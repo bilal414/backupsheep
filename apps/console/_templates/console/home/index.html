@@ -1,0 +1,17 @@
+{% extends "_master.html" %}
+{% block title %}{{ heading }}{% endblock %}
+{% block meta_title %}{{ heading }}{% endblock %}
+{% block meta_description %}{{ heading }}{% endblock %}
+{% block meta_keywords %}{{ heading }}{% endblock %}
+{% block page_class %}page_console console-page sb-l-o sb-r-c{% endblock %}
+{% block heading %}false{% endblock %}
+{% load humanize %}
+{% load tz %}
+{% block content %}
+    <div class="md:flex md:items-center md:justify-between">
+        <div class="min-w-0 flex-1">
+            <h2 class="text-2xl font-bold leading-7 text-gray-900 sm:truncate sm:text-3xl sm:tracking-tight">
+                Welcome, {{ request.user.member.full_name }} to BackupSheep!</h2>
+        </div>
+    </div>
+{% endblock %}

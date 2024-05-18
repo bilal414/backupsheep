@@ -1,0 +1,44 @@
+{% extends "_master_auth.html" %}
+{% block title %}{{ heading }}{% endblock %}
+{% block og_title %}{{ heading }}{% endblock %}
+{% block description %}{{ description }}{% endblock %}
+{% block og_description %}{{ description }}{% endblock %}
+{% block page_class %}page_login{% endblock %}
+
+{% block content %}
+    <div class="lg:px-24 lg:py-24 md:py-20 md:px-44 px-4 py-24 items-center flex justify-center flex-col-reverse lg:flex-row md:gap-28 gap-16">
+        <div class="xl:pt-24 w-full xl:w-1/2 relative pb-12 lg:pb-0">
+            <div class="relative">
+                <div class="absolute">
+                    <div class="">
+                        <h1 class="my-2 text-gray-600 text-4xl">
+                            Looks like you've found the
+                            doorway to the great nothing
+                        </h1>
+                        <p class="my-2 text-gray-600 mb-6 text-xl">Reach
+                            out to our support team by <a href="mailto:support@backupsheep.com"
+                                                          class="font-semibold text-teal-600 hover:text-teal-500">emailing
+                                us,</a> and we’ll get back to you as soon as we can.</p>
+                        <p class="my-2 text-gray-600 mb-6 text-xl">Sorry about that! Please visit our hompage to get
+                            where you
+                            need to go.</p>
+                        <a href="{% url 'console:home:index' %}"
+                           class="cursor-pointer rounded-md bg-teal-600 px-3.5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-teal-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600">
+                            Take me there <span
+                                aria-hidden="true">→</span>
+                        </a>
+                    </div>
+                </div>
+                <div>
+                    <img src="{{ STATIC_URL }}console/images/404.png" alt="not found"/>
+                </div>
+            </div>
+        </div>
+        <div>
+            <img src="{{ STATIC_URL }}console/images/unplug.png" alt="not found"/>
+        </div>
+    </div>
+{% endblock %}
+{% block extra_scripts %}
+
+{% endblock %}

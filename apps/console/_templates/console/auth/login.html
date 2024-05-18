@@ -1,0 +1,151 @@
+{% extends "_master_auth.html" %}
+{% block title %}{{ heading }}{% endblock %}
+{% block og_title %}{{ heading }}{% endblock %}
+{% block description %}{{ description }}{% endblock %}
+{% block og_description %}{{ description }}{% endblock %}
+{% block page_class %}page_login{% endblock %}
+
+{% block content %}
+    <div class="flex min-h-full flex-col justify-center py-12 sm:px-6 lg:px-8" x-data="loginPage()">
+        <div class="sm:mx-auto sm:w-full sm:max-w-md">
+            <img class="mx-auto h-12 w-auto" src="{{ STATIC_URL }}console/images/logo.svg"
+                 alt="BackupSheep">
+            <h2 class="mt-6 text-center text-3xl font-bold tracking-tight text-gray-900">Log into Dashboard</h2>
+        </div>
+
+        <div class="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+            <div class="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
+                <form class="space-y-6" action="javascript:void(0);" method="POST">
+
+                    <div>
+                        <label for="email" class="block text-sm font-medium text-gray-700">Email address</label>
+                        <div class="mt-1">
+                            <input x-model="auth.email" id="email" name="email" type="email" autocomplete="email"
+                                   required
+                                   class="block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 placeholder-gray-400 shadow-sm focus:border-teal-500 focus:outline-none focus:ring-teal-500 sm:text-sm">
+                            <p x-show="loginErrors?.email" class="mt-2 text-sm text-red-600" id="name-error"
+                               x-text="loginErrors?.email"></p>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label for="password" class="block text-sm font-medium text-gray-700">Password</label>
+                        <div class="mt-1">
+                            <input x-model="auth.password" id="password" name="password" type="password"
+                                   autocomplete="password"
+                                   required
+                                   class="block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 placeholder-gray-400 shadow-sm focus:border-teal-500 focus:outline-none focus:ring-teal-500 sm:text-sm">
+                            <p x-show="loginErrors?.password" class="mt-2 text-sm text-red-600" id="name-error"
+                               x-text="loginErrors?.password"></p>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <div class="text-sm">
+                            <a href="{% url 'console:auth:reset' %}"
+                               class="font-medium text-teal-600 hover:text-teal-500">Forgot your
+                                password?</a>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <template x-for="non_field_error in loginErrors.non_field_errors">
+                            <div class="rounded-md bg-red-50 p-2 w-full">
+                                <div class="flex">
+                                    <div class="text-sm text-red-700">
+                                        <p x-text="non_field_error"></p>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+
+                    <div>
+                        <button @click="emailPasswordLogin()"
+                                class="flex w-full justify-center rounded-md border border-transparent bg-teal-600 py-2 px-4 text-sm font-medium text-white shadow-sm hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-teal-500 focus:ring-offset-2">
+                            Sign in
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+{% endblock %}
+{% block extra_scripts %}
+    <script>
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('loginPage', () => ({
+                loading: null,
+                auth_multi_factor: null,
+                auth: {},
+                loginErrors: {},
+                init() {
+
+                },
+                async emailPasswordLogin() {
+                    this.loading = true;
+                    Alpine.store('showLoading').toggle("Authenticating your account. Don't refresh page.");
+
+                    let url = "/api/v1/auth/login/";
+
+                    let data = {
+                        email: this.auth.email,
+                        password: this.auth.password,
+                        auth_multi_factor_token: this.auth.auth_multi_factor_token,
+                    };
+
+                    let response = await fetch(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'POST',
+                        body: JSON.stringify(data)
+
+                    }).then(async (response) => {
+                        Alpine.store('showLoading').toggle();
+                        if (response.ok) {
+                            return response.json();
+                        } else {
+                            this.loading = false;
+                            let json;
+                            try {
+                                json = await response.json();
+                            } catch (exception_var) {
+                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                            }
+                            this.loginErrors = json;
+                            throw new Error(json.detail);
+                        }
+
+                    }).then((json) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            success: true,
+                            heading: 'Success!',
+                            details: json.detail
+                        });
+                        this.loading = false;
+
+                        if (json.auth_multi_factor) {
+                            this.auth_multi_factor = json.auth_multi_factor;
+                        } else {
+                            if (json.next) {
+                                window.location = json.next;
+                            } else {
+                                window.location = '/console';
+                            }
+                        }
+
+                    }).catch((error) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            error: true,
+                            heading: 'Error!',
+                            details: error.message
+                        });
+                    });
+                },
+            }));
+        });
+
+    </script>
+{% endblock %}

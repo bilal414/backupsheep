@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-white">
+<head>
+    <title>{% block title %}Dashboard{% endblock %}</title>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="author" content="{% block author %}MonetizeNow{% endblock %}">
+    <!-- Fonts -->
+    <link rel="shortcuticon" href="{{ STATIC_URL }}images/favicon.png" type="image/x-icon">
+    <link rel="icon" href="{{ STATIC_URL }}images/favicon.png" type="image/x-icon">
+    <script src="https://cdn.tailwindcss.com?plugins=forms,typography,aspect-ratio,line-clamp"></script>
+    <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/flowbite@1.5.2/dist/flowbite.min.css"/>
+    <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet"/>
+</head>
+<body class="h-full{% block page_class %}{% endblock %}">
+<div x-data="{ sideBar: false }">
+    {% include "_sidebar.html" %}
+    <div class="lg:pl-72">
+        {% include "_header.html" %}
+        <main class="py-10  flex flex-col h-screen justify-between">
+            <div class="px-4 sm:px-6 lg:px-8 mb-auto">
+                {% block content %}{% endblock %}
+            </div>
+            {% include "_footer.html" %}
+
+        </main>
+
+    </div>
+</div>
+{% block extra_scripts %}{% endblock %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script src="https://unpkg.com/flowbite@1.5.2/dist/flowbite.js"></script>
+<script src="https://unpkg.com/flowbite@1.5.2/dist/datepicker.js"></script>
+{% include "_notifications.html" %}
+{% include "_loading.html" %}
+</body>
+</html>

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-CTFWTRZC93"></script>
+    <script>
+        window.dataLayer = window.dataLayer || [];
+
+        function gtag() {
+            dataLayer.push(arguments);
+        }
+
+        gtag('js', new Date());
+
+        gtag('config', 'G-CTFWTRZC93');
+    </script>
+    <title>{% block title %}BackupSheep{% endblock %}</title>
+    {% if server_type == 'dev' %}
+        <meta name="robots" content="noindex,nofollow">
+    {% endif %}
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="description"
+          content="{% block description %}{% endblock %}">
+    <meta name="author" content="{% block author %}{% endblock %}">
+    <meta name="og:site_name" content="BackupSheep">
+    <meta name="og:image" content="{{ STATIC_URL }}images/home.png">
+    <meta property="og:image:width" content="4284"/>
+    <meta property="og:image:height" content="2874"/>
+    <meta name="og:description"
+          content="{% block og_description %} {% endblock %}">
+    <meta name="og:title"
+          content="{% block og_title %}BackupSheep{% endblock %}">
+    <meta name="keywords"
+          content="{% block keywords %}automate cloud backups, cloud backups, website backups, database backups{% endblock %}">
+    <link rel="shortcuticon" href="{{ STATIC_URL }}images/favicon.ico" type="image/x-icon">
+    <link rel="icon" href="{{ STATIC_URL }}images/favicon.ico" type="image/x-icon">
+    <link rel="canonical" href="{% url 'console:auth:signup' %}"/>
+    <link type="text/css" href="{{ STATIC_URL }}css/compiled.css" rel="stylesheet">
+    <script>(function (w, r) {
+        w._rwq = r;
+        w[r] = w[r] || function () {
+            (w[r].q = w[r].q || []).push(arguments)
+        }
+    })(window, 'rewardful');</script>
+    <script async src='https://r.wdfl.co/rw.js' data-rewardful='f2191d'></script>
+</head>
+<body class="{% block page_class %}{% endblock %}">
+{% block content %}{% endblock %}
+<script src="{{ STATIC_URL }}js/cdn.min.js" defer></script>
+{% if not is_impersonated_session %}
+      <script>
+        window.intercomSettings = {
+            api_base: "https://api-iam.intercom.io",
+            app_id: "sn7exkua",
+            custom_launcher_selector: '#live-chat',
+            {% if request.user.is_authenticated %}
+                name: "{{ request.user.name|escapejs }}", // Full name
+                email: "{{ request.user.email|escapejs }}", // Email address
+                user_hash: "{{ request.user.member.hash }}", // Email address
+                created_at: "{{ request.user.date_joined|date:"U" }}" // Signup date as a Unix timestamp
+            {% endif %}
+        };
+    </script>
+
+    <script>
+        // We pre-filled your app ID in the widget URL: 'https://widget.intercom.io/widget/sn7exkua'
+        (function () {
+            var w = window;
+            var ic = w.Intercom;
+            if (typeof ic === "function") {
+                ic('reattach_activator');
+                ic('update', w.intercomSettings);
+            } else {
+                var d = document;
+                var i = function () {
+                    i.c(arguments);
+                };
+                i.q = [];
+                i.c = function (args) {
+                    i.q.push(args);
+                };
+                w.Intercom = i;
+                var l = function () {
+                    var s = d.createElement('script');
+                    s.type = 'text/javascript';
+                    s.async = true;
+                    s.src = 'https://widget.intercom.io/widget/sn7exkua';
+                    var x = d.getElementsByTagName('script')[0];
+                    x.parentNode.insertBefore(s, x);
+                };
+                if (document.readyState === 'complete') {
+                    l();
+                } else if (w.attachEvent) {
+                    w.attachEvent('onload', l);
+                } else {
+                    w.addEventListener('load', l, false);
+                }
+            }
+        })();
+    </script>
+{% endif %}
+<script type="text/javascript">
+    var _iub = _iub || [];
+    _iub.csConfiguration = {
+        "askConsentAtCookiePolicyUpdate": true,
+        "countryDetection": true,
+        "enableLgpd": true,
+        "enableUspr": true,
+        "floatingPreferencesButtonDisplay": "bottom-left",
+        "gdprAppliesGlobally": false,
+        "lang": "en",
+        "lgpdAppliesGlobally": false,
+        "perPurposeConsent": true,
+        "siteId": 2265299,
+        "cookiePolicyId": 83522139,
+        "floatingPreferencesButtonCaption": true,
+        "banner": {
+            "acceptButtonCaptionColor": "#FFFFFF",
+            "acceptButtonColor": "#0073CE",
+            "acceptButtonDisplay": true,
+            "backgroundColor": "#FFFFFF",
+            "closeButtonRejects": true,
+            "customizeButtonCaptionColor": "#4D4D4D",
+            "customizeButtonColor": "#DADADA",
+            "customizeButtonDisplay": true,
+            "explicitWithdrawal": true,
+            "listPurposes": true,
+            "position": "float-bottom-left",
+            "rejectButtonCaptionColor": "#FFFFFF",
+            "rejectButtonColor": "#0073CE",
+            "rejectButtonDisplay": true,
+            "showPurposesToggles": true,
+            "textColor": "#000000"
+        }
+    };
+</script>
+<script type="text/javascript" src="//cdn.iubenda.com/cs/gpp/stub.js"></script>
+<script type="text/javascript" src="//cdn.iubenda.com/cs/iubenda_cs.js" charset="UTF-8" async></script>
+{% include "_notifications.html" %}
+{% include "_loading.html" %}
+{% block extra_scripts %}{% endblock %}
+</body>
+</html>
