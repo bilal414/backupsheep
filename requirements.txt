@@ -25,7 +25,7 @@ shortuuid==1.0.11
 django-storages==1.14.2
 phonenumbers==8.13.31
 django-widget-tweaks==1.5.0
-Pillow==10.2.0
+Pillow==10.3.0
 cryptography==42.0.5
 dropbox==11.36.2
 pcloud==1.3
