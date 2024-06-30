@@ -21,7 +21,6 @@ from django.conf.urls.static import static
 from django.conf import settings
 
 urlpatterns = [
-                  path('django-admin/', include('loginas.urls')),
                   path("django-admin/", admin.site.urls),
                   path("api-auth/", include("rest_framework.urls", namespace="rest_framework")),
                   path("", include("apps.console.urls")),

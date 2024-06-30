@@ -24,16 +24,13 @@ from dotenv import dotenv_values
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
-if "AWS_SECRETS" in os.environ:
-    config = json.loads(os.environ.get("AWS_SECRETS"))
+if "BACKUPSHEEP_SECRETS" in os.environ:
+    config = json.loads(os.environ.get("BACKUPSHEEP_SECRETS"))
 else:
     config = {
         **dotenv_values(".env"),  # load shared development variables
         **os.environ,  # override loaded values with environment variables
     }
-# env = environ.Env(
-#     DJANGO_DEBUG=(bool, False), DJANGO_ALLOWED_HOSTS=(list, []),
-# )  # set
 
 # # environ.Env.read_env(".env")
 SECRET_KEY = config["DJANGO_SECRET_KEY"]
@@ -41,7 +38,7 @@ DEBUG = config["DJANGO_DEBUG"]
 DJANGO_SERVER = config["DJANGO_SERVER"]
 ALLOWED_HOSTS = [config["DJANGO_ALLOWED_HOSTS"]]
 HTTPS_ENABLED = False
-CSRF_TRUSTED_ORIGINS = ["https://backupsheep.io"]
+CSRF_TRUSTED_ORIGINS = [f"{config['APP_PROTOCOL']}{config['APP_DOMAIN']}"]
 # Application definition
 
 INSTALLED_APPS = [
@@ -52,14 +49,11 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django.contrib.postgres",
-    "django_ses",
     "rest_framework",
     "rest_framework.authtoken",
     "django.contrib.humanize",
     "django_user_agents",
     "django_filters",
-    'loginas',
-    'widget_tweaks',
     'apps',
 
 ]
@@ -200,15 +194,11 @@ STATICFILES_DIRS = (
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# App Domain
+# App Settings
+APP_NAME = config["APP_NAME"]
 APP_DOMAIN = config["APP_DOMAIN"]
 APP_PROTOCOL = config["APP_PROTOCOL"]
 APP_URL = f"{APP_PROTOCOL}{APP_DOMAIN}"
-
-# Email settings
-EMAIL_BACKEND = "django_ses.SESBackend"
-DEFAULT_FROM_EMAIL = "BackupSheep<support@backupsheep.com>"
-EMAIL_SUBJECT_PREFIX = "BackupSheep"
 
 sentry_sdk.init(
     dsn=config["SENTRY_DSN"],
@@ -243,20 +233,31 @@ LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/error/',
 ]
 
-
-# POSTMARK
+# POSTMARK - Email Service
 POSTMARK_API_KEY = config["POSTMARK_API_KEY"]
 POSTMARK_DOMAIN = config["POSTMARK_DOMAIN"]
 POSTMARK_EMAIL = config["POSTMARK_EMAIL"]
 POSTMARK_API_URL = config["POSTMARK_API_URL"]
 
-# Stripe
-STRIPE_SECRET_KEY = config["STRIPE_SECRET_KEY"]
+# AWS SES - Email Service
+SES_REGION_NAME = config["SES_REGION_NAME"]
+SES_REGION_ENDPOINT = config["SES_REGION_ENDPOINT"]
+SES_ACCESS_KEY_ID = config["SES_ACCESS_KEY_ID"]
+SES_SECRET_ACCESS_KEY = config["SES_SECRET_ACCESS_KEY"]
 
+# MAILGUN - Email Service
+MAILGUN_DOMAIN = config["MAILGUN_DOMAIN"]
+MAILGUN_EMAIL = config["MAILGUN_EMAIL"]
+MAILGUN_API_KEY = config["MAILGUN_API_KEY"]
+MAILGUN_API_URL = config["MAILGUN_API_URL"]
 
-DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
-AWS_ACCESS_KEY_ID = config["S3_ACCESS_KEY_ID"]
-AWS_SECRET_ACCESS_KEY = config["S3_SECRET_ACCESS_KEY"]
-AWS_STORAGE_BUCKET_NAME = config["S3_STORAGE_BUCKET_NAME"]
-AWS_S3_ENDPOINT_URL = config["S3_ENDPOINT_URL"]
-AWS_S3_SIGNATURE_VERSION = 's3v4'
+# Options are postmark, mailgun and ses
+EMAIL_PROVIDER = config["EMAIL_PROVIDER"]
+
+# Storage to be used for application logs etc. Tested with AWS S3 and Cloudflare R2
+S3_ACCESS_KEY_ID = config["S3_ACCESS_KEY_ID"]
+S3_SECRET_ACCESS_KEY = config["S3_SECRET_ACCESS_KEY"]
+S3_STORAGE_BUCKET_NAME = config["S3_STORAGE_BUCKET_NAME"]
+S3_ENDPOINT_URL = config["S3_ENDPOINT_URL"]
+S3_SIGNATURE_VERSION = config["S3_SIGNATURE_VERSION"]
+

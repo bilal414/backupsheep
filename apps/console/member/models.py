@@ -1,6 +1,5 @@
 import uuid
 
-import stripe
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import models
@@ -23,7 +22,6 @@ class CoreMember(TimeStampedModel):
     state = models.CharField(max_length=50, null=True, blank=True)
     zip_code = models.CharField(max_length=10, null=True, blank=True)
     country = models.CharField(max_length=50, default="US")
-    stripe_customer_id = models.CharField(max_length=255, null=True)
     phone = models.CharField(max_length=255, null=True, blank=True)
     password_reset_token = models.CharField(null=True, max_length=255, blank=True)
 
@@ -60,18 +58,6 @@ class CoreMember(TimeStampedModel):
     def send_verification_email(self):
         self.notification_email.get().send_verification_email()
 
-    @property
-    def stripe_customer_portal_url(self):
-        try:
-            stripe.api_key = settings.STRIPE_SECRET_KEY
-            session = stripe.billing_portal.Session.create(
-                customer=self.stripe_customer_id,
-                return_url=f"{settings.APP_PROTOCOL}{settings.APP_DOMAIN}/console/",
-            )
-            return session.url
-        except Exception as e:
-            capture_exception(e)
-
     def send_welcome_email(self):
         from apps.console.notification.models import CoreNotificationLogEmail
 
@@ -82,7 +68,7 @@ class CoreMember(TimeStampedModel):
         email_notification.context = {
             "action_url": f"{settings.APP_URL}",
             "help_url": "https://backupsheep.com",
-            "sender_name": "BackupSheep - Notification Bot",
+            "sender_name": f"{settings.APP_NAME} - Notification Bot",
         }
         email_notification.save()
 
@@ -104,7 +90,7 @@ class CoreMember(TimeStampedModel):
         email_notification.context = {
             "action_url": f"{settings.APP_URL}/reset/{self.password_reset_token}/",
             "help_url": "https://backupsheep.com",
-            "sender_name": "BackupSheep - Notification Bot",
+            "sender_name": f"{settings.APP_NAME} - Notification Bot",
         }
         email_notification.save()
 
