@@ -1,0 +1,30 @@
+FROM python:3.12
+
+# set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+
+RUN apt-get update \
+    && apt-get -y upgrade \
+    && apt-get -y install zsh htop libpq-dev gcc software-properties-common gnupg2 python3-dev musl-dev git g++-11 ruby ruby-full postgresql-server-dev-all \
+    && apt-get -y install curl dirmngr \
+    && curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | bash \
+    && apt-get update \
+    && apt-get -y install mariadb-server mariadb-client \
+    && apt-get -y install tree build-essential vim supervisor openssh-server libffi-dev git libpq-dev python3-dev libffi-dev libjpeg-dev git zip unzip nano libmysqlclient-dev gunicorn g++ libzmq3-dev gcc \
+    && apt-get -y install libssl-dev libxml2-dev libxslt1-dev python3-dev libcurl4-openssl-dev libffi-dev unixodbc unixodbc-dev libsqlite3-dev ncurses-dev  libexpat1-dev \
+    && apt-get -y install pkg-config ncurses-dev libreadline6-dev zlib1g-dev libssl-dev software-properties-common autoconf automake libtool pkg-config autoconf \
+    && apt-get -y install libncurses-dev libgnutls28-dev libexpat1-dev  pkg-config libreadline-dev  zlib1g-dev libssl-dev \
+    && apt-get -y install software-properties-common tree libfreetype6-dev \
+    && apt-get -y install nginx tzdata \
+    && wget http://lftp.yar.ru/ftp/lftp-4.9.2.tar.gz \
+    && tar -xvf lftp-4.9.2.tar.gz && cd lftp-4.9.2 && ./configure && make install \
+    && pip install psycopg2
+
+RUN wget https://github.com/robbyrussell/oh-my-zsh/raw/master/tools/install.sh -O - | zsh || true
+
+# install dependencies
+COPY requirements.txt requirements.txt
+RUN pip install --upgrade pip
+RUN pip install --no-cache-dir -r requirements.txt

@@ -1,13 +1,18 @@
 import json
 import os
+import uuid
 
 import requests
 from django.db import models
 from model_utils.models import TimeStampedModel
 from sentry_sdk import capture_message, capture_exception
 
+from ..account.models import CoreAccount
+from ..connection.models import CoreAWSRegion, CoreWasabiRegion, CoreDoSpacesRegion, CoreFilebaseRegion, \
+    CoreExoscaleRegion, CoreOracleRegion, CoreScalewayRegion, CoreTencentRegion, CoreAlibabaRegion, CoreIonosRegion, \
+    CoreRackCorpRegion, CoreIBMRegion
 from ..member.models import CoreMember
-from ...api.v1.utils.helper import bs_decrypt, bs_encrypt
+from apps.api.v1.utils.api_helpers import bs_encrypt, bs_decrypt
 
 
 class CoreStorageType(models.Model):
@@ -16,20 +21,10 @@ class CoreStorageType(models.Model):
     is_enabled = models.BooleanField(default=False)
     position = models.IntegerField(null=True)
     description = models.TextField(null=True)
-    limit = models.TextField(null=True)
     image = models.TextField(null=True)
 
     class Meta:
         db_table = "core_storage_type"
-
-
-class CoreStorageStatus(models.Model):
-    code = models.CharField(max_length=64, unique=True)
-    name = models.CharField(max_length=64)
-    description = models.TextField(null=True)
-
-    class Meta:
-        db_table = "core_storage_status"
 
 
 class CoreStorageDropbox(TimeStampedModel):
@@ -55,10 +50,12 @@ class CoreStorageDropbox(TimeStampedModel):
         from dropbox.files import WriteMode
         from django.conf import settings
 
-        local_txt_file = "_upload_test_files/backupsheep.txt"
+        file_name = str(uuid.uuid4()).split("-")[0]
+
+        local_txt_file = f"_upload_test_files/backupsheep.txt"
         file_size = os.path.getsize(local_txt_file)
         chunk_size = 157286400
-        dest_path = f"/backupsheep.txt"
+        dest_path = f"/{file_name}.txt"
         encryption_key = self.storage.account.get_encryption_key()
         access_token = bs_decrypt(self.access_token, encryption_key)
         refresh_token = bs_decrypt(self.refresh_token, encryption_key)
@@ -210,7 +207,6 @@ class CoreStoragePCloud(TimeStampedModel):
 
 
 class CoreStorageOneDrive(TimeStampedModel):
-
     storage = models.OneToOneField(
         "CoreStorage", related_name="storage_onedrive", on_delete=models.CASCADE
     )
@@ -273,7 +269,6 @@ class CoreStorageOneDrive(TimeStampedModel):
             print(token_request.json())
 
     def validate(self, data=None, raise_exp=None):
-        import os
         import requests
         from django.conf import settings
 
@@ -295,36 +290,6 @@ class CoreStorageOneDrive(TimeStampedModel):
             )
             if r.status_code == 201 or r.status_code == 200:
                 pass
-            # # Test
-            # # Creating an upload session
-            # upload_session = requests.post(
-            #     onedrive_path + ":/createUploadSession", headers=self.get_client()
-            # ).json()
-
-            # with open(local_file_path, "rb") as f:
-            #     total_file_size = os.path.getsize(local_file_path)
-            #     chunk_size = 6553600
-            #     chunk_number = total_file_size // chunk_size
-            #     chunk_leftover = total_file_size - chunk_size * chunk_number
-            #     i = 0
-            #     while True:
-            #         chunk_data = f.read(chunk_size)
-            #         start_index = i * chunk_size
-            #         end_index = start_index + chunk_size
-            #         # If end of file, break
-            #         if not chunk_data:
-            #             break
-            #         if i == chunk_number:
-            #             end_index = start_index + chunk_leftover
-            #         # Setting the header with the appropriate chunk data location in the file
-            #         headers = {
-            #             "Content-Length": "{}".format(chunk_size),
-            #             "Content-Range": "bytes {}-{}/{}".format(start_index, end_index - 1, total_file_size),
-            #         }
-            #         # Upload one chunk at a time
-            #         r = requests.put(upload_session["uploadUrl"], data=chunk_data, headers=headers)
-            #         i = i + 1
-            #         print(r.status_code)
 
             # Get file
             url = f"{settings.MS_GRAPH_ENDPOINT}/drives/{self.drive_id}/root:/{target_file_path}"
@@ -365,8 +330,6 @@ class CoreStorageGoogleDrive(TimeStampedModel):
 
         credentials = google.oauth2.credentials.Credentials(
             access_token,
-            # refresh_token=refresh_token,
-            # token_uri="https://accounts.google.com/o/oauth2/token",
             client_id=settings.GOOGLE_CLIENT_ID,
             client_secret=settings.GOOGLE_CLIENT_SECRET,
         )
@@ -449,7 +412,8 @@ class CoreStorageGoogleDrive(TimeStampedModel):
                 "parents": [bs_folder],
             }
             result = client.post(
-                f"https://www.googleapis.com/upload/drive/v3/files/?uploadType=resumable", data=json.dumps(file_metadata),
+                f"https://www.googleapis.com/upload/drive/v3/files/?uploadType=resumable",
+                data=json.dumps(file_metadata),
                 headers={"Content-Type": "application/json; charset=UTF-8"}
             )
 
@@ -492,7 +456,6 @@ class CoreStorageGoogleDrive(TimeStampedModel):
                             return True
 
 
-# Todo: Attach bucket name and prefix to website and database backup so if they get changed then we can delete previous backups
 class CoreStorageAWSS3(TimeStampedModel):
     storage = models.OneToOneField(
         "CoreStorage", related_name="storage_aws_s3", on_delete=models.CASCADE
@@ -511,7 +474,6 @@ class CoreStorageAWSS3(TimeStampedModel):
         db_table = "core_storage_aws_s3"
 
     def validate(self, data=None, raise_exp=None):
-        from ..api.v1.utils.api_helpers import bs_decrypt
         import boto3
         import time
 
@@ -558,7 +520,6 @@ class CoreStorageAWSS3(TimeStampedModel):
         return True
 
 
-# Todo: Attach bucket name and prefix to website and database backup so if they get changed then we can delete previous backups
 class CoreStorageWasabi(TimeStampedModel):
     storage = models.OneToOneField(
         "CoreStorage", related_name="storage_wasabi", on_delete=models.CASCADE
@@ -577,7 +538,6 @@ class CoreStorageWasabi(TimeStampedModel):
         db_table = "core_storage_wasabi"
 
     def validate(self, data=None, raise_exp=None):
-        from ..api.v1.utils.api_helpers import bs_decrypt
         import boto3
         import time
 
@@ -624,52 +584,6 @@ class CoreStorageWasabi(TimeStampedModel):
             s3_delete = s3_client.delete_object(Bucket=bucket_name, Key=filename)
             if s3_delete["ResponseMetadata"]["HTTPStatusCode"] != 204:
                 return False
-        return True
-
-
-class CoreStorageBS(TimeStampedModel):
-    storage = models.OneToOneField(
-        "CoreStorage", related_name="storage_bs", on_delete=models.CASCADE
-    )
-    bucket_name = models.CharField(max_length=255, editable=False, null=True)
-    prefix = models.CharField(max_length=255, null=True)
-    endpoint = models.CharField(max_length=255, editable=False, null=True)
-    region = models.CharField(max_length=255, editable=False, null=True)
-    profile = models.CharField(max_length=255, editable=False, null=True)
-    secret_key = models.BinaryField(null=True)
-    access_key = models.BinaryField(null=True)
-    no_delete = models.BooleanField(null=True)
-
-    # new for NAS storage
-    user_id = models.IntegerField(editable=False, null=True)
-    username = models.BinaryField(null=True)
-    password = models.BinaryField(null=True)
-    home_dir = models.TextField(max_length=255, editable=False, null=True)
-    host = models.TextField(max_length=255, editable=False, null=True)
-
-    # temporary
-    move_node_fsn_01 = models.BooleanField(null=True)
-    move_node_fsn_02 = models.BooleanField(null=True)
-    move_node_hel_01 = models.BooleanField(null=True)
-    move_node_hel_02 = models.BooleanField(null=True)
-    move_node_hel_03 = models.BooleanField(null=True)
-
-    # temporary
-    move_node_fsn_01_import = models.BooleanField(null=True)
-    move_node_fsn_02_import = models.BooleanField(null=True)
-    move_node_hel_01_import = models.BooleanField(null=True)
-    move_node_hel_02_import = models.BooleanField(null=True)
-    move_node_hel_03_import = models.BooleanField(null=True)
-
-    # temporary
-    move_bb_us = models.BooleanField(null=True)
-    move_bb_eu = models.BooleanField(null=True)
-    move_filebase = models.BooleanField(null=True)
-
-    class Meta:
-        db_table = "core_storage_bs"
-
-    def validate(self, data=None, raise_exp=None):
         return True
 
 
@@ -1518,7 +1432,8 @@ class CoreStorageTencent(TimeStampedModel):
 
             if url_response.decode() != file_content:
                 if raise_exp:
-                    raise ValueError(f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
+                    raise ValueError(
+                        f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
                 else:
                     return False
 
@@ -1595,14 +1510,16 @@ class CoreStorageAliBaba(TimeStampedModel):
         if not s3_object.etag:
             return False
 
-        object_url = bucket.sign_url('GET', filename, 3600*24, headers={'content-disposition':'attachment'}, slash_safe=True)
+        object_url = bucket.sign_url('GET', filename, 3600 * 24, headers={'content-disposition': 'attachment'},
+                                     slash_safe=True)
 
         with urllib.request.urlopen(object_url) as response:
             url_response = response.read()
 
             if url_response.decode() != file_content:
                 if raise_exp:
-                    raise ValueError(f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
+                    raise ValueError(
+                        f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
                 else:
                     return False
 
@@ -1687,7 +1604,8 @@ class CoreStorageAzure(TimeStampedModel):
 
             if url_response.decode() != file_content:
                 if raise_exp:
-                    raise ValueError(f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
+                    raise ValueError(
+                        f"We were unable to validate uploaded file. Check your file {filename} in your bucket")
                 else:
                     return False
 
@@ -1708,10 +1626,10 @@ class CoreStorageGoogleCloud(TimeStampedModel):
 
     # access_token = models.CharField(max_length=255)
     # refresh_token = models.CharField(max_length=255)
-    #Todo: Delete following later
+    # Todo: Delete following later
     access_token = models.BinaryField(null=True)
     refresh_token = models.BinaryField(null=True)
-    email_address = models.CharField(max_length=255,null=True)
+    email_address = models.CharField(max_length=255, null=True)
     display_name = models.CharField(max_length=255, null=True)
 
     class Meta:
@@ -2066,7 +1984,6 @@ class CoreStorageIBM(TimeStampedModel):
             endpoint_url=f"https://{endpoint}", config=Config(signature_version='s3v4')
         )
 
-
         if prefix:
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
@@ -2256,21 +2173,3 @@ class CoreStorage(TimeStampedModel):
                 raise ValueError(e.__str__())
             else:
                 return False
-
-
-class CoreStorageDefault(TimeStampedModel):
-    endpoint = models.CharField(max_length=255, null=True)
-    bucket_name = models.CharField(max_length=255, null=True)
-    region = models.CharField(max_length=64, null=True)
-    code = models.CharField(max_length=32, null=True)
-    profile = models.CharField(max_length=128, null=True)
-    host = models.CharField(max_length=255, null=True)
-    api_key = models.TextField(max_length=128, null=True)
-    api_url = models.TextField(max_length=128, null=True)
-    home_dir = models.TextField(max_length=128, null=True)
-    name = models.CharField(max_length=255)
-    active = models.BooleanField(default=True)
-    service_key = models.JSONField(null=True)
-
-    class Meta:
-        db_table = "core_storage_default"

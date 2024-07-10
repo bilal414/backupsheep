@@ -6,6 +6,9 @@ from django.db.models import UniqueConstraint
 from model_utils.models import TimeStampedModel
 import uuid
 
+from sentry_sdk import capture_exception
+
+from apps.console.account.models import CoreAccount
 from apps.console.member.models import CoreMember
 from apps.api.v1._thirdparty.aws.ses import SesMailSender, SesDestination
 
@@ -44,8 +47,8 @@ class CoreNotificationEmail(TimeStampedModel):
         email_notification.template = "verify_email"
         email_notification.context = {
             "action_url": f"{settings.APP_URL}/console/notification/email/verify/{self.verify_code}/",
-            "help_url": "https://backupsheep.com",
-            "sender_name": "BackupSheep - Notification Bot",
+            "help_url": f"{settings.APP_URL}",
+            "sender_name": f"{settings.APP_NAME} - Notification Bot",
         }
         email_notification.save()
 
@@ -134,3 +137,117 @@ class CoreNotificationLogEmail(TimeStampedModel):
 
             self.message_id = message_id
             self.save()
+
+
+class CoreNotificationSlack(TimeStampedModel):
+    account = models.ForeignKey(CoreAccount, related_name="notification_slack", on_delete=models.CASCADE)
+    app_id = models.CharField(max_length=64, editable=False)
+    token_type = models.CharField(max_length=64, editable=False)
+    access_token = models.TextField(editable=False)
+    bot_user_id = models.CharField(max_length=64, editable=False)
+    refresh_token = models.TextField(editable=False)
+    expiry = models.DateTimeField(null=True)
+    channel = models.CharField(max_length=64, editable=False)
+    channel_id = models.CharField(max_length=64, editable=False)
+    configuration_url = models.URLField(editable=False)
+    url = models.URLField(editable=False)
+    data = models.JSONField(null=True)
+    added_by = models.ForeignKey(
+        CoreMember,
+        related_name="notification_slack",
+        on_delete=models.CASCADE,
+        null=True,
+    )
+
+    class Meta:
+        db_table = "core_notification_slack"
+
+    def refresh_auth_token(self):
+        from slack_sdk import WebClient, WebhookClient
+        from datetime import datetime
+        import time
+
+        token_request_url = (
+            f"{settings.SLACK_TOKEN_URL}?"
+            f"grant_type=refresh_token"
+            f"&client_id={settings.SLACK_CLIENT_ID}"
+            f"&client_secret={settings.SLACK_CLIENT_SECRET}"
+            f"&refresh_token={self.refresh_token}"
+        )
+
+        result = requests.post(token_request_url)
+
+        if result.status_code == 200:
+            slack_data = result.json()
+
+            if slack_data.get("ok"):
+                self.refresh_token = slack_data.get("refresh_token")
+                self.access_token = slack_data.get("access_token")
+                self.expiry = datetime.fromtimestamp((int(time.time()) + int(slack_data["expires_in"])))
+                self.data = slack_data
+                self.save()
+
+                # # Send Welcome Message on Slack
+                # webhook = WebhookClient(self.url)
+                # webhook.send(
+                #     text="Hey! Your slack token is successfully refreshed.",
+                # )
+
+    def send(self, message):
+        from apps._tasks.helper.tasks import send_log_to_slack
+
+        send_log_to_slack.delay(url=self.url, message=message)
+
+    def validate(self):
+        from slack_sdk import WebhookClient
+
+        try:
+            # Send Welcome Message on Slack
+            webhook = WebhookClient(self.url)
+            response = webhook.send(
+                text="Hey! This is validation message that your Slack integration is working fine.",
+            )
+            if response.status_code == 200 and response.body == "ok":
+                return True
+            else:
+                return False
+        except Exception as e:
+            capture_exception(e)
+            return False
+
+
+class CoreNotificationTelegram(TimeStampedModel):
+    account = models.ForeignKey(CoreAccount, related_name="notification_telegram", on_delete=models.CASCADE)
+    chat_id = models.CharField(max_length=64, editable=False)
+    channel_name = models.CharField(max_length=64, editable=False)
+    added_by = models.ForeignKey(
+        CoreMember,
+        related_name="notification_telegram",
+        on_delete=models.CASCADE,
+        null=True,
+    )
+
+    class Meta:
+        db_table = "core_notification_telegram"
+
+    def send(self, message):
+        from apps._tasks.helper.tasks import send_log_to_telegram
+
+        send_log_to_telegram.delay(chat_id=self.chat_id, message=message)
+
+    def validate(self):
+        try:
+            result = requests.get(
+                f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_KEY}/sendMessage?"
+                f"chat_id={self.chat_id}"
+                f"&text=Hey! This is validation message that your Telegram integration is working fine.",
+                headers={"content-type": "application/json"},
+                verify=True,
+            )
+            if result.status_code == 200:
+                return True
+            else:
+                raise ValueError(result.json().get("description"))
+        except Exception as e:
+            capture_exception(e)
+            return False

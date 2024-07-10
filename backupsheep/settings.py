@@ -16,7 +16,6 @@ from pathlib import Path
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
 import google.auth
-from google.cloud import secretmanager
 from dotenv import load_dotenv
 from dotenv import dotenv_values
 
@@ -54,6 +53,8 @@ INSTALLED_APPS = [
     "django.contrib.humanize",
     "django_user_agents",
     "django_filters",
+    "django_celery_results",
+    "django_celery_beat",
     'apps',
 
 ]
@@ -261,3 +262,26 @@ S3_STORAGE_BUCKET_NAME = config["S3_STORAGE_BUCKET_NAME"]
 S3_ENDPOINT_URL = config["S3_ENDPOINT_URL"]
 S3_SIGNATURE_VERSION = config["S3_SIGNATURE_VERSION"]
 
+# Dropbox Storage - Create Dropbox App and add keys in .env file
+# Learn more: https://www.dropbox.com/developers/reference/getting-started#app%20console
+DROPBOX_APP_KEY = config["DROPBOX_APP_KEY"]
+DROPBOX_APP_SECRET = config["DROPBOX_APP_SECRET"]
+
+
+# OneDrive Storage
+MS_CLIENT_ID = config["MS_CLIENT_ID"]
+MS_OBJECT_ID = config["MS_OBJECT_ID"]
+MS_TENANT_ID = config["MS_TENANT_ID"]
+MS_APPLICATION_ID = config["MS_APPLICATION_ID"]
+MS_CLIENT_SECRET_VALUE = config["MS_CLIENT_SECRET_VALUE"]
+MS_CLIENT_SECRET_ID = config["MS_CLIENT_SECRET_ID"]
+MS_OAUTH_ENDPOINT = config["MS_OAUTH_ENDPOINT"]
+MS_OAUTH_TOKEN_URL = config["MS_OAUTH_TOKEN_URL"]
+MS_REDIRECT_URL = config["MS_REDIRECT_URL"]
+MS_RESPONSE_TYPE = config["MS_RESPONSE_TYPE"]
+MS_SCOPE = config["MS_SCOPE"]
+MS_GRAPH_ENDPOINT = config["MS_GRAPH_ENDPOINT"]
+
+# GOOGLE Storage
+GOOGLE_CLIENT_ID = config["GOOGLE_CLIENT_ID"]
+GOOGLE_CLIENT_SECRET = config["GOOGLE_CLIENT_SECRET"]
