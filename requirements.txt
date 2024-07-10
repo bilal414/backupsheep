@@ -26,7 +26,7 @@ ibm-cos-sdk==2.13.4
 slack-sdk==3.18.3
 google-auth-oauthlib==1.2.0
 azure-storage-blob==12.16.0
-azure-identity==1.12.0
+azure-identity==1.16.1
 oss2==2.17.0
 cos-python-sdk-v5==1.9.23
 google-cloud-storage==2.17.0
