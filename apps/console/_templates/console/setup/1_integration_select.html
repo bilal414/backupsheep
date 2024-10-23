@@ -1,0 +1,1361 @@
+{% extends "console/_master.html" %}
+{% block title %}{{ heading }}{% endblock %}
+{% block meta_title %}{{ heading }}{% endblock %}
+{% block meta_description %}{{ heading }}{% endblock %}
+{% block meta_keywords %}{{ heading }}{% endblock %}
+{% block page_class %}page_console console-page sb-l-o sb-r-c{% endblock %}
+{% block heading %}false{% endblock %}
+{% block content %}
+    <div x-data="setupSelectIntegration()">
+        <div class="md:flex md:items-center md:justify-between mb-4 pb-4">
+            <div class="flex-1 min-w-0">
+                <h2 class="text-2xl font-bold leading-7 text-gray-700 sm:text-3xl sm:truncate">
+                    Cloud Providers (snapshot automation only)
+                </h2>
+                <p class="mt-3 text-lg text-gray-700">
+                    Connect any number of the cloud provider account and schedule snapshots of your cloud servers and
+                    volumes, recover your data in minutes.
+                </p>
+            </div>
+        </div>
+
+        <div class="rounded-lg bg-gray-200 overflow-hidden shadow divide-y divide-gray-200 sm:divide-y-0 sm:grid sm:grid-cols-2 sm:gap-px">
+            <div class="rounded-tl-lg rounded-tr-lg sm:rounded-tr-none relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a href="{% url 'console:setup:integration_open' 'digitalocean' %}"><img class="max-h-12"
+                                                                                             src="{{ STATIC_URL }}website/images/clouds/digitalocean-horizontal.svg"
+                                                                                             alt="DigitalOcean Backups"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule frequent backups for DigitalOcean servers and volumes. Snapshots are created using APIs
+                        and stored within your DigitalOcean account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+            <div class=" sm:rounded-tr-lg relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" @click="openOVHModal()"><img class="max-h-12 loading"
+                                                                           src="{{ STATIC_URL }}website/images/clouds/ovhcloud.svg"
+                                                                           alt="OVH Cloud Backups"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule frequent backups for servers and volumes. Snapshots are created using APIs and stored
+                        within your OVH Cloud account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+
+
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a href="{% url 'console:setup:integration_open' 'vultr' %}"><img class="max-h-12"
+                                                                                      src="{{ STATIC_URL }}website/images/clouds/vultr.svg"
+                                                                                      alt="Vultr Backups"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule frequent backups for servers and volumes. Snapshots are created using APIs and stored
+                        within your Vultr account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+            <div class="sm:rounded-tr-lg relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a href="{% url 'console:setup:integration_open' 'aws' %}"><img class="max-h-12 loading"
+                                                                                    src="{{ STATIC_URL }}website/images/clouds/aws.svg"
+                                                                                    alt="AWS Backups"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule frequent backups for servers and volumes. Snapshots are created using APIs and stored
+                        within your AWS account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+
+
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a href="{% url 'console:setup:integration_open' 'lightsail' %}"><img class="max-h-12 loading"
+                                                                                          src="https://backupsheep.com/cdn-cgi/image/width=1920,quality=100,fit=scale-down,format=auto{{ STATIC_URL }}website/images/clouds/lightsail.webp"
+                                                                                          alt="AWS Lightsail Backups"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule frequent backups for servers and volumes. Snapshots are created using APIs and stored
+                        within your Amazon Lighsail account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+            <div class="sm:rounded-tr-lg relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a href="{% url 'console:setup:integration_open' 'hetzner' %}"><img class="max-h-12"
+                                                                                        src="{{ STATIC_URL }}website/images/clouds/hetzner.svg"
+                                                                                        alt="Hetzner Backups"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule frequent backups for servers. Snapshots are created using APIs and stored within your
+                        Hetzner account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a href="{% url 'console:setup:integration_open' 'upcloud' %}"><img class="max-h-12"
+                                                                                        src="{{ STATIC_URL }}website/images/clouds/upcloud.svg"
+                                                                                        alt="UpCloud Backups"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule frequent backups for storage volumes. Snapshots are created using APIs and stored
+                        within your UpCloud account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a href="{% url 'console:setup:integration_open' 'oracle' %}"><img class="max-h-12"
+                                                                                       src="{{ STATIC_URL }}website/images/oracle.svg"
+                                                                                       alt="Oracle Cloud Backups"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule frequent backups for storage volumes. Snapshots are created using APIs and stored
+                        within your Oracle account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a href="{% url 'console:setup:integration_open' 'google_cloud' %}"><img class="max-h-12"
+                                                                                             src="{{ STATIC_URL }}website/images/google_cloud.svg"
+                                                                                             alt="Google Cloud Backups"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule frequent backups for cloud instances and volumes. Snapshots are created using APIs and
+                        stored
+                        within your Google Cloud account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+        </div>
+
+        <div class="md:flex md:items-center md:justify-between mb-4 pb-4 mt-16">
+            <div class="flex-1 min-w-0">
+                <h2 class="text-2xl font-bold leading-7 text-gray-700 sm:text-3xl sm:truncate">
+                    Databases
+                </h2>
+                <p class="mt-3 text-lg text-gray-700">
+                    Connect any number of the databases for simple, secure, and cost-effective backups; locally or in
+                    the cloud.
+                </p>
+            </div>
+        </div>
+
+        <div class="rounded-lg bg-gray-200 overflow-hidden shadow divide-y divide-gray-200 sm:divide-y-0 sm:grid sm:grid-cols-2 sm:gap-px">
+            <div class="rounded-tl-lg rounded-tr-lg sm:rounded-tr-none relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <div class="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                        <div><a href="{% url 'console:setup:integration_open' 'database' %}"><img class="max-h-12"
+                                                                                                  src="{{ STATIC_URL }}website/images/database/mysql.svg"
+                                                                                                  alt="MyQL Backups"></a>
+                        </div>
+                        <div><a href="{% url 'console:setup:integration_open' 'database' %}"><img class="max-h-12"
+                                                                                                  src="{{ STATIC_URL }}website/images/database/postgresql.svg"
+                                                                                                  alt="PostgreSQL Backups"></a>
+                        </div>
+                        <div><a href="{% url 'console:setup:integration_open' 'database' %}"><img class="max-h-12"
+                                                                                                  src="{{ STATIC_URL }}website/images/database/mariadb.svg"
+                                                                                                  alt="MariaDB Backups"></a>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule frequent backups for MySQL, MariaDB and PostgreSQL. Backups are created using mysqldump
+                        & pgdump cli and you can also connect using SSH.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+        </div>
+
+        <div class="md:flex md:items-center md:justify-between mb-4 pb-4 mt-16">
+            <div class="flex-1 min-w-0">
+                <h2 class="text-2xl font-bold leading-7 text-gray-700 sm:text-3xl sm:truncate">
+                    Web Servers
+                </h2>
+                <p class="mt-3 text-lg text-gray-700">
+                    Connect any number of the cPanel, wordpress or other SFTP accounts for simple, secure, and
+                    cost-effective backups; locally or in the cloud.
+                </p>
+            </div>
+        </div>
+
+        <div class="rounded-lg bg-gray-200 overflow-hidden shadow divide-y divide-gray-200 sm:divide-y-0 sm:grid sm:grid-cols-2 sm:gap-px">
+            <div class="rounded-tl-lg rounded-tr-lg sm:rounded-tr-none relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <div class="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                        <div><a href="{% url 'console:setup:integration_open' 'website' %}"><img
+                                class="max-h-12 mx-auto" src="{{ STATIC_URL }}website/images/file/sftp.svg"
+                                alt="SFTP Backups"></a></div>
+                        <div><a href="{% url 'console:setup:integration_open' 'website' %}"><img
+                                class="max-h-12 mx-auto" src="{{ STATIC_URL }}website/images/file/ftp.svg"
+                                alt="FTP Backups"></a></div>
+                        <div><a href="{% url 'console:setup:integration_open' 'website' %}"><img
+                                class="max-h-12 mx-auto" src="{{ STATIC_URL }}website/images/file/ssh.svg"
+                                alt="SSH Backups"></a></div>
+                    </div>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Schedule backups for FTP,cPanel and WordPress servers using ftp/sftp protocol and store them in
+                        your own storage locations using storage integrations.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+        </div>
+
+        <div class="md:flex md:items-center md:justify-between mb-4 pb-4 mt-16">
+            <div class="flex-1 min-w-0">
+                <h2 class="text-2xl font-bold leading-7 text-gray-700 sm:text-3xl sm:truncate">
+                    CMS & SaaS Applications
+
+                </h2>
+                <p class="mt-3 text-lg text-gray-700">
+                    Connect WordPress website by installing BackupSheep plugin. You can store backups included Free
+                    Storage in your plan or on your storage accounts.
+                </p>
+            </div>
+        </div>
+
+        <div class="rounded-lg bg-gray-200 overflow-hidden shadow divide-y divide-gray-200 sm:divide-y-0 sm:grid sm:grid-cols-2 sm:gap-px">
+            <div id="wordpress"
+                 class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_open' 'wordpress' %}"><img
+                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/wordpress.svg"
+                            alt="WordPress"></a></div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Backup your WordPress websites using BackupSheep plugin.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+             <div id="basecamp"
+                 class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_open' 'basecamp' %}"><img
+                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/basecamp.svg"
+                            alt="Basecamp"></a></div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Backup your data using BackupSheep.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            {#             <div id="intercom"#}
+            {#                 class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">#}
+            {#                <div>#}
+            {#                    <a class="cursor-pointer" href="{% url 'console:setup:integration_open' 'intercom' %}"><img#}
+            {#                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/intercom.svg"#}
+            {#                            alt="Intercom"></a></div>#}
+            {#                <div class="mt-8">#}
+            {#                    <p class="mt-2 text-sm text-gray-700">#}
+            {#                        Backup your Intercom data using BackupSheep.#}
+            {#                    </p>#}
+            {#                </div>#}
+            {#                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"#}
+            {#                      aria-hidden="true">#}
+            {#                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">#}
+            {#                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>#}
+            {#                  </svg>#}
+            {#                </span>#}
+            {#            </div>#}
+            <div id="intercom"
+                 class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer"><img
+                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/intercom.svg"
+                            alt="Intercom"></a></div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded  bg-purple-100 text-purple-800"> Coming Soon </span>
+
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+
+            {#             <div id="zendesk"#}
+            {#                 class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">#}
+            {#                <div>#}
+            {#                    <a class="cursor-pointer" href="{% url 'console:setup:integration_open' 'zendesk' %}"><img#}
+            {#                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/zendesk.svg"#}
+            {#                            alt="Zendesk"></a></div>#}
+            {#                <div class="mt-8">#}
+            {#                    <p class="mt-2 text-sm text-gray-700">#}
+            {#                        Backup your Zendesk data using BackupSheep.#}
+            {#                    </p>#}
+            {#                </div>#}
+            {#                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"#}
+            {#                      aria-hidden="true">#}
+            {#                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">#}
+            {#                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>#}
+            {#                  </svg>#}
+            {#                </span>#}
+            {#            </div>#}
+            <div id="zendesk"
+                 class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer"><img
+                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/zendesk.svg"
+                            alt="Zendesk"></a></div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded  bg-purple-100 text-purple-800"> Coming Soon </span>
+
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            {#             <div id="slack"#}
+            {#                 class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">#}
+            {#                <div>#}
+            {#                    <a class="cursor-pointer" href="{% url 'console:setup:integration_open' 'slack' %}"><img#}
+            {#                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/slack.svg"#}
+            {#                            alt="Slack"></a></div>#}
+            {#                <div class="mt-8">#}
+            {#                    <p class="mt-2 text-sm text-gray-700">#}
+            {#                        Backup your Slack data using BackupSheep.#}
+            {#                    </p>#}
+            {#                </div>#}
+            {#                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"#}
+            {#                      aria-hidden="true">#}
+            {#                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">#}
+            {#                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>#}
+            {#                  </svg>#}
+            {#                </span>#}
+            {#            </div>#}
+            <div id="slack"
+                 class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer"><img
+                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/slack.svg"
+                            alt="Slack"></a></div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded  bg-purple-100 text-purple-800"> Coming Soon </span>
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+        </div>
+
+        <div class="md:flex md:items-center md:justify-between mb-4 pb-4 mt-16">
+            <div class="flex-1 min-w-0">
+                <h2 class="text-2xl font-bold leading-7 text-gray-700 sm:text-3xl sm:truncate">
+                    Storage Platforms (for website, database & SaaS backups only)
+                </h2>
+                <p class="mt-3 text-lg text-gray-700">
+                    Connect any number of the external storage accounts as you wish for your database and file server
+                    backups. Store the backups at multiple storage locations simultaneously.
+                </p>
+            </div>
+        </div>
+        <div class="rounded-lg bg-gray-200 overflow-hidden shadow divide-y divide-gray-200 sm:divide-y-0 sm:grid sm:grid-cols-2 sm:gap-px">
+            {#            <div id="storage-backupsheep"#}
+            {#                 class="rounded-tl-lg rounded-tr-lg sm:rounded-tr-none relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">#}
+            {#                <div>#}
+            {#                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'bs' %}"><img#}
+            {#                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/backupsheep.svg"#}
+            {#                            alt="BackupSheep"></a></div>#}
+            {#                <div class="mt-8">#}
+            {#                    <p class="mt-2 text-sm text-gray-700">#}
+            {#                        BackupSheep storage is included in your plan. You can store website, database and WordPress backups.#}
+            {#                    </p>#}
+            {#                </div>#}
+            {#                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"#}
+            {#                      aria-hidden="true">#}
+            {#                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">#}
+            {#                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>#}
+            {#                  </svg>#}
+            {#                </span>#}
+            {#            </div>#}
+            <div id="storage-cloudflare"
+                 class="rounded-tl-lg rounded-tr-lg sm:rounded-tr-none relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer"
+                       href="{% url 'console:setup:integration_storage_open' 'cloudflare' %}"><img
+                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/cloudflare.svg"
+                            alt="Cloudfalre"></a></div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your Cloudflare R2 storage buckets.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div id="storage-firebase"
+                 class="rounded-tl-lg rounded-tr-lg sm:rounded-tr-none relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'filebase' %}"><img
+                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/filebase.svg"
+                            alt="Filebase"></a></div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your Filebase buckets.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class=" sm:rounded-tr-lg relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a href="{% url 'console:setup:integration_storage_open' 'google_drive' %}"
+                       class="cursor-pointer"><img class="max-h-12 loading"
+                                                   src="https://backupsheep.com/cdn-cgi/image/width=300,quality=100,fit=scale-down,format=auto{{ STATIC_URL }}website/images/google_drive.webp"
+                                                   alt="Google Drive"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your Google Drive account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'do_spaces' %}"><img
+                            class="max-h-12" src="{{ STATIC_URL }}website/images/digitalocean.svg"
+                            alt="DigitalOcean Spaces"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your DigitalOcean Spaces buckets.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'aws_s3' %}"><img
+                            class="max-h-12 loading" src="{{ STATIC_URL }}website/images/amazon-s3.svg" alt="Amazon S3"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website and database backups on your AWS S3 buckets.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+
+
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+
+                    <a href="{% url 'console:setup:integration_storage_open' 'dropbox' %}"><img class="max-h-12"
+                                                                                                src="{{ STATIC_URL }}website/images/dropbox.svg"
+                                                                                                alt="Dropbox"></a>
+
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your Dropbox account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+            <div class=" relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'wasabi' %}"><img
+                            class="max-h-12"
+                            src="https://backupsheep.com/cdn-cgi/image/width=300,quality=100,fit=scale-down,format=auto{{ STATIC_URL }}website/images/wasabi.webp"
+                            alt="Wasabi"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your Wasabi buckets.
+
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+              <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+              </svg>
+            </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer"
+                       href="{% url 'console:setup:integration_storage_open' 'backblaze_b2' %}"><img class="max-h-12"
+                                                                                                     src="{{ STATIC_URL }}website/images/backblaze.svg"
+                                                                                                     alt="BackBlaze B2"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your BackBlaze B2 buckets in North America and
+                        Europe.
+
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'linode' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/linode.svg"
+                            alt="Linode Object Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your Linode Object Storage in different regions.
+
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'exoscale' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/exoscale.svg"
+                            alt="Exoscale Object Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your Exoscale Object Storage in different European
+                        regions.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'vultr' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/clouds/vultr.svg"
+                            alt="Vultr Object Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your Vultr Object Storage buckets.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'upcloud' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/upcloud.svg"
+                            alt="UpCloud Object Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your UpCloud Object Storage buckets.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'oracle' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/oracle.svg"
+                            alt="Oracle Object Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your Oracle Object Storage buckets.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'scaleway' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/scaleway.svg"
+                            alt="Scaleway Object Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your Scaleway Object Storage buckets.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'pcloud' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/pcloud.svg"
+                            alt="pCloud Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited file and database backups on your pCloud storage account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'onedrive' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/onedrive.svg"
+                            alt="Microsoft OneDrive"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website, WordPress and database backups on your Microsoft OneDrive storage
+                        account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer"
+                       href="{% url 'console:setup:integration_storage_open' 'google_cloud' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/google_cloud.svg"
+                            alt="Google Cloud Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website, WordPress and database backups on your Google Cloud storage account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'azure' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/azure.svg"
+                            alt="Microsoft Azure Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website, WordPress and database backups on your Microsoft Azure storage account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'leviia' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/leviia.svg"
+                            alt="Leviia Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website, WordPress and database backups on your Leviia storage account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'alibaba' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/alibaba.svg"
+                            alt="Alibaba Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website, WordPress and database backups on your Alibaba Cloud storage account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'tencent' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/tencent.svg"
+                            alt="Tencent Cloud Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website, WordPress and database backups on your Tencent Cloud storage account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'idrive' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/idrive.svg"
+                            alt="iDrive E2 Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website, WordPress and database backups on your iDrive E2 storage account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'ionos' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/ionos.svg"
+                            alt="Ionos Object Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website, WordPress and database backups on your Ionos Object storage account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'rackcorp' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/rackcorp.svg"
+                            alt="RackCorp Object Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website, WordPress and database backups on your RackCorp Object storage account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+            <div class="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500">
+                <div>
+                    <a class="cursor-pointer" href="{% url 'console:setup:integration_storage_open' 'ibm' %}"><img
+                            class="max-h-12"
+                            src="{{ STATIC_URL }}website/images/ibm.svg"
+                            alt="IBM Object Storage"></a>
+                </div>
+                <div class="mt-8">
+                    <p class="mt-2 text-sm text-gray-700">
+                        Store unlimited website, WordPress and database backups on your IBM Object storage account.
+                    </p>
+                </div>
+                <span class="pointer-events-none absolute top-6 right-6 text-gray-300 group-hover:text-gray-400"
+                      aria-hidden="true">
+                  <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M20 4h1a1 1 0 00-1-1v1zm-1 12a1 1 0 102 0h-2zM8 3a1 1 0 000 2V3zM3.293 19.293a1 1 0 101.414 1.414l-1.414-1.414zM19 4v12h2V4h-2zm1-1H8v2h12V3zm-.707.293l-16 16 1.414 1.414 16-16-1.414-1.414z"></path>
+                  </svg>
+                </span>
+            </div>
+        </div>
+
+
+        <div x-show="openOVH" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
+             aria-labelledby="modal-title" role="dialog" aria-modal="true">
+            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                <div x-show="openOVH"
+                     x-transition:enter="ease-out duration-300"
+                     x-transition:enter-start="opacity-0"
+                     x-transition:enter-end="opacity-100"
+                     x-transition:leave="ease-in duration-200"
+                     x-transition:leave-start="opacity-100"
+                     x-transition:leave-end="opacity-0"
+                     class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+
+                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+
+                <div x-show="openOVH"
+                     x-transition:enter="ease-out duration-300"
+                     x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                     x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+                     x-transition:leave="ease-in duration-200"
+                     x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+                     x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
+                    <div class="hidden sm:block absolute top-0 right-0 pt-4 pr-4">
+                        <button @click="closeOVHModal()" type="button"
+                                class="bg-white rounded-md text-gray-400 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            <span class="sr-only">Close</span>
+                            <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                 stroke="currentColor" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                      d="M6 18L18 6M6 6l12 12"></path>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div>
+                        <div class="mt-3 text-center sm:mt-5">
+                            <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                                Select OVH Region
+                            </h3>
+                            <div class="mt-2">
+                                <p class="text-sm text-gray-700">
+                                    Each OVH region operate separately. Select the region for which you want to see
+                                    integrations.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+
+                    <div class="mt-5 sm:mt-6 sm:grid sm:grid-cols-3 sm:gap-3 sm:grid-flow-row-dense">
+
+                        <a href="{% url 'console:setup:integration_open' 'ovh_ca' %}" type="button"
+                           class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-1 sm:text-sm">
+                            OVH Canada
+                        </a>
+                        <a href="{% url 'console:setup:integration_open' 'ovh_eu' %}" type="button"
+                           class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                            OVH Europe
+                        </a>
+                        <a href="{% url 'console:setup:integration_open' 'ovh_us' %}" type="button"
+                           class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-3 sm:text-sm">
+                            OVH USA
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div x-show="openStorage" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
+             aria-labelledby="modal-title" role="dialog" aria-modal="true">
+            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                <div x-show="openStorage"
+                     x-transition:enter="ease-out duration-300"
+                     x-transition:enter-start="opacity-0"
+                     x-transition:enter-end="opacity-100"
+                     x-transition:leave="ease-in duration-200"
+                     x-transition:leave-start="opacity-100"
+                     x-transition:leave-end="opacity-0"
+                     class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+
+                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+
+                <div x-show="openStorage"
+                     x-transition:enter="ease-out duration-300"
+                     x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                     x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+                     x-transition:leave="ease-in duration-200"
+                     x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+                     x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
+                    <div>
+                        <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
+                            <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
+                                 xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                        stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor"
+                                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+
+                            <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white"
+                                 fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                      d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
+                            </svg>
+                        </div>
+                        <div x-show="!loading" class="mt-3 text-center sm:mt-5">
+                            <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                                <span x-text="storageName"></span> Integration
+                            </h3>
+                        </div>
+                        <div x-show="loading" class="mt-3 text-center sm:mt-5">
+                            <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                                Loading storage details...
+                            </h3>
+                            <div class="mt-2">
+                                <p class="text-sm text-gray-700">
+                                    Fetching storage details for <br/><strong x-text="storage?.name"></strong>
+                                </p>
+                            </div>
+                        </div>
+                        <div x-show="!loading" class="mt-6 grid grid-cols-1 gap-y-6 gap-x-4 sm:grid-cols-6">
+                            <div class="sm:col-span-6">
+                                <label for="name" class="block text-sm font-medium text-gray-700">
+                                    Name
+                                </label>
+                                <div class="mt-1">
+                                    <input x-model="storage.name" type="text" name="name" id="name" autocomplete="name"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
+                                       x-text="storageErrors?.name"></p>
+                                </div>
+                            </div>
+
+                            <div class="sm:col-span-6">
+                                <label for="first-name" class="block text-sm font-medium text-gray-700">
+                                    Bucket Name (must exist in your account)
+                                </label>
+                                <div class="mt-1">
+                                    <input x-model="selectedStorage.bucket_name" type="text" name="name" id="name"
+                                           autocomplete="given-name"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.bucket_name" class="mt-2 text-sm text-red-600"
+                                       id="name-error" x-text="storageErrors.auth?.bucket_name"></p>
+                                </div>
+                            </div>
+
+                            <div class="sm:col-span-6">
+                                <label for="first-name" class="block text-sm font-medium text-gray-700">
+                                    Folder Name (must not start with /)
+                                </label>
+                                <div class="mt-1">
+                                    <input x-model="selectedStorage.prefix" type="text" name="name" id="name"
+                                           autocomplete="given-name"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.prefix" class="mt-2 text-sm text-red-600"
+                                       id="name-error" x-text="storageErrors.auth?.prefix"></p>
+                                </div>
+                            </div>
+                            <div class="sm:col-span-6">
+                                <label for="first-name" class="block text-sm font-medium text-gray-700">
+                                    Access Key
+                                </label>
+                                <div class="mt-1">
+                                    <input x-model="selectedStorage.access_key" type="text" name="name" id="name"
+                                           autocomplete="given-name"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.access_key" class="mt-2 text-sm text-red-600"
+                                       id="name-error" x-text="storageErrors.auth?.access_key"></p>
+                                </div>
+                            </div>
+
+                            <div class="sm:col-span-6">
+                                <label for="first-name" class="block text-sm font-medium text-gray-700">
+                                    Secret Key
+                                </label>
+                                <div class="mt-1">
+                                    <input x-model="selectedStorage.secret_key" type="text" name="name" id="name"
+                                           autocomplete="given-name"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.secret_key" class="mt-2 text-sm text-red-600"
+                                       id="name-error" x-text="storageErrors.auth?.secret_key"></p>
+                                </div>
+                            </div>
+                            <div class="sm:col-span-6">
+                                <label for="first-name" class="block text-sm font-medium text-gray-700">
+                                    Region
+                                </label>
+                                <div class="relative mt-2">
+                                    <button @click="toggleRegionDropdown()"
+                                            type="button"
+                                            class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                            aria-haspopup="listbox" aria-expanded="true"
+                                            aria-labelledby="listbox-label">
+                                        <span class="block truncate"
+                                              x-text="selectedStorage.region?.name||'--Choose Region--'"></span>
+                                        <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                                <!-- Heroicon name: solid/selector -->
+                                                <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                     viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                  <path fill-rule="evenodd"
+                                                        d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                                        clip-rule="evenodd"></path>
+                                                </svg>
+                                              </span>
+                                    </button>
+
+                                    <ul
+                                            x-show="openRegion"
+                                            @click.self="toggleRegionDropdown()"
+                                            x-transition:enter=""
+                                            x-transition:enter-start=""
+                                            x-transition:enter-end=""
+                                            x-transition:leave="transition ease-in duration-100"
+                                            x-transition:leave-start="opacity-100"
+                                            x-transition:leave-end="opacity-0"
+                                            class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                            tabindex="-1" role="listbox"
+                                            aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+
+                                        <template x-for="(region, index) in regions">
+                                            <li
+                                                    @click="selectedStorage.region = region;toggleRegionDropdown()"
+                                                    @mouseenter="regionActiveIndex = index"
+                                                    @mouseleave="regionActiveIndex = null"
+                                                    :class="{ 'text-white bg-indigo-600': regionActiveIndex === index, 'text-gray-700': !(regionActiveIndex === index) }"
+                                                    class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                    id="listbox-option-0" role="option">
+                                                    <span class="font-normal block truncate">
+                                                        <span x-text="region.name"></span>
+                                                    </span>
+
+                                                <span
+                                                        x-show="selectedStorage.region?.id === region?.id"
+                                                        :class="{ 'text-indigo-600': (selectedStorage.region?.id === region?.id) && (regionActiveIndex !== index), 'text-white': (!(selectedStorage.region === region) || (regionActiveIndex === index)) }"
+                                                        class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                      <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                           viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                        <path fill-rule="evenodd"
+                                                              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                                              clip-rule="evenodd"></path>
+                                                      </svg>
+                                                    </span>
+                                            </li>
+                                        </template>
+                                    </ul>
+                                </div>
+                                <p x-show="storageErrors.auth?.region" class="mt-2 text-sm text-red-600"
+                                   id="email-error" x-text="storageErrors.auth?.region"></p>
+                            </div>
+
+                            <div class="sm:col-span-6">
+                                <label for="about" class="block text-sm font-medium text-gray-700">
+                                    Notes
+                                </label>
+                                <div class="mt-1">
+                                    <textarea x-model="storage.notes" id="about" name="about" rows="3"
+                                              class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                    <p x-show="storageErrors?.notes" class="mt-2 text-sm text-red-600" id="email-error"
+                                       x-text="storageErrors?.notes"></p>
+                                </div>
+                                <p class="mt-2 text-sm text-gray-700">Optional notes about the storage.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                        <button @click="saveStorage()" type="button"
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                            <span>Add Integration</span>
+                        </button>
+                        <button @click="closeStorageModal()" type="button"
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('setupSelectIntegration', () => ({
+                loading: null,
+                openOVH: false,
+                openStorage: false,
+                storageName: null,
+                storageTypeCode: null,
+                storage: {},
+                selectedStorage: {},
+                storageErrors: {
+                    auth: {}
+                },
+                openRegion: false,
+                regionActiveIndex: null,
+                regions: [],
+                integration_code: "{{integration.code}}",
+                init() {
+                    if (this.integration_code === "digitalocean") {
+                        this.getOauthUrl();
+                    }
+                },
+                openOVHModal() {
+                    this.openOVH = true;
+                },
+                closeOVHModal() {
+                    this.openOVH = false;
+                },
+                toggleRegionDropdown() {
+                    this.openRegion = !this.openRegion;
+                    this.regionActiveIndex = null;
+                },
+                async saveStorage() {
+                    this.loading = true;
+
+                    let url = "/api/v1/storage/" + this.storageTypeCode + "/";
+
+                    let data = {
+                        name: this.storage.name,
+                        notes: this.storage.notes,
+                    };
+
+                    data["storage_" + this.storageTypeCode] = {
+                        access_key: this.selectedStorage.access_key,
+                        secret_key: this.selectedStorage.secret_key,
+                        bucket_name: this.selectedStorage.bucket_name,
+                        prefix: this.selectedStorage.prefix,
+                        region: this.selectedStorage.region?.id,
+                    };
+
+                    let response = await fetch(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'POST',
+                        body: JSON.stringify(data)
+
+                    }).then(async (response) => {
+                        if (response.ok) {
+                            return response.json();
+                        } else {
+                            this.loading = false;
+                            let json;
+                            try {
+                                json = await response.json();
+                            } catch (exception_var) {
+                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                            }
+
+                            this.storageErrors = json;
+                            this.storageErrors.auth = this.storageErrors["storage_" + this.storageTypeCode];
+
+                            if (this.storageErrors["storage_" + this.storageTypeCode]?.non_field_errors) {
+                                json.detail = this.storageErrors["storage_" + this.storageTypeCode]?.non_field_errors[0];
+                            } else {
+                                json.detail = "Unable to process request. Please contact support.";
+                            }
+                            throw new Error(json.detail);
+                        }
+                    }).then((json) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            success: true,
+                            heading: 'Success!',
+                            details: json.detail
+                        });
+                        this.loading = false;
+                        this.closeStorageModal();
+                        location.reload();
+                    }).catch((error) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            error: true,
+                            heading: 'Error!',
+                            details: error.message
+                        });
+                    });
+                },
+
+                closeStorageModal() {
+                    this.openStorage = false;
+                    this.storage = {};
+                    this.selectedStorage = {};
+                    this.regions = [];
+                    this.openRegion = false;
+                    this.regionActiveIndex = null;
+                    this.storageErrors = {
+                        auth: {}
+                    };
+                },
+            }));
+        });
+    </script>
+{% endblock %}

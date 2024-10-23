@@ -1,0 +1,35 @@
+{% extends "console/emails/_master.html" %}
+{% block content %}
+<h1>You have exceeded storage limit on your account</h1>
+
+<p>Hi. It looks like your account is using more BackupSheep storage than allowed in your plan. Please update your account with valid credit card by <strong>Jan 31st 2023</strong> to pay for extra storage usage or reduce your storage by deleting older backups.</p>
+
+<p>Your account is using <strong>{{storage_used_bs}}</strong> of BackupSheep storage.</p>
+
+<p>BackupSheep storage limit on your plan (<strong>{{plan_name}}</strong>) is  <strong>{{plan_storage_quota}}</strong>.</p>
+
+<p>Extra BackupSheep storage being used is <strong>{{plan_storage_overage}}</strong>.</p>
+
+<p>If you're not ready to take any action, you have a few other options available to you&hellip;</p>
+<table class="attributes" width="100%" cellpadding="0" cellspacing="0">
+  <tr>
+    <td class="attributes_content">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td class="attributes_item"><strong>Connect your storage</strong> - You can connect your storage to store backups there. You can store unlimited backups on your storage.
+            <br>
+            <br>
+          </td>
+        </tr>
+        <tr>
+          <td class="attributes_item"><strong>Auto termination</strong> - If you are unable to redcue storage or add valid payment method by Jan 31st 2023 then your account  will be terminated without further notice.</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+<p>Regardless of your choice, we want to say thank you for trying BackupSheep. We know it's an investment of your time, and we appreciate you giving us a chance.</p>
+<p>Thanks,
+  <br>BackupSheep Team</p>
+<p><strong>P.S.</strong> Need immediate help getting started? Check out our <a href="https://support.backupsheep.com/">help documentation</a>. Or, just reply to this email, support team is always ready to help!</p>
+{% endblock %}

@@ -1,0 +1,17 @@
+Whoops!
+
+The backup of node {{ node_name }} ({{node_type}}) failed to upload to your {{storage_type}} storage {{storage_name}} at {{backup_time}}.
+
+This error could be temporary, and we will keep retrying backup upload every 15 minutes for next 24 hours.
+
+NEW! Starting 29th Jan 2023. If you select only your storage in backup schedule and the upload fails then we will automatically upload the backup to BackupSheep storage.
+
+Error: {{error_details}}
+
+If your storage is using any firewall then make sure BackupSheep server {{endpoint_location}} IPv4 {{endpoint_ip}} and IPv6 {{endpoint_ipv6}} is allowed. To view other endpoint IPs goto https://support.backupsheep.com/docs/backupsheep-ips
+
+
+Thanks,
+{{sender_name}}
+
+P.S. Need immediate help getting started? Check out our help documentation ( {{ help_url }} ). Or, just reply to this email, support team is always ready to help!

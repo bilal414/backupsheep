@@ -1,0 +1,25 @@
+{% extends "console/emails/_master.html" %}
+{% block content %}
+    <h2>Please confirm your email address</h2>
+
+    <p>Once your email address has been confirmed, you will receive notifications related to your BackupSheep account.</p>
+
+
+    <p>Follow this link to verify your email address. <a target="_blank" href="{{ action_url }}">{{ action_url }}</a>
+    </p>
+
+    <p>If you didn’t ask to verify this address, you can ignore this email.</p>
+
+    <p><strong>P.S.</strong> Need immediate help getting started? Check out our <a href="{{ help_url }}">help
+        documentation</a>. Or, just reply to this email, support team is always ready to help!</p>
+
+    <table class="body-sub">
+        <tr>
+            <td>
+                <p class="sub">If you’re having trouble with the button above, copy and paste the URL below into your
+                    web browser.</p>
+                <p class="sub">{{ action_url }}</p>
+            </td>
+        </tr>
+    </table>
+{% endblock %}

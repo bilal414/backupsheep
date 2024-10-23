@@ -1,0 +1,20 @@
+{% extends "console/_master.html" %}
+{% block title %}{{ heading }}{% endblock %}
+{% block meta_title %}{{ heading }}{% endblock %}
+{% block meta_description %}{{ heading }}{% endblock %}
+{% block meta_keywords %}{{ heading }}{% endblock %}
+{% block page_class %}page_console console-page sb-l-o sb-r-c{% endblock %}
+{% block heading %}false{% endblock %}
+{% block content %}
+    {% if integration_code == "website" %}
+        {% include "console/setup/_setup_website_node.html" %}
+    {% elif integration_code == "basecamp" %}
+        {% include "console/setup/_setup_basecamp_node.html" %}
+    {% elif integration_code == "wordpress" %}
+        {% include "console/setup/_setup_wordpress_node.html" %}
+    {% elif integration_code == "database" %}
+        {% include "console/setup/_setup_database_node.html" %}
+    {% elif object_code == "cloud" or object_code == "volume" %}
+        {% include "console/setup/_setup_cloud_node.html" %}
+    {% endif %}
+{% endblock %}

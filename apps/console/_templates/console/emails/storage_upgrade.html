@@ -1,0 +1,42 @@
+{% extends "console/emails/_master.html" %}
+{% block content %}
+    <h2>More Storage and Exciting Changes</h2>
+
+    <p>We have some exciting news to share with you! We have increased the amount of cloud storage included in
+        BackupSheep plans, giving you even more space to back up your critical data at no extra cost. Our new cloud
+        storage is powered by Google Cloud.</p>
+
+    <p>Here's an overview of the new included storage limits for each plan:</p>
+    <ul>
+        <li>Developer: 5 GB</li>
+        <li>Lite: 50 GB</li>
+        <li>Startup: 100 GB</li>
+        <li>Business: 500 GB</li>
+        <li>Agency: 1000 GB</li>
+    </ul>
+    <p>If you are using your own storage then above limits doesn't apply.</p>
+
+    <h2>We need your help!</h2>
+    <p>
+        Help us spread the word and reach even more businesses in need of our services. Get your unique
+        referral link to share with your network, track your referrals, and monitor your rewards.
+    </p>
+
+    <p>Get your referral link. <a target="_blank" href="{{ action_url }}">{{ action_url }}</a>
+    </p>
+
+    <p>Thank you for being a part of the BackupSheep community.</p>
+
+    <p><strong>P.S.</strong> Need immediate help getting started? Check out our <a href="{{ help_url }}">help
+        documentation</a>. Or, just reply to this email, support team is always ready to help!</p>
+
+    <table class="body-sub">
+        <tr>
+            <td>
+                <p class="sub">If you’re having trouble with the button above, copy and paste the URL below into your
+                    web browser.</p>
+                <p class="sub">{{ action_url }}</p>
+            </td>
+        </tr>
+    </table>
+{% endblock %}

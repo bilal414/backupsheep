@@ -1,0 +1,1287 @@
+{% load humanize %}
+
+<div x-data="setupStorage()">
+
+    {% if storage.code == "bs" %}
+        <div
+                class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+
+            <img class="max-h-20 mx-auto" src="{{ STATIC_URL }}{{ storage.image }}" alt="{{ storage.name }} Backups">
+
+        </div>
+
+    {% else %}
+        {% if  storage.code == "google_drive" and not is_google_drive_available %}
+            <div class="border-l-4 border-yellow-400 bg-yellow-50 p-4 mb-4">
+                <div class="flex">
+                    <div class="flex-shrink-0">
+                        <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                            <path fill-rule="evenodd"
+                                  d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z"
+                                  clip-rule="evenodd"></path>
+                        </svg>
+                    </div>
+                    <div class="ml-3">
+                        <p class="text-sm text-yellow-700">
+                            <strong>Google Drive Integration Is Unavailable</strong> <br/>
+                            We are noticing high error rates from Google Drive storage APIs. Please update your backup
+                            schedules to use alternate storage integration.
+                            <a href="https://support.backupsheep.com/page/notice-on-google-drive-storage-api-errors"
+                               class="font-medium text-yellow-700 underline hover:text-yellow-600">Learn more.</a>
+                        </p>
+                    </div>
+                </div>
+            </div>
+        {% else %}
+            <button @click="openStorageModal(null, '{{ storage.code }}')" type="button"
+                    class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+
+                <img class="max-h-20 mx-auto" src="{{ STATIC_URL }}{{ storage.image }}"
+                     alt="{{ storage.name }} Backups">
+
+                <a class="mt-2 block  text-1xl font-normal leading-7 text-gray-700">
+                    Setup {{ storage.name }} Integration
+                </a>
+            </button>
+        {% endif %}
+
+    {% endif %}
+
+    {% if storage_count > 0 %}
+        <div class="pb-3 border-b border-gray-200 mt-12">
+            <div class="-ml-2 -mt-2 flex flex-wrap items-baseline">
+                <h3 class="ml-2 mt-2 text-lg leading-6 font-medium text-gray-700">
+                    {{ storage.name }} Integrations
+                </h3>
+            </div>
+        </div>
+        <div class="flex flex-col mt-4">
+            <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+                <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
+                    <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                        <div class="overflow-x-auto">
+                            <table id="section-storages" class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                <tr>
+                                    <th scope="col"
+                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Name
+                                    </th>
+                                    <th scope="col"
+                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Websites - Backups - Storage
+                                    </th>
+                                    <th scope="col"
+                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Databases - Backups - Storage
+                                    </th>
+                                    <th scope="col"
+                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        SaaS - Backups - Storage
+                                    </th>
+                                    <th scope="col"
+                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Status
+                                    </th>
+                                    <th scope="col" class="relative px-6 py-3">
+                                        <span class="sr-only">Actions</span>
+                                    </th>
+                                </tr>
+                                </thead>
+                                <tbody class="bg-white divide-y divide-gray-200">
+                                {% for storage in page.object_list %}
+                                    <tr>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <div class="flex items-center">
+                                                <div class="flex-shrink-0 h-10 w-10">
+                                                    <svg xmlns="http://www.w3.org/2000/svg"
+                                                         class="h-10 w-10 rounded-full text-indigo-600" fill="none"
+                                                         viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                              stroke-width="2"
+                                                              d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
+                                                    </svg>
+                                                </div>
+                                                <div class="ml-4">
+                                                    <div class="text-sm font-medium text-gray-700">
+                                                        {{ storage.name }}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <div class="text-sm text-gray-700">{{ storage.stats_website_count|default:0|intcomma }}
+                                                - {{ storage.stats_website_backup_count|default:0|intcomma }}
+                                                - {{ storage.stats_website_size|filesizeformat }}</div>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <div class="text-sm text-gray-700">{{ storage.stats_database_count|default:0|intcomma }}
+                                                - {{ storage.stats_database_backup_count|default:0|intcomma }}
+                                                - {{ storage.stats_database_size|filesizeformat }}</div>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <div class="text-sm text-gray-700">{{ storage.stats_wordpress_count|default:0|intcomma }}
+                                                - {{ storage.stats_wordpress_backup_count|default:0|intcomma }}
+                                                - {{ storage.stats_wordpress_size|filesizeformat }}</div>
+                                        </td>
+
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            {% if storage.status == 1 or storage.status == 2 %}
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                            {{ storage.get_status_display }}
+                                        </span>
+                                            {% elif storage.status == 3 %}
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                            {{ storage.get_status_display }}
+                                        </span>
+                                            {% elif storage.status == 4 %}
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
+                                            {{ storage.get_status_display }}
+                                        </span>
+                                            {% elif storage.status == 6 or storage.status == 8 %}
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                            {{ storage.get_status_display }}
+                                        </span>
+                                            {% else %}
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                                            {{ storage.get_status_display }}
+                                        </span>
+                                            {% endif %}
+                                        </td>
+
+                                        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                            {% if storage.type.code == "bs" %}
+                                                <button @click="openStorageModal('{{ storage.id }}', '{{ storage.type.code }}')"
+                                                        type="button"
+                                                        class="w-full inline-flex justify-center rounded-md border border-gray-300  shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                                    S3 Access
+                                                </button>
+                                            {% else %}
+
+                                                {% if storage.status == 5 %}
+                                                    <button @click="resumeStorage('{{ storage.id }}', '{{ storage.type.code }}')"
+                                                            type="button"
+                                                            class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        Undo
+                                                    </button>
+                                                {% else %}
+                                                    <span class="relative z-0 inline-flex shadow-sm rounded-md">
+                                                  <button @click="openStorageModal('{{ storage.id }}', '{{ storage.type.code }}')"
+                                                          type="button" class="relative inline-flex items-center px-4 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium
+                                                  text-gray-700 hover:bg-gray-50
+                                                  focus:z-10
+                                                  focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                    Modify
+                                                  </button>
+                                                     <button @click="validateStorage('{{ storage.id }}')"
+                                                             type="button"
+                                                             class="-ml-px relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                        Validate
+                                                    </button>
+
+                                                        {% if storage.status == 1 %}
+                                                            <button @click="pauseStorage('{{ storage.id }}')"
+                                                                    type="button"
+                                                                    class="-ml-px relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                        Pause
+                                                    </button>
+                                                        {% elif storage.status == 4 %}
+                                                            <button @click="resumeStorage('{{ storage.id }}')"
+                                                                    type="button"
+                                                                    class="-ml-px relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                        Resume
+                                                    </button>
+                                                        {% endif %}
+                                                        <button @click="openStorageModal('{{ storage.id }}', '{{ storage.type.code }}', 'copy')"
+                                                                type="button"
+                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                        Copy
+                                                        </button>
+                                                        <button @click="openDeleteStorageModal('{{ storage.id }}', '{{ storage.name }}')"
+                                                                type="button"
+                                                                class="-ml-px relative inline-flex items-center px-4 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10
+                                                      focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                        Delete
+                                                    </button>
+                                            </span>
+                                                {% endif %}
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <nav class="border-t border-gray-200 px-4 flex items-center justify-between sm:px-0 mt-4">
+            <div class="-mt-px w-0 flex-1 flex">
+                {% if page.has_previous %}
+                    <a href="{% url 'console:setup:integration_storage_open' storage.code %}?p_no={{ page.previous_page_number }}&p_size={{ page.paginator.per_page }}&#section-nodes"
+                       class="border-t-2 border-transparent pt-4 pr-1 inline-flex items-center text-sm font-medium text-gray-700 hover:text-gray-700 hover:border-gray-300">
+                        <!-- Heroicon name: solid/arrow-narrow-left -->
+                        <svg class="mr-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
+                             fill="currentColor" aria-hidden="true">
+                            <path fill-rule="evenodd"
+                                  d="M7.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l2.293 2.293a1 1 0 010 1.414z"
+                                  clip-rule="evenodd"></path>
+                        </svg>
+                        Previous
+                    </a>
+                {% endif %}
+            </div>
+            <div class="hidden md:-mt-px md:flex">
+                {% for page_no in elided_page_range %}
+                    <!-- Current: "border-indigo-500 text-indigo-600", Default: "border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300" -->
+                    {% if page_no == "…" %}
+                        <a class="{% if page.number ==  page_no %}border-indigo-500 text-indigo-600{% else %}border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300{% endif %} border-t-2 pt-4 px-4 inline-flex items-center text-sm font-medium">
+                            {{ page_no }}
+                        </a>
+                    {% else %}
+                        <a href="{% url 'console:setup:integration_storage_open' storage.code %}?p_no={{ page_no }}&p_size={{ page.paginator.per_page }}&#section-nodes"
+                           class="{% if page.number ==  page_no %}border-indigo-500 text-indigo-600{% else %}border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300{% endif %} border-t-2 pt-4 px-4 inline-flex items-center text-sm font-medium">
+                            {{ page_no }}
+                        </a>
+                    {% endif %}
+                {% endfor %}
+            </div>
+            <div class="-mt-px w-0 flex-1 flex justify-end">
+                {% if page.has_next %}
+                    <a href="{% url 'console:setup:integration_storage_open' storage.code %}?p_no={{ page.next_page_number }}&p_size={{ page.paginator.per_page }}&#section-nodes"
+                       class="border-t-2 border-transparent pt-4 pl-1 inline-flex items-center text-sm font-medium text-gray-700 hover:text-gray-700 hover:border-gray-300">
+                        Next
+                        <!-- Heroicon name: solid/arrow-narrow-right -->
+                        <svg class="ml-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
+                             fill="currentColor" aria-hidden="true">
+                            <path fill-rule="evenodd"
+                                  d="M12.293 5.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-2.293-2.293a1 1 0 010-1.414z"
+                                  clip-rule="evenodd"></path>
+                        </svg>
+                    </a>
+                {% endif %}
+            </div>
+        </nav>
+    {% else %}
+        <div class="bg-gray-50 mt-10">
+            <div class="max-w-2xl mx-auto py-12 px-4 sm:px-6 sm:py-12 lg:max-w-7xl lg:px-8 rounded-full">
+                <div class="max-w-4xl">
+                    <h2 class="text-4xl font-extrabold tracking-tight text-gray-700">Setup your first {{ storage.name }}
+                        Integration!</h2>
+                    <p class="mt-4 text-gray-700">
+                        Store unlimited backups of <span class="font-medium text-indigo-600 hover:text-indigo-500">website</span>,
+                        <span class="font-medium text-indigo-600 hover:text-indigo-500">wordpress</span>
+                        and <span
+                            class="font-medium text-indigo-600 hover:text-indigo-500">database</span> on
+                        your {{ storage.name }}.
+                    </p>
+                </div>
+                <div class="grid grid-cols-1 gap-y-12 sm:grid-cols-3 sm:gap-x-6 lg:grid-cols-3 lg:gap-x-8  mt-10">
+                    <div>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+                        </svg>
+                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                            1. Setup {{ storage.name }} Integration
+                        </h3>
+                        <p class="mt-2 text-sm text-gray-700">
+                            Connect {{ storage.name }} account and store unlimited website and database backups.
+
+                        </p>
+                    </div>
+
+                    <div>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        </svg>
+                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                            2. Update Schedule
+                        </h3>
+                        <p class="mt-2 text-sm text-gray-700">
+                            Select storage account when configuring the schedule or when creating on-demand backups.
+                        </p>
+                    </div>
+
+                    <div>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
+                        </svg>
+                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                            3. Multi-Storage (optional)
+                        </h3>
+                        <p class="mt-2 text-sm text-gray-700">
+                            Select multiple storage locations for schedule backups for website and database backups.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+
+    <div x-show="openStorage" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
+         aria-labelledby="modal-title" role="dialog" aria-modal="true">
+        <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div x-show="openStorage"
+                 x-transition:enter="ease-out duration-300"
+                 x-transition:enter-start="opacity-0"
+                 x-transition:enter-end="opacity-100"
+                 x-transition:leave="ease-in duration-200"
+                 x-transition:leave-start="opacity-100"
+                 x-transition:leave-end="opacity-0"
+                 class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+
+            <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+
+            <div x-show="openStorage"
+                 x-transition:enter="ease-out duration-300"
+                 x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                 x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+                 x-transition:leave="ease-in duration-200"
+                 x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+                 x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                 class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
+                <div>
+                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
+                        </svg>
+                    </div>
+                    <div x-show="!loading" class="mt-3 text-center sm:mt-5">
+                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                            {{ storage.name }} Integration
+                        </h3>
+                        <div class="mt-2">
+                            <p class="text-sm text-gray-700">
+                                <span x-text="storage?.name"></span>
+                            </p>
+                        </div>
+                    </div>
+                    <div class="mt-6 grid grid-cols-1 gap-y-6 gap-x-4 sm:grid-cols-6">
+                        {% if storage.code == "bs" %}
+                            <div class="sm:col-span-6">
+                                <div class="border-l-4 border-yellow-400 bg-yellow-50 p-4">
+                                    <div class="flex">
+                                        <div class="flex-shrink-0">
+                                            <!-- Heroicon name: mini/exclamation-triangle -->
+                                            <svg class="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                <path fill-rule="evenodd"
+                                                      d="M8.485 3.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 3.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z"
+                                                      clip-rule="evenodd"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="ml-3">
+                                            <p class="text-sm text-yellow-700">
+                                                Important: Do not upload any files to your storage buckets. BackupSheep
+                                                storage is only intended for backups generated by BackupSheep, read-only
+                                                access and integrations.
+                                                <a target="_blank"
+                                                   href="#"
+                                                   class="font-medium text-yellow-700 underline hover:text-yellow-600">Learn
+                                                    More.</a>
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        {% endif %}
+                        <div class="sm:col-span-6">
+                            <label for="name" class="block text-sm font-medium text-gray-700">
+                                Name
+                            </label>
+                            <div class="mt-1">
+                                <input {% if storage.code == "bs" %}readonly {% endif %} x-model="storage.name"
+                                       type="text" name="name" id="name" autocomplete="name"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="storageErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
+                                   x-text="storageErrors?.name"></p>
+                            </div>
+                        </div>
+                        {% if storage.code == "bs" %}
+                            <div class="sm:col-span-3" x-show="selectedStorage.host">
+                                <label for="username" class="block text-sm font-medium text-gray-700">
+                                    FTP Host
+                                </label>
+                                <div class="mt-1">
+                                    <input readonly x-model="selectedStorage.host" type="text" name="host"
+                                           id="host" autocomplete="host"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.host" class="mt-2 text-sm text-red-600"
+                                       id="namespace-error" x-text="storageErrors.auth?.host"></p>
+                                </div>
+                            </div>
+                            <div class="sm:col-span-3" x-show="selectedStorage.host">
+                                <label for="username" class="block text-sm font-medium text-gray-700">
+                                    FTP Post
+                                </label>
+                                <div class="mt-1">
+                                    <input readonly x-model="selectedStorage.port" type="text" name="port"
+                                           id="port" autocomplete="port"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.port" class="mt-2 text-sm text-red-600"
+                                       id="namespace-error" x-text="storageErrors.auth?.port"></p>
+                                </div>
+                            </div>
+                            <div class="sm:col-span-6" x-show="selectedStorage.host">
+                                <label for="username" class="block text-sm font-medium text-gray-700">
+                                    Username
+                                </label>
+                                <div class="mt-1">
+                                    <input readonly x-model="selectedStorage.username" type="text" name="username"
+                                           id="username" autocomplete="username"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.username" class="mt-2 text-sm text-red-600"
+                                       id="namespace-error" x-text="storageErrors.auth?.username"></p>
+                                </div>
+                            </div>
+                            <div class="sm:col-span-6" x-show="selectedStorage.host">
+                                <label for="password" class="block text-sm font-medium text-gray-700">
+                                    Password
+                                </label>
+                                <div class="mt-1">
+                                    <input readonly x-model="selectedStorage.password" type="text" name="password"
+                                           id="password" autocomplete="password"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.password" class="mt-2 text-sm text-red-600"
+                                       id="namespace-error" x-text="storageErrors.auth?.password"></p>
+                                </div>
+                            </div>
+                            <div class="sm:col-span-6" x-show="selectedStorage.endpoint">
+                                <label for="endpoint" class="block text-sm font-medium text-gray-700">
+                                    Endpoint
+                                </label>
+                                <div class="mt-1">
+                                    <input readonly x-model="selectedStorage.endpoint_alt" type="text" name="endpoint"
+                                           id="endpoint" autocomplete="endpoint"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.endpoint" class="mt-2 text-sm text-red-600"
+                                       id="namespace-error" x-text="storageErrors.auth?.endpoint"></p>
+                                </div>
+                            </div>
+                            <div class="sm:col-span-6" x-show="selectedStorage.bucket_name">
+                                <label for="bucket_name" class="block text-sm font-medium text-gray-700">
+                                    Bucket Name
+                                </label>
+                                <div class="mt-1">
+                                    <input readonly x-model="selectedStorage.bucket_name" type="text" name="bucket_name"
+                                           id="bucket_name" autocomplete="bucket_name"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.bucket_name" class="mt-2 text-sm text-red-600"
+                                       id="namespace-error" x-text="storageErrors.auth?.bucket_name"></p>
+                                </div>
+                            </div>
+                            <div class="sm:col-span-6" x-show="selectedStorage.bucket_name">
+                                <label for="access_key" class="block text-sm font-medium text-gray-700">
+                                    Access Key
+                                </label>
+                                <div class="mt-1">
+                                    <input readonly x-model="selectedStorage.access_key" type="text" name="access_key"
+                                           id="access_key" autocomplete="access_key"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.access_key" class="mt-2 text-sm text-red-600"
+                                       id="namespace-error" x-text="storageErrors.auth?.access_key"></p>
+                                </div>
+                            </div>
+                            <div class="sm:col-span-6" x-show="selectedStorage.secret_key">
+                                <label for="secret_key" class="block text-sm font-medium text-gray-700">
+                                    Secret Key
+                                </label>
+                                <div class="mt-1">
+                                    <input readonly x-model="selectedStorage.secret_key" type="text" name="secret_key"
+                                           id="secret_key" autocomplete="secret_key"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.secret_key" class="mt-2 text-sm text-red-600"
+                                       id="namespace-error" x-text="storageErrors.auth?.secret_key"></p>
+                                </div>
+                            </div>
+
+                        {% endif %}
+                        <div class="sm:col-span-6" x-show="showS3Fields || storage_code === 'google_cloud' || storage_code === 'azure'">
+                            <label for="bucket-name" class="block text-sm font-medium text-gray-700">
+                                <span x-show="storage_code === 'azure'">Container Name</span>
+                                <span x-show="storage_code !== 'azure'">Bucket Name</span>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedStorage.bucket_name" type="text" name="bucket-name"
+                                       id="bucket-name" autocomplete="bucket-name"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="storageErrors.auth?.bucket_name" class="mt-2 text-sm text-red-600"
+                                   id="bucket-name-error" x-text="storageErrors.auth?.bucket_name"></p>
+                            </div>
+                        </div>
+                        {% if storage.code == "oracle" %}
+                            <div class="sm:col-span-6" x-show="showS3Fields">
+                                <label for="namespace" class="block text-sm font-medium text-gray-700">
+                                    Namespace
+                                </label>
+                                <div class="mt-1">
+                                    <input x-model="selectedStorage.namespace" type="text" name="namespace"
+                                           id="namespace" autocomplete="namespace"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.namespace" class="mt-2 text-sm text-red-600"
+                                       id="namespace-error" x-text="storageErrors.auth?.namespace"></p>
+                                </div>
+                            </div>
+                        {% endif %}
+
+
+                        <div class="sm:col-span-6" x-show="showS3Fields || storage_code === 'google_cloud'">
+                            <label for="first-name" class="block text-sm font-medium text-gray-700">
+                                Folder Name (must not start with /)
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedStorage.prefix" type="text" name="folder-name" id="folder-name"
+                                       autocomplete="folder-name"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="storageErrors.auth?.prefix" class="mt-2 text-sm text-red-600"
+                                   id="folder-name-error" x-text="storageErrors.auth?.prefix"></p>
+                            </div>
+                        </div>
+
+                        {% if storage.code == "google_cloud" %}
+                            <div class="sm:col-span-6">
+                                <label for="service_key" class="block text-sm font-medium text-gray-700">
+                                    Service Key JSON
+                                </label>
+                                <div class="mt-1">
+                                        <textarea x-model="selectedStorage.service_key" id="service_key"
+                                                  name="service_key" rows="3"
+                                                  class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                    <p x-show="storageErrors?.auth?.service_key" class="mt-2 text-sm text-red-600"
+                                       id="service_key-error"
+                                       x-text="storageErrors?.auth?.service_key"></p>
+                                </div>
+                            </div>
+                        {% endif %}
+
+                        {% if storage.code == "azure" %}
+                            <div class="sm:col-span-6">
+                                <label for="connection_string" class="block text-sm font-medium text-gray-700">
+                                    Connection String
+                                </label>
+                                <div class="mt-1">
+                                        <textarea x-model="selectedStorage.connection_string" id="connection_string"
+                                                  name="connection_string" rows="3"
+                                                  class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                    <p x-show="storageErrors?.auth?.connection_string" class="mt-2 text-sm text-red-600"
+                                       id="connection_string-error"
+                                       x-text="storageErrors?.auth?.connection_string"></p>
+                                </div>
+                            </div>
+                        {% endif %}
+
+                        <div class="sm:col-span-6" x-show="showS3Fields && storage_code=='backblaze_b2'">
+                            <div class="rounded-md bg-blue-50 p-4">
+                                <div class="flex">
+                                    <div class="flex-shrink-0">
+                                        <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                             viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                            <path fill-rule="evenodd"
+                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                                  clip-rule="evenodd"></path>
+                                        </svg>
+                                    </div>
+                                    <div class="ml-3 flex-1 md:flex md:justify-between">
+                                        <p class="text-sm font-bold text-blue-700">
+                                            Master Application Key will not work for BackBlaze B2 storage integration.
+                                            Please use bucket-specific Application Key.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="showS3Fields && storage_code=='cloudflare'">
+                            <label for="account_id" class="block text-sm font-medium text-gray-700">
+                                <span>Account ID (Cloudflare)</span>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedStorage.account_id" type="text" name="account_id"
+                                       id="account_id" autocomplete="account_id"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="storageErrors.auth?.account_id" class="mt-2 text-sm text-red-600"
+                                   id="access-key-error" x-text="storageErrors.auth?.account_id"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="showS3Fields">
+                            <label for="accesskey" class="block text-sm font-medium text-gray-700">
+                                <span x-show="storage_code!='backblaze_b2'">Access Key</span>
+                                <span x-show="storage_code=='backblaze_b2'">Key ID</span>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedStorage.access_key" type="text" name="access-key"
+                                       id="access-key" autocomplete="access-key"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="storageErrors.auth?.access_key" class="mt-2 text-sm text-red-600"
+                                   id="access-key-error" x-text="storageErrors.auth?.access_key"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="showS3Fields">
+                            <label for="secretkey" class="block text-sm font-medium text-gray-700">
+                                <span x-show="storage_code!='backblaze_b2'">Secret Key</span>
+                                <span x-show="storage_code=='backblaze_b2'">Application Key</span>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedStorage.secret_key" type="text" name="secret-key"
+                                       id="secret-key" autocomplete="secret-key"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="storageErrors.auth?.secret_key" class="mt-2 text-sm text-red-600"
+                                   id="secret-key-error" x-text="storageErrors.auth?.secret_key"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6"
+                             x-show="showS3Fields && (storage_code==='backblaze_b2' || storage_code==='linode' || storage_code==='vultr' || storage_code==='upcloud' || storage_code==='idrive')">
+                            <label for="endpoint" class="block text-sm font-medium text-gray-700">
+                                Endpoint
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedStorage.endpoint" type="text" name="endpoint" id="endpoint"
+                                       autocomplete="endpoint"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="storageErrors.auth?.endpoint" class="mt-2 text-sm text-red-600"
+                                   id="endpoint-error" x-text="storageErrors.auth?.endpoint"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6"
+                             x-show="showS3Fields && storage_code!=='backblaze_b2' && storage_code!=='linode' && storage_code!=='vultr' && storage_code!=='upcloud' && storage_code!=='cloudflare' && storage_code!=='leviia' && storage_code!=='idrive'">
+                            <label for="first-name" class="block text-sm font-medium text-gray-700">
+                                Region
+                            </label>
+                            <div class="relative mt-2">
+                                <button @click="toggleRegionDropdown()"
+                                        type="button"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                    <span class="block truncate"
+                                          x-text="selectedStorage.region?.name||'--Choose Region--'"></span>
+                                    <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                                <!-- Heroicon name: solid/selector -->
+                                                <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                     viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                  <path fill-rule="evenodd"
+                                                        d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                                        clip-rule="evenodd"></path>
+                                                </svg>
+                                              </span>
+                                </button>
+
+                                <ul
+                                        x-show="openRegion"
+                                        @click.self="toggleRegionDropdown()"
+                                        x-transition:enter=""
+                                        x-transition:enter-start=""
+                                        x-transition:enter-end=""
+                                        x-transition:leave="transition ease-in duration-100"
+                                        x-transition:leave-start="opacity-100"
+                                        x-transition:leave-end="opacity-0"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        tabindex="-1" role="listbox"
+                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+
+                                    <template x-for="(region, index) in regions">
+                                        <li
+                                                @click="selectedStorage.region = region;toggleRegionDropdown()"
+                                                @mouseenter="regionActiveIndex = index"
+                                                @mouseleave="regionActiveIndex = null"
+                                                :class="{ 'text-white bg-indigo-600': regionActiveIndex === index, 'text-gray-700': !(regionActiveIndex === index) }"
+                                                class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                id="listbox-option-0" role="option">
+                                                    <span class="font-normal block truncate">
+                                                        <span x-text="region.name"></span>
+                                                    </span>
+
+                                            <span
+                                                    x-show="selectedStorage.region?.id === region?.id"
+                                                    :class="{ 'text-indigo-600': (selectedStorage.region?.id === region?.id) && (regionActiveIndex !== index), 'text-white': (!(selectedStorage.region === region) || (regionActiveIndex === index)) }"
+                                                    class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                      <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                           viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                        <path fill-rule="evenodd"
+                                                              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                                              clip-rule="evenodd"></path>
+                                                      </svg>
+                                                    </span>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                            <p x-show="storageErrors.auth?.region" class="mt-2 text-sm text-red-600" id="email-error"
+                               x-text="storageErrors.auth?.region"></p>
+                        </div>
+
+
+                        {% if storage.code != "bs" %}
+                            <div class="sm:col-span-6">
+                                <label for="about" class="block text-sm font-medium text-gray-700">
+                                    Notes
+                                </label>
+                                <div class="mt-1">
+                                    <textarea x-model="storage.notes" id="about" name="about" rows="3"
+                                              class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                    <p x-show="storageErrors?.notes" class="mt-2 text-sm text-red-600" id="email-error"
+                                       x-text="storageErrors?.notes"></p>
+                                </div>
+                                <p class="mt-2 text-sm text-gray-700">Optional notes about the storage.</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div x-show="!loading && storage_code !== 'bs'"
+                     class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                    <button @click="saveStorage()" type="button"
+                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                        <span x-show="!storage.id">Add Integration</span>
+                        <span x-show="storage.id">Modify Integration</span>
+                    </button>
+                    <button @click="closeStorageModal()" type="button"
+                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                        Cancel
+                    </button>
+                </div>
+                <div x-show="!loading && storage_code === 'bs'"
+                     class="w-full mt-5 sm:mt-6 sm:grid sm:grid-cols-1 sm:gap-3 sm:grid-flow-row-dense">
+                    <button @click="closeStorageModal()" type="button"
+                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:text-sm">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div x-show="openDeleteStorage" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
+         aria-labelledby="modal-title" role="dialog" aria-modal="true">
+        <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div x-show="openDeleteStorage"
+                 x-transition:enter="ease-out duration-300"
+                 x-transition:enter-start="opacity-0"
+                 x-transition:enter-end="opacity-100"
+                 x-transition:leave="ease-in duration-200"
+                 x-transition:leave-start="opacity-100"
+                 x-transition:leave-end="opacity-0"
+                 class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+
+            <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+
+            <div x-show="openDeleteStorage"
+                 x-transition:enter="ease-out duration-300"
+                 x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                 x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+                 x-transition:leave="ease-in duration-200"
+                 x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+                 x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                 class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
+                <div>
+                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
+                        <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
+                             xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                    stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor"
+                                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        </svg>
+                    </div>
+                    <div x-show="!loading" class="mt-3 text-center sm:mt-5">
+                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                            Please Confirm
+                        </h3>
+                        <div class="mt-2">
+                            <p class="text-sm text-gray-700">
+                                This action will remove this storage from all schedules and delete all backups created
+                                with this storage (<strong x-text="storage.name"></strong>). You can't undo this action.
+                                Proceed carefully.
+                            </p>
+                        </div>
+                    </div>
+                    <div x-show="loading" class="mt-3 text-center sm:mt-5">
+                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                            Loading...
+                        </h3>
+                        <div class="mt-2">
+                            <p class="text-sm text-gray-700">
+                                Don't refresh page.
+                            </p>
+                        </div>
+                    </div>
+                    <div x-show="!loading" class="mt-3 text-left sm:mt-5">
+                        <div class="sm:col-span-6">
+                            <label for="about" class="block text-sm font-medium text-gray-700">
+                                Notes
+                            </label>
+                            <div class="mt-1">
+                                <textarea x-model="notes" id="about" name="about" rows="3"
+                                          class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                            </div>
+                            <p class="mt-2 text-sm text-gray-700">Optional notes about this action.</p>
+                        </div>
+                    </div>
+                </div>
+                <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                    <button @click="deleteStorage(storage.id)" type="button"
+                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                        Delete Storage
+                    </button>
+                    <button @click="closeDeleteStorageModal()" type="button"
+                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('setupStorage', () => ({
+            loading: null,
+            openStorage: false,
+            showS3Fields: false,
+            storageName: null,
+            storageTypeCode: null,
+            openDeleteStorage: null,
+            notes: null,
+            storage: {},
+            selectedStorage: {},
+            storageErrors: {
+                auth: {}
+            },
+            openRegion: false,
+            regionActiveIndex: null,
+            regions: [],
+            storage_code: "{{storage.code}}",
+            connectURL: "{{connect_url}}",
+
+            init() {
+                if (this.integration_code === "digitalocean") {
+                    this.getOauthUrl();
+                }
+            },
+            toggleRegionDropdown() {
+                this.openRegion = !this.openRegion;
+                this.regionActiveIndex = null;
+            },
+            async openStorageModal(storage_id, storage_type_code, action_type) {
+
+                if (!storage_id && (storage_type_code === "dropbox" || storage_type_code === "google_drive" || storage_type_code === "pcloud" || storage_type_code === "onedrive")) {
+                    window.location.href = "{{connect_url|safe}}";
+                } else {
+                    this.storageTypeCode = storage_type_code;
+
+                    Alpine.store('showLoading').toggle();
+
+                    this.showS3Fields = storage_type_code === "aws_s3" || storage_type_code === "wasabi" || storage_type_code === "do_spaces" || storage_type_code === "filebase" || storage_type_code === "backblaze_b2" || storage_type_code === "linode" || storage_type_code === "vultr" || storage_type_code === "upcloud" || storage_type_code === "exoscale" || storage_type_code === "oracle" || storage_type_code === "scaleway" || storage_type_code === "cloudflare" || storage_type_code === "leviia" || storage_type_code === "idrive" || storage_type_code === "ionos" || storage_type_code === "alibaba" || storage_type_code === "tencent" || storage_type_code === "rackcorp" || storage_type_code === "ibm";
+
+                    if (this.showS3Fields && storage_type_code !== "backblaze_b2" && storage_type_code !== "linode" && storage_type_code !== "vultr" && storage_type_code !== "upcloud" && storage_type_code !== "cloudflare" && storage_type_code !== "leviia" && storage_type_code !== "idrive") {
+                        await this.getRegions(storage_type_code);
+                    }
+
+                    if (storage_id) {
+                        let url = "/api/v1/storage/" + storage_type_code + "/" + storage_id + "/";
+
+                        let response = await fetch(url, {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            method: 'GET',
+                        }).then(async (response) => {
+                            if (response.ok) {
+                                return response.json();
+                            } else {
+                                let json;
+                                try {
+                                    json = await response.json();
+                                } catch (exception_var) {
+                                    json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                                }
+
+                                this.storageErrors = json;
+                                throw new Error(json.detail);
+                            }
+                        }).then((json) => {
+                            this.storage = json;
+
+                            /**
+                             * This is copy action so we will remove so it can be added as new
+                             */
+                            if (action_type === 'copy') {
+                                this.storage.id = null;
+                            }
+
+                            this.openStorage = true;
+                            if (this.showS3Fields) {
+                                this.selectedStorage = this.storage["storage_" + storage_type_code];
+                            } else if (storage_type_code === "bs") {
+                                this.selectedStorage = this.storage["storage_" + storage_type_code];
+                            } else {
+                                this.selectedStorage = this.storage["storage_" + storage_type_code];
+                            }
+                            Alpine.store('showLoading').toggle();
+                        }).catch((error) => {
+                            Alpine.store('notifications').items.push({
+                                show: true,
+                                error: true,
+                                heading: 'Error!',
+                                details: error.message
+                            });
+                            Alpine.store('showLoading').toggle();
+                        });
+                    } else {
+                        this.storage = {};
+                        this.selectedStorage = {};
+                        this.storageErrors = {
+                            auth: {}
+                        };
+                        this.openStorage = true;
+                        Alpine.store('showLoading').toggle();
+
+                    }
+                }
+            },
+            async saveStorage() {
+                Alpine.store('showLoading').toggle();
+                let url = null;
+                let method = null;
+
+                if (this.storage.id) {
+                    url = "/api/v1/storage/" + this.storageTypeCode + "/" + this.storage.id + "/";
+                    method = "PATCH";
+                } else {
+                    url = "/api/v1/storage/" + this.storageTypeCode + "/";
+                    method = "POST";
+                }
+
+                let data = {
+                    name: this.storage.name,
+                    notes: this.storage.notes,
+                };
+
+                data["storage_" + this.storageTypeCode] = {
+                    access_key: this.selectedStorage.access_key,
+                    secret_key: this.selectedStorage.secret_key,
+                    bucket_name: this.selectedStorage.bucket_name,
+                    account_id: this.selectedStorage.account_id,
+                    namespace: this.selectedStorage.namespace,
+                    service_key: this.selectedStorage.service_key,
+                    connection_string: this.selectedStorage.connection_string,
+                    prefix: this.selectedStorage.prefix || '',
+                    region: this.selectedStorage.region?.id,
+                    endpoint: this.selectedStorage.endpoint,
+                };
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: method,
+                    body: JSON.stringify(data)
+
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.storageErrors = json;
+                        this.storageErrors.auth = this.storageErrors["storage_" + this.storageTypeCode];
+
+                        if (this.storageErrors["storage_" + this.storageTypeCode]?.non_field_errors) {
+                            json.detail = this.storageErrors["storage_" + this.storageTypeCode]?.non_field_errors[0];
+                        } else {
+                            json.detail = "Unable to process request. Please contact support.";
+                        }
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                    Alpine.store('showLoading').toggle();
+                    this.closeStorageModal();
+                    location.reload();
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                    Alpine.store('showLoading').toggle();
+                });
+            },
+            async getRegions(storage_type_code) {
+                let url = "/api/v1/storage/" + storage_type_code + "/regions/";
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'Success!', details: json.detail});#}
+                    this.regions = json;
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                });
+            },
+            async pauseStorage(storage_id) {
+                Alpine.store('showLoading').toggle();
+
+                let url = "/api/v1/storage/" + storage_id + "/pause/";
+
+                let data = {
+                    notes: this.notes,
+                }
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'POST',
+                    body: JSON.stringify(data)
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                    location.reload();
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                    Alpine.store('showLoading').toggle();
+                });
+            },
+
+            async resumeStorage(storage_id) {
+                Alpine.store('showLoading').toggle();
+
+                let url = "/api/v1/storage/" + storage_id + "/resume/";
+
+                let data = {
+                    notes: this.notes,
+                }
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'POST',
+                    body: JSON.stringify(data)
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                    location.reload();
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                    Alpine.store('showLoading').toggle();
+
+                });
+            },
+
+            async deleteStorage(storage_id) {
+                Alpine.store('showLoading').toggle();
+
+                let url = "/api/v1/storage/" + storage_id + "/delete/";
+
+                let data = {
+                    notes: this.notes,
+                }
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'POST',
+                    body: JSON.stringify(data)
+                }).then(async (response) => {
+                    if (response.status === 200) {
+                        return {"detail": "Storage will be deleted soon."};
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                    location.reload();
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                    Alpine.store('showLoading').toggle();
+                });
+            },
+            async validateStorage(storage_id) {
+                Alpine.store('showLoading').toggle();
+
+                let method = "GET";
+                let url = "/api/v1/storage/{{storage.code}}/" + storage_id + "/validate/";
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: method,
+                }).then(async (response) => {
+                    Alpine.store('showLoading').toggle();
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                });
+            },
+
+            openDeleteStorageModal(storageID, storageName) {
+                this.storage = {
+                    id: storageID,
+                    name: storageName,
+                };
+                this.openDeleteStorage = true;
+                this.notes = null;
+            },
+            closeDeleteStorageModal() {
+                this.notes = null;
+                this.openDeleteStorage = false;
+            },
+            closeStorageModal() {
+                this.openStorage = false;
+                this.storage = {};
+                this.selectedStorage = {};
+                this.regions = [];
+                this.openRegion = false;
+                this.regionActiveIndex = null;
+                this.storageErrors = {
+                    auth: {}
+                };
+            },
+        }));
+    });
+</script>

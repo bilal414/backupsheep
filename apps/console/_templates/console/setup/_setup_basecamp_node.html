@@ -1,0 +1,491 @@
+<div x-data="setupBasecampNode()">
+    <div class="grid grid-cols-2 gap-4">
+        <div>
+            <template x-if="loading===true">
+                <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg pb-4 pt-4">
+                    <div class="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-indigo-500">
+                        <svg class="animate-spin h-14 w-14 text-white" xmlns="http://www.w3.org/2000/svg" fill="none"
+                             viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                    stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor"
+                                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                    </div>
+                </div>
+            </template>
+            <div class="flex flex-col x-cloak" x-show="loading===false">
+                <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+                    <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
+                        <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                            <div x-show="errorObjectList" class="overflow-x-auto">
+                                <div class="rounded-md bg-red-50 p-4">
+                                    <div class="flex">
+                                        <div class="flex-shrink-0">
+                                            <svg class="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                <path fill-rule="evenodd"
+                                                      d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                                                      clip-rule="evenodd"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="ml-3">
+                                            <h3 class="text-sm font-medium text-red-800">Error fetching data endpoints
+                                                from
+                                                integration.</h3>
+                                            <div class="mt-2 text-sm text-red-700">
+                                                <ul role="list" class="list-disc pl-5 space-y-1">
+                                                    <li x-text="errorObjectList?.message"></li>
+                                                </ul>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div x-show="!errorObjectList" class="overflow-x-auto">
+                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200"
+                                       x-show="loading===false">
+                                    <thead class="bg-gray-50">
+                                    <tr>
+                                        <th scope="col"
+                                            class="px-2 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                            Project in Basecamp accounts
+                                        </th>
+                                        <th scope="col"
+                                            class="px-2 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        </th>
+                                        <th scope="col"
+                                            class="px-2 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider"
+                                            x-show="!basecamp.all_projects">
+                                        </th>
+                                    </tr>
+                                    </thead>
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                    <template x-for="object in objectList">
+                                        <tr>
+                                            <td class="px-2 py-2 whitespace-nowrap">
+                                                <div class="flex items-center">
+                                                    <div class="flex-shrink-0 h-6 w-6">
+                                                        <svg xmlns="http://www.w3.org/2000/svg"
+                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
+                                                             viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                  stroke-width="2"
+                                                                  d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path>
+                                                        </svg>
+                                                    </div>
+                                                    <div class="ml-2">
+                                                        <div class="text-sm font-sm text-gray-700">
+                                                            <a x-text="object.name"></a>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </td>
+
+                                            <td class="px-2 py-2 whitespace-nowrap">
+                                                <span class="inline-flex items-center gap-x-1.5 rounded-full bg-purple-100 px-1.5 py-0.5 text-xs font-medium text-purple-700">
+                                                  <svg class="h-1.5 w-1.5 fill-purple-500" viewBox="0 0 6 6"
+                                                       aria-hidden="true">
+                                                    <circle cx="3" cy="3" r="3"></circle>
+                                                  </svg>
+                                                  <span x-text="object.account_name"></span>
+                                                </span>
+                                            </td>
+
+                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium"
+                                                x-show="!basecamp.all_projects">
+                                                <button @click="addProject(object)" type="button"
+                                                        class="rounded-md bg-white px-2 py-1 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+                                                    Include
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    </template>
+                                    <tr x-show="objectList?.length === 0">
+                                        <td class="px-2 py-2 whitespace-nowrap">
+                                            <div class="rounded-md bg-blue-50 p-4">
+                                                <div class="flex">
+                                                    <div class="flex-shrink-0">
+                                                        <svg class="h-5 w-5 text-blue-400"
+                                                             xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
+                                                             fill="currentColor" aria-hidden="true">
+                                                            <path fill-rule="evenodd"
+                                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                                                  clip-rule="evenodd"></path>
+                                                        </svg>
+                                                    </div>
+                                                    <div class="ml-3 flex-1 md:flex md:justify-between">
+                                                        <p class="text-sm text-blue-700">No objects found from
+                                                            integration.</p>
+
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                        </td>
+                                    </tr>
+
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div>
+            <div>
+                <div class="bg-white shadow overflow-hidden sm:rounded-lg">
+                    <div class="px-2 py-3 sm:px-2  bg-indigo-500">
+                        <h3 class="text-md leading-6  text-white">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                      d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                            </svg>
+                            Configurations
+                        </h3>
+                    </div>
+                    <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
+                        <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
+                            <div class="sm:col-span-1">
+                                <label for="name" class="block text-sm font-medium text-gray-700">
+                                    Name
+                                </label>
+                                <div class="mt-1">
+                                    <input x-model="basecamp.name" type="text" name="name" id="name" autocomplete="name"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="basecampErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
+                                       x-text="basecampErrors?.name"></p>
+                                </div>
+                            </div>
+                            <div class="sm:col-span-1">
+                                <label for="name" class="block text-sm font-medium text-gray-700">
+                                    Backup All Projects in all Accounts
+                                </label>
+                                <div class="mt-1">
+                                    <button type="button"
+                                            @click="basecamp.all_projects = !basecamp.all_projects;"
+                                            :class="{ 'bg-indigo-600': basecamp.all_projects, 'bg-gray-200': !(basecamp.all_projects) }"
+                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
+                                        <span :class="{ 'translate-x-5': basecamp.all_projects, 'translate-x-0': !(basecamp.all_projects) }"
+                                              aria-hidden="true"
+                                              class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                    </button>
+                                    <p x-show="basecampErrors?.all_projects" class="mt-2 text-sm text-red-600"
+                                       id="name-error" x-text="basecampErrors?.all_projects"></p>
+                                </div>
+                            </div>
+
+                            <div class="sm:col-span-1">
+                                <label for="notes" class="block text-sm font-medium text-gray-700">
+                                    Notes
+                                </label>
+                                <div class="mt-1">
+                                          <textarea x-model="basecamp.notes" id="notes" name="notes" rows="3"
+                                                    class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md mt-3"></textarea>
+                                    <p x-show="basecampErrors?.notes" class="mt-2 text-sm text-red-600" id="notes-error"
+                                       x-text="basecampErrors?.notes"></p>
+                                </div>
+                            </div>
+
+                            <div class="sm:col-span-1" x-show="!errorObjectList">
+                                <button @click="saveBasecamp()" type="button"
+                                        class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                    {% if not node.id %}
+                                        <span>Create Node</span>
+                                    {% elif node.id %}
+                                        <span>Modify Node</span>
+                                    {% endif %}
+                                </button>
+                            </div>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white shadow overflow-hidden sm:rounded-lg mt-6"
+                 x-show="(basecamp.projects?.length>0)  && (!basecamp.all_projects)">
+                <div class="px-2 py-3 sm:px-2  bg-indigo-500">
+                    <h3 class="text-md leading-6  text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M12 4v16m8-8H4"></path>
+                        </svg>
+                        Project included in this node
+                    </h3>
+                </div>
+                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
+                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
+                        <div class="border-t border-gray-200 ">
+                            <div class="overflow-x-auto">
+                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                    <template x-for="project in basecamp.projects">
+                                        <tr>
+                                            <td class="px-2 py-2 whitespace-nowrap">
+                                                <div class="flex items-center">
+                                                    <div class="flex-shrink-0 h-6 w-6">
+                                                        <svg xmlns="http://www.w3.org/2000/svg"
+                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
+                                                             viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                  stroke-width="2"
+                                                                  d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path>
+                                                        </svg>
+                                                    </div>
+                                                    <div class="ml-2">
+                                                        <div class="text-sm font-sm text-gray-700">
+                                                            <a x-text="project.name"></a>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </td>
+                                            <td class="px-2 py-2 whitespace-nowrap">
+                                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-purple-100 px-1.5 py-0.5 text-xs font-medium text-purple-700">
+                                                      <svg class="h-1.5 w-1.5 fill-purple-500" viewBox="0 0 6 6"
+                                                           aria-hidden="true">
+                                                        <circle cx="3" cy="3" r="3"></circle>
+                                                      </svg>
+                                                      <span x-text="project.account_name"></span>
+                                                    </span>
+                                            </td>
+                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                                <button @click="removeProject(project)" type="button"
+                                                        class="rounded-md bg-white px-2 py-1 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+                                                    Remove
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    </template>
+
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('setupBasecampNode', () => ({
+            loading: true,
+            error: null,
+            errorObjectList: null,
+            objectList: null,
+            connection: {},
+            basecamp: {
+                all_projects: false,
+                all_tables: false,
+                projects: [],
+                name: null,
+                notes: null,
+            },
+            basecampErrors: {},
+            integration_code: "{{integration.code}}",
+            connection_id: "{{connection.id}}",
+            location_id: "{{connection.location.id}}",
+            object_type: "{{object_code}}",
+            node_id: "{{node_id}}",
+
+            init() {
+                this.loading = true;
+                this.getObjects();
+            },
+
+            openUrl(url) {
+                window.location.href = url;
+            },
+            addProject(object) {
+                if (!_.find(this.basecamp.projects, function (o) {
+                    return o.id === object.id;
+                })) {
+                    this.basecamp.projects.push(object);
+                }
+            },
+            removeProject(object) {
+                _.remove(this.basecamp.projects, function (n) {
+                    return n.id === object.id;
+                });
+            },
+            async getObjects(path) {
+                this.loading = true;
+                this.errorObjectList = null;
+
+                {% if node.id %}
+                    await this.getBasecamp();
+                {% endif %}
+
+                let params = {
+                    location: this.location_id,
+                }
+
+                if (path) {
+                    params.path = path;
+                }
+                let url = "/api/proxy/connections/" + this.integration_code + "/" + this.connection_id + "/objects/?" + new URLSearchParams(params);
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.scheduleErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'OAuth URL Ready!', details: json.detail});#}
+                    this.objectList = json;
+                    this.loading = false;
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                    this.errorObjectList = error;
+                });
+            },
+            async getBasecamp() {
+                let params = {}
+
+                let url = "/api/v1/saas/" + this.integration_code + "/" + "{{node.basecamp.id}}" + "/?" + new URLSearchParams(params);
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.basecampErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    this.basecamp = json;
+                    if (this.basecamp.tables === null) {
+                        this.basecamp.tables = [];
+                    }
+                    if (this.basecamp.basecamps === null) {
+                        this.basecamp.basecamps = [];
+                    }
+                }).catch((error) => {
+                    this.error = error;
+                });
+            },
+
+            async saveBasecamp() {
+                Alpine.store('showLoading').toggle();
+
+                let url = "";
+                let method = "";
+
+                let data = {
+                    node: {
+                        connection: this.connection_id,
+                        name: this.basecamp.name,
+                    },
+                    location: this.location_id,
+                    all_tables: this.basecamp.all_tables,
+                    tables: this.basecamp.tables,
+                    option_postgres: this.basecamp.option_postgres,
+                    projects: this.basecamp.projects,
+                    all_projects: this.basecamp.all_projects,
+                    name: this.basecamp.name,
+                    notes: this.basecamp.notes
+                };
+
+                if (this.basecamp.id) {
+                    url = "/api/v1/saas/basecamp/" + this.basecamp.id + "/";
+                    method = "PATCH";
+                } else {
+                    url = "/api/v1/saas/basecamp/";
+                    method = "POST";
+                }
+
+                if (this.basecamp.all_projects === true) {
+                    data.basecamps = null;
+                }
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: method,
+                    body: JSON.stringify(data)
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.basecampErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Node successfully linked.',
+                        details: json.detail
+                    });
+                    Alpine.store('showLoading').toggle();
+                    if (this.basecamp.id) {
+                        window.location.reload();
+                    } else {
+                        window.location.href = "/console/nodes/" + json.node.id;
+                    }
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                    this.error = error;
+                    Alpine.store('showLoading').toggle();
+                });
+            },
+        }));
+    });
+</script>

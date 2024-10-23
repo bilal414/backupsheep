@@ -1,0 +1,2523 @@
+<div x-data="setupSelectConnection()">
+    <button @click="openConnectionModal(null, null, null,'{{ integration.code }}')" type="button"
+            class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+
+        <img class="max-h-20 mx-auto" src="{{ STATIC_URL }}{{ integration.image }}"
+             alt="{{ integration.name }} Backups">
+
+        <a class="mt-2 block  text-1xl font-normal leading-7 text-gray-700">
+            Setup {{ integration.name }} Integration
+        </a>
+        {% if "ovh" in integration.code %}
+            Note: For OVH, please select <strong>validity</strong> period <strong>unlimited</strong>. Otherwise, backups
+            will fail after the validity period.
+        {% endif %}
+
+    </button>
+
+    {% if connections_count > 0 %}
+        <div class="pb-3 border-b border-gray-200 mt-12">
+            <div class="-ml-2 -mt-2 flex flex-wrap items-baseline">
+                <h3 class="ml-2 mt-2 text-lg leading-6 font-medium text-gray-700">
+                    {{ integration.name }} Integrations {% if "wordpress" in integration.code %}(<a target="_blank" class="text-indigo-600" href="https://support.backupsheep.com/docs/how-to-backup-wordpress">How to Backup WordPress</a>){% endif %}
+                    {% if i_name %}
+                        <small>(<a class="text-indigo-500"
+                                   href="{% url 'console:setup:integration_open' integration_code=integration.code|lower %}">reset
+                            filter</a>)</small>
+                    {% endif %}
+                </h3>
+            </div>
+        </div>
+        <div class="flex flex-col mt-4">
+            <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+                <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
+                    <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                        <div class="overflow-x-auto">
+                            <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                <tr>
+                                    <th scope="col"
+                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Name
+                                    </th>
+                                    <th scope="col"
+                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Status
+                                    </th>
+                                    <th scope="col"
+                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Backup Server
+                                    </th>
+                                    <th scope="col"
+                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Nodes
+                                    </th>
+                                    {#                                    <th scope="col" class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">#}
+                                    {#                                        Date#}
+                                    {#                                    </th>#}
+                                    <th scope="col"
+                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Create Node
+                                    </th>
+                                    <th scope="col"
+                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Actions
+                                    </th>
+                                </tr>
+                                </thead>
+                                <tbody class="bg-white divide-y divide-gray-200">
+                                {% for connection in page.object_list %}
+                                    <tr>
+                                        <td class="px-4 py-4">
+                                            <div class="text-sm text-gray-700">{{ connection.name }}
+                                            </div>
+                                            <small>{{ connection.modified }}</small>
+                                        </td>
+                                        <td class="px-4 py-4 whitespace-nowrap">
+                                            {% if connection.status == 1 %}
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                            {{ connection.get_status_display }}
+                                        </span>
+                                            {% elif connection.status == 6 %}
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
+                                            {{ connection.get_status_display }}
+                                        </span>
+                                            {% elif connection.status == 4 %}
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                            {{ connection.get_status_display }}
+                                        </span>
+                                            {% elif connection.status == 5 %}
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                                            {{ connection.get_status_display }}
+                                        </span>
+                                            {% else %}
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                            {{ connection.get_status_display }}
+                                        </span>
+                                            {% endif %}
+                                        </td>
+
+                                        <td class="px-4 py-4 whitespace-nowrap">
+{#                                            <img src="{{ connection.location.image_url }}"#}
+{#                                                 alt="{{ connection.location.location }}" class="max-h-6 float-left mr-2">#}
+                                            <small>{{ connection.location.location }}</small><br/>
+                                            <small>IPv4: {{ connection.location.ip_address }}</small><br/>
+                                            <small>IPv6: {{ connection.location.ip_address_v6 }}</small>
+                                        </td>
+                                        <td class="px-4 py-4 whitespace-nowrap">
+                                            <div class="text-sm text-gray-700">{{ connection.total_nodes }}</div>
+                                        </td>
+                                        {#                                        <td class="px-4 py-4 whitespace-nowrap">#}
+                                        {#                                            <div class="text-sm text-gray-700">{{ connection.modified }}</div>#}
+                                        {#                                        </td>#}
+                                        <td class="px-4 py-4 whitespace-nowrap text-sm font-medium">
+                                            {% if integration.code == "website" %}
+                                                <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
+                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    Create Website Node
+                                                </a>
+                                            {% elif integration.code == "database" %}
+                                                <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
+                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    Create Database Node
+                                                </a>
+                                            {% elif integration.type == "saas" %}
+                                                <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
+                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    Create {{ integration.name }} Node
+                                                </a>
+                                            {% else %}
+                                                {% if integration.code != "upcloud" and integration.code != "oracle" %}
+                                                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
+                                                       class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        Create Server Node
+                                                    </a>
+                                                {% endif %}
+                                                {% if integration.code != "aws_rds" %}
+                                                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
+                                                       class="{% if integration.code != "upcloud" and integration.code != "oracle" %}ml-2{% endif %} inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        Create Volume Node
+                                                    </a>
+                                                {% endif %}
+                                            {% endif %}
+                                        </td>
+                                        <td class="px-4 py-4 whitespace-nowrap text-sm font-medium">
+
+                                            {% if connection.status == 5 %}
+                                                <button @click="resumeConnection('{{ connection.id }}')" type="button"
+                                                        class="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    Undo
+                                                </button>
+                                            {% else %}
+                                                <span class="relative z-0 inline-flex shadow-sm rounded-md">
+                                                  <button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'modify')"
+                                                          type="button" class="relative inline-flex items-center px-2.5 py-1.5 rounded-l-md border border-gray-300 bg-white text-sm font-medium
+                                                  text-gray-700 hover:bg-gray-50
+                                                  focus:z-10
+                                                  focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                    Modify
+                                                  </button>
+                                                   <button @click="validateConnection('{{ connection.id }}', '{{ connection.location.id }}')"
+                                                           type="button"
+                                                           class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                        Validate
+                                                    </button>
+                                                    <a target="_blank"
+                                                       href="{% url 'console:log:index' %}?integration={{ connection.id }}"
+                                                       class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                        Logs
+                                                    </a>
+                                                    {% if integration.code != "google_cloud" %}
+                                                        <button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'copy')"
+                                                                type="button"
+                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                            Copy
+                                                        </button>
+                                                    {% endif %}
+                                                    {% if connection.status == 1 %}
+                                                        <button @click="pauseConnection('{{ connection.id }}')"
+                                                                type="button"
+                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                        Pause
+                                                    </button>
+                                                    {% elif connection.status == 4 %}
+                                                        <button @click="resumeConnection('{{ connection.id }}')"
+                                                                type="button"
+                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                        Resume
+                                                    </button>
+                                                    {% endif %}
+                                                    <button @click="deleteConnection('{{ connection.id }}')"
+                                                            type="button"
+                                                            class="-ml-px relative inline-flex items-center px-2.5 py-1.5 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10
+                                                      focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                        Delete
+                                                    </button>
+                                            </span>
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <nav class="border-t border-gray-200 px-4 flex items-center justify-between sm:px-0 mt-4">
+            <div class="-mt-px w-0 flex-1 flex">
+                {% if page.has_previous %}
+                    <a href="{% url 'console:setup:integration_open' integration.code %}?p_no={{ page.previous_page_number }}&p_size={{ page.paginator.per_page }}&#section-nodes"
+                       class="border-t-2 border-transparent pt-4 pr-1 inline-flex items-center text-sm font-medium text-gray-700 hover:text-gray-700 hover:border-gray-300">
+                        <!-- Heroicon name: solid/arrow-narrow-left -->
+                        <svg class="mr-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
+                             fill="currentColor" aria-hidden="true">
+                            <path fill-rule="evenodd"
+                                  d="M7.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l2.293 2.293a1 1 0 010 1.414z"
+                                  clip-rule="evenodd"></path>
+                        </svg>
+                        Previous
+                    </a>
+                {% endif %}
+            </div>
+            <div class="hidden md:-mt-px md:flex">
+                {% for page_no in elided_page_range %}
+                    <!-- Current: "border-indigo-500 text-indigo-600", Default: "border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300" -->
+                    {% if page_no == "…" %}
+                        <a class="{% if page.number ==  page_no %}border-indigo-500 text-indigo-600{% else %}border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300{% endif %} border-t-2 pt-4 px-4 inline-flex items-center text-sm font-medium">
+                            {{ page_no }}
+                        </a>
+                    {% else %}
+                        <a href="{% url 'console:setup:integration_open' integration.code %}?p_no={{ page_no }}&p_size={{ page.paginator.per_page }}&#section-nodes"
+                           class="{% if page.number ==  page_no %}border-indigo-500 text-indigo-600{% else %}border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300{% endif %} border-t-2 pt-4 px-4 inline-flex items-center text-sm font-medium">
+                            {{ page_no }}
+                        </a>
+                    {% endif %}
+                {% endfor %}
+            </div>
+            <div class="-mt-px w-0 flex-1 flex justify-end">
+                {% if page.has_next %}
+                    <a href="{% url 'console:setup:integration_open' integration.code %}?p_no={{ page.next_page_number }}&p_size={{ page.paginator.per_page }}&#section-nodes"
+                       class="border-t-2 border-transparent pt-4 pl-1 inline-flex items-center text-sm font-medium text-gray-700 hover:text-gray-700 hover:border-gray-300">
+                        Next
+                        <!-- Heroicon name: solid/arrow-narrow-right -->
+                        <svg class="ml-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
+                             fill="currentColor" aria-hidden="true">
+                            <path fill-rule="evenodd"
+                                  d="M12.293 5.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-2.293-2.293a1 1 0 010-1.414z"
+                                  clip-rule="evenodd"></path>
+                        </svg>
+                    </a>
+                {% endif %}
+            </div>
+        </nav>
+
+    {% else %}
+        <div class="bg-gray-50 mt-10">
+            <div class="max-w-2xl mx-auto py-12 px-4 sm:px-6 sm:py-12 lg:max-w-7xl lg:px-8 rounded-full">
+                <div class="max-w-4xl">
+                    <h2 class="text-4xl font-extrabold tracking-tight text-gray-700">Setup your
+                        first {{ integration.name }} Integration!</h2>
+                    {% if integration.code == "database" %}
+                        <p class="mt-4 text-gray-700">
+                            We support backup automation of MySQL, MariaDB and PostgreSQL <span
+                                class="font-medium text-indigo-600 hover:text-indigo-500">databases</span> and <span
+                                class="font-medium text-indigo-600 hover:text-indigo-500">tables</span>.
+
+                        </p>
+                    {% elif integration.code == "website" %}
+                        <p class="mt-4 text-gray-700">
+                            We support backup automation of SFTP, FTP and FTPS <span
+                                class="font-medium text-indigo-600 hover:text-indigo-500">web/file servers</span>.
+
+                        </p>
+                    {% elif integration.code == "wordpress" %}
+                        <p class="mt-4 text-gray-700">
+                            We support backup automation of {{ integration.name }} <span
+                                class="font-medium text-indigo-600 hover:text-indigo-500">full website backups</span>.
+
+                        </p>
+                    {% elif integration.code == "basecamp" %}
+                        <p class="mt-4 text-gray-700">
+                            We support backup automation of <span
+                                class="font-medium text-indigo-600 hover:text-indigo-500">any data available through {{ integration.name }} public APIs.</span>
+
+                        </p>
+                    {% else %}
+                        <p class="mt-4 text-gray-700">
+                            We support backup automation of {{ integration.name }} <span
+                                class="font-medium text-indigo-600 hover:text-indigo-500">servers</span> and <span
+                                class="font-medium text-indigo-600 hover:text-indigo-500">volumes</span>.
+
+                        </p>
+                    {% endif %}
+                </div>
+                <div class="grid grid-cols-1 gap-y-12 sm:grid-cols-2 sm:gap-x-6 lg:grid-cols-4 lg:gap-x-8  mt-10">
+                    <div>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+                        </svg>
+                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                            1. Setup {{ integration.name }} Integration
+                        </h3>
+                        <p class="mt-2 text-sm text-gray-700">
+                            {% if integration.code == "database" %}
+                                Connect {{ integration.name }} using standard database logins or using public/private
+                                keys method.
+                            {% elif integration.code == "website" %}
+                                Connect {{ integration.name }} using standard web server logins or using public/private
+                                keys method.
+                            {% else %}
+                                Connect {{ integration.name }} account to automate snapshots of cloud servers andvolumes
+                                using APIs.
+                            {% endif %}
+                        </p>
+                    </div>
+
+                    <div>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
+                        </svg>
+                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                            2. Link {{ integration.name }} Node
+                        </h3>
+                        <p class="mt-2 text-sm text-gray-700">
+                            {% if integration.code == "database" %}
+                                Create nodes with single or multiple databases or specific tables from the samedatabase.
+                            {% elif integration.code == "website" %}
+                                Create website nodes with multiple directories and folders. You can also rule to exclude
+                                specific files.
+                            {% elif integration.code == "wordpress" %}
+                                Create WordPress nodes which includes all files and database.
+                            {% else %}
+                                Choose which {{ integration.name }} servers and volumes you want to link to automate
+                                snapshots.
+                            {% endif %}
+                        </p>
+                    </div>
+
+                    <div>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        </svg>
+                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                            3. Setup Schedule
+                        </h3>
+                        <p class="mt-2 text-sm text-gray-700">
+                            {% if integration.code == "database" %}
+                                Automate backups of {{ integration.name }} nodes using schedule(s), and you can also
+                                create on-demand backups.
+                            {% elif integration.code == "website" %}
+                                Automate backups of {{ integration.name }} nodes using schedule(s), and you can also
+                                create on-demand backups.
+                            {% elif integration.code == "wordpress" %}
+                                Automate backups of {{ integration.name }} nodes using schedule(s), and you can also
+                                create on-demand backups.
+                            {% else %}
+                                Automate backups of {{ integration.name }} nodes using schedule(s). Save $$ in
+                                {{ integration.name }} backup fees.
+                            {% endif %}
+                        </p>
+                    </div>
+
+                    <div>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
+                        </svg>
+                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                            4. Setup Storage (optional)
+                        </h3>
+                        <p class="mt-2 text-sm text-gray-700">
+                            {% if integration.code == "website" %}
+                                Store backups on Free Storage included in your plan, or you can bring your storage
+                                as well.
+                            {% elif integration.code == "database" %}
+                                Store backups on Free Storage included in your plan, or you can bring your storage
+                                as well.
+                            {% elif integration.code == "wordpress" %}
+                                Store backups on Free Storage included in your plan, or you can bring your storage
+                                as well.
+                            {% else %}
+                                {{ integration.name }} backups are stored within your account as snapshots. You only pay
+                                {{ integration.name }} for storage.
+                            {% endif %}
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+
+    <div x-show="openConnection" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
+         aria-labelledby="modal-title" role="dialog" aria-modal="true">
+        <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div x-show="openConnection"
+                 x-transition:enter="ease-out duration-300"
+                 x-transition:enter-start="opacity-0"
+                 x-transition:enter-end="opacity-100"
+                 x-transition:leave="ease-in duration-200"
+                 x-transition:leave-start="opacity-100"
+                 x-transition:leave-end="opacity-0"
+                 class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+
+            <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+
+            <div x-show="openConnection"
+                 x-transition:enter="ease-out duration-300"
+                 x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                 x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+                 x-transition:leave="ease-in duration-200"
+                 x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+                 x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                 class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
+                <div>
+                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
+                        <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
+                             xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                    stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor"
+                                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+
+                        <svg  x-show="!loading"  xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+                        </svg>
+
+                    </div>
+                    <div x-show="!loading" class="mt-3 text-center sm:mt-5">
+                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                            {{ integration.name|title }} Integration
+                        </h3>
+
+                    </div>
+                    <div x-show="loading" class="mt-3 text-center sm:mt-5">
+                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                            Loading...
+                        </h3>
+                        <div class="mt-2">
+                            <p class="text-sm text-gray-700">
+                                Don't refresh page.
+                            </p>
+                        </div>
+                    </div>
+                    <div x-show="!loading" class="mt-6 grid grid-cols-1 gap-y-6 gap-x-4 sm:grid-cols-6">
+                        <div class="sm:col-span-6">
+                            <label for="name" class="block text-sm font-medium text-gray-700">
+                                Name  {% if "wordpress" in integration.code %}(<a target="_blank" class="text-indigo-600" href="https://support.backupsheep.com/docs/how-to-backup-wordpress">How to Backup WordPress</a>){% endif %}
+
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="connection.name" type="text" name="name" id="name" autocomplete="name"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
+                                   x-text="connectionErrors?.name"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6">
+                            <label for="location" class="block text-sm font-medium text-gray-700">
+                                Backup Server
+                            </label>
+                            <p class="mt-1 text-sm text-gray-700">
+                                This server will execute, compress and upload your backups. <span
+                                    x-show="connection.location"><br/>You must whitelist IP <strong
+                                    x-text="connection.location?.ip_address"></strong> and IPv6(if supported) <strong
+                                    x-text="connection.location?.ip_address_v6"></strong></span>
+                            </p>
+                            <div class="relative mt-2">
+                                <button @click="toggleEndpointDropdown()"
+                                        type="button"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+{#                                    <img :src="connection.location?.image_url" class="max-h-6 mr-2  float-left">#}
+
+                                    <span class="block truncate"
+                                          x-text="connection.location?.location||'--Choose Backup Server--'"></span>
+                                    <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                            <!-- Heroicon name: solid/selector -->
+                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                              <path fill-rule="evenodd"
+                                                    d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                                    clip-rule="evenodd"></path>
+                                            </svg>
+                                          </span>
+                                </button>
+
+                                <ul
+                                        x-show="openEndpoint"
+                                        @click.self="toggleEndpointDropdown()"
+                                        x-transition:enter=""
+                                        x-transition:enter-start=""
+                                        x-transition:enter-end=""
+                                        x-transition:leave="transition ease-in duration-100"
+                                        x-transition:leave-start="opacity-100"
+                                        x-transition:leave-end="opacity-0"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        tabindex="-1"
+                                        role="listbox"
+                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+                                    <!--
+                                      Select option, manage highlight styles based on mouseenter/mouseleave and keyboard navigation.
+
+                                      Highlighted: "text-white bg-indigo-600", Not Highlighted: "text-gray-700"
+                                    -->
+                                    <template x-for="(endpoint, index) in endpoints">
+                                        <li
+                                                @click="connection.location = endpoint;toggleEndpointDropdown()"
+                                                @mouseenter="endpointActiveIndex = index"
+                                                @mouseleave="endpointActiveIndex = null"
+                                                :class="{ 'text-white bg-indigo-600': endpointActiveIndex === index, 'text-gray-700': !(endpointActiveIndex === index) }"
+                                                class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                id="listbox-option-0" role="option">
+                                                <span class="font-normal block truncate">
+{#                                                    <img :src="endpoint?.image_url"#}
+{#                                                         class="max-h-6 mr-2  float-left">#}
+                                                    <span
+                                                        x-text="endpoint.location"></span>
+                                                </span>
+
+                                            <span
+                                                    x-show="connection.location?.id === endpoint?.id"
+                                                    :class="{ 'text-indigo-600': (connection.location?.id === endpoint?.id) && (endpointActiveIndex !== index), 'text-white': (!(connection.location === endpoint) || (endpointActiveIndex === index)) }"
+                                                    class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                  <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                       viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                    <path fill-rule="evenodd"
+                                                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                                          clip-rule="evenodd"></path>
+                                                  </svg>
+                                                </span>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                            <p x-show="connectionErrors?.location" class="mt-2 text-sm text-red-600" id="location-error"
+                               x-text="connectionErrors?.location"></p>
+                        </div>
+
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'wordpress'">
+                            <label for="url" class="block text-sm font-medium text-gray-700">
+                                WordPress URL
+                                {% if "wordpress" in integration.code %} (<a target="_blank" class="text-indigo-600" href="https://wordpress.org/plugins/backupsheep/">Download BackupSheep Plugin</a>){% endif %}
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.url" type="text" name="url" id="url"
+                                       autocomplete="url"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.url" class="mt-2 text-sm text-red-600"
+                                   id="url-error" x-text="connectionErrors.auth?.url"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'wordpress'">
+                            <label for="key" class="block text-sm font-medium text-gray-700">
+                                 <a class="text-indigo-700 cursor-pointer float-left" @click="copyToClipboard(selectedAuth.key)">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+                                </svg>
+                            </a> WordPress Key (add this to BackupSheep plugin page)
+                            </label>
+                            <div class="mt-1">
+                                <input  x-model="selectedAuth.key" type="text" name="key" id="key"
+                                       autocomplete="key"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.key" class="mt-2 text-sm text-red-600"
+                                   id="key-error" x-text="connectionErrors.auth?.key"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'wordpress'">
+                           <div class="rounded-md bg-blue-50 p-4">
+                              <div class="flex">
+                                <div class="flex-shrink-0">
+                                  <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                    <path fill-rule="evenodd" d="M19 10.5a8.5 8.5 0 11-17 0 8.5 8.5 0 0117 0zM8.25 9.75A.75.75 0 019 9h.253a1.75 1.75 0 011.709 2.13l-.46 2.066a.25.25 0 00.245.304H11a.75.75 0 010 1.5h-.253a1.75 1.75 0 01-1.709-2.13l.46-2.066a.25.25 0 00-.245-.304H9a.75.75 0 01-.75-.75zM10 7a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
+                                  </svg>
+                                </div>
+                                <div class="ml-3 flex-1 md:flex md:justify-between">
+                                  <p class="text-sm text-blue-700">
+                                   If your website is password protected then add your
+                                  user and password below.
+                                      <br/><strong>This is not WordPress admin password. </strong>
+                                  </p>
+                                  <p class="mt-3 text-sm md:mt-0 md:ml-6">
+                                    <a target="_blank" href="https://support.backupsheep.com/docs/password-protected-wordpress-sites" class="whitespace-nowrap font-medium text-blue-700 hover:text-blue-600">
+                                      Learn More
+                                      <span aria-hidden="true"> &rarr;</span>
+                                    </a>
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+
+                        </div>
+                        <div class="sm:col-span-3"
+                             x-show="integrationCode === 'wordpress'">
+                            <label for="http_user" class="block text-sm font-medium text-gray-700">
+                                 <a class="text-indigo-700 cursor-pointer float-left" >
+                            </a>  User (not required)
+                            </label>
+                            <div class="mt-1">
+                                <input  x-model="selectedAuth.http_user" type="text" name="http_user" id="http_user"
+                                       autocomplete="http_user"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.http_user" class="mt-2 text-sm text-red-600"
+                                   id="http_user-error" x-text="connectionErrors.auth?.http_user"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-3"
+                             x-show="integrationCode === 'wordpress'">
+                            <label for="http_pass" class="block text-sm font-medium text-gray-700">
+                                 <a class="text-indigo-700 cursor-pointer float-left" >
+                            </a>  Password (not required)
+                            </label>
+                            <div class="mt-1">
+                                <input  x-model="selectedAuth.http_pass" type="text" name="http_pass" id="http_pass"
+                                       autocomplete="http_pass"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.http_pass" class="mt-2 text-sm text-red-600"
+                                   id="http_pass-error" x-text="connectionErrors.auth?.http_pass"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
+                            <label for="profile" class="block text-sm font-medium text-gray-700">
+                             Profile Name
+                            </label>
+                            <div class="mt-1">
+                                <input  x-model="selectedAuth.profile" type="text" name="profile" id="profile"
+                                       autocomplete="profile"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.profile" class="mt-2 text-sm text-red-600"
+                                   id="profile-error" x-text="connectionErrors.auth?.profile"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
+                            <label for="user" class="block text-sm font-medium text-gray-700">
+                             User
+                            </label>
+                            <div class="mt-1">
+                                <input  x-model="selectedAuth.user" type="text" name="user" id="user"
+                                       autocomplete="user"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.user" class="mt-2 text-sm text-red-600"
+                                   id="user-error" x-text="connectionErrors.auth?.user"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
+                            <label for="fingerprint" class="block text-sm font-medium text-gray-700">
+                               Fingerprint
+                            </label>
+                            <div class="mt-1">
+                                <input  x-model="selectedAuth.fingerprint" type="text" name="fingerprint" id="fingerprint"
+                                       autocomplete="fingerprint"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.fingerprint" class="mt-2 text-sm text-red-600"
+                                   id="fingerprint-error" x-text="connectionErrors.auth?.fingerprint"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
+                            <label for="tenancy" class="block text-sm font-medium text-gray-700">
+                             Tenancy
+                            </label>
+                            <div class="mt-1">
+                                <input  x-model="selectedAuth.tenancy" type="text" name="tenancy" id="tenancy"
+                                       autocomplete="tenancy"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.tenancy" class="mt-2 text-sm text-red-600"
+                                   id="tenancy-error" x-text="connectionErrors.auth?.tenancy"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
+                            <label for="region" class="block text-sm font-medium text-gray-700">
+                                Region
+                            </label>
+                            <div class="mt-1">
+                                <input  x-model="selectedAuth.region" type="text" name="region" id="region"
+                                       autocomplete="region"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.region" class="mt-2 text-sm text-red-600"
+                                   id="region-error" x-text="connectionErrors.auth?.region"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6"  x-show="integrationCode === 'oracle'">
+                            <label for="private_key" class="block text-sm font-medium text-gray-700">
+                                Private Key
+                            </label>
+                            <div class="mt-1">
+                                        <textarea x-model="selectedAuth.private_key" id="private_key" name="private_key" rows="3"
+                                                  class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                <p x-show="connectionErrors?.private_key" class="mt-2 text-sm text-red-600" id="private_key-error"
+                                   x-text="connectionErrors?.private_key"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6"  x-show="integrationCode === 'google_cloud'">
+                            <label for="service_key" class="block text-sm font-medium text-gray-700">
+                                Service Key JSON
+                            </label>
+                            <div class="mt-1">
+                                        <textarea x-model="selectedAuth.service_key" id="service_key" name="service_key" rows="3"
+                                                  class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                <p x-show="connectionErrors?.auth?.service_key" class="mt-2 text-sm text-red-600" id="service_key-error"
+                                   x-text="connectionErrors?.auth?.service_key"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6" x-show="selectAWSRegions">
+                            <label for="region" class="block text-sm font-medium text-gray-700">
+                                <span x-text="connection.integration?.name"></span> Region
+                            </label>
+                            <div class="relative mt-2">
+                                <button @click="toggleAWSRegionDropdown()"
+                                        type="button"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                    <span class="block truncate"
+                                          x-text="selectedAuth.region?.name||'--Choose AWS Region--'"></span>
+                                    <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                            <!-- Heroicon name: solid/selector -->
+                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                              <path fill-rule="evenodd"
+                                                    d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                                    clip-rule="evenodd"></path>
+                                            </svg>
+                                          </span>
+                                </button>
+
+                                <ul
+                                        x-show="openAWSRegion"
+                                        @click.self="toggleAWSRegionDropdown()"
+                                        x-transition:enter=""
+                                        x-transition:enter-start=""
+                                        x-transition:enter-end=""
+                                        x-transition:leave="transition ease-in duration-100"
+                                        x-transition:leave-start="opacity-100"
+                                        x-transition:leave-end="opacity-0"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        tabindex="-1"
+                                        role="listbox"
+                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+
+                                    <template x-for="(region, index) in awsRegions">
+                                        <li
+                                                @click="selectedAuth.region = region;toggleAWSRegionDropdown()"
+                                                @mouseenter="awsRegionActiveIndex = index"
+                                                @mouseleave="awsRegionActiveIndex = null"
+                                                :class="{ 'text-white bg-indigo-600': awsRegionActiveIndex === index, 'text-gray-700': !(awsRegionActiveIndex === index) }"
+                                                class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                id="listbox-option-0" role="option">
+                                                <span class="font-normal block truncate">
+                                                    <span x-text="region.name"></span>
+                                                </span>
+
+                                            <span
+                                                    x-show="selectedAuth.region?.id === region?.id"
+                                                    :class="{ 'text-indigo-600': (selectedAuth.region?.id === region?.id) && (awsRegionActiveIndex !== index), 'text-white': (!(selectedAuth.region === region) || (awsRegionActiveIndex === index)) }"
+                                                    class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                  <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                       viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                    <path fill-rule="evenodd"
+                                                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                                          clip-rule="evenodd"></path>
+                                                  </svg>
+                                                </span>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                            <p x-show="connectionErrors?.region" class="mt-2 text-sm text-red-600" id="region-error"
+                               x-text="connectionErrors?.region"></p>
+                        </div>
+
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'aws' || integrationCode === 'aws_rds' || integrationCode === 'lightsail'">
+                            <label for="access_key" class="block text-sm font-medium text-gray-700">
+                                Access Key
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.access_key" type="text" name="access_key" id="access_key"
+                                       autocomplete="access_key"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.access_key" class="mt-2 text-sm text-red-600"
+                                   id="access_key-error" x-text="connectionErrors.auth?.access_key"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'aws' || integrationCode === 'aws_rds' || integrationCode === 'lightsail'">
+                            <label for="secret_key" class="block text-sm font-medium text-gray-700">
+                                Secret Key
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.secret_key" type="text" name="secret_key" id="secret_key"
+                                       autocomplete="secret_key"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.secret_key" class="mt-2 text-sm text-red-600"
+                                   id="secret_key-error" x-text="connectionErrors.auth?.secret_key"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="integrationCode === 'upcloud'">
+                            <label for="username" class="block text-sm font-medium text-gray-700">
+                                API User Name
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.username" type="text" name="username" id="username"
+                                       autocomplete="username"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.username" class="mt-2 text-sm text-red-600"
+                                   id="access_key-error" x-text="connectionErrors.auth?.username"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="integrationCode === 'upcloud'">
+                            <label for="password" class="block text-sm font-medium text-gray-700">
+                                API User Password
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.password" type="text" name="password" id="password"
+                                       autocomplete="password"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.password" class="mt-2 text-sm text-red-600"
+                                   id="password-error" x-text="connectionErrors.auth?.password"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'vultr' || integrationCode === 'hetzner' || integrationCode === 'digitalocean'">
+                            <label for="api_key" class="block text-sm font-medium text-gray-700">
+                                API Key (
+                                <a x-show="integrationCode === 'digitalocean'"
+                                   href="https://docs.digitalocean.com/reference/api/create-personal-access-token/"
+                                   target="_blank">create api key</a>
+                                <a x-show="integrationCode === 'hetzner'"
+                                   href="https://docs.hetzner.cloud/#getting-started" target="_blank">create api key</a>
+                                <a x-show="integrationCode === 'vultr'"
+                                   href="https://www.vultr.com/api/#section/Authentication/API%20Key" target="_blank">create
+                                    api key</a>
+                                )
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.api_key" type="text" name="api_key" id="api_key"
+                                       autocomplete="api_key"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.api_key" class="mt-2 text-sm text-red-600"
+                                   id="api_key-error" x-text="connectionErrors.auth?.api_key"></p>
+                            </div>
+                        </div>
+
+                        <!-- Website-->
+                        <div class="sm:col-span-3" x-show="integrationCode === 'database'">
+                            <label for="database_name" class="block text-sm font-medium text-gray-700">
+                                Database Name
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.database_name" type="text" name="database_name"
+                                       id="database_name" autocomplete="database_name"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.database_name" class="mt-2 text-sm text-red-600"
+                                   id="database_name-error" x-text="connectionErrors.auth?.database_name"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-3" x-show="integrationCode === 'database'">
+                            <label for="region" class="block text-sm font-medium text-gray-700">
+                                Database Type
+                            </label>
+                            <div class="relative mt-2">
+                                <button @click="toggleDatabaseTypeDropdown()"
+                                        type="button"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                    <span class="block truncate"
+                                          x-text="selectedAuth.type?.name||'--Database Type--'"></span>
+                                    <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                            <!-- Heroicon name: solid/selector -->
+                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                              <path fill-rule="evenodd"
+                                                    d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                                    clip-rule="evenodd"></path>
+                                            </svg>
+                                          </span>
+                                </button>
+
+                                <ul
+                                        x-show="openDatabaseType"
+                                        @click.self="toggleDatabaseTypeDropdown()"
+                                        x-transition:enter=""
+                                        x-transition:enter-start=""
+                                        x-transition:enter-end=""
+                                        x-transition:leave="transition ease-in duration-100"
+                                        x-transition:leave-start="opacity-100"
+                                        x-transition:leave-end="opacity-0"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        tabindex="-1"
+                                        role="listbox"
+                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+
+                                    <template x-for="(type, index) in databaseTypes">
+                                        <li
+                                                @click="selectedAuth.type = type; selectedAuth.version = null; toggleDatabaseTypeDropdown()"
+                                                @mouseenter="databaseTypeActiveIndex = index"
+                                                @mouseleave="databaseTypeActiveIndex = null"
+                                                :class="{ 'text-white bg-indigo-600': databaseTypeActiveIndex === index, 'text-gray-700': !(databaseTypeActiveIndex === index) }"
+                                                class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                id="listbox-option-0" role="option">
+                                                <span class="font-normal block truncate">
+                                                    <span x-text="type.name"></span>
+                                                </span>
+
+                                            <span
+                                                    x-show="selectedAuth.type?.code === type?.code"
+                                                    :class="{ 'text-indigo-600': (selectedAuth.type?.code === type?.code) && (databaseTypeActiveIndex !== index), 'text-white': (!(selectedAuth.type === type) || (databaseTypeActiveIndex === index)) }"
+                                                    class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                  <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                       viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                    <path fill-rule="evenodd"
+                                                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                                          clip-rule="evenodd"></path>
+                                                  </svg>
+                                                </span>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                            <p x-show="connectionErrors?.auth?.type" class="mt-2 text-sm text-red-600" id="region-error"
+                               x-text="connectionErrors?.auth?.type"></p>
+                        </div>
+
+                        <div class="sm:col-span-3" x-show="integrationCode === 'database'">
+                            <label for="region" class="block text-sm font-medium text-gray-700">
+                                Database Version
+                            </label>
+                            <div class="relative mt-2">
+                                <button @click="toggleDatabaseVersionDropdown()"
+                                        type="button"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                    <span class="block truncate"
+                                          x-text="selectedAuth.version?.name||'--Database Version--'"></span>
+                                    <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                            <!-- Heroicon name: solid/selector -->
+                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                              <path fill-rule="evenodd"
+                                                    d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                                    clip-rule="evenodd"></path>
+                                            </svg>
+                                          </span>
+                                </button>
+
+                                <ul
+                                        x-show="openDatabaseVersion"
+                                        @click.self="toggleDatabaseVersionDropdown()"
+                                        x-transition:enter=""
+                                        x-transition:enter-start=""
+                                        x-transition:enter-end=""
+                                        x-transition:leave="transition ease-in duration-100"
+                                        x-transition:leave-start="opacity-100"
+                                        x-transition:leave-end="opacity-0"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        tabindex="-1"
+                                        role="listbox"
+                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+
+                                    <template x-for="(version, index) in databaseVersions">
+                                        <li
+                                                @click="selectedAuth.version = version; toggleDatabaseVersionDropdown()"
+                                                x-show="version?.name?.includes(selectedAuth.type?.name)"
+                                                @mouseenter="databaseVersionActiveIndex = index"
+                                                @mouseleave="databaseVersionActiveIndex = null"
+                                                :class="{ 'text-white bg-indigo-600': databaseVersionActiveIndex === index, 'text-gray-700': !(databaseVersionActiveIndex === index) }"
+                                                class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                id="listbox-option-0" role="option">
+                                                <span class="font-normal block truncate">
+                                                    <span x-text="version.name"></span>
+                                                </span>
+
+                                            <span
+                                                    x-show="selectedAuth.version?.code === version?.code"
+                                                    :class="{ 'text-indigo-600': (selectedAuth.version?.code === version?.code) && (databaseVersionActiveIndex !== index), 'text-white': (!(selectedAuth.version === version) || (databaseVersionActiveIndex === index)) }"
+                                                    class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                  <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                       viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                    <path fill-rule="evenodd"
+                                                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                                          clip-rule="evenodd"></path>
+                                                  </svg>
+                                                </span>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                            <p x-show="connectionErrors?.auth?.version" class="mt-2 text-sm text-red-600"
+                               id="region-error" x-text="connectionErrors?.auth?.version"></p>
+                        </div>
+                        <div class="sm:col-span-3" x-show="integrationCode === 'database'">
+                            <label for="port" class="block text-sm font-medium text-gray-700">
+                                Database Port
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.port" type="text" name="port" id="port" autocomplete="port"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.port" class="mt-2 text-sm text-red-600"
+                                   id="port-error" x-text="connectionErrors.auth?.port"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6" x-show="integrationCode === 'database'">
+                            <label for="host" class="block text-sm font-medium text-gray-700">
+                                Database Hostname or IPv4 or IPv6
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.host"  x-on:change.debounce="awsRDSReplicaWarning()" type="text" name="host" id="host" autocomplete="host"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.host" class="mt-2 text-sm text-red-600"
+                                   id="host-error" x-text="connectionErrors.auth?.host"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6" x-show="integrationCode === 'database' && awsRDSReplicaWarning() === true">
+                            <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4">
+                                <div class="flex">
+                                    <div class="flex-shrink-0">
+                                        <svg class="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg"
+                                             viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                            <path fill-rule="evenodd"
+                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                                  clip-rule="evenodd"></path>
+                                        </svg>
+                                    </div>
+                                    <div class="ml-3 flex-1 md:flex md:justify-between">
+                                        <p class="text-sm text-yellow-700">
+                                            <strong> We recommend using master RDS server hostname to create backup</strong>. Using AWS RDS Read Replica server to create database backup may cause error "canceling statement due to conflict with recovery" and your
+                                            backup may fail. <a target="_blank" href="https://aws.amazon.com/premiumsupport/knowledge-center/rds-postgresql-error-conflict-recovery/#:~:text=This%20error%20might%20occur%20due,happening%20on%20the%20read%20replica"><strong>Learn More</strong></a>.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-3" x-show="integrationCode === 'database'">
+                            <label for="username" class="block text-sm font-medium text-gray-700">
+                                Database User
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.username" type="text" name="username" id="username"
+                                       autocomplete="username"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.username" class="mt-2 text-sm text-red-600"
+                                   id="port-error" x-text="connectionErrors.auth?.username"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-3" x-show="integrationCode === 'database'">
+                            <label for="password" class="block text-sm font-medium text-gray-700">
+                                Database Password
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.password" type="text" name="password" id="password"
+                                       autocomplete="password"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.password" class="mt-2 text-sm text-red-600"
+                                   id="port-error" x-text="connectionErrors.auth?.password"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'database' && (selectedAuth.type?.code===1 || selectedAuth.type?.code===2)">
+                            <div class="mt-1">
+                                <div class="flex items-center justify-between">
+                                          <span class="flex-grow flex flex-col">
+                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Use SSL/TLS? (ssl-mode=PREFERRED)</span>
+                                            <span class="text-sm text-gray-700" id="availability-description">Only use this if your database server supports connection using SSL/TLS.</span>
+                                          </span>
+                                    <button type="button"
+                                            @click="toggleUseSSL()"
+                                            :class="{ 'bg-indigo-600': selectedAuth.use_ssl, 'bg-gray-200': !(selectedAuth.use_ssl) }"
+                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            aria-describedby="availability-description">
+                                            <span :class="{ 'translate-x-5': selectedAuth.use_ssl, 'translate-x-0': !(selectedAuth.use_ssl) }"
+                                                  aria-hidden="true"
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'database' && (selectedAuth.type?.code===1 || selectedAuth.type?.code===2)">
+                            <div class="mt-1">
+                                <div class="flex items-center justify-between">
+                                          <span class="flex-grow flex flex-col">
+                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Include Stored Procedures?</span>
+                                            <span class="text-sm text-gray-700" id="availability-description">Include stored procedures, functions & triggers in backups.
+                                                Please ensure your database user has permissions; otherwise, the backup will fail.</span>
+                                          </span>
+                                    <button type="button"
+                                            @click="toggleIncludeStoredProcedure()"
+                                            :class="{ 'bg-indigo-600': selectedAuth.include_stored_procedure, 'bg-gray-200': !(selectedAuth.include_stored_procedure) }"
+                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            aria-describedby="availability-description">
+                                            <span :class="{ 'translate-x-5': selectedAuth.include_stored_procedure, 'translate-x-0': !(selectedAuth.include_stored_procedure) }"
+                                                  aria-hidden="true"
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+
+                        <!-- Website-->
+                        <div class="sm:col-span-3" x-show="integrationCode === 'website'">
+                            <label for="host" class="block text-sm font-medium text-gray-700">
+                                Hostname or IPv4 or IPv6
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.host" type="text" name="host" id="host" autocomplete="host"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.host" class="mt-2 text-sm text-red-600"
+                                   id="host-error" x-text="connectionErrors.auth?.host"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-3" x-show="integrationCode === 'website'">
+                            <label for="port" class="block text-sm font-medium text-gray-700">
+                                Port
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.port" type="text" name="port" id="port" autocomplete="port"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.port" class="mt-2 text-sm text-red-600"
+                                   id="port-error" x-text="connectionErrors.auth?.port"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-3" x-show="integrationCode === 'website'">
+                            <label for="username" class="block text-sm font-medium text-gray-700">
+                                Username
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.username" type="text" name="username" id="username"
+                                       autocomplete="username"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.username" class="mt-2 text-sm text-red-600"
+                                   id="username-error" x-text="connectionErrors.auth?.username"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-3"
+                             x-show="integrationCode === 'website' && (!selectedAuth.use_public_key||selectedAuth.use_private_key)">
+                            <label for="password" class="block text-sm font-medium text-gray-700">
+                                <span x-show="selectedAuth.use_private_key===false||!selectedAuth.use_private_key">Password</span>
+                                <span x-show="selectedAuth.use_private_key===true">SSH Key Passphrase (optional)</span>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.password" type="text" name="password" id="password"
+                                       autocomplete="password"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.password" class="mt-2 text-sm text-red-600"
+                                   id="password-error" x-text="connectionErrors.auth?.password"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-3" x-show="integrationCode === 'website'">
+                            <label for="protocol" class="block text-sm font-medium text-gray-700">
+                                Protocol
+                            </label>
+                            <div class="relative mt-2">
+                                <button @click="toggleProtocolDropdown()"
+                                        type="button"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                    <span class="block truncate"
+                                          x-text="selectedAuth.protocol?.name||'--Server Protocol--'"></span>
+                                    <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                            <!-- Heroicon name: solid/selector -->
+                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                              <path fill-rule="evenodd"
+                                                    d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                                    clip-rule="evenodd"></path>
+                                            </svg>
+                                          </span>
+                                </button>
+
+                                <ul
+                                        x-show="openProtocol"
+                                        @click.self="toggleProtocolDropdown()"
+                                        x-transition:enter=""
+                                        x-transition:enter-start=""
+                                        x-transition:enter-end=""
+                                        x-transition:leave="transition ease-in duration-100"
+                                        x-transition:leave-start="opacity-100"
+                                        x-transition:leave-end="opacity-0"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        tabindex="-1"
+                                        role="listbox"
+                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+
+                                    <template x-for="(protocol, index) in websiteProtocols">
+                                        <li
+                                                @click="selectedAuth.protocol = protocol;toggleProtocolDropdown()"
+                                                @mouseenter="protocolActiveIndex = index"
+                                                @mouseleave="protocolActiveIndex = null"
+                                                :class="{ 'text-white bg-indigo-600': protocolActiveIndex === index, 'text-gray-700': !(protocolActiveIndex === index) }"
+                                                class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                id="listbox-option-0" role="option">
+                                                <span class="font-normal block truncate">
+                                                    <span x-text="protocol.name"></span>
+                                                </span>
+
+                                            <span
+                                                    x-show="selectedAuth.protocol?.code === protocol?.code"
+                                                    :class="{ 'text-indigo-600': (selectedAuth.protocol?.code === protocol?.code) && (protocolActiveIndex !== index), 'text-white': (!(selectedAuth.protocol === protocol) || (protocolActiveIndex === index)) }"
+                                                    class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                  <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                       viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                    <path fill-rule="evenodd"
+                                                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                                          clip-rule="evenodd"></path>
+                                                  </svg>
+                                                </span>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                            <p x-show="connectionErrors.auth?.protocol" class="mt-2 text-sm text-red-600"
+                               id="region-error" x-text="connectionErrors.auth?.protocol"></p>
+                        </div>
+                        <div class="sm:col-span-3"
+                             x-show="integrationCode === 'website' && selectedAuth.protocol?.name === 'FTPS'">
+                            <label for="protocol" class="block text-sm font-medium text-gray-700">
+                                Use Explicit SSL
+                            </label>
+                            <div class="relative mt-3">
+                                <button type="button"
+                                        @click="selectedAuth.ftps_use_explicit_ssl = !selectedAuth.ftps_use_explicit_ssl; selectedAuth.use_private_key=false;"
+                                        :class="{ 'bg-indigo-600': selectedAuth.ftps_use_explicit_ssl, 'bg-gray-200': !(selectedAuth.ftps_use_explicit_ssl) }"
+                                        class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                        role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                        aria-describedby="availability-description">
+                                            <span :class="{ 'translate-x-5': selectedAuth.ftps_use_explicit_ssl, 'translate-x-0': !(selectedAuth.ftps_use_explicit_ssl) }"
+                                                  aria-hidden="true"
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                </button>
+                            </div>
+                            <p x-show="connectionErrors.auth?.protocol" class="mt-2 text-sm text-red-600"
+                               id="region-error" x-text="connectionErrors.auth?.protocol"></p>
+                        </div>
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'website' && selectedAuth.protocol?.name === 'FTPS'">
+                            <div class="rounded-md bg-blue-50 p-4">
+                                <div class="flex">
+                                    <div class="flex-shrink-0">
+                                        <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                             viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                            <path fill-rule="evenodd"
+                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                                  clip-rule="evenodd"></path>
+                                        </svg>
+                                    </div>
+                                    <div class="ml-3 flex-1 md:flex md:justify-between">
+                                        <p class="text-sm text-blue-700">Depending on your host, you may need to
+                                            enable<br/> <strong>Use Explicit SSL</strong> option on the integration for
+                                            the backups to work correctly. If your backup zip
+                                            folder is empty, try enabling <strong>Use Explicit SSL</strong>.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Website and Database-->
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'database' || integrationCode === 'website'">
+                            <div class="mt-1">
+                                <hr/>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'database' || integrationCode === 'website'">
+                            <div class="mt-1">
+                                <div class="flex items-center justify-between">
+                                          <span class="flex-grow flex flex-col">
+                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Use Our Public Key?</span>
+                                            <span class="text-sm text-gray-700" id="availability-description">Use the public-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
+                                          </span>
+                                    <button type="button"
+                                            @click="selectedAuth.use_public_key = !selectedAuth.use_public_key; selectedAuth.use_private_key=false;"
+                                            :class="{ 'bg-indigo-600': selectedAuth.use_public_key, 'bg-gray-200': !(selectedAuth.use_public_key) }"
+                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            aria-describedby="availability-description">
+                                            <span :class="{ 'translate-x-5': selectedAuth.use_public_key, 'translate-x-0': !(selectedAuth.use_public_key) }"
+                                                  aria-hidden="true"
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                    </button>
+                                </div>
+                                <div class="rounded-md bg-blue-50 p-4 mt-3 mb-3"
+                                     x-show="(selectedAuth.use_public_key===true)">
+                                    <div class="flex">
+                                        <div class="flex-shrink-0">
+                                            <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                <path fill-rule="evenodd"
+                                                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                                      clip-rule="evenodd"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="ml-3 flex-1 md:flex md:justify-between">
+                                            <p class="text-sm text-blue-700">
+                                                Use the following Linux bash command to add the public key to your SSH
+                                                user. Please make sure you log in as a user before running this command.
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                                <code class="block break-words whitespace-normal overflow-x-scroll prose bg-indigo-500 text-white p-2 mt-3 rounded-lg"
+                                      x-show="(selectedAuth.use_public_key===true)">
+                                    echo -e 'ssh-rsa
+                                    AAAAB3NzaC1yc2EAAAADAQABAAABAQC4PG+UeogbJNjvqNOXHK6TsRcE+Zd7hU67qI5Kelt/jpim/kneW1R6lTD9X39EwYGJxjXG6cZkfio3mEFpVmciKWpT9x9jKMvEQGSupzlhU7qSaFIbf1jtpWlPKs686BsJwfkFrUMk2jtaB/GIcRp39UyZB9heoqsgdPwNu2R6uToCjSmZGgg3dMl5Uwis4obu+NeLDl9r6E9LdwXTV3jJI+ZAn1Ju3S7WOXaG+sNLcs+sPMwBPNyLkHEUbJ0XrEHnWhamcm4tgrNlzv2oV2ysS4qCPGZYLari0nrl43MJK+h5YUeAAqHih9zneIN2Gh45rQwBQcOt37a1T993klDh
+                                    backupsheep.com' >> ~/.ssh/authorized_keys
+                                </code>
+                                <code class="block break-words whitespace-normal overflow-x-scroll prose bg-indigo-500 text-white p-2 mt-3 rounded-lg"
+                                      x-show="(selectedAuth.use_public_key===true)">
+                                    chmod 0600 ~/.ssh/authorized_keys
+                                </code>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'database' || integrationCode === 'website'">
+                            <div class="mt-1">
+                                <div class="flex items-center justify-between">
+                                          <span class="flex-grow flex flex-col">
+                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Use Your Private Key?</span>
+                                            <span class="text-sm text-gray-700"
+                                                  id="availability-description">Use the private-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
+                                          </span>
+                                    <button type="button"
+                                            @click="selectedAuth.use_private_key = !selectedAuth.use_private_key; selectedAuth.use_public_key=false;"
+                                            :class="{ 'bg-indigo-600': selectedAuth.use_private_key, 'bg-gray-200': !(selectedAuth.use_private_key) }"
+                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            aria-describedby="availability-description">
+                                            <span :class="{ 'translate-x-5': selectedAuth.use_private_key, 'translate-x-0': !(selectedAuth.use_private_key) }"
+                                                  aria-hidden="true"
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                    </button>
+                                </div>
+                                <textarea x-model="selectedAuth.private_key" id="private_key" name="private_key"
+                                          rows="3"
+                                          x-show="(selectedAuth.use_private_key===true)"
+                                          class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md mt-3"></textarea>
+                                <p x-show="connectionErrors.auth?.private_key && selectedAuth.use_private_key===true"
+                                   class="mt-2 text-sm text-red-600" id="notes-error"
+                                   x-text="connectionErrors.auth?.private_key"></p>
+
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'database' || integrationCode === 'website'">
+                            <div class="mt-1">
+                                <div class="flex items-center justify-between">
+                                          <span class="flex-grow flex flex-col">
+                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Use legacy SHA-1 Key Verification?</span>
+                                            <span class="text-sm text-gray-700"
+                                                  id="availability-description">If your systems do not support SHA-2 variants of RSA key verification algorithms.</span>
+                                          </span>
+                                    <button type="button"
+                                            @click="selectedAuth.flag_use_sha1_key_verification = !selectedAuth.flag_use_sha1_key_verification;"
+                                            :class="{ 'bg-indigo-600': selectedAuth.flag_use_sha1_key_verification, 'bg-gray-200': !(selectedAuth.flag_use_sha1_key_verification) }"
+                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            aria-describedby="availability-description">
+                                            <span :class="{ 'translate-x-5': selectedAuth.flag_use_sha1_key_verification, 'translate-x-0': !(selectedAuth.flag_use_sha1_key_verification) }"
+                                                  aria-hidden="true"
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'database' || integrationCode === 'website'">
+                            <div class="mt-1">
+                                <hr/>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-3"
+                             x-show="(integrationCode === 'database') && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
+                            <label for="ssh_host" class="block text-sm font-medium text-gray-700">
+                                SSH Server Address
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.ssh_host" type="text" name="ssh_host" id="ssh_host"
+                                       autocomplete="ssh_host"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.ssh_host" class="mt-2 text-sm text-red-600"
+                                   id="ssh_host-error" x-text="connectionErrors.auth?.ssh_host"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-3"
+                             x-show="(integrationCode === 'database') && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
+                            <label for="ssh_ssh_port" class="block text-sm font-medium text-gray-700">
+                                SSH Server Port
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.ssh_port" type="text" name="ssh_port" id="ssh_port"
+                                       autocomplete="ssh_port"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.ssh_port" class="mt-2 text-sm text-red-600"
+                                   id="ssh_port-error" x-text="connectionErrors.auth?.ssh_port"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-3"
+                             x-show="(integrationCode === 'database') && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
+                            <label for="ssh_username" class="block text-sm font-medium text-gray-700">
+                                SSH User
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.ssh_username" type="text" name="ssh_username"
+                                       id="ssh_username" autocomplete="ssh_username"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.ssh_username" class="mt-2 text-sm text-red-600"
+                                   id="ssh_username-error" x-text="connectionErrors.auth?.ssh_username"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-3"
+                             x-show="(integrationCode === 'database') && (selectedAuth.use_private_key===true)">
+                            <label for="ssh_password" class="block text-sm font-medium text-gray-700">
+                                <span x-show="selectedAuth.use_private_key===false||!selectedAuth.use_private_key">SSH User Password <span
+                                        x-show="selectedAuth.use_public_key===true">(optional)</span></span>
+                                <span x-show="selectedAuth.use_private_key===true">SSH Key Passphrase (optional)</span>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.ssh_password" type="text" name="ssh_port" id="ssh_port"
+                                       autocomplete="ssh_password"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="connectionErrors.auth?.ssh_password" class="mt-2 text-sm text-red-600"
+                                   id="ssh_port-error" x-text="connectionErrors.auth?.ssh_password"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'database' && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
+                            <div class="mt-1">
+                                <hr/>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6"
+                             x-show="integrationCode === 'database' && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
+                            <div class="mt-1">
+                                <!-- This example requires Tailwind CSS v2.0+ -->
+                                <div class="flex items-center justify-between">
+                                          <span class="flex-grow flex flex-col">
+                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Multi-Database User?</span>
+                                            <span class="text-sm text-gray-700" id="availability-description">If you use the same user for multiple databases, it's good to enable this option.</span>
+                                          </span>
+                                    <button type="button"
+                                            @click="selectedAuth.all_databases = !selectedAuth.all_databases;"
+                                            :class="{ 'bg-indigo-600': selectedAuth.all_databases, 'bg-gray-200': !(selectedAuth.all_databases) }"
+                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            aria-describedby="availability-description">
+                                            <span :class="{ 'translate-x-5': selectedAuth.all_databases, 'translate-x-0': !(selectedAuth.all_databases) }"
+                                                  aria-hidden="true"
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                    </button>
+                                </div>
+
+                            </div>
+
+                            <div class="mt-3" x-show="selectedAuth.type?.name === 'PostgreSQL'">
+                                <div class="rounded-md bg-blue-50 p-4">
+                                    <div class="flex">
+                                        <div class="flex-shrink-0">
+                                            <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                <path fill-rule="evenodd"
+                                                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                                      clip-rule="evenodd"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="ml-3 flex-1 md:flex md:justify-between">
+                                            <p class="text-sm text-blue-700">Please make sure that <strong>psql</strong>
+                                                is installed on your SSH server and <strong>pg_dump</strong> version
+                                                must be equal or higher than database server
+                                                version</p>
+                                            <p class="mt-3 text-sm md:mt-0 md:ml-6">
+                                                <a target="_blank"
+                                                   href="https://support.backupsheep.com/docs/requirements-for-database-backup-using-ssh"
+                                                   class="whitespace-nowrap font-medium text-blue-700 hover:text-blue-600">Details
+                                                    <span aria-hidden="true">&rarr;</span></a>
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mt-3"
+                                 x-show="selectedAuth.type?.name === 'MySQL' || selectedAuth.type?.name === 'MariaDB'">
+                                <div class="rounded-md bg-blue-50 p-4">
+                                    <div class="flex">
+                                        <div class="flex-shrink-0">
+                                            <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                <path fill-rule="evenodd"
+                                                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                                      clip-rule="evenodd"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="ml-3 flex-1 md:flex md:justify-between">
+                                            <p class="text-sm text-blue-700">Please make sure that
+                                                <strong>mysql</strong> is installed on your SSH server and <strong>mysqldump</strong>
+                                                version must be equal or higher than database server
+                                                version</p>
+                                            <p class="mt-3 text-sm md:mt-0 md:ml-6">
+                                                <a target="_blank"
+                                                   href="https://support.backupsheep.com/databases/database-backup-using-ssh-server#mysql-mysql-mysqldump-and-server-version"
+                                                   class="whitespace-nowrap font-medium text-blue-700 hover:text-blue-600">Details
+                                                    <span aria-hidden="true">&rarr;</span></a>
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6">
+                            <label for="notes" class="block text-sm font-medium text-gray-700">
+                                Notes
+                            </label>
+                            <div class="mt-1">
+                                        <textarea x-model="connection.notes" id="notes" name="notes" rows="3"
+                                                  class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                <p x-show="connectionErrors?.notes" class="mt-2 text-sm text-red-600" id="notes-error"
+                                   x-text="connectionErrors?.notes"></p>
+                            </div>
+                            <p class="mt-2 text-sm text-gray-700">Optional notes about the connection.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                    <button @click="saveConnection()" type="button"
+                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                        <span x-show="!connection.id">Add Integration</span>
+                        <span x-show="connection.id">Modify Integration</span>
+                    </button>
+                    <button @click="closeConnectionModal()" type="button"
+                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div x-show="openDeleteConnection" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
+         aria-labelledby="modal-title" role="dialog" aria-modal="true">
+        <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div x-show="openDeleteConnection"
+                 x-transition:enter="ease-out duration-300"
+                 x-transition:enter-start="opacity-0"
+                 x-transition:enter-end="opacity-100"
+                 x-transition:leave="ease-in duration-200"
+                 x-transition:leave-start="opacity-100"
+                 x-transition:leave-end="opacity-0"
+                 class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+
+            <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+
+            <div x-show="openDeleteConnection"
+                 x-transition:enter="ease-out duration-300"
+                 x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                 x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+                 x-transition:leave="ease-in duration-200"
+                 x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+                 x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                 class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
+                <div>
+                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
+                        <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
+                             xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                    stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor"
+                                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        </svg>
+                    </div>
+                    <div x-show="!loading" class="mt-3 text-center sm:mt-5">
+                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                            Please Confirm
+                        </h3>
+                        <div class="mt-2">
+                            <p class="text-sm text-gray-700">
+                                This action will delete all nodes created with this connection (<strong
+                                    x-text="connection.name"></strong>) and their backups as well. You can't undo this
+                                action. Proceed carefully.
+                            </p>
+                        </div>
+                    </div>
+                    <div x-show="loading" class="mt-3 text-center sm:mt-5">
+                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                            Loading...
+                        </h3>
+                        <div class="mt-2">
+                            <p class="text-sm text-gray-700">
+                                Don't refresh page.
+                            </p>
+                        </div>
+                    </div>
+                    <div x-show="!loading" class="mt-3 text-left sm:mt-5">
+                        <div class="sm:col-span-6">
+                            <label for="about" class="block text-sm font-medium text-gray-700">
+                                Notes
+                            </label>
+                            <div class="mt-1">
+                                <textarea x-model="notes" id="about" name="about" rows="3"
+                                          class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                            </div>
+                            <p class="mt-2 text-sm text-gray-700">Optional notes about this action.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                    <button @click="deleteConnection(connection.id)" type="button"
+                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                        Delete Connection
+                    </button>
+                    <button @click="closeDeleteConnectionModal()" type="button"
+                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+</div>
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('setupSelectConnection', () => ({
+            oauth_url: null,
+            openConnection: false,
+            openEndpoint: false,
+            openAWSRegion: false,
+            openDatabaseType: false,
+            openDatabaseVersion: false,
+            selectAWSRegions: false,
+            endpointActiveIndex: null,
+            awsRegionActiveIndex: null,
+            databaseTypeActiveIndex: null,
+            databaseVersionActiveIndex: null,
+            protocolActiveIndex: null,
+            openDeleteConnection: null,
+            openProtocol: null,
+            connection: {},
+            endpoints: [],
+            awsRegions: [],
+            loading: null,
+            selectedAuth: {},
+            notes: null,
+            connectionErrors: {
+                name: null,
+                notes: null,
+                location: null,
+                region: null,
+                auth: {},
+            },
+            websiteProtocols: [
+                {
+                    "code": 1,
+                    "name": 'FTP'
+                },
+                {
+                    "code": 2,
+                    "name": 'SFTP'
+                },
+                {
+                    "code": 3,
+                    "name": 'FTPS'
+                }
+            ],
+            databaseTypes: [
+                {
+                    "code": 1,
+                    "port": 3306,
+                    "name": 'MySQL'
+                },
+                {
+                    "code": 2,
+                    "port": 3306,
+                    "name": 'MariaDB'
+                },
+                {
+                    "code": 3,
+                    "port": 5432,
+                    "name": 'PostgreSQL'
+                }
+            ],
+            databaseVersions: [
+                {
+                    "code": "mysql_8_0",
+                    "name": 'MySQL 8.0'
+                },
+                {
+                    "code": "mysql_5_7",
+                    "name": 'MySQL 5.7'
+                },
+                {
+                    "code": "mysql_5_6",
+                    "name": 'MySQL 5.6'
+                },
+                {
+                    "code": "mysql_5_5",
+                    "name": 'MySQL 5.5'
+                },
+                {
+                    "code": "mariadb_10_10",
+                    "name": 'MariaDB 10.10'
+                },
+                {
+                    "code": "mariadb_10_9",
+                    "name": 'MariaDB 10.9'
+                },
+                {
+                    "code": "mariadb_10_8",
+                    "name": 'MariaDB 10.8'
+                },
+                {
+                    "code": "mariadb_10_7",
+                    "name": 'MariaDB 10.7'
+                },
+                {
+                    "code": "mariadb_10_6",
+                    "name": 'MariaDB 10.6'
+                },
+                {
+                    "code": "mariadb_10_5",
+                    "name": 'MariaDB 10.5'
+                },
+                {
+                    "code": "mariadb_10_4",
+                    "name": 'MariaDB 10.4'
+                },
+                {
+                    "code": "mariadb_10_3",
+                    "name": 'MariaDB 10.3'
+                },
+                {
+                    "code": "mariadb_10_2",
+                    "name": 'MariaDB 10.2'
+                },
+                {
+                    "code": "mariadb_10_1",
+                    "name": 'MariaDB 10.1'
+                },
+                {
+                    "code": "postgres_15",
+                    "name": 'PostgreSQL 15'
+                },
+                {
+                    "code": "postgres_14",
+                    "name": 'PostgreSQL 14'
+                },
+                {
+                    "code": "postgres_13",
+                    "name": 'PostgreSQL 13'
+                },
+                {
+                    "code": "postgres_12",
+                    "name": 'PostgreSQL 12'
+                },
+                {
+                    "code": "postgres_11",
+                    "name": 'PostgreSQL 11'
+                },
+                {
+                    "code": "postgres_10",
+                    "name": 'PostgreSQL 10'
+                },
+                {
+                    "code": "postgres_9",
+                    "name": 'PostgreSQL 9'
+                }
+            ],
+            integrationCode: "{{integration.code}}",
+            init() {
+                if (this.integrationCode === "ovh_ca" || this.integrationCode === "ovh_eu" || this.integrationCode === "ovh_us") {
+                    this.getOauthUrl();
+                }
+            },
+            openUrl(url) {
+                window.location.href = url;
+            },
+            async getOauthUrl() {
+                this.loading = true;
+                let url = "/api/v1/connections/" + this.integrationCode + "/oauth_url/";
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.scheduleErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'OAuth URL Ready!', details: json.detail});#}
+                    this.oauth_url = json.oauth_url;
+                    this.loading = false;
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error! Unable to get OAuth url.',
+                        details: error.message
+                    });
+                });
+            },
+
+            async openConnectionModal(connection_id, location_id, action_type, integration_code) {
+
+                if (!connection_id && (integration_code === "basecamp" || integration_code === "intercom")) {
+                    window.location.href = "{{connect_url|safe}}";
+                } else {
+                    /**
+                     * Modify Connection
+                     */
+                    if (connection_id) {
+                        Alpine.store('showLoading').toggle();
+
+                        await this.getEndpoints();
+
+                        if (this.integrationCode === "aws" || this.integrationCode === "aws_rds" || this.integrationCode === "lightsail") {
+                            await this.getAWSRegions();
+                            this.selectAWSRegions = true;
+                        }
+
+                        let url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/?" + new URLSearchParams({
+                            location: location_id,
+                        });
+
+                        let response = await fetch(url, {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            method: 'GET',
+                        }).then(async (response) => {
+                            if (response.ok) {
+                                return response.json();
+                            } else {
+                                this.loading = false;
+                                let json;
+                                try {
+                                    json = await response.json();
+                                } catch (exception_var) {
+                                    json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                                }
+
+                                this.connectionErrors = json;
+                                throw new Error(json.detail);
+                            }
+                        }).then((json) => {
+                            {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'Success!', details: json.detail});#}
+                            this.connection = json;
+
+                            /**
+                             * This is copy action so we will remove so it can be added as new
+                             */
+                            if (action_type === 'copy') {
+                                this.connection.id = null;
+                            }
+
+                            this.selectedAuth = this.connection["auth_" + this.integrationCode];
+                            if (this.integrationCode === "database") {
+                                if (this.selectedAuth.type) {
+                                    this.selectedAuth.type = this.databaseTypes.filter(obj => {
+                                        return obj.code === this.selectedAuth.type
+                                    })[0];
+                                }
+                                if (this.selectedAuth.version) {
+                                    this.selectedAuth.version = this.databaseVersions.filter(obj => {
+                                        return obj.code === this.selectedAuth.version
+                                    })[0];
+                                }
+                            }
+                            if (this.integrationCode === "website") {
+                                if (this.selectedAuth.protocol) {
+                                    this.selectedAuth.protocol = this.websiteProtocols.filter(obj => {
+                                        return obj.code === this.selectedAuth.protocol
+                                    })[0];
+                                }
+                            }
+
+                            if (this.integrationCode === "wordpress") {
+                                if (!this.selectedAuth.key || action_type === 'copy') {
+                                    this.getWordPressKey();
+                                }
+                            }
+
+                            Alpine.store('showLoading').toggle();
+
+                            /**
+                             * Open Modal
+                             */
+                            this.openConnection = true;
+                        }).catch((error) => {
+                            Alpine.store('notifications').items.push({
+                                show: true,
+                                error: true,
+                                heading: 'Error!',
+                                details: error.message
+                            });
+                        });
+
+                    } else {
+                        /**
+                         * Add New Connection
+                         */
+                        if (this.integrationCode === "ovh_ca" || this.integrationCode === "ovh_eu" || this.integrationCode === "ovh_us") {
+                            window.location.href = this.oauth_url;
+                        } else {
+                            this.connection = {};
+                            this.notes = null;
+                            this.openConnection = true;
+
+                            await this.getEndpoints();
+
+                            if (this.integrationCode === "aws" || this.integrationCode === "aws_rds" || this.integrationCode === "lightsail") {
+                                await this.getAWSRegions();
+                                this.selectAWSRegions = true;
+                            }
+
+                            if (this.integrationCode === "wordpress") {
+                                await this.getWordPressKey();
+                            }
+                        }
+                    }
+                }
+
+
+            },
+            async saveConnection() {
+                this.loading = true;
+                let url = null;
+                let method = null;
+
+                if (this.connection.id) {
+                    url = "/api/proxy/connections/" + this.integrationCode + "/" + this.connection.id + "/?" + new URLSearchParams({
+                        location: this.connection.location?.id,
+                    });
+                    method = "PATCH";
+                } else {
+                    url = "/api/proxy/connections/" + this.integrationCode + "/?" + new URLSearchParams({
+                        location: this.connection.location?.id,
+                    });
+                    method = "POST";
+                }
+
+
+                let data = {
+                    name: this.connection.name,
+                    notes: this.connection.notes,
+                    location: this.connection.location?.id,
+                };
+
+                data["auth_" + this.integrationCode] = JSON.parse(JSON.stringify(this.selectedAuth));
+
+                if (this.integrationCode === "aws" || this.integrationCode === "aws_rds" || this.integrationCode === "lightsail") {
+                    data["auth_" + this.integrationCode].region = data["auth_" + this.integrationCode].region?.id;
+                }
+
+                if (this.integrationCode === "website") {
+                    data["auth_" + this.integrationCode].protocol = data["auth_" + this.integrationCode].protocol?.code;
+
+                    if (data["auth_" + this.integrationCode].protocol === 1) {
+                        this.selectedAuth.use_private_key = false;
+                        this.selectedAuth.use_public_key = false;
+                        data["auth_" + this.integrationCode].use_private_key = false;
+                        data["auth_" + this.integrationCode].use_public_key = false;
+                    }
+                }
+
+                if (this.integrationCode === "database") {
+                    data["auth_" + this.integrationCode].type = data["auth_" + this.integrationCode].type?.code;
+                }
+
+                if (this.integrationCode === "database") {
+                    data["auth_" + this.integrationCode].version = data["auth_" + this.integrationCode].version?.code;
+                }
+
+                if (this.integrationCode === "database") {
+                    if (data["auth_" + this.integrationCode].all_databases === true) {
+                        data["auth_" + this.integrationCode].database_name = null;
+                    }
+                }
+
+                if (data["auth_" + this.integrationCode].use_public_key === true) {
+                    this.selectedAuth.private_key = null;
+                    this.selectedAuth.use_private_key = null;
+                    this.selectedAuth.ssh_password = null;
+                    data["auth_" + this.integrationCode].private_key = null;
+                    data["auth_" + this.integrationCode].use_private_key = null;
+                    data["auth_" + this.integrationCode].ssh_password = null;
+                }
+                /**
+                 * We need to get details of schedule so we will make GET call.
+                 * @type {Response}
+                 */
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: method,
+                    body: JSON.stringify(data)
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.connectionErrors = json;
+                        this.connectionErrors.auth = this.connectionErrors["auth_" + this.integrationCode];
+                        if (this.connectionErrors["auth_" + this.integrationCode]?.non_field_errors) {
+                            json.detail = this.connectionErrors["auth_" + this.integrationCode]?.non_field_errors[0];
+
+                        } else {
+                                json.detail = "Unable to process request. Please contact support.";
+                        }
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    if (this.integrationCode === "database") {
+                        if (json["id"]) {
+                            this.updateDBTypeAndVersion(json["id"], json["location"]);
+                        }
+                    }
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                    this.loading = false;
+                    this.closeConnectionModal();
+                    location.reload();
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                });
+
+            },
+            async pauseConnection(connection_id) {
+                this.loading = true;
+
+                let url = "/api/v1/connections/" + connection_id + "/pause/";
+
+                let data = {
+                    notes: this.notes,
+                }
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'POST',
+                    body: JSON.stringify(data)
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                    location.reload();
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                });
+            },
+            async validateConnection(connection_id, location_id) {
+                Alpine.store('showLoading').toggle();
+
+                let url = null;
+                let method = null;
+
+                url = "/api/proxy/connections/" + this.integrationCode + "/" + connection_id + "/validate?" + new URLSearchParams({
+                    location: location_id,
+                });
+                method = "GET";
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: method,
+                }).then(async (response) => {
+
+                    Alpine.store('showLoading').toggle();
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                });
+            },
+            async updateDBTypeAndVersion(connection_id, location_id) {
+                let url = null;
+                let method = null;
+
+                url = "/api/proxy/connections/" + this.integrationCode + "/" + connection_id + "/update_db_type_and_version?" + new URLSearchParams({
+                    location: location_id,
+                });
+                method = "GET";
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: method,
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                });
+            },
+
+            async resumeConnection(connection_id) {
+                this.loading = true;
+
+                let url = "/api/v1/connections/" + connection_id + "/resume/";
+
+                let data = {
+                    notes: this.notes,
+                }
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'POST',
+                    body: JSON.stringify(data)
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                    location.reload();
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                });
+            },
+
+            async deleteConnection(connection_id) {
+                Alpine.store('showLoading').toggle();
+
+                let url = "/api/v1/connections/" + connection_id + "/";
+
+                let data = {
+                    notes: this.notes,
+                }
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'DELETE',
+                    body: JSON.stringify(data)
+                }).then(async (response) => {
+                    Alpine.store('showLoading').toggle();
+                    if (response.status === 204) {
+                        return {"detail": "Integration will be deleted soon."};
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: json.detail
+                    });
+                    location.reload();
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                });
+            },
+
+
+            async getEndpoints() {
+                let url = "/api/v1/connections/" + this.integrationCode + "/endpoints/?";
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.connectionErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'Success!', details: json.detail});#}
+                    this.endpoints = json;
+                    {#this.closeConnectionModal();#}
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                    {#this.closeConnectionModal();#}
+                });
+            },
+            async getAWSRegions() {
+                let url = "/api/v1/connections/" + this.integrationCode + "/regions/?";
+
+                /**
+                 * We need to get details of schedule so we will make GET call.
+                 * @type {Response}
+                 */
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.connectionErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'Success!', details: json.detail});#}
+                    this.awsRegions = json;
+                    {#this.closeConnectionModal();#}
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                    {#this.closeConnectionModal();#}
+                });
+            },
+            async getWordPressKey() {
+                let url = "/api/v1/saas/" + this.integrationCode + "/generate_key/?";
+
+                /**
+                 * We need to get details of schedule so we will make GET call.
+                 * @type {Response}
+                 */
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                     this.selectedAuth.key = json.key;
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                });
+            },
+
+            toggleEndpointDropdown() {
+                this.openEndpoint = !this.openEndpoint;
+                this.endpointActiveIndex = null;
+            },
+            toggleAWSRegionDropdown() {
+                this.openAWSRegion = !this.openAWSRegion;
+                this.awsRegionActiveIndex = null;
+            },
+            toggleDatabaseTypeDropdown() {
+                this.openDatabaseType = !this.openDatabaseType;
+                this.databaseTypeActiveIndex = null;
+            },
+            toggleDatabaseVersionDropdown() {
+                this.openDatabaseVersion = !this.openDatabaseVersion;
+                this.databaseVersionActiveIndex = null;
+            },
+            toggleProtocolDropdown() {
+                this.openProtocol = !this.openProtocol;
+                this.protocolActiveIndex = null;
+            },
+            toggleIncludeStoredProcedure() {
+                this.selectedAuth.include_stored_procedure = !this.selectedAuth.include_stored_procedure;
+            },
+            toggleUseSSL() {
+                this.selectedAuth.use_ssl = !this.selectedAuth.use_ssl;
+            },
+            closeConnectionModal() {
+                this.openEndpoint = false;
+                this.endpointActiveIndex = null;
+                this.openConnection = false;
+                this.selectAWSRegions = false;
+                this.connection = {};
+                this.selectedAuth = {};
+                this.connectionErrors = {
+                    name: null,
+                    notes: null,
+                    location: null,
+                    region: null,
+                    auth: {},
+                }
+            },
+            openDeleteConnectionModal(connectionID, connectionName) {
+                this.connection = {
+                    id: connectionID,
+                    name: connectionName,
+                };
+                this.loading = false;
+                this.openDeleteConnection = true;
+                this.notes = null;
+            },
+            closeDeleteConnectionModal() {
+                this.loading = false;
+                this.notes = null;
+                this.openDeleteConnection = false;
+            },
+            copyToClipboard(string) {
+                navigator.clipboard.writeText(string);
+                Alpine.store('notifications').items.push({
+                    show: true,
+                    success: true,
+                    heading: 'Copied!',
+                    details: string
+                });
+            },
+            awsRDSReplicaWarning() {
+                if (this.selectedAuth?.host) {
+                    return (this.selectedAuth?.host.includes("rds.") && this.selectedAuth?.host.includes("replica."))
+                }
+            },
+        }));
+    });
+</script>

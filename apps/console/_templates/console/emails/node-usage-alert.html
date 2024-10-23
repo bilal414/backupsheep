@@ -1,0 +1,39 @@
+{% extends "console/emails/_master.html" %}
+{% block content %}
+    <h1>You have exceeded node limit on your account</h1>
+
+    <p>Hi. It looks like your account is using <strong>{{ plan_node_overage }}</strong> more nodes than
+        allowed(<strong>{{ plan_node_quota }}</strong>) in your <strong>{{ plan_name }}</strong> plan. If you are
+        enjoying BackupSheep, then please upgrade immediately or your account will be shutdown without furher notice.
+    </p>
+
+    <p><strong>Your backups are paused until you delete extra nodes or upgrade your plan.</strong></p>
+    <!-- Action -->
+    <table class="body-action" align="center" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+            <td align="center">
+                <!-- Border based button https://litmus.com/blog/a-guide-to-bulletproof-buttons-in-email-design -->
+                <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                    <tr>
+                        <td align="center">
+                            <table border="0" cellspacing="0" cellpadding="0">
+                                <tr>
+                                    <td>
+                                        <a href="https://backupsheep.com/pricing/" class="button button--green"
+                                           target="_blank">View BackupSheep Plans</a>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+
+    <p>Thanks,
+        <br>BackupSheep Team</p>
+    <p><strong>P.S.</strong> Need immediate help getting started? Check out our <a
+            href="https://support.backupsheep.com/">help documentation</a>. Or, just reply to this email, support team
+        is always ready to help!</p>
+{% endblock %}

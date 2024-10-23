@@ -1,0 +1,274 @@
+{% extends "console/_master.html" %}
+{% block title %}Settings - AppSumo{% endblock %}
+{% block meta_title %}Settings - AppSumo{% endblock %}
+{% block meta_description %}Settings - AppSumo{% endblock %}
+{% block meta_keywords %}Settings - AppSumo{% endblock %}
+{% block page_class %}page_settings dashboard-page sb-l-o sb-r-c{% endblock %}
+{% block content %}
+    <div class="lg:grid lg:grid-cols-12 lg:gap-x-5" x-data="settingsAccount()">
+        <aside class="py-6 px-2 sm:px-6 lg:py-0 lg:px-0 lg:col-span-3">
+            <nav class="space-y-1">
+                <a href="{% url 'console:settings:profile' %}"
+                   class="bg-gray-50 text-indigo-700 hover:text-indigo-700 hover:bg-white group rounded-md px-3 py-2 flex items-center text-sm font-medium"
+                   aria-current="page">
+                    <svg class="text-indigo-500 group-hover:text-indigo-500 flex-shrink-0 -ml-1 mr-3 h-6 w-6"
+                         xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                         aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <span class="truncate">
+                      Profile
+                    </span>
+                </a>
+                <a href="{% url 'console:settings:account' %}"
+                   class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium"
+                   aria-current="page">
+                    <svg xmlns="http://www.w3.org/2000/svg"
+                         class="text-gray-400 group-hover:text-gray-700 flex-shrink-0 -ml-1 mr-3 h-6 w-6"
+                         fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                              d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                              d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                    </svg>
+                    <span class="truncate">
+                      Account
+                    </span>
+                </a>
+{#                <a href="{% url 'console:settings:multifactor' %}"#}
+{#                   class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium">#}
+{#                    <svg xmlns="http://www.w3.org/2000/svg"#}
+{#                         class="text-gray-400 group-hover:text-gray-700 flex-shrink-0 -ml-1 mr-3 h-6 w-6" fill="none"#}
+{#                         viewBox="0 0 24 24"#}
+{#                         stroke="currentColor" stroke-width="2">#}
+{#                        <path stroke-linecap="round" stroke-linejoin="round"#}
+{#                              d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>#}
+{#                    </svg>#}
+{#                    <span class="truncate">#}
+{#                      Multi-Factor Auth#}
+{#                    </span>#}
+{#                </a>#}
+                <a href="{% url 'console:settings:password' %}"
+                   class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium">
+                    <svg class="text-gray-400 group-hover:text-gray-700 flex-shrink-0 -ml-1 mr-3 h-6 w-6"
+                         xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                         aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+                    </svg>
+                    <span class="truncate">
+                      Password
+                    </span>
+                </a>
+
+                <a  href="{% url 'console:settings:billing' %}"
+                   class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium">
+                    <svg class="text-gray-400 group-hover:text-gray-700 flex-shrink-0 -ml-1 mr-3 h-6 w-6"
+                         xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                         aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"></path>
+                    </svg>
+                    <span class="truncate">
+                      Plan &amp; Billing
+                    </span>
+                </a>
+{% if not is_appsumo_plan %}
+                <a href="{% url 'console:settings:group' %}"
+                   class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium">
+                    <svg class="text-gray-400 group-hover:text-gray-700 flex-shrink-0 -ml-1 mr-3 h-6 w-6"
+                         xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                         aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                    </svg>
+                    <span class="truncate">
+                      Groups
+                    </span>
+                </a>
+                <a href="{% url 'console:settings:user' %}"
+                   class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium">
+                    <svg xmlns="http://www.w3.org/2000/svg"
+                         class="text-gray-400 group-hover:text-gray-700 flex-shrink-0 -ml-1 mr-3 h-6 w-6"
+                         fill="none" viewBox="0 0 24 24"
+                         stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                              d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                    </svg>
+                    <span class="truncate">
+                      Users
+                    </span>
+                </a>
+                <a href="{% url 'console:settings:invite' %}"
+                   class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium">
+                    <svg xmlns="http://www.w3.org/2000/svg"
+                         class="text-gray-400 group-hover:text-gray-700 flex-shrink-0 -ml-1 mr-3 h-6 w-6" fill="none"
+                         viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                              d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0a2 2 0 104 0m-5 8a2 2 0 100-4 2 2 0 000 4zm0 0c1.306 0 2.417.835 2.83 2M9 14a3.001 3.001 0 00-2.83 2M15 11h3m-3 4h2"></path>
+                    </svg>
+                    <span class="truncate">
+                      Invites
+                    </span>
+                </a>
+                 {% endif %}
+                {% if account.billing.plan.name == "AppSumo" %}
+                    <a href="{% url 'console:settings:appsumo' %}"
+                       class="bg-gray-50 text-indigo-700 hover:text-indigo-700 hover:bg-white group rounded-md px-3 py-2 flex items-center text-sm font-medium">
+                        <svg xmlns="http://www.w3.org/2000/svg"
+                             class="text-indigo-500 group-hover:text-indigo-500 flex-shrink-0 -ml-1 mr-3 h-6 w-6"
+                             fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                  d="M15 5v2m0 4v2m0 4v2M5 5a2 2 0 00-2 2v3a2 2 0 110 4v3a2 2 0 002 2h14a2 2 0 002-2v-3a2 2 0 110-4V7a2 2 0 00-2-2H5z"></path>
+                        </svg>
+                        <span class="truncate">
+                      AppSumo
+                    </span>
+                    </a>
+                {% endif %}
+{% if not is_appsumo_plan %}
+                <a href="{% url 'console:settings:notification' %}"
+                   class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium">
+                    <svg class="text-gray-400 group-hover:text-gray-700 flex-shrink-0 -ml-1 mr-3 h-6 w-6"
+                         xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                         aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M17 14v6m-3-3h6M6 10h2a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v2a2 2 0 002 2zm10 0h2a2 2 0 002-2V6a2 2 0 00-2-2h-2a2 2 0 00-2 2v2a2 2 0 002 2zM6 20h2a2 2 0 002-2v-2a2 2 0 00-2-2H6a2 2 0 00-2 2v2a2 2 0 002 2z"></path>
+                    </svg>
+                    <span class="truncate">
+                                          Notifications
+                                        </span>
+                </a>
+                 {% endif %}
+            </nav>
+        </aside>
+
+        <div class="space-y-6 sm:px-6 lg:px-0 lg:col-span-9">
+
+            <div class="shadow sm:rounded-md">
+                <div class="bg-white py-6 px-4 space-y-6 sm:p-6">
+                    <div>
+                        <h3 class="text-lg leading-6 font-medium text-gray-900">
+                            Redeem AppSumo Code(s)
+                        </h3>
+                        <p class="mt-1 max-w-2xl text-sm text-gray-500">
+                            Hey Sumo-ling! You can redeem your AppSumo code here to unlock lifetime access to UNLIMITED
+                            plan and use a second AppSumo code to unlock an additional 1TB of storage.
+                        </p>
+                    </div>
+                    <div class="grid grid-cols-6 gap-6">
+                        <div class="col-span-6 sm:col-span-3">
+                            <label for="appsumo_code" class="block text-sm font-medium text-gray-700">New AppSumo
+                                Code</label>
+                            <input x-model="account.appsumo_code" type="text" name="appsumo_code" id="appsumo_code"
+                                   autocomplete="appsumo_code"
+                                   class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            <p x-show="accountErrors.appsumo_code" class="mt-2 text-sm text-red-600" id="email-error"
+                               x-text="accountErrors.appsumo_code"></p>
+                        </div>
+                    </div>
+                    {% if account.appsumo_code_count > 0 %}
+                        <div class="col-span-6 sm:col-span-3">
+                            <label for="appsumo_code" class="block text-sm font-medium text-gray-700">Your AppSumo
+                                Codes</label>
+                            <dd class="mt-1 text-sm text-gray-900 sm:mt-0 sm:col-span-2">
+                                <ul role="list" class="border border-gray-200 rounded-md divide-y divide-gray-200">
+                                    {% for appsumo_code in account.appsumo_codes.all %}
+                                        <li class="pl-3 pr-4 py-3 flex items-center justify-between text-sm">
+                                            <div class="w-0 flex-1 flex items-center">
+                                                <span class="ml-2 flex-1 w-0 truncate">
+                                                    {{ appsumo_code.code }}
+                                                </span>
+                                            </div>
+                                            <div class="ml-4 flex-shrink-0">
+                                                <a class="font-medium text-indigo-600 hover:text-indigo-500">
+                                                   {{ appsumo_code.get_status_display }}
+                                                </a>
+                                            </div>
+                                          <div class="ml-4 flex-shrink-0">
+                                                <a class="font-medium text-indigo-600 hover:text-indigo-500">
+                                                    {{ appsumo_code.modified }}
+                                                </a>
+                                            </div>
+                                        </li>
+                                    {% endfor %}
+                                </ul>
+                            </dd>
+                        </div>
+                    {% endif %}
+                </div>
+{#                <div class="px-4 py-3 bg-gray-50 text-right sm:px-6">#}
+{#                    <button @click="saveAccount()"#}
+{#                            class="bg-indigo-600 border border-transparent rounded-md shadow-sm py-2 px-4 inline-flex justify-center text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
+{#                        Redeem#}
+{#                    </button>#}
+{#            #}
+{#                </div>#}
+            </div>
+
+
+        </div>
+    </div>
+    <script>
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('settingsAccount', () => ({
+                accountErrors: {
+                    appsumo_code: null,
+                },
+                account: {
+                    id: {{ account.id }},
+                    appsumo_code: null,
+                },
+                init() {
+                },
+                async saveAccount() {
+                    Alpine.store('showLoading').toggle("Saving account details.");
+
+                    let url = "/api/v1/accounts/" + {{account.id}} +"/appsumo/";
+
+                    let data = this.account
+
+                    let response = await fetch(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'POST',
+                        body: JSON.stringify(data)
+                    }).then(async (response) => {
+                        Alpine.store('showLoading').toggle();
+
+                        if (response.ok) {
+                            return response.json();
+                        } else {
+                            let json;
+                            try {
+                                json = await response.json();
+                            } catch (exception_var) {
+                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                            }
+                            throw new Error(json.detail);
+                        }
+                    }).then((json) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            success: true,
+                            heading: 'Success!',
+                            details: json.detail
+                        });
+                        window.location.reload();
+                    }).catch((error) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            error: true,
+                            heading: 'Error!',
+                            details: error.message
+                        });
+                    });
+                },
+            }));
+        });
+    </script>
+
+{% endblock %}

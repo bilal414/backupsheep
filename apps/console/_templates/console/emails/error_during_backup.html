@@ -1,0 +1,79 @@
+{% extends "console/emails/_master.html" %}
+{% block content %}
+   <h2>Whoops!</h2>
+<p>The backup attempt failed for your <strong>{{node_type}}</strong> node named <strong>{{ node_name }}</strong> at <strong>{{backup_time}}</strong>. </p>
+<p>Node backup failed because of following error.</p>
+<p><strong>Error:</strong> {{error_details}}</p>
+
+<p>This error could be temporary, and we will retry backup again in few minutes. However, if you continue to get these alerts, then please check your node settings.</p>
+<!-- Action -->
+<table class="body-action" align="center" width="100%" cellpadding="0" cellspacing="0">
+  <tr>
+    <td align="center">
+      <!-- Border based button https://litmus.com/blog/a-guide-to-bulletproof-buttons-in-email-design -->
+      <table width="100%" border="0" cellspacing="0" cellpadding="0">
+        <tr>
+          <td align="center">
+            <table border="0" cellspacing="0" cellpadding="0">
+              <tr>
+                <td>
+                  <a href="{{action_url}}" class="button button--" target="_blank">check node</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+<p>For reference, details are following:</p>
+<table class="attributes" width="100%" cellpadding="0" cellspacing="0">
+  <tr>
+    <td class="attributes_content">
+      <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+          <td class="attributes_item"><strong>Backup Type:</strong> {{backup_type}}</td>
+        </tr>
+        <tr>
+          <td class="attributes_item"><strong>Backup Time:</strong> {{backup_time}}</td>
+        </tr>
+        <tr>
+          <td class="attributes_item"><strong>Node Type:</strong> {{node_type}}</td>
+        </tr>
+        <tr>
+          <td class="attributes_item"><strong>Node Name:</strong> {{node_name}}</td>
+        </tr>
+               <tr>
+          <td class="attributes_item"><strong>Node Status:</strong> {{node_status}}</td>
+        </tr>
+        <tr>
+          <td class="attributes_item"><strong>Integration Name:</strong> {{connection_name}}</td>
+        </tr>
+                <tr>
+          <td class="attributes_item"><strong>Integration Status:</strong> {{connection_status}}</td>
+        </tr>
+                <tr>
+          <td class="attributes_item"><strong>Endpoint:</strong> {{endpoint_name}} - {{endpoint_ip}}</td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
+<p>If you are using any firewall then make sure BackupSheep endpoint IP <strong>{{endpoint_ip}}</strong> is allowed. To view other endpoint IPs <a href="https://support.backupsheep.com/docs/backupsheep-ips">click here</a> </p>
+
+<p>Thanks,
+  <br>{{ sender_name }}</p>
+<p><strong>P.S.</strong> Need immediate help getting started? Check out our <a href="{{help_url}}">help documentation</a>. Or, just reply to this email, support team is always ready to help!</p>
+<!-- Sub copy -->
+<table class="body-sub">
+  <tr>
+    <td>
+      <p class="sub">If you’re having trouble with the button above, copy and paste the URL below into your web browser.</p>
+      <p class="sub">{{action_url}}</p>
+    </td>
+  </tr>
+</table>
+
+{% endblock %}

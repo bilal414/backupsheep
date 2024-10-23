@@ -1,0 +1,321 @@
+<div x-data="setupOpenConnection()">
+    <div>
+        <nav class="relative z-0 rounded-lg shadow flex divide-x divide-gray-200" aria-label="Tabs">
+            {% if integration.code != "upcloud" and integration.code != "oracle" %}
+                <a x-bind:class="object_type === 'cloud' ? 'text-gray-700' : 'text-gray-700 hover:text-gray-700'" href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
+                   class="rounded-l-lg group relative min-w-0 flex-1 overflow-hidden bg-white py-4 px-4 text-sm font-medium text-center hover:bg-gray-50 focus:z-10" aria-current="page">
+                    <span>Servers</span>
+                    <span x-bind:class="object_type === 'cloud' ? 'bg-indigo-500' : 'bg-transparent'" aria-hidden="true" class="absolute inset-x-0 bottom-0 h-0.5"></span>
+                </a>
+            {% endif %}
+            {% if integration.code != "aws_rds" and integration.code != "hetzner" %}
+                <a x-bind:class="object_type === 'volume' ? 'text-gray-700' : 'text-gray-700 hover:text-gray-700'" href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
+                   class="group relative min-w-0 flex-1 overflow-hidden bg-white py-4 px-4 text-sm font-medium text-center hover:bg-gray-50 focus:z-10">
+                    <span>Volumes</span>
+                    <span x-bind:class="object_type === 'volume' ? 'bg-indigo-500' : 'bg-transparent'" aria-hidden="true" class="absolute inset-x-0 bottom-0 h-0.5"></span>
+                </a>
+            {% endif %}
+        </nav>
+    </div>
+    <div class="flex flex-col mt-4">
+        <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+            <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
+                <template x-if="loading">
+                    <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg pb-4 pt-4">
+                        <div class="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-indigo-500">
+                            <svg class="animate-spin h-14 w-14 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                        </div>
+                    </div>
+                </template>
+                <template x-if="error">
+                    <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                        <div class="rounded-md bg-red-50 p-4">
+                            <div class="flex">
+                                <div class="flex-shrink-0">
+                                    <!-- Heroicon name: solid/x-circle -->
+                                    <svg class="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                        <path fill-rule="evenodd"
+                                              d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                                              clip-rule="evenodd"></path>
+                                    </svg>
+                                </div>
+                                <div class="ml-3">
+                                    <h3 class="text-sm font-medium text-red-800">
+                                        There was error with your request
+                                    </h3>
+                                    <div class="mt-2 text-sm text-red-700">
+                                        <ul role="list" class="list-disc pl-5 space-y-1">
+                                            <li x-text="error"></li>
+                                        </ul>
+                                    </div>
+                                </div>
+
+                            </div>
+                        </div>
+                        <button @click="openUrl(oauth_url)" type="button"
+                                class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 mt-3">
+
+                            <img class="max-h-10 mx-auto" src="{{ STATIC_URL }}{{ integration.image }}" alt="{{ integration.name }} Backups">
+
+                            <a class="mt-2 block  text-1xl font-normal leading-7 text-gray-700">
+                                Reconnect {{ integration.name }} ({{ connection.name }}) Connection
+                            </a>
+                        </button>
+                    </div>
+                </template>
+                <div class="bg-white shadow sm:rounded-lg" x-show="objectList?.length === 0">
+                    <div class="px-4 py-5 sm:p-6">
+                        <h3 class="text-lg leading-6 font-medium text-gray-700">
+                            No {% if object_code == "cloud" %}servers{% else %}{{ object_code }}s{% endif %} found
+                        </h3>
+                        <div class="mt-2 max-w-xl text-sm text-gray-700">
+                            <p>
+                                Unable to fetch any {% if object_code == "cloud" %}servers{% else %}{{ object_code }}s{% endif %} from your {{ integration.name }} account. If you are using Teams, then switch to team account before
+                                setting up integration.
+                            </p>
+                        </div>
+                        <div class="mt-3 text-sm">
+                            <a href="{% url 'console:setup:integration_open' integration_code %}" class="font-medium text-indigo-600 hover:text-indigo-500"> Select or add different {{ integration.name }} integration <span
+                                    aria-hidden="true">&rarr;</span></a>
+                        </div>
+                    </div>
+                </div>
+
+                <template x-if="objectList?.length > 0">
+                    <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                        <div class="overflow-x-auto">
+                            <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                <tr>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Name
+                                    </th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Region
+                                    </th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Size
+                                    </th>
+                                    <th scope="col" class="relative px-6 py-3">
+                                        <span class="sr-only">Actions</span>
+                                    </th>
+                                </tr>
+                                </thead>
+                                <tbody class="bg-white divide-y divide-gray-200">
+
+                                <template x-for="object in objectList">
+                                    <tr>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <div class="flex items-center">
+                                                <div class="flex-shrink-0 h-10 w-10">
+                                                    <svg x-show="object_type==='cloud'" xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 rounded-full text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
+                                                    </svg>
+                                                    <svg x-show="object_type==='volume'" xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 rounded-full text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                              d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+                                                    </svg>
+                                                </div>
+                                                <div class="ml-4">
+                                                    <div class="text-sm font-medium text-gray-700">
+                                                        <span x-text="object._bs_name"></span>
+                                                        <span x-show="object._bs_vol_type" class="inline-flex items-center rounded bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800">
+                                                          <svg class="mr-1.5 h-2 w-2 text-indigo-400" fill="currentColor" viewBox="0 0 8 8">
+                                                            <circle cx="4" cy="4" r="3"></circle>
+                                                          </svg>
+                                                          <span x-text="object._bs_vol_type"></span>
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <div class="text-sm text-gray-700">
+                                                <span x-text="object._bs_region"></span>
+                                            </div>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <div class="text-sm text-gray-700">
+                                                <span x-text="object._bs_size"></span> <span x-show="object._bs_size">GB</span>
+                                            </div>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                            <span class="relative z-0 inline-flex shadow-sm rounded-md">
+                                              <button @click="linkObject(object)" x-bind:disabled="object._bs_attached===true" type="button"
+                                                      class="ml-4 flex-shrink-0 px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50">
+                                                Link Node
+                                              </button>
+                                            </span>
+                                        </td>
+                                    </tr>
+                                </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('setupOpenConnection', () => ({
+            error: null,
+            objectList: null,
+            oauth_url: null,
+            integration_code: "{{integration.code}}",
+            connection_id: "{{connection.id}}",
+            location_id: "{{connection.location.id}}",
+            object_type: "{{object_code}}",
+
+            init() {
+                this.getObjects();
+                if (this.integration_code === "ovh_ca" || this.integration_code === "ovh_eu" || this.integration_code === "ovh_us") {
+                    this.getOauthUrl();
+                }
+            },
+
+            openUrl(url) {
+                window.location.href = url;
+            },
+
+            async getObjects() {
+                this.loading = true;
+                let url = "/api/proxy/connections/" + this.integration_code + "/" + this.connection_id + "/objects/?" + new URLSearchParams({
+                    location: this.location_id,
+                    object_type: this.object_type,
+                });
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.scheduleErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'OAuth URL Ready!', details: json.detail});#}
+                    this.objectList = json;
+                    this.loading = false;
+                }).catch((error) => {
+                    {#Alpine.store('notifications').items.push({show: true, error: true, heading: 'Error!', details: error.message});#}
+                    this.error = error;
+                });
+            },
+
+            async linkObject(object) {
+                Alpine.store('showLoading').toggle();
+                let url = "/api/v1/{{object_code}}s/" + this.integration_code + "/";
+
+                let project_id = null;
+                let zone = null;
+
+                if (this.integration_code === "ovh_ca" || this.integration_code === "ovh_eu" || this.integration_code === "ovh_us") {
+                    if (object?.project) {
+                        project_id = object.project.project_id;
+                    }
+                }
+                else if (this.integration_code === "google_cloud") {
+                    if (object?._bs_project_id) {
+                        project_id = object._bs_project_id;
+                    }
+                    if (object?._bs_zone) {
+                        zone = object._bs_zone;
+                    }
+                }
+
+                let data = {
+                    node: {
+                        connection: this.connection_id,
+                        name: object._bs_name,
+                    },
+                    location: this.location_id,
+                    name: object._bs_name,
+                    unique_id: object._bs_unique_id,
+                    project_id: project_id,
+                    zone: zone,
+                    metadata: object
+                };
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'POST',
+                    body: JSON.stringify(data)
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({show: true, success: true, heading: 'Node successfully linked.', details: json.detail});
+                    object._bs_attached = true;
+                    Alpine.store('showLoading').toggle();
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({show: true, error: true, heading: 'Error!', details: error.message});
+                    this.error = error;
+                    Alpine.store('showLoading').toggle();
+                });
+            },
+            async getOauthUrl() {
+                let url = "/api/v1/connections/" + this.integration_code + "/oauth_url/";
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.scheduleErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'OAuth URL Ready!', details: json.detail});#}
+                    this.oauth_url = json.oauth_url;
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({show: true, error: true, heading: 'Error! Unable to get OAuth url.', details: error.message});
+                });
+            },
+        }));
+    });
+</script>

@@ -1,0 +1,11 @@
+from django_filters import rest_framework as filters
+from apps.console.connection.models import CoreConnection
+
+
+class CoreWebsiteFilter(filters.FilterSet):
+    # can't use location because it's used in proxy
+    location_code = filters.CharFilter(field_name="location__code")
+
+    class Meta:
+        model = CoreConnection
+        fields = []

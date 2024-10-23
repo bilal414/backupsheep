@@ -1,0 +1,59 @@
+{% extends "console/emails/_master.html" %}
+{% block content %}
+    <h2>Whoops!</h2>
+    <p>The backup of node <strong>{{ node_name }}</strong> (<strong>{{ node_type }}</strong>) failed to upload to your
+        <strong>{{ storage_type }}</strong> storage <strong>{{ storage_name }}</strong> at
+        <strong>{{ backup_time }}</strong>. </p>
+
+    <p>This error could be temporary, and we will keep retrying backup upload <strong>every 15 minutes for next 24
+        hours</strong>.</p>
+
+    <p>Backup ID: {{ backup_name }}</p>
+
+    <!-- Action -->
+    <table class="body-action" align="center" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+            <td align="center">
+                <!-- Border based button https://litmus.com/blog/a-guide-to-bulletproof-buttons-in-email-design -->
+                <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                    <tr>
+                        <td align="center">
+                            <table border="0" cellspacing="0" cellpadding="0">
+                                <tr>
+                                    <td>
+                                        <a href="{{ action_url }}" class="button button--" target="_blank">check
+                                            node</a>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+
+    <p><strong>Error:</strong> {{ error_details }}</p>
+
+
+    <p>If your storage is using any firewall then make sure BackupSheep server <strong>{{ endpoint_location }}</strong>
+        IPv4 <strong>{{ endpoint_ip }}</strong> and IPv6 <strong>{{ endpoint_ipv6 }}</strong> is allowed. To view other
+        backup server IPs <a href="https://support.backupsheep.com/docs/backupsheep-ips">click here</a>
+    </p>
+
+    <p>Thanks,
+        <br>{{ sender_name }}</p>
+    <p><strong>P.S.</strong> Need immediate help getting started? Check out our <a
+            href="https://support.backupsheep.com">help documentation</a>. Or, just reply to this email, support
+        team is always ready to help!</p>
+    <!-- Sub copy -->
+    <table class="body-sub">
+        <tr>
+            <td>
+                <p class="sub">If you’re having trouble with the button above, copy and paste the URL below into your
+                    web browser.</p>
+                <p class="sub">{{ action_url }}</p>
+            </td>
+        </tr>
+    </table>
+{% endblock %}

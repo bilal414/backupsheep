@@ -1,0 +1,277 @@
+<div x-data="setupWordPressNode()">
+    <div class="grid grid-cols-1 gap-4">
+        <div>
+
+            <div class="bg-white shadow overflow-hidden sm:rounded-lg">
+                <div class="px-2 py-3 sm:px-2 bg-indigo-500">
+                    <h3 class="text-md leading-6  text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                        </svg>
+                        Node Configurations
+                    </h3>
+                </div>
+                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
+                    <dl class="grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-2">
+                        <div class="sm:col-span-2">
+                            <label for="name" class="block text-sm font-medium text-gray-700">
+                                Name
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="wordpress.name" type="text" name="name" id="name" autocomplete="name"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="wordpressErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
+                                   x-text="wordpressErrors?.name"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label for="include" class="block text-sm font-medium text-gray-700">
+                                What should be included in the backup?
+                            </label>
+                            <div class="relative mt-2">
+                                <button @click="toggleIncludeDropdown()"
+                                        type="button"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                    <span class="block truncate"
+                                          x-text="wordpress.include?.name||'--Select--'"></span>
+                                    <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                              <path fill-rule="evenodd"
+                                                    d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                                    clip-rule="evenodd"></path>
+                                            </svg>
+                                          </span>
+                                </button>
+
+                                <ul
+                                        x-show="openInclude"
+                                        @click.self="toggleIncludeDropdown()"
+                                        x-transition:enter=""
+                                        x-transition:enter-start=""
+                                        x-transition:enter-end=""
+                                        x-transition:leave="transition ease-in duration-100"
+                                        x-transition:leave-start="opacity-100"
+                                        x-transition:leave-end="opacity-0"
+                                        class="absolute z-20 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        tabindex="-1"
+                                        role="listbox"
+                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+
+                                    <template x-for="(include, index) in wordPressIncludes">
+                                        <li
+                                                @click="wordpress.include = include;toggleIncludeDropdown()"
+                                                @mouseenter="includeActiveIndex = include.id"
+                                                @mouseleave="includeActiveIndex = null"
+                                                :class="{ 'text-white bg-indigo-600': includeActiveIndex === include.id, 'text-gray-700': !(includeActiveIndex === include.id) }"
+                                                class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                id="listbox-option-0" role="option">
+                                                <span class="font-normal block truncate">
+                                                    <span x-text="include.name"></span>
+                                                </span>
+
+                                            <span
+                                                    x-show="wordpress.include?.id === include.id"
+                                                    :class="{ 'text-indigo-600': (wordpress.include?.id === include.id) && (includeActiveIndex !== include.id), 'text-white': (!(wordpress.include?.id === include.id) || (includeActiveIndex === include.id)) }"
+                                                    class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                  <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                       viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                    <path fill-rule="evenodd"
+                                                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                                          clip-rule="evenodd"></path>
+                                                  </svg>
+                                                </span>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                            <p x-show="wordpressErrors?.include" class="mt-2 text-sm text-red-600"
+                               id="region-error" x-text="wordpressErrors?.include"></p>
+                        </div>
+
+                        <div class="sm:col-span-2">
+                            <label for="notes" class="block text-sm font-medium text-gray-700">
+                                Notes
+                            </label>
+                            <div class="mt-1">
+                                          <textarea x-model="wordpress.notes" id="notes" name="notes" rows="3"
+                                                    class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md mt-3"></textarea>
+                                <p x-show="wordpressErrors?.notes" class="mt-2 text-sm text-red-600" id="notes-error"
+                                   x-text="wordpressErrors?.notes"></p>
+                            </div>
+                        </div>
+
+
+                    </dl>
+                    <button @click="saveWordPress()" type="button"
+                            class="mt-6 w-full justify-center inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-teal-600 hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        {% if not node.id %}
+                            <span>Create New Node</span>
+                        {% elif node.id %}
+                            <span>Save Node Changes</span>
+                        {% endif %}
+                    </button>
+                </div>
+                <div class="sm:col-span-1 mb-3" x-show="!errorObjectList">
+
+                </div>
+            </div>
+            {#x-show="wordpress.paths.length>0 && !wordpress.all_paths"#}
+
+
+        </div>
+    </div>
+</div>
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('setupWordPressNode', () => ({
+            loading: true,
+            error: null,
+            errorObjectList: null,
+            objectList: null,
+            wordPressIncludes: [
+                {id: 1, name: "Full (Database + Files)"},
+                {id: 2, name: "Only Database"},
+                {id: 3, name: "Only Files"}
+            ],
+            wordpress: {},
+            wordpressErrors: {},
+            integration_code: "{{integration.code}}",
+            connection_id: "{{connection.id}}",
+            location_id: "{{connection.location.id}}",
+            object_type: "{{object_code}}",
+
+            openInclude: false,
+            includeActiveIndex: false,
+
+            init() {
+                this.loading = true;
+                this.getWordPress();
+            },
+
+            openUrl(url) {
+                window.location.href = url;
+            },
+
+            toggleIncludeDropdown() {
+                this.openInclude = !this.openInclude;
+                this.includeActiveIndex = null;
+            },
+
+            async saveWordPress() {
+                Alpine.store('showLoading').toggle();
+
+                let url = "";
+                let method = "";
+
+                let data = {
+                    node: {
+                        connection: this.connection_id,
+                        name: this.wordpress.name,
+                    },
+                    location: this.location_id,
+                    name: this.wordpress.name,
+                    include: this.wordpress.include ? this.wordpress.include.id : 1,
+                    notes: this.wordpress.notes
+                };
+
+                if (this.wordpress.id) {
+                    url = "/api/v1/saas/" + this.integration_code + "/" + this.wordpress.id + "/";
+                    method = "PATCH";
+                } else {
+                    url = "/api/v1/saas/" + this.integration_code + "/";
+                    method = "POST";
+                }
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: method,
+                    body: JSON.stringify(data)
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.wordpressErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Node successfully linked.',
+                        details: json.detail
+                    });
+                    Alpine.store('showLoading').toggle();
+                    if (this.wordpress.id) {
+                        window.location.reload();
+                    } else {
+                        window.location.href = "/console/nodes/" + json.node.id;
+                    }
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                    this.error = error;
+                    Alpine.store('showLoading').toggle();
+                });
+            },
+
+            async getWordPress() {
+                let params = {}
+
+                let url = "/api/v1/saas/" + this.integration_code + "/" + "{{node.wordpress.id}}" + "/?" + new URLSearchParams(params);
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.wordpressErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    this.wordpress = json;
+                    if (this.wordpress.include) {
+                        this.wordpress.include = this.wordPressIncludes.find(({id}) => id === this.wordpress.include);
+                    } else {
+                        this.wordpress.include = this.wordPressIncludes.find(({id}) => id === 1);
+                    }
+                }).catch((error) => {
+                    this.error = error;
+                });
+            },
+
+        }));
+    });
+</script>

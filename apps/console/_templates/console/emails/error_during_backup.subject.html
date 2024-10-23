@@ -1,0 +1,32 @@
+Whoops!
+
+The backup attempt failed for your {{node_type}} node named {{ node_name }} at {{backup_time}}.
+
+Node backup failed because of following error.
+
+Error: {{error_details}}
+
+This error could be temporary, and we will retry backup again in few minutes. However, if you continue to get these alerts, then please check your node settings.
+
+You can check your node here: {{action_url}}
+
+For reference, details are following:
+
+Backup Typ: {{backup_type}}
+Backup Time: {{backup_time}}
+Node Type: {{node_type}}
+Node Status: {{node_status}}
+Node Name: {{node_name}}
+Integration Name: {{connection_name}}
+Integration Status: {{connection_status}}
+Endpoint: {{endpoint_name}} - {{endpoint_ip}}
+
+
+If you are using any firewall then make sure BackupSheep endpoint IP {{endpoint_ip}} is allowed. To view other endpoint IPs goto https://docs.backupsheep.com/introduction/multi-region
+
+Thanks,
+{{sender_name}}
+
+P.S. Need immediate help getting started? Check out our help documentation ( {{ help_url }} ). Or, just reply to this email, support team is always ready to help!
+
+

@@ -1,0 +1,1574 @@
+<div x-data="setupWebsiteNode()">
+    <div class="grid grid-cols-2 gap-4">
+        <div>
+
+            <div class="bg-white shadow overflow-hidden sm:rounded-lg">
+                <div class="px-2 py-3 sm:px-2 bg-indigo-600">
+                    <h3 class="text-md leading-6  text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                        </svg>
+                        Node Configurations
+                    </h3>
+                </div>
+                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
+                    <dl class="grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-2">
+
+
+                        <div class="sm:col-span-2">
+                            <label for="name" class="block text-sm font-medium text-gray-700">
+                                Name <small>(A node is a group of files and directories.)</small>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="website.name" type="text" name="name" id="name" autocomplete="name"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="websiteErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
+                                   x-text="websiteErrors?.name"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-2">
+                            <label for="include" class="block text-sm font-medium text-gray-700">
+                                Backup Type <span class="text-indigo-600">(Cannot modify Backup Type settings after node creation.)</span>
+                            </label>
+                            {% if not node.id %}
+                                <div class="relative mt-2">
+                                    <button @click="toggleBackupDropdown()"
+                                            type="button"
+                                            class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                            aria-haspopup="listbox" aria-expanded="true"
+                                            aria-labelledby="listbox-label">
+                                    <span class="block truncate"
+                                          x-text="website.backup_type?.name||'--Select--'"></span>
+                                        <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                              <path fill-rule="evenodd"
+                                                    d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                                    clip-rule="evenodd"></path>
+                                            </svg>
+                                          </span>
+                                    </button>
+
+                                    <ul
+                                            x-show="openBackupType"
+                                            @click.self="toggleBackupDropdown()"
+                                            x-transition:enter=""
+                                            x-transition:enter-start=""
+                                            x-transition:enter-end=""
+                                            x-transition:leave="transition ease-in duration-100"
+                                            x-transition:leave-start="opacity-100"
+                                            x-transition:leave-end="opacity-0"
+                                            class="absolute z-20 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                            tabindex="-1"
+                                            role="listbox"
+                                            aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+
+                                        <template x-for="(backup_type, index) in backupTypes">
+                                            <li
+                                                    @click="website.backup_type = backup_type;toggleBackupDropdown()"
+                                                    @mouseenter="backupTypeActiveIndex = backup_type.id"
+                                                    @mouseleave="backupTypeActiveIndex = null"
+                                                    :class="{ 'text-white bg-indigo-600': backupTypeActiveIndex === backup_type.id, 'text-gray-700': !(backupTypeActiveIndex === backup_type.id) }"
+                                                    class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                    id="listbox-option-0" role="option">
+                                                <span class="font-normal block truncate">
+                                                    <span x-text="backup_type.name"></span>
+                                                </span>
+
+                                                <span
+                                                        x-show="website.backup_type?.id === backup_type.id"
+                                                        :class="{ 'text-indigo-600': (website.backup_type?.id === backup_type.id) && (backupTypeActiveIndex !== backup_type.id), 'text-white': (!(website.backup_type?.id === backup_type.id) || (backupTypeActiveIndex === backup_type.id)) }"
+                                                        class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                  <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                       viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                    <path fill-rule="evenodd"
+                                                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                                          clip-rule="evenodd"></path>
+                                                  </svg>
+                                                </span>
+                                            </li>
+                                        </template>
+                                    </ul>
+                                </div>
+                            {% else %}
+                                <div class="relative mt-2">
+                                    <span x-text="website.backup_type?.name"></span>
+                                </div>
+                            {% endif %}
+                            <p x-show="websiteErrors?.backup_type" class="mt-2 text-sm text-red-600"
+                               id="region-error" x-text="websiteErrors?.backup_type"></p>
+
+
+                            <div class="overflow-hidden rounded-md bg-white shadow  mt-4"  x-show="website?.backup_type?.id && website?.backup_type?.id===1">
+                                <ul role="list" class="divide-y divide-gray-200">
+                                    <li class="px-2 py-2">
+                                        1. Files are downloaded from your server to BackupSheep server
+                                    </li>
+                                    <li class="px-2 py-2">
+                                        2. Files are compressed (zip) On BackupSheep server
+                                    </li>
+                                    <li class="px-2 py-2">
+                                        3. BackupSheep server upload backup to your storage accounts
+                                    </li>
+                                </ul>
+                            </div>
+
+                            <div class="overflow-hidden rounded-md bg-white shadow  mt-4"  x-show="website?.backup_type?.id && website?.backup_type?.id===4">
+                                <ul role="list" class="divide-y divide-gray-200">
+                                    <li class="px-2 py-2">
+                                        1. Full backup is generated on <strong>your server</strong> using <strong>Tar</strong>
+                                    </li>
+                                    <li class="px-2 py-2">
+                                        2. The backup file is downloaded to BackupSheep server.
+                                    </li>
+                                    <li class="px-2 py-2">
+                                        3. BackupSheep server upload backup to your storage accounts
+                                    </li>
+                                </ul>
+                            </div>
+                            <div class="overflow-hidden rounded-md bg-white shadow  mt-4"  x-show="website?.backup_type?.id && website?.backup_type?.id===2">
+                                <ul role="list" class="divide-y divide-gray-200">
+                                    <li class="px-2 py-2">
+                                        1. Incremental backup is generated on <strong>your server</strong> using <strong>Tar</strong>
+                                    </li>
+                                    <li class="px-2 py-2">
+                                        2. The backup file is downloaded to BackupSheep server.
+                                    </li>
+                                    <li class="px-2 py-2">
+                                        3. BackupSheep server upload backup to your storage accounts
+                                    </li>
+                                </ul>
+                            </div>
+                            <div class="overflow-hidden rounded-md bg-white shadow  mt-4"  x-show="website?.backup_type?.id && website?.backup_type?.id===3">
+                                <ul role="list" class="divide-y divide-gray-200">
+                                    <li class="px-2 py-2">
+                                        1. Differential backup is generated on <strong>your server</strong> using <strong>Tar</strong>
+                                    </li>
+                                    <li class="px-2 py-2">
+                                        2. The backup file is downloaded to BackupSheep server.
+                                    </li>
+                                    <li class="px-2 py-2">
+                                        3. BackupSheep server upload backup to your storage accounts
+                                    </li>
+                                </ul>
+                            </div>
+
+
+                            <div class="rounded-md bg-blue-50 p-4 mt-4" x-show="website?.backup_type?.id">
+                                <div class="flex">
+                                    <div class="flex-shrink-0">
+                                        <svg class="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor"
+                                             aria-hidden="true">
+                                            <path fill-rule="evenodd"
+                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a.75.75 0 000 1.5h.253a.25.25 0 01.244.304l-.459 2.066A1.75 1.75 0 0010.747 15H11a.75.75 0 000-1.5h-.253a.25.25 0 01-.244-.304l.459-2.066A1.75 1.75 0 009.253 9H9z"
+                                                  clip-rule="evenodd"></path>
+                                        </svg>
+                                    </div>
+                                    <div class="ml-3">
+                                        {% if connection.incremental_backup_available %}
+                                            <p class="text-blue-700" x-show="website?.backup_type?.id===1">
+                                                Only use <strong>Full v1</strong> when you don't have enough
+                                                temporary space on your server for backup.<br/>Your backup speed will
+                                                depend on size of your backup and number of files because we download
+                                                all files to BackupSheep server first and then create archive.
+
+                                            </p>
+                                            <p class="text-blue-700" x-show="website?.backup_type?.id===4">
+                                                For <strong>Full v2</strong> backups your server must have enough disk
+                                                space to create temporary backup and ability to create tar archive.
+                                            </p>
+                                            <p class="text-blue-700" x-show="website?.backup_type?.id===2">
+                                                For incremental backups your server must have enough disk space and
+                                                ability to create tar archive.
+                                            </p>
+                                            <p class="text-blue-700" x-show="website?.backup_type?.id===3">
+                                                For differential backups your server must have enough disk space and
+                                                ability to create tar archive.
+                                            </p>
+                                        {% else %}
+                                            <p class="text-sm text-blue-700" x-show="website?.backup_type?.id===1">
+                                                <strong>Incremental</strong> and <strong>Differential</strong> backup
+                                                type are available when you setup integration <strong>using SSH(use
+                                                public or private key)</strong> and your
+                                                server support <strong>tar</strong>.
+                                            </p>
+
+                                        {% endif %}
+
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {% if connection.incremental_backup_available %}
+                            <div class="sm:col-span-2"  x-show="website?.backup_type && website?.backup_type?.id!==1">
+                                <label for="custom_directory" class="block text-sm font-medium text-gray-700">
+                                    Temporary Backup Directory<br/>
+                                    <span class="text-indigo-600">(It must be outside any paths you wish to include in the backup)</span>
+                                </label>
+                                <div class="mt-1">
+                                    <input x-model="website.tar_temp_backup_dir" type="text" name="custom_directory"
+                                           id="custom_directory" placeholder="example: /var/log/backupsheep"
+                                           autocomplete="custom_directory"
+                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="websiteErrors?.tar_temp_backup_dir" class="mt-2 text-sm text-red-600"
+                                       id="name-error" x-text="websiteErrors?.tar_temp_backup_dir"></p>
+                                </div>
+                            </div>
+                        {% endif %}
+                        {#                        <div class="sm:col-span-2">#}
+                        {#                            <div class="rounded-md bg-blue-50 p-4 mb-3" x-show="website.all_paths">#}
+                        {#                                <div class="flex">#}
+                        {#                                    <div class="flex-shrink-0">#}
+                        {#                                        <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"#}
+                        {#                                             viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">#}
+                        {#                                            <path fill-rule="evenodd"#}
+                        {#                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"#}
+                        {#                                                  clip-rule="evenodd"></path>#}
+                        {#                                        </svg>#}
+                        {#                                    </div>#}
+                        {#                                    <div class="ml-3 flex-1 md:flex md:justify-between">#}
+                        {#                                        <p class="text-sm text-blue-700">#}
+                        {#                                            The <strong>Backup Everything</strong> option will backup everything under#}
+                        {#                                            the user's home/landing directory. We recommend including the specific#}
+                        {#                                            folders you want to backup for faster backups.#}
+                        {#                                        </p>#}
+                        {#                                    </div>#}
+                        {#                                </div>#}
+                        {#                            </div>#}
+                        {#                            <label for="name" class="block text-sm font-medium text-gray-700">#}
+                        {#                                Backup Everything (in user home directory)#}
+                        {#                            </label>#}
+                        {#                            <div class="mt-1">#}
+                        {#                                <button type="button"#}
+                        {#                                        @click="website.all_paths = !website.all_paths;"#}
+                        {#                                        :class="{ 'bg-indigo-600': website.all_paths, 'bg-gray-200': !(website.all_paths) }"#}
+                        {#                                        class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"#}
+                        {#                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">#}
+                        {#                                    <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->#}
+                        {#                                    <span :class="{ 'translate-x-5': website.all_paths, 'translate-x-0': !(website.all_paths) }"#}
+                        {#                                          aria-hidden="true"#}
+                        {#                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>#}
+                        {#                                </button>#}
+                        {#                                <p x-show="websiteErrors?.all_paths" class="mt-2 text-sm text-red-600" id="name-error"#}
+                        {#                                   x-text="websiteErrors?.all_paths"></p>#}
+                        {#                            </div>#}
+                        {##}
+                        {#                        </div>#}
+
+                        <div class="sm:col-span-2">
+                            <label for="parallel" class="block text-sm font-medium text-gray-700">
+                                Simultaneous Connections <span class="text-indigo-600">(set high number for faster download)</span>
+                            </label>
+                            <div class="relative mt-2">
+                                <button @click="toggleParallelDropdown()"
+                                        type="button"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
+                                    <span class="block truncate"
+                                          x-text="website.parallel||'--Simultaneous Connections--'"></span>
+                                    <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                              <path fill-rule="evenodd"
+                                                    d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                                                    clip-rule="evenodd"></path>
+                                            </svg>
+                                          </span>
+                                </button>
+
+                                <ul
+                                        x-show="openParallel"
+                                        @click.self="toggleParallelDropdown()"
+                                        x-transition:enter=""
+                                        x-transition:enter-start=""
+                                        x-transition:enter-end=""
+                                        x-transition:leave="transition ease-in duration-100"
+                                        x-transition:leave-start="opacity-100"
+                                        x-transition:leave-end="opacity-0"
+                                        class="absolute z-20 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        tabindex="-1"
+                                        role="listbox"
+                                        aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
+
+                                    <template x-for="(parallel, index) in websiteParallels">
+                                        <li
+                                                @click="website.parallel = parallel;toggleParallelDropdown()"
+                                                @mouseenter="parallelActiveIndex = index"
+                                                @mouseleave="parallelActiveIndex = null"
+                                                :class="{ 'text-white bg-indigo-600': parallelActiveIndex === index, 'text-gray-700': !(parallelActiveIndex === index) }"
+                                                class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                id="listbox-option-0" role="option">
+                                                <span class="font-normal block truncate">
+                                                    <span x-text="parallel"></span>
+                                                </span>
+
+                                            <span
+                                                    x-show="website.parallel === parallel"
+                                                    :class="{ 'text-indigo-600': (website.parallel === parallel) && (parallelActiveIndex !== index), 'text-white': (!(website.parallel === parallel) || (parallelActiveIndex === index)) }"
+                                                    class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                  <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                       viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                    <path fill-rule="evenodd"
+                                                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                                          clip-rule="evenodd"></path>
+                                                  </svg>
+                                                </span>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                            <p x-show="websiteErrors?.parallel" class="mt-2 text-sm text-red-600"
+                               id="region-error" x-text="websiteErrors?.parallel"></p>
+                            <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 mt-3 mb-3"
+                                 x-show="website?.parallel>3">
+                                <div class="flex">
+                                    <div class="flex-shrink-0">
+                                        <svg class="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg"
+                                             viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                            <path fill-rule="evenodd"
+                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                                  clip-rule="evenodd"></path>
+                                        </svg>
+                                    </div>
+                                    <div class="ml-3 flex-1 md:flex md:justify-between">
+                                        <p class="text-sm text-yellow-700">
+                                            If you are using cPanel then setting higher simultaneous connections may result
+                                            in
+                                            <strong> 421 too many connections from this IP error</strong>.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 mt-3 mb-3"
+                                 x-show="website?.parallel>5">
+                                <div class="flex">
+                                    <div class="flex-shrink-0">
+                                        <svg class="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg"
+                                             viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                            <path fill-rule="evenodd"
+                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                                  clip-rule="evenodd"></path>
+                                        </svg>
+                                    </div>
+                                    <div class="ml-3 flex-1 md:flex md:justify-between">
+                                        <p class="text-sm text-yellow-700">
+                                            Setting simultaneous connections to a high number can cause a high CPU load on a
+                                            small server. Use caution, and don't run all your node backups from the same
+                                            server simultaneously.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {#                        <div class="sm:col-span-1">#}
+                        {#                            <label for="verbose" class="block text-sm font-medium text-gray-700">#}
+                        {#                                Enable Detailed Logs <small>(use only when troubleshooting - may reduce speed)</small>#}
+                        {#                            </label>#}
+                        {#                            <div class="mt-1">#}
+                        {#                                <button type="button"#}
+                        {#                                        @click="website.verbose = !website.verbose;"#}
+                        {#                                        :class="{ 'bg-indigo-600': website.verbose, 'bg-gray-200': !(website.verbose) }"#}
+                        {#                                        class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"#}
+                        {#                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">#}
+                        {#                                    <span :class="{ 'translate-x-5': website.verbose, 'translate-x-0': !(website.verbose) }"#}
+                        {#                                          aria-hidden="true"#}
+                        {#                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>#}
+                        {#                                </button>#}
+                        {#                                <p x-show="websiteErrors?.verbose" class="mt-2 text-sm text-red-600" id="name-error"#}
+                        {#                                   x-text="websiteErrors?.verbose"></p>#}
+                        {#                            </div>#}
+                        {##}
+                        {#                        </div>#}
+
+
+                        <div class="sm:col-span-2">
+                            <label for="notes" class="block text-sm font-medium text-gray-700">
+                                Notes
+                            </label>
+                            <div class="mt-1">
+                                          <textarea x-model="website.notes" id="notes" name="notes" rows="3"
+                                                    class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md mt-3"></textarea>
+                                <p x-show="websiteErrors?.notes" class="mt-2 text-sm text-red-600" id="notes-error"
+                                   x-text="websiteErrors?.notes"></p>
+                            </div>
+                        </div>
+
+
+                    </dl>
+                    <button @click="saveWebsite()" type="button"
+                            class="mt-6 w-full justify-center inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-teal-600 hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        {% if not node.id %}
+                            <span>Create New Node</span>
+                        {% elif node.id %}
+                            <span>Save Node Changes</span>
+                        {% endif %}
+                    </button>
+                </div>
+                <div class="sm:col-span-1 mb-3" x-show="!errorObjectList">
+
+                </div>
+            </div>
+            {#x-show="website.paths.length>0 && !website.all_paths"#}
+
+
+        </div>
+        <div>
+            <div class="bg-white shadow overflow-hidden sm:rounded-lg">
+                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
+                    <h3 class="text-md leading-6  text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                  d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
+                        </svg>
+                        Backup Paths (Include & exclude rules apply to each path)
+                    </h3>
+                </div>
+
+                <div class="rounded-md bg-blue-50 p-4 ml-3 mr-3 mt-3 mb-3" x-show="website.paths?.length===0">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                <path fill-rule="evenodd"
+                                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                      clip-rule="evenodd"></path>
+                            </svg>
+                        </div>
+                        <div class="ml-3 flex-1 md:flex md:justify-between">
+                            <p class="text-sm text-blue-700">
+                                Add manual backup paths using <strong>Directory & File Paths</strong> or use <strong>Server
+                                File Explorer</strong> to browse & include
+                                files from your connected web server.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div class="rounded-md bg-blue-50 p-4 ml-3 mr-3 mt-3 mb-3" x-show="website.paths?.length===0">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                <path fill-rule="evenodd"
+                                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                      clip-rule="evenodd"></path>
+                            </svg>
+                        </div>
+                        <div class="ml-3 flex-1 md:flex md:justify-between">
+                            <p class="text-sm text-blue-700">
+                                To backup everything in your user home/landing directory add dot <strong>.</strong> as
+                                directory path.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div x-show="website.paths?.length>0">
+                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
+                        <div class="sm:col-span-1">
+                            <div class="border-t border-gray-200">
+                                <div class="overflow-x-auto">
+                                    <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
+                                        <tbody class="bg-white divide-y divide-gray-200">
+                                        <template x-for="object in website.paths">
+                                            <tr>
+                                                <td class="px-2 py-2 whitespace-nowrap">
+                                                    <div class="flex items-center">
+                                                        <div class="flex-shrink-0 h-6 w-6">
+                                                            <svg x-show="object.type==='file'"
+                                                                 xmlns="http://www.w3.org/2000/svg"
+                                                                 class="h-6 w-6 rounded-full text-indigo-600"
+                                                                 fill="none"
+                                                                 viewBox="0 0 24 24" stroke="currentColor">
+                                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                                      stroke-width="2"
+                                                                      d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"></path>
+                                                            </svg>
+
+                                                            <svg x-show="object.type==='directory'"
+                                                                 xmlns="http://www.w3.org/2000/svg"
+                                                                 class="h-6 w-6 rounded-full text-indigo-600"
+                                                                 fill="none"
+                                                                 viewBox="0 0 24 24" stroke="currentColor">
+                                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                                      stroke-width="2"
+                                                                      d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
+                                                            </svg>
+                                                        </div>
+                                                        <div class="ml-2">
+                                                            <div class="text-sm font-medium text-gray-700">
+                                                                <a class="cursor-pointer"
+                                                                   @click="getObjects(object.path)"
+                                                                   x-text="object.name"></a>
+                                                            </div>
+                                                            <div class="text-xs text-gray-700"
+                                                                 x-text="object.path"></div>
+                                                        </div>
+                                                    </div>
+                                                </td>
+
+                                                <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                                    <button @click="removePath(object)" type="button"
+                                                            class="text-center justify-center inline-flex items-center  mx-auto px-2 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        Remove
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        </template>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+
+            <div class="bg-white shadow overflow-hidden sm:rounded-lg  mt-6">
+                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
+                    <h3 class="text-md leading-6  text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        Include directory and file paths.
+                    </h3>
+                </div>
+
+                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
+                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
+                        <div class="sm:col-span-1">
+                            <label for="custom_directory" class="block text-sm font-medium text-gray-700">
+                                Directory Path
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="custom_directory" type="text" name="custom_directory"
+                                       id="custom_directory" placeholder="example: /home/websites/myblog.com/"
+                                       autocomplete="custom_directory"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="websiteErrors?.custom_directory" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.custom_directory"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-1">
+                            <button @click="addCustomObject(custom_directory, 'directory');custom_directory=null;"
+                                    type="button"
+                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                <span>Add</span>
+                            </button>
+                        </div>
+
+                        <div class="sm:col-span-1">
+                            <label for="custom_file" class="block text-sm font-medium text-gray-700">
+                                File Path
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="custom_file" type="text" name="custom_file"
+                                       id="custom_file" placeholder="example: /home/websites/myblog.com/wp-config.php"
+                                       autocomplete="custom_file"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="websiteErrors?.custom_file" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.custom_file"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-1">
+                            <button @click="addCustomObject(custom_file, 'file');custom_file=null;"
+                                    type="button"
+                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                <span>Add</span>
+                            </button>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+
+            <div class="bg-white shadow overflow-hidden sm:rounded-lg  mt-6" x-show="website?.backup_type?.id===1">
+                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
+                    <h3 class="text-md leading-6  text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        Regex Include Rules
+                    </h3>
+                </div>
+
+                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
+                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
+
+                        <div class="sm:col-span-1">
+                            <label for="include_regex" class="block text-sm font-medium text-gray-700">
+                                Regex (Regular Expression) <a class="text-indigo-600"
+                                                              href="https://support.backupsheep.com/docs/include-files-in-website-backup#using-regular-expression---regex"
+                                                              target="_blank">learn more</a>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="include_regex" type="text" name="include_regex"
+                                       id="include_regex" placeholder="example: (.*)\/public_html\/wp-content\/wpvividbackups\/.*zip$
+"
+                                       autocomplete="include_regex"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="websiteErrors?.include_regex" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.include_regex"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-1">
+                            <button @click="addIncludeRegex(include_regex);include_regex=null;" type="button"
+                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                <span>Add</span>
+                            </button>
+                        </div>
+                        <div class="border-t border-gray-200 " x-show="website.includes_regex?.length>0">
+                            <div class="overflow-x-auto">
+                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                    <template x-for="object in website.includes_regex">
+                                        <tr>
+                                            <td class="px-2 py-2 whitespace-nowrap">
+                                                <div class="flex items-center">
+                                                    <div class="flex-shrink-0 h-6 w-6">
+                                                        <svg xmlns="http://www.w3.org/2000/svg"
+                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
+                                                             viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                  stroke-width="2"
+                                                                  d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
+                                                        </svg>
+                                                    </div>
+                                                    <div class="ml-2">
+                                                        <div class="text-sm font-sm text-gray-700">
+                                                            <a x-text="object"></a>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </td>
+
+                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                                <button @click="removeIncludeRegex(object)" type="button"
+                                                        class="text-center justify-center inline-flex items-center  mx-auto px-2 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    Remove
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    </template>
+
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+
+            <div class="bg-white shadow overflow-hidden sm:rounded-lg  mt-6"  x-show="website?.backup_type?.id===1">
+                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
+                    <h3 class="text-md leading-6  text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        Glob Include Rules
+                    </h3>
+                </div>
+
+                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
+                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
+                        <div class="sm:col-span-1">
+                            <label for="include_glob" class="block text-sm font-medium text-gray-700">
+                                Glob Patterns <a class="text-indigo-600"
+                                                 href="https://support.backupsheep.com/docs/include-files-in-website-backup#using-glob-pattern"
+                                                 target="_blank">learn more</a>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="include_glob" type="text" name="include_glob"
+                                       id="include_glob"
+                                       placeholder="example: */public_html/wp-content/wpvividbackups/*.zip"
+                                       autocomplete="include_glob"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="websiteErrors?.include_glob" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.include_glob"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-1">
+                            <button @click="addIncludeGlob(include_glob);include_glob=null;" type="button"
+                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                <span>Add</span>
+                            </button>
+                        </div>
+                        <div class="border-t border-gray-200 " x-show="website.includes_glob?.length>0">
+                            <div class="overflow-x-auto">
+                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                    <template x-for="object in website.includes_glob">
+                                        <tr>
+                                            <td class="px-2 py-2 whitespace-nowrap">
+                                                <div class="flex items-center">
+                                                    <div class="flex-shrink-0 h-6 w-6">
+                                                        <svg xmlns="http://www.w3.org/2000/svg"
+                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
+                                                             viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                  stroke-width="2"
+                                                                  d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
+                                                        </svg>
+                                                    </div>
+                                                    <div class="ml-2">
+                                                        <div class="text-sm font-sm text-gray-700">
+                                                            <a x-text="object"></a>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </td>
+
+                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                                <button @click="removeIncludeGlob(object)" type="button"
+                                                        class="text-center justify-center inline-flex items-center  mx-auto px-2 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    Remove
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    </template>
+
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+
+            <div class="bg-white shadow overflow-hidden sm:rounded-lg mt-6"  x-show="website?.backup_type?.id===1">
+                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
+                    <h3 class="text-md leading-6  text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        Regex Exclude Rules
+                    </h3>
+                </div>
+                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
+                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
+                        <div class="sm:col-span-1">
+                            <label for="exclude_regex" class="block text-sm font-medium text-gray-700">
+                                Regex Pattern, e.g. ^\.svn <a class="text-indigo-600"
+                                                              href="https://support.backupsheep.com/docs/exclude-files-from-website-backup#using-regular-expression---regex"
+                                                              target="_blank">learn more</a>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="exclude_regex" type="text" name="exclude_regex" id="exclude_regex"
+                                       autocomplete="exclude_regex"
+                                       placeholder="example: ^\.svn (to exclude .svn directory)"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="websiteErrors?.excludes_regex" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.excludes_regex"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-1">
+                            <button @click="addExcludeRegex(exclude_regex);exclude_regex=null;" type="button"
+                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                <span>Add</span>
+                            </button>
+                        </div>
+                        <div class="border-t border-gray-200 " x-show="website.excludes_regex?.length>0">
+                            <div class="overflow-x-auto">
+                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                    <template x-for="object in website.excludes_regex">
+                                        <tr>
+                                            <td class="px-2 py-2 whitespace-nowrap">
+                                                <div class="flex items-center">
+                                                    <div class="flex-shrink-0 h-6 w-6">
+                                                        <svg xmlns="http://www.w3.org/2000/svg"
+                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
+                                                             viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                  stroke-width="2"
+                                                                  d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
+                                                        </svg>
+                                                    </div>
+                                                    <div class="ml-2">
+                                                        <div class="text-sm font-sm text-gray-700">
+                                                            <a x-text="object"></a>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </td>
+
+                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                                <button @click="removeExcludeRegex(object)" type="button"
+                                                        class="text-center justify-center inline-flex items-center  mx-auto px-2 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    Remove
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    </template>
+
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+
+             {% if connection.incremental_backup_available %}
+                <div x-show="website?.backup_type && website?.backup_type?.id!==1" class="bg-white shadow overflow-hidden sm:rounded-lg mt-6">
+                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
+                    <h3 class="text-md leading-6  text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        Tar Exclude Rules
+                    </h3>
+                </div>
+                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
+                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1 overflow-hidden overflow-y-scroll h-64 max-h-full">
+                       <div class="sm:col-span-1">
+                           <label for="tar_exclude_vcs_ignores" class="block text-sm font-medium text-gray-700">
+                               --exclude-vcs-ignores
+                           </label>
+                           <div class="text-sm mt-2">
+                               Before archiving a directory, see if it contains any of the following files:
+                               ‘cvsignore’, ‘.gitignore’, ‘.bzrignore’, or ‘.hgignore’.
+                               If so, read ignore patterns from these files.
+                           </div>
+                            <div class="mt-4">
+                                <button type="button"
+                                        @click="website.tar_exclude_vcs_ignores = !website.tar_exclude_vcs_ignores;"
+                                        :class="{ 'bg-indigo-600': website.tar_exclude_vcs_ignores, 'bg-gray-200': !(website.tar_exclude_vcs_ignores) }"
+                                        class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                    <span :class="{ 'translate-x-5': website.tar_exclude_vcs_ignores, 'translate-x-0': !(website.tar_exclude_vcs_ignores) }"
+                                          aria-hidden="true"
+                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                </button>
+                                <p x-show="websiteErrors?.tar_exclude_vcs_ignores" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.tar_exclude_vcs_ignores"></p>
+                            </div>
+                        </div>
+                       <div class="sm:col-span-1">
+                           <label for="tar_exclude_vcs" class="block text-sm font-medium text-gray-700">
+                               --exclude-vcs
+                           </label>
+                           <div class="text-sm mt-2">
+                                Exclude files and directories used by following version control
+                               systems: ‘CVS’, ‘RCS’, ‘SCCS’, ‘SVN’, ‘Arch’, ‘Bazaar’, ‘Mercurial’, and ‘Darcs’.
+                           </div>
+                            <div class="mt-4">
+                                <button type="button"
+                                        @click="website.tar_exclude_vcs = !website.tar_exclude_vcs;"
+                                        :class="{ 'bg-indigo-600': website.tar_exclude_vcs, 'bg-gray-200': !(website.tar_exclude_vcs) }"
+                                        class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                    <span :class="{ 'translate-x-5': website.tar_exclude_vcs, 'translate-x-0': !(website.tar_exclude_vcs) }"
+                                          aria-hidden="true"
+                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                </button>
+                                <p x-show="websiteErrors?.tar_exclude_vcs" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.tar_exclude_vcs"></p>
+                            </div>
+                        </div>
+                       <div class="sm:col-span-1">
+                           <label for="tar_exclude_backups" class="block text-sm font-medium text-gray-700">
+                               --exclude-backups
+                           </label>
+                           <div class="text-sm mt-2">
+                                Exclude backup and lock files. This option causes exclusion of files
+                               that match the following shell globbing patterns:.#*, *~, #*#
+                           </div>
+                            <div class="mt-4">
+                                <button type="button"
+                                        @click="website.tar_exclude_backups = !website.tar_exclude_backups;"
+                                        :class="{ 'bg-indigo-600': website.tar_exclude_backups, 'bg-gray-200': !(website.tar_exclude_backups) }"
+                                        class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                    <span :class="{ 'translate-x-5': website.tar_exclude_backups, 'translate-x-0': !(website.tar_exclude_backups) }"
+                                          aria-hidden="true"
+                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                </button>
+                                <p x-show="websiteErrors?.tar_exclude_backups" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.tar_exclude_backups"></p>
+                            </div>
+                        </div>
+                       <div class="sm:col-span-1">
+                           <label for="tar_exclude_caches" class="block text-sm font-medium text-gray-700">
+                               --exclude-caches
+                           </label>
+                           <div class="text-sm mt-2">
+                              Do not archive the contents of the directory,
+                               but archive the directory itself and the ‘CACHEDIR.TAG’ file.
+                           </div>
+                            <div class="mt-4">
+                                <button type="button"
+                                        @click="website.tar_exclude_caches = !website.tar_exclude_caches;"
+                                        :class="{ 'bg-indigo-600': website.tar_exclude_caches, 'bg-gray-200': !(website.tar_exclude_caches) }"
+                                        class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                    <span :class="{ 'translate-x-5': website.tar_exclude_caches, 'translate-x-0': !(website.tar_exclude_caches) }"
+                                          aria-hidden="true"
+                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                </button>
+                                <p x-show="websiteErrors?.tar_exclude_caches" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.tar_exclude_caches"></p>
+                            </div>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="bg-white shadow overflow-hidden sm:rounded-lg mt-6">
+                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
+                    <h3 class="text-md leading-6  text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        Glob Exclude Rules
+                    </h3>
+                </div>
+                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
+                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
+                        <div class="sm:col-span-1">
+                            <label for="exclude_glob" class="block text-sm font-medium text-gray-700">
+                                Glob Pattern, e.g. *.zip <a class="text-indigo-600"
+                                                            href="https://support.backupsheep.com/docs/exclude-files-from-website-backup#using-glob-pattern"
+                                                            target="_blank">learn more</a>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="exclude_glob" type="text" name="exclude_glob" id="exclude_glob"
+                                       autocomplete="exclude_glob"
+                                       placeholder="example: *.zip (all .zip files in all directories)"
+                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="websiteErrors?.excludes_glob" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.excludes_glob"></p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-1">
+                            <button @click="addExcludeGlob(exclude_glob);exclude_glob=null;" type="button"
+                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                <span>Add</span>
+                            </button>
+                        </div>
+
+                        <div class="border-t border-gray-200  " x-show="website.excludes_glob?.length>0">
+                            <div class="overflow-y-scroll h-64 max-h-full">
+                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                    <template x-for="object in website.excludes_glob">
+                                        <tr>
+                                            <td class="px-2 py-2 whitespace-nowrap">
+                                                <div class="flex items-center">
+                                                    <div class="flex-shrink-0 h-6 w-6">
+                                                        <svg xmlns="http://www.w3.org/2000/svg"
+                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
+                                                             viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                  stroke-width="2"
+                                                                  d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
+                                                        </svg>
+                                                    </div>
+                                                    <div class="ml-2">
+                                                        <div class="text-sm font-sm text-gray-700">
+                                                            <a x-text="object"></a>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </td>
+
+                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                                <button @click="removeExcludeGlob(object)" type="button"
+                                                        class="text-center justify-center inline-flex items-center  mx-auto px-2 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    Remove
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    </template>
+
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                    </dl>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 gap-4 mt-10">
+        <div class="bg-white shadow overflow-hidden sm:rounded-lg mt-6">
+            <div class="px-2 py-3 sm:px-2  bg-indigo-600">
+                <h3 class="text-md leading-6  text-white">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
+                         viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                              d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path>
+                    </svg>
+                    Server File Explorer <small>(use this to browser your server and include/exclude backup
+                    paths)</small>
+                </h3>
+            </div>
+            <div class="px-4 py-6 pb-7 sm:px-6">
+                <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
+                    <template x-if="loading===true">
+                        <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg pb-4 pt-4">
+                            <div class="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-indigo-600">
+                                <svg class="animate-spin h-14 w-14 text-white" xmlns="http://www.w3.org/2000/svg"
+                                     fill="none"
+                                     viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                            stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor"
+                                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                            </div>
+                        </div>
+                    </template>
+                    <div class="flex flex-col x-cloak" x-show="loading===false && errorObjectList">
+                        <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+                            <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
+                                <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                                    <div class="overflow-x-auto">
+                                        <div class="rounded-md bg-red-50 p-4">
+                                            <div class="flex">
+                                                <div class="flex-shrink-0">
+                                                    <svg class="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg"
+                                                         viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                        <path fill-rule="evenodd"
+                                                              d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                                                              clip-rule="evenodd"></path>
+                                                    </svg>
+                                                </div>
+                                                <div class="ml-3">
+                                                    <h3 class="text-sm font-medium text-red-800">Error fetching objects
+                                                        from
+                                                        integration.</h3>
+                                                    <div class="mt-2 text-sm text-red-700">
+                                                        <ul role="list" class="list-disc pl-5 space-y-1">
+                                                            <li x-text="errorObjectList?.message"></li>
+                                                        </ul>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div x-show="!errorObjectList" class="overflow-x-auto">
+                        <table id="section-nodes" class="min-w-full divide-y divide-gray-200"
+                               x-show="loading===false">
+                            <thead class="bg-gray-50">
+                            <tr>
+
+                                <th scope="col"
+                                    class="px-2 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider"
+                                >
+                                    <nav class="flex x-cloak text-indigo-600" aria-label="Breadcrumb"
+                                         x-show="loading===false">
+                                        <ol role="list" class="flex items-center space-x-2">
+                                            <li>
+                                                <div class="flex items-center ml-2 text-md font-medium text-white-500 hover:text-white-700">
+                                                    Nav:
+                                                </div>
+                                            </li>
+                                            <template x-for="path in pathTree">
+                                                <li>
+                                                    <div class="flex items-center">
+                                                        <svg class="flex-shrink-0 h-4 w-4 text-white-300"
+                                                             xmlns="http://www.w3.org/2000/svg"
+                                                             fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+                                                            <path d="M5.555 17.776l8-16 .894.448-8 16-.894-.448z"></path>
+                                                        </svg>
+                                                        <a @click="getObjects(path.path)"
+                                                           class="cursor-pointer ml-2 text-md font-medium text-white-500 hover:text-white-700"
+                                                           x-text="path.name"></a>
+                                                    </div>
+                                                </li>
+                                            </template>
+                                        </ol>
+                                    </nav>
+                                </th>
+                                <th scope="col"></th>
+                            </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200">
+                            <template x-for="object in objectList">
+                                <tr>
+                                    <td class="px-2 py-2 whitespace-nowrap max-w-lg">
+                                        <div class="flex items-center">
+                                            <div class="flex-shrink-0 h-6 w-6">
+                                                <svg x-show="object.type==='file'"
+                                                     xmlns="http://www.w3.org/2000/svg"
+                                                     class="h-6 w-6 rounded-full text-indigo-600" fill="none"
+                                                     viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                          stroke-width="2"
+                                                          d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"></path>
+                                                </svg>
+
+                                                <svg @click="getObjects(object.path)" x-show="object.type==='directory'"
+                                                     xmlns="http://www.w3.org/2000/svg"
+                                                     class="h-6 w-6 rounded-full text-indigo-600 cursor-pointer"
+                                                     fill="none"
+                                                     viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                          stroke-width="2"
+                                                          d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
+                                                </svg>
+                                            </div>
+                                            <div class="ml-2">
+                                                <div class="text-sm font-sm text-gray-700">
+                                                    <a class="cursor-pointer" x-show="object.type==='directory'"
+                                                       @click="getObjects(object.path)"
+                                                       x-text="object.name"></a>
+                                                    <a x-show="object.type==='file'" x-text="object.name"></a> (<small
+                                                        class="text-xs text-gray-700 " x-text="object.path"></small>)
+
+                                                </div>
+
+                                            </div>
+                                        </div>
+                                    </td>
+
+                                    <td class="whitespace-nowrap">
+                                        <button @click="addObject(object)"
+                                                type="button"
+                                                class="mr-2  inline-flex items-center mx-auto px-2.5 py-1 border border-gray-300 shadow-sm text-sm  font-light rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                            Include
+                                        </button>
+{#                                        <button @click="removeObject(object)" type="button"#}
+{#                                                class="mr-2  inline-flex items-center mx-auto px-2.5 py-1 border border-gray-300 shadow-sm text-sm  font-light rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
+{#                                            Exclude#}
+{#                                        </button>#}
+                                        <button x-show="object.type==='directory'"
+                                                @click="getObjects(object.path)"
+                                                type="button"
+                                                class="inline-flex items-center mx-auto px-2.5 py-1 border border-gray-300 shadow-sm text-sm  font-light rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                            Open Directory
+                                        </button>
+                                    </td>
+                                </tr>
+                            </template>
+                            <tr x-show="objectList?.length === 0">
+                                <td class="px-2 py-2 whitespace-nowrap">
+                                    <div class="rounded-md bg-blue-50 p-4">
+                                        <div class="flex">
+                                            <div class="flex-shrink-0">
+                                                <svg class="h-5 w-5 text-blue-400"
+                                                     xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
+                                                     fill="currentColor" aria-hidden="true">
+                                                    <path fill-rule="evenodd"
+                                                          d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                                          clip-rule="evenodd"></path>
+                                                </svg>
+                                            </div>
+                                            <div class="ml-3 flex-1 md:flex md:justify-between">
+                                                <p class="text-sm text-blue-700">No objects found from
+                                                    integration.</p>
+
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                </td>
+                            </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </dl>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('setupWebsiteNode', () => ({
+            loading: true,
+            error: null,
+            errorObjectList: null,
+            objectList: null,
+            pathTree: [],
+            oauth_url: null,
+            custom_exclude: null,
+            exclude_regex: null,
+            exclude_glob: null,
+            include_regex: null,
+            include_glob: null,
+            custom_directory: null,
+            custom_file: null,
+            {#parallelActiveIndex: {{node.website.parallel|default:0|add:-1}},#}
+            parallelActiveIndex: null,
+            openParallel: null,
+            websiteParallels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            website: {
+                parallel: {{node.website.parallel|default:3}},
+                paths: [],
+                excludes: [],
+                excludes_regex: [],
+                excludes_glob: ["/boot", "/run", "/proc", "/sys", "/mnt", "/media", "/dev", "/var/run", "/var/cache", "/var/tmp", "/var/lib/apt/lists", "/var/lib/lxcfs", "/bin", "/lib", "/lib64", "/sbin", "/usr/share", "/usr/src", "/usr/lib", "/usr/bin", "/usr/sbin", "/swap", "/swapfile", "/home/*/.gvfs", "/home/*/.cache", "/home/*/.local/share/Trash", "/tmp"],
+                includes_regex: [],
+                includes_glob: [],
+                tar_temp_backup_dir: null,
+                tar_exclude_vcs_ignores: null,
+                tar_exclude_vcs: null,
+                tar_exclude_backups: null,
+                tar_exclude_caches: null,
+            },
+            websiteErrors: {},
+            integration_code: "{{integration.code}}",
+            connection_id: "{{connection.id}}",
+            location_id: "{{connection.location.id}}",
+            object_type: "{{object_code}}",
+            backupTypeActiveIndex: false,
+            openBackupType: false,
+            {% if connection.incremental_backup_available %}
+                backupTypes: [
+                    {id: 1, name: "Full v1"},
+                    {id: 4, name: "Full v2"},
+                    {id: 2, name: "Incremental"},
+                    {id: 3, name: "Differential"},
+
+                ],
+            {% else %}
+                backupTypes: [
+                    {id: 1, name: "Full"},
+                ],
+            {% endif %}
+            init() {
+                this.loading = true;
+                //this.parallelActiveIndex = this.websiteParallels.filter(obj => {
+                //   return obj ===
+                //   {{node.website.parallel|default:0}}
+                //})[0];
+                this.getObjects();
+            },
+
+            openUrl(url) {
+                window.location.href = url;
+            },
+            addObject(object) {
+                console.log(object);
+                if (!this.website.paths.includes(object)) {
+                    this.website.paths.push(object);
+                    this.website.excludes = this.website.excludes.filter(el => el.path !== object.path);
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Success!',
+                        details: "Backup paths updated."
+                    });
+                }
+            },
+
+            addCustomObject(path, type) {
+                if (path) {
+                    if (path.trim() !== "") {
+                        let path_obj = {path: path, type: type, 'name': path}
+                        this.addObject(path_obj);
+                    }
+                }
+
+            },
+
+            removeObject(object) {
+                if (object) {
+                    if (object !== "") {
+                        if (!this.website.excludes.includes(object)) {
+                            this.website.excludes.push(object);
+                            if (object.path) {
+                                this.website.paths = this.website.paths.filter(el => el.path !== object.path);
+                            }
+                            Alpine.store('notifications').items.push({
+                                show: true,
+                                success: true,
+                                heading: 'Success!',
+                                details: "Excluded paths list updated"
+                            });
+                        }
+                    }
+                }
+            },
+            removePath(object) {
+                this.website.paths = this.website.paths.filter(el => el.path !== object.path);
+            },
+            removeExclude(object) {
+                if (object.path) {
+                    this.website.excludes = this.website.excludes.filter(el => el.path !== object.path);
+                } else {
+                    this.website.excludes = this.website.excludes.filter(el => el !== object);
+                }
+            },
+            toggleParallelDropdown() {
+                this.openParallel = !this.openParallel;
+                this.parallelActiveIndex = null;
+            },
+            addExcludeRegex(object) {
+                if (this.website.excludes_regex === null) {
+                    this.website.excludes_regex = [];
+                }
+                this.website.excludes_regex.push(object);
+            },
+            removeExcludeRegex(object) {
+                this.website.excludes_regex = this.website.excludes_regex.filter(el => el !== object);
+            },
+            addExcludeGlob(object) {
+                if (this.website.excludes_glob === null) {
+                    this.website.excludes_glob = [];
+                }
+                this.website.excludes_glob.push(object);
+            },
+            removeExcludeGlob(object) {
+                this.website.excludes_glob = this.website.excludes_glob.filter(el => el !== object);
+            },
+
+            addIncludeRegex(object) {
+                if (this.website.includes_regex === null) {
+                    this.website.includes_regex = [];
+                }
+                this.website.includes_regex.push(object);
+            },
+            removeIncludeRegex(object) {
+                this.website.includes_regex = this.website.includes_regex.filter(el => el !== object);
+            },
+
+            addIncludeGlob(object) {
+                if (this.website.includes_glob === null) {
+                    this.website.includes_glob = [];
+                }
+                this.website.includes_glob.push(object);
+            },
+            removeIncludeGlob(object) {
+                this.website.includes_glob = this.website.includes_glob.filter(el => el !== object);
+            },
+            toggleBackupDropdown() {
+                this.openBackupType = !this.openBackupType;
+                this.backupTypeActiveIndex = null;
+            },
+
+            async getObjects(path) {
+                this.loading = true;
+                this.errorObjectList = null;
+
+                {% if node.id %}
+                    if (!this.website.id) {
+                        await this.getWebsite();
+                    }
+                {% endif %}
+
+                let params = {
+                    location: this.location_id,
+                }
+                if (path) {
+                    params.path = path;
+                }
+                let url = "/api/proxy/connections/" + this.integration_code + "/" + this.connection_id + "/objects/?" + new URLSearchParams(params);
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        this.loading = false;
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.scheduleErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'OAuth URL Ready!', details: json.detail});#}
+                    this.objectList = json.eligible_objects;
+                    this.pathTree = json.path_tree;
+                    this.loading = false;
+                }).catch((error) => {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Error!',
+                        details: error.message
+                    });
+                    this.errorObjectList = error;
+                });
+            },
+
+            async getWebsite() {
+                let params = {}
+
+                let url = "/api/v1/" + this.integration_code + "s/" + "{{node.website.id}}" + "/?" + new URLSearchParams(params);
+
+                let response = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    method: 'GET',
+                }).then(async (response) => {
+                    if (response.ok) {
+                        return response.json();
+                    } else {
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (exception_var) {
+                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                        }
+
+                        this.websiteErrors = json;
+                        throw new Error(json.detail);
+                    }
+                }).then((json) => {
+                    this.website = json;
+                    if (this.website.excludes === null) {
+                        this.website.excludes = [];
+                    }
+                    if (this.website.paths === null) {
+                        this.website.paths = [];
+                    }
+                    if (this.website.backup_type) {
+                        this.website.backup_type = this.backupTypes.find(({id}) => id === this.website.backup_type);
+                    } else {
+                        this.website.backup_type = this.backupTypes.find(({id}) => id === 1);
+                    }
+                }).catch((error) => {
+                    this.error = error;
+                });
+            },
+            async saveWebsite() {
+                if (this.website?.backup_type?.id!==1 && this.website?.tar_temp_backup_dir===null){
+                     Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Temporary Backup Directory Empty',
+                        details: 'Specify a directory where we can store the temporary backup archive.' +
+                            ' It must be outside any paths you wish to include in the backup.'
+                    });
+                    return;
+                }
+                if (this.website.paths?.length > 0) {
+                    this.website.all_paths = null;
+
+                    Alpine.store('showLoading').toggle();
+
+                    let url = "";
+                    let method = "";
+
+                    let data = {
+                        node: {
+                            connection: this.connection_id,
+                            name: this.website.name,
+                        },
+                        location: this.location_id,
+                        backup_type: this.website.backup_type?.id,
+                        all_paths: this.website.all_paths,
+                        paths: this.website.paths,
+                        excludes: this.website.excludes,
+                        excludes_regex: this.website.excludes_regex,
+                        excludes_glob: this.website.excludes_glob,
+                        includes_regex: this.website.includes_regex,
+                        includes_glob: this.website.includes_glob,
+                        name: this.website.name,
+                        parallel: this.website.parallel,
+                        verbose: this.website.verbose,
+                        tar_temp_backup_dir: this.website.tar_temp_backup_dir,
+                        tar_exclude_vcs_ignores: this.website.tar_exclude_vcs_ignores,
+                        tar_exclude_vcs: this.website.tar_exclude_vcs,
+                        tar_exclude_backups: this.website.tar_exclude_backups,
+                        tar_exclude_caches: this.website.tar_exclude_caches,
+                        notes: this.website.notes
+                    };
+
+                    if (this.website.id) {
+                        url = "/api/v1/websites/" + this.website.id + "/";
+                        method = "PATCH";
+                    } else {
+                        url = "/api/v1/websites/";
+                        method = "POST";
+                    }
+
+                    if (this.website.all_paths === true) {
+                        data.paths = null;
+                    }
+
+                    let response = await fetch(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: method,
+                        body: JSON.stringify(data)
+                    }).then(async (response) => {
+                        if (response.ok) {
+                            return response.json();
+                        } else {
+                            this.loading = false;
+                            let json;
+                            try {
+                                json = await response.json();
+                            } catch (exception_var) {
+                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                            }
+
+                            this.websiteErrors = json;
+                            throw new Error(json.detail);
+                        }
+                    }).then((json) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            success: true,
+                            heading: 'Node successfully linked.',
+                            details: json.detail
+                        });
+                        Alpine.store('showLoading').toggle();
+                        if (this.website.id) {
+                            window.location.reload();
+                        } else {
+                            window.location.href = "/console/nodes/" + json.node.id;
+                        }
+                    }).catch((error) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            error: true,
+                            heading: 'Error!',
+                            details: error.message
+                        });
+                        this.error = error;
+                        Alpine.store('showLoading').toggle();
+                    });
+                } else {
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        error: true,
+                        heading: 'Backup Paths Empty.',
+                        details: 'Your Backup Paths list is empty. Please include directories/files you want to backup.'
+                    });
+                }
+
+            },
+        }));
+    });
+</script>

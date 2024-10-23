@@ -1,0 +1,833 @@
+{% extends "console/_master.html" %}
+{% block title %}{{ heading }}{% endblock %}
+{% block meta_title %}{{ heading }}{% endblock %}
+{% block meta_description %}{{ heading }}{% endblock %}
+{% block meta_keywords %}{{ heading }}{% endblock %}
+{% block page_class %}page_console console-page sb-l-o sb-r-c{% endblock %}
+{% load humanize %}
+{% load tz %}
+
+{% block content %}
+    <div>
+        <dl class="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-5">
+            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow rounded-lg overflow-hidden">
+                <dt>
+                    <div class="absolute bg-indigo-500 rounded-md p-3">
+                        <!-- Heroicon name: outline/users -->
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
+                        </svg>
+                    </div>
+                    <p class="ml-16 text-sm font-medium text-gray-700 truncate">Servers</p>
+                </dt>
+                <dd class="ml-16 pb-6 flex items-baseline sm:pb-7">
+                    <p class="text-2xl font-semibold text-gray-700">
+                        {{ total_clouds }}
+                    </p>
+{##}
+{#                     <div class="absolute bottom-0 inset-x-0 bg-gray-50 px-4 py-4 sm:px-6">#}
+{#                        <div class="text-sm">#}
+{#                            <div class="flex justify-between">#}
+{#                                <div>#}
+{#                                    <a class="font-medium text-indigo-600 hover:text-indigo-500">Servers: {{ total_clouds|intcomma }}</a>#}
+{#                                </div>#}
+{#                                <div>#}
+{#                                    <a class="font-medium text-indigo-600 hover:text-indigo-500">Volumes: {{ total_volumes|intcomma }}</a>#}
+{#                                </div>#}
+{#                            </div>#}
+{#                        </div>#}
+{#                    </div>#}
+                </dd>
+            </div>
+
+            <div class="relative bg-white pt-5 px-4  sm:pt-6 sm:px-6 shadow rounded-lg overflow-hidden">
+                <dt>
+                    <div class="absolute bg-indigo-500 rounded-md p-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+                        </svg>
+                    </div>
+                    <p class="ml-16 text-sm font-medium text-gray-700 truncate">Volumes</p>
+                </dt>
+                <dd class="ml-16 pb-6 flex items-baseline sm:pb-7">
+                    <p class="text-2xl font-semibold text-gray-700">
+                        {{ total_volumes }}
+                    </p>
+{#                   <div class="absolute bottom-0 inset-x-0 bg-gray-50 px-4 py-4 sm:px-6">#}
+{#                        <div class="text-sm">#}
+{#                            <div class="flex justify-between">#}
+{#                                <div>#}
+{#                                    <a class="font-medium text-indigo-600 hover:text-indigo-500">Servers: {{ total_clouds|intcomma }}</a>#}
+{#                                </div>#}
+{#                                <div>#}
+{#                                    <a class="font-medium text-indigo-600 hover:text-indigo-500">Volumes: {{ total_volumes|intcomma }}</a>#}
+{#                                </div>#}
+{#                            </div>#}
+{#                        </div>#}
+{#                    </div>#}
+                </dd>
+            </div>
+
+            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow rounded-lg overflow-hidden">
+                <dt>
+                    <div class="absolute bg-indigo-500 rounded-md p-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path>
+                        </svg>
+                    </div>
+                    <p class="ml-16 text-sm font-medium text-gray-700 truncate">Websites</p>
+                </dt>
+                <dd class="ml-16 pb-6 flex items-baseline sm:pb-7">
+                    <p class="text-2xl font-semibold text-gray-700">
+                        {{ total_websites }}
+                    </p>
+{##}
+{#                  <div class="absolute bottom-0 inset-x-0 bg-gray-50 px-4 py-4 sm:px-6">#}
+{#                        <div class="text-sm">#}
+{#                            <div class="flex justify-between">#}
+{#                                <div>#}
+{#                                    <a class="font-medium text-indigo-600 hover:text-indigo-500">Backups: {{ website_stats.backup__website__count|intcomma }}</a>#}
+{#                                </div>#}
+{#                                <div>#}
+{#                                    <a class="font-medium text-indigo-600 hover:text-indigo-500">Storage: {{ website_stats.backup__size__sum|filesizeformat }}</a>#}
+{#                                </div>#}
+{#                            </div>#}
+{#                        </div>#}
+{#                    </div>#}
+                </dd>
+            </div>
+            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow rounded-lg overflow-hidden">
+                <dt>
+                    <div class="absolute bg-indigo-500 rounded-md p-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path>
+                        </svg>
+                    </div>
+                    <p class="ml-16 text-sm font-medium text-gray-700 truncate">Databases</p>
+                </dt>
+                <dd class="ml-16 pb-6 flex items-baseline sm:pb-7">
+                    <p class="text-2xl font-semibold text-gray-700">
+                        {{ total_database }}
+                    </p>
+
+{#                   <div class="absolute bottom-0 inset-x-0 bg-gray-50 px-4 py-4 sm:px-6">#}
+{#                        <div class="text-sm">#}
+{#                            <div class="flex justify-between">#}
+{#                                <div>#}
+{#                                    <a class="font-medium text-indigo-600 hover:text-indigo-500">Backups: {{ database_stats.backup__database__count|intcomma }}</a>#}
+{#                                </div>#}
+{#                                <div>#}
+{#                                    <a class="font-medium text-indigo-600 hover:text-indigo-500">Storage: {{ database_stats.backup__size__sum|filesizeformat }}</a>#}
+{#                                </div>#}
+{#                            </div>#}
+{#                        </div>#}
+{#                    </div>#}
+                </dd>
+            </div>
+            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow rounded-lg overflow-hidden">
+                <dt>
+                    <div class="absolute bg-indigo-500 rounded-md p-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                  d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"></path>
+                        </svg>
+                    </div>
+                    <p class="ml-16 text-sm font-medium text-gray-700 truncate">CMS & SaaS</p>
+                </dt>
+                <dd class="ml-16 pb-6 flex items-baseline sm:pb-7">
+                    <p class="text-2xl font-semibold text-gray-700">
+                        {{ total_saas }}
+                    </p>
+
+{#                    <div class="absolute bottom-0 inset-x-0 bg-gray-50 px-4 py-4 sm:px-6">#}
+{#                        <div class="text-sm">#}
+{#                            <div class="flex justify-between">#}
+{#                                <div>#}
+{#                                    <a class="font-medium text-indigo-600 hover:text-indigo-500">Backups: {{ saas_stats.backup__wordpress__count|intcomma }}</a>#}
+{#                                </div>#}
+{#                                <div>#}
+{#                                    <a class="font-medium text-indigo-600 hover:text-indigo-500">Storage: {{ saas_stats.backup__size__sum|filesizeformat }}</a>#}
+{#                                </div>#}
+{#                            </div>#}
+{#                        </div>#}
+{#                    </div>#}
+                </dd>
+            </div>
+        </dl>
+    </div>
+
+    {% if node_count > 0 %}
+        <div x-data="nodeListPage">
+            <div class="pb-5 border-b border-gray-200 mt-16">
+                <div class="-ml-2 -mt-2 flex flex-wrap items-baseline">
+                    <h3 class="ml-2 mt-2 text-lg leading-6 font-medium text-gray-700">
+                        {{ node_type|default:'Total'|title }} Nodes {% if not node_type %}({{ total_clouds|add:total_volumes|add:total_websites|add:total_database }}){% endif %}
+                    </h3>
+                    {% if node_type == "server" or node_type == "volume" %}
+                        <p class="ml-2 mt-1 text-sm text-gray-700 truncate">{{ node_type }} backups are stored on-site
+                            in
+                            your hosting account.</p>
+
+                    {% elif node_type == "website" or node_type == "database" %}
+                        <p class="ml-2 mt-1 text-sm text-gray-700 truncate">{{ node_type }} backups are stored
+                            off-site.</p>
+                    {% endif %}
+
+                </div>
+                <div class="mt-4 flex  items-baseline">
+                    <div class="grow mr-4 rounded-md border border-gray-300 px-3 py-2 shadow-sm focus-within:border-indigo-600 focus-within:ring-1 focus-within:ring-indigo-600">
+                        <label for="s_node" class="block text-xs font-medium text-gray-900">Node</label>
+                        <input x-model="search.s_node" type="text" name="node" id="node"
+                               class="block w-full border-0 p-0 text-gray-900 placeholder-gray-500 focus:ring-0 sm:text-sm"
+                               placeholder="">
+                    </div>
+                    <div class="grow mr-4 rounded-md border border-gray-300 px-3 py-2 shadow-sm focus-within:border-indigo-600 focus-within:ring-1 focus-within:ring-indigo-600">
+                        <label for="s_integration" class="block text-xs font-medium text-gray-900">Integration</label>
+                        <input x-model="search.s_integration" type="text" name="integration" id="integration"
+                               class="block w-full border-0 p-0 text-gray-900 placeholder-gray-500 focus:ring-0 sm:text-sm"
+                               placeholder="">
+                    </div>
+                    <div class="grow  rounded-md border border-gray-300 px-3 py-2 shadow-sm focus-within:border-indigo-600 focus-within:ring-1 focus-within:ring-indigo-600">
+                        <label for="s_endpoint" class="block text-xs font-medium text-gray-900">Endpoint</label>
+                        <input x-model="search.s_endpoint" type="text" name="endpoint" id="endpoint"
+                               class="block w-full border-0 p-0 text-gray-900 placeholder-gray-500 focus:ring-0 sm:text-sm"
+                               placeholder="">
+                    </div>
+
+                </div>
+                <div class="grid grid-cols-3 gap-4 mt-4">
+                    <div>
+                        <label for="type" class="mb-3 block text-xs font-medium text-gray-900">Type</label>
+
+                        <select id="node-type" class="block w-full "
+                                data-placeholder="Node type..."
+                                data-allow-clear="true"></select>
+                    </div>
+                    <div>
+                        <label for="status" class="mb-3 block text-xs font-medium text-gray-900">Status</label>
+
+                        <select id="node-status" class="block w-full "
+                                data-placeholder="Node status..."
+                                data-allow-clear="true"></select>
+                    </div>
+                </div>
+
+                <span class="mt-4 isolate inline-flex rounded-md shadow-sm">
+                  <a @click="executeSearch()"
+                     class="relative cursor-pointer inline-flex items-center rounded-l-md border border-gray-300 bg-indigo-500 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-600 focus:z-10 focus:border-indigo-600 focus:outline-none focus:ring-1 focus:ring-indigo-600">Search Nodes</a>
+                  <a @click="resetSearch()"
+                     class="relative cursor-pointer -ml-px inline-flex items-center rounded-r-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">Reset Filters</a>
+                </span>
+            </div>
+            {% if page.object_list.count > 0 %}
+                <div class="flex flex-col mt-6">
+                    <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+                        <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
+                            <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                                <div class="overflow-x-auto">
+                                    <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
+                                        <thead class="bg-gray-50">
+                                        <tr>
+                                            <th scope="col"
+                                                class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                                Node Name
+                                            </th>
+                                            <th scope="col"
+                                                class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                                Status
+                                            </th>
+                                            <th scope="col"
+                                                class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                                Last Backup/Snapshot & Storage
+                                            </th>
+                                            <th scope="col"
+                                                class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                                Integration
+                                            </th>
+                                            <th scope="col" class="relative px-6 py-3">
+                                                <span class="sr-only">Actions</span>
+                                            </th>
+                                        </tr>
+                                        </thead>
+                                        <tbody class="bg-white divide-y divide-gray-200">
+                                        {% for node in page.object_list %}
+                                            <tr>
+                                                <td class="px-4 py-4 whitespace-nowrap">
+                                                    <div class="flex items-center">
+                                                        <div class="flex-shrink-0 h-10 w-10">
+                                                            {% if node.type == 1 %}
+                                                                <svg xmlns="http://www.w3.org/2000/svg"
+                                                                     class="h-10 w-10 rounded-full text-indigo-600"
+                                                                     fill="none" viewBox="0 0 24 24"
+                                                                     stroke="currentColor">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                                          stroke-width="2"
+                                                                          d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
+                                                                </svg>
+                                                            {% elif node.type == 2 %}
+                                                                <svg xmlns="http://www.w3.org/2000/svg"
+                                                                     class="h-10 w-10 rounded-full text-indigo-600"
+                                                                     fill="none" viewBox="0 0 24 24"
+                                                                     stroke="currentColor">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                                          stroke-width="2"
+                                                                          d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+                                                                </svg>
+                                                            {% elif node.type == 3 %}
+                                                                <svg xmlns="http://www.w3.org/2000/svg"
+                                                                     class="h-10 w-10 rounded-full text-indigo-600"
+                                                                     fill="none" viewBox="0 0 24 24"
+                                                                     stroke="currentColor">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                                          stroke-width="2"
+                                                                          d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path>
+                                                                </svg>
+                                                            {% elif node.type == 4 %}
+                                                                <svg xmlns="http://www.w3.org/2000/svg"
+                                                                     class="h-10 w-10 rounded-full text-indigo-600"
+                                                                     fill="none" viewBox="0 0 24 24"
+                                                                     stroke="currentColor">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                                          stroke-width="2"
+                                                                          d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path>
+                                                                </svg>
+                                                            {% elif node.type == 5 %}
+                                                                <svg xmlns="http://www.w3.org/2000/svg"
+                                                                     class="h-10 w-10 rounded-full text-indigo-600"
+                                                                     fill="none" viewBox="0 0 24 24"
+                                                                     stroke="currentColor" stroke-width="2">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                                          d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"></path>
+                                                                </svg>
+                                                            {% endif %}
+                                                        </div>
+                                                        <div class="ml-4">
+                                                            <div class="text-sm font-medium text-gray-700">
+                                                                <a href="{% url 'console:node:detail' node.id %}">{{ node.name|truncatechars:45 }}</a>
+                                                            </div>
+                                                            <div class="text-sm text-gray-700">
+                                                                {{ node.connection.integration.name }}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                                <td class="px-4 py-4 whitespace-nowrap">
+                                                    {% if node.status == 1 or node.status == 2 %}
+                                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                                                {{ node.get_status_display }}
+                                                        </span>
+                                                    {% elif node.status == 3 %}
+                                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                                            {{ node.get_status_display }}
+                                                        </span>
+                                                    {% elif node.status == 4 %}
+                                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
+                                                            {{ node.get_status_display }}
+                                                        </span>
+                                                    {% elif node.status == 6 or node.status == 8 %}
+                                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                                            {{ node.get_status_display }}
+                                                        </span>
+                                                    {% else %}
+                                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                                                            {{ node.get_status_display }}
+                                                        </span>
+                                                    {% endif %}
+                                                </td>
+                                                <td class="px-4 py-4 whitespace-nowrap">
+                                                    <div class="text-sm text-gray-700">{{ node.last_backup_date|default:"n/a" }}</div>
+                                                    <div class="text-sm text-gray-700">{{ node.total_storage|default:"n/a" }}</div>
+                                                </td>
+                                                <td class="px-6 py-4 whitespace-nowrap">
+                                                    <div class="text-sm text-gray-700"><a class="text-sm text-gray-700"
+                                                                                          href="{% url 'console:setup:integration_open' integration_code=node.connection.integration.code %}?i_name={{ node.connection.name }}">
+                                                        {{ node.connection.name|truncatechars:25 }}</a></div>
+                                                    <div class="text-sm text-gray-700">
+                                                        {{ node.connection.location.location }}
+                                                    </div>
+                                                </td>
+
+
+                                                <td class="px-4 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                                    <a target="_blank"
+                                                       href="{% url 'console:log:index' %}?node={{ node.id }}"
+                                                       type="button"
+                                                       class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        Logs
+                                                    </a>
+                                                    <a href="{% url 'console:node:detail' node.id %}" type="button"
+                                                       class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+
+                                                        Open
+                                                    </a>
+                                                    <button @click="openModal('{{ node.id }}','{{ node.name }}','{{ node.connection.location.id }}','{{ node.connection.integration.code }}','{{ node.type }}')"
+                                                            type="button"
+                                                            class="inline-flex items-center mx-auto px-2.5 py-1.5  border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        {% if node.type == 3 or node.type == 4 or node.type == 5 %}
+                                                            Backup{% else %}Snapshot{% endif %}
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <nav class="border-t border-gray-200 px-4 flex items-center justify-between sm:px-0 mt-4">
+                    <div class="-mt-px w-0 flex-1 flex">
+                        {% if page.has_previous %}
+                            <a @click="executeSearch({{ page.previous_page_number }},{{ page.paginator.per_page }})"
+                               class="cursor-pointer border-t-2 border-transparent pt-4 pr-1 inline-flex items-center text-sm font-medium text-gray-700 hover:text-gray-700 hover:border-gray-300">
+                                <!-- Heroicon name: solid/arrow-narrow-left -->
+                                <svg class="mr-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                     viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                    <path fill-rule="evenodd"
+                                          d="M7.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l2.293 2.293a1 1 0 010 1.414z"
+                                          clip-rule="evenodd"></path>
+                                </svg>
+                                Previous
+                            </a>
+                        {% endif %}
+                    </div>
+                    <div class="hidden md:-mt-px md:flex">
+                        {% for page_no in elided_page_range %}
+                            <!-- Current: "border-indigo-500 text-indigo-600", Default: "border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300" -->
+                            {% if page_no == "…" %}
+                                <a class="{% if page.number ==  page_no %}border-indigo-500 text-indigo-600{% else %}cursor-pointer border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300{% endif %} border-t-2 pt-4 px-4 inline-flex items-center text-sm font-medium">
+                                    {{ page_no }}
+                                </a>
+                            {% else %}
+                                <a @click="executeSearch({{ page_no }},{{ page.paginator.per_page }})"
+                                   class="{% if page.number ==  page_no %}border-indigo-500 text-indigo-600{% else %}cursor-pointer border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300{% endif %} border-t-2 pt-4 px-4 inline-flex items-center text-sm font-medium">
+                                    {{ page_no }}
+                                </a>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
+                    <div class="-mt-px w-0 flex-1 flex justify-end">
+                        {% if page.has_next %}
+                            <a @click="executeSearch({{ page.next_page_number }},{{ page.paginator.per_page }})"
+                               class="border-t-2 cursor-pointer  border-transparent pt-4 pl-1 inline-flex items-center text-sm font-medium text-gray-700 hover:text-gray-700 hover:border-gray-300">
+                                Next
+                                <!-- Heroicon name: solid/arrow-narrow-right -->
+                                <svg class="ml-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                     viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                    <path fill-rule="evenodd"
+                                          d="M12.293 5.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-2.293-2.293a1 1 0 010-1.414z"
+                                          clip-rule="evenodd"></path>
+                                </svg>
+                            </a>
+                        {% endif %}
+                    </div>
+                </nav>
+                <div x-show="open" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
+                     aria-labelledby="modal-title" role="dialog" aria-modal="true">
+                    <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                        <div x-show="open"
+                             x-transition:enter="ease-out duration-300"
+                             x-transition:enter-start="opacity-0"
+                             x-transition:enter-end="opacity-100"
+                             x-transition:leave="ease-in duration-200"
+                             x-transition:leave-start="opacity-100"
+                             x-transition:leave-end="opacity-0"
+                             class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity"
+                             aria-hidden="true"></div>
+
+                        <span class="hidden sm:inline-block sm:align-middle sm:h-screen"
+                              aria-hidden="true">&#8203;</span>
+
+                        <div x-show="open"
+                             x-transition:enter="ease-out duration-300"
+                             x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                             x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+                             x-transition:leave="ease-in duration-200"
+                             x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+                             x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                             class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
+                            <div>
+                                <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
+                                    <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
+                                         xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                                stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor"
+                                              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white"
+                                         fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                              d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                                    </svg>
+                                </div>
+                                <div x-show="!loading" class="mt-3 text-center sm:mt-5">
+                                    <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                                        Create <span
+                                            x-show="node_type==='3'||node_type==='4'||node_type==='5'">Backup</span><span
+                                            x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">Snapshot</span>
+                                    </h3>
+                                    <div class="mt-2">
+                                        <p class="text-sm text-gray-700">
+                                            You are about to create on-demand <span
+                                                x-show="node_type==='3'||node_type==='4'||node_type==='5'">backup</span><span
+                                                x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">snapshot</span>
+                                            of <br/><strong
+                                                x-text="node_name"></strong>
+                                        </p>
+                                    </div>
+                                </div>
+                                <div x-show="loading" class="mt-3 text-center sm:mt-5">
+                                    <h4 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                                        Requesting <span x-show="node_type==='3'||node_type==='4'||node_type==='5'">Backup</span><span
+                                            x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">Snapshot</span>...
+                                    </h4>
+                                    <div class="mt-2">
+                                        <p class="text-sm text-gray-700">
+                                            Requesting on-demand <span
+                                                x-show="node_type==='3'||node_type==='4'||node_type==='5'">backup</span><span
+                                                x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">snapshot</span>
+                                            for <br/><strong x-text="node_name"></strong>
+                                        </p>
+                                    </div>
+                                </div>
+                                <div x-show="integration_code==='website'||integration_code==='database'||integration_code==='wordpress'">
+                                    <div x-show="!loading" class="sm:col-span-6  mt-4">
+                                        <h4 class="font-medium text-gray-700">
+                                            Storage Locations (<span
+                                                x-text="onDemandBackup.storage_point_ids.length"></span>)
+                                        </h4>
+                                        <p class="mt-1 text-sm text-gray-700">
+                                            Select where you want to store backups for this backup run.
+                                        </p>
+                                    </div>
+                                    <div x-show="!loading" class="sm:col-span-6">
+                                        <fieldset class="overflow-auto h-32">
+                                            <div class="divide-y divide-gray-200">
+                                                {% for storage in storage_list %}
+                                                    <div class="relative flex items-start py-4 px-1">
+                                                        <div class="flex items-center h-5">
+                                                            <input id="ondemand-storage-{{ storage.id }}"
+                                                                   aria-describedby="ondemand-storage-{{ storage.id }}"
+                                                                   name="storage-{{ storage.id }}" type="checkbox"
+                                                                   value="{{ storage.id }}"
+                                                                   x-model="onDemandBackup.storage_point_ids"
+                                                                   class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded">
+                                                        </div>
+                                                        <div class="ml-3 text-sm">
+                                                            <label for="ondemand-storage-{{ storage.id }}"
+                                                                   class="font-medium text-gray-700">{{ storage.name }}
+                                                                {% if storage.type.code == "bs" %}
+                                                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800"> Default </span>
+                                                                {% endif %}
+                                                            </label>
+                                                            <p id="comments-description"
+                                                               class="text-gray-700">{{ storage.type.name }}</p>
+                                                        </div>
+                                                    </div>
+                                                {% endfor %}
+                                            </div>
+                                        </fieldset>
+                                        <p x-show="onDemandBackupErrors.storage_point_ids"
+                                           class="mt-2 text-sm text-red-600"
+                                           id="ondemand-storage-error"
+                                           x-text="onDemandBackupErrors.storage_point_ids"></p>
+                                    </div>
+                                </div>
+                                <div x-show="!loading" class="mt-3 text-left sm:mt-5">
+                                    <div class="sm:col-span-6">
+                                        <label for="about" class="block text-sm font-medium text-gray-700">
+                                            Notes
+                                        </label>
+                                        <div class="mt-1">
+                                        <textarea x-model="onDemandBackup.notes" id="about" name="about" rows="3"
+                                                  class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                        </div>
+                                        <p class="mt-2 text-sm text-gray-700">Optional notes about the <span
+                                                x-show="node_type==='3'||node_type==='4'||node_type==='5'">backup</span><span
+                                                x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">snapshot</span>.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div x-show="!loading"
+                                 class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                                <button @click="createBackup()" type="button"
+                                        class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                    Create <span
+                                        x-show="node_type==='3'||node_type==='4'||node_type==='5'">Backup</span><span
+                                        x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">Snapshot</span>
+                                </button>
+                                <button @click="closeModal()" type="button"
+                                        class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            {% else %}
+                <div class="text-center">
+                    <h2 class="mt-2 text-gray-900">No nodes found with search filters</h2>
+                    <div class="mt-6">
+                        <button type="button"
+                                class="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                @click="resetSearch()">Reset Filters
+                        </button>
+                    </div>
+                </div>
+            {% endif %}
+        </div>
+        <script>
+            document.addEventListener('alpine:init', () => {
+                Alpine.data('nodeListPage', () => ({
+                    open: false,
+                    node_id: null,
+                    node_name: null,
+                    integration_code: null,
+                    notes: null,
+                    node_type: null,
+                    loading: null,
+                    onDemandBackup: {
+                        storage_point_ids: [],
+                    },
+                    search: {
+                        s_node: null,
+                        s_integration: null,
+                        s_status: null,
+                        s_endpoint: null,
+                        s_type: null,
+                        p_no: null,
+                        p_size: null,
+                    },
+                    onDemandBackupErrors: {},
+                    init() {
+                        const url = new URL(window.location.href);
+                        const searchParams = url.searchParams;
+
+                        if (searchParams.get('s_node')) {
+                            this.search.s_node = searchParams.get('s_node');
+                        }
+                        if (searchParams.get('s_integration')) {
+                            this.search.s_integration = searchParams.get('s_integration');
+                        }
+                        if (searchParams.get('s_status')) {
+                            this.search.s_status = parseInt(searchParams.get('s_status'));
+                        }
+                        if (searchParams.get('s_endpoint')) {
+                            this.search.s_endpoint = searchParams.get('s_endpoint');
+                        }
+
+                        $(document).ready(function () {
+                            let nodeStatusOptions = [
+                                {
+                                    id: '1',
+                                    text: 'Active'
+                                },
+                                {
+                                    id: '3',
+                                    text: 'Backup In-Progress'
+                                },
+                                {
+                                    id: '4',
+                                    text: 'Retrying Backup'
+                                },
+                                {
+                                    id: '6',
+                                    text: 'Paused'
+                                },
+                                {
+                                    id: '8',
+                                    text: 'Paused (Max Retries)'
+                                },
+                                {
+                                    id: '7',
+                                    text: 'Delete Requested'
+                                }
+                            ];
+                            let nodeTypeOptions = [
+                                {
+                                    id: '1',
+                                    text: 'Cloud'
+                                },
+                                {
+                                    id: '2',
+                                    text: 'Volume'
+                                },
+                                {
+                                    id: '3',
+                                    text: 'Website'
+                                },
+                                {
+                                    id: '4',
+                                    text: 'Database'
+                                },
+                                {
+                                    id: '5',
+                                    text: 'SaaS'
+                                },
+                            ];
+
+                            /**
+                             * Node Status
+                             */
+                            if (searchParams.get('s_status')) {
+                                let nodeStatusOption = _.find(nodeStatusOptions, {'id': searchParams.get('s_status')});
+                                if (nodeStatusOption) {
+                                    nodeStatusOption.selected = true;
+                                }
+                            } else {
+                                setTimeout(function () {
+                                    $("#node-status").val(null).trigger('change');
+                                }, 500);
+                            }
+                            /**
+                             * Initiate Dropdown
+                             */
+                            $("#node-status").select2({
+                                data: nodeStatusOptions,
+                            });
+
+                            /**
+                             * Node Type
+                             */
+                            if (searchParams.get('s_type')) {
+                                let nodeTypeOption = _.find(nodeTypeOptions, {'id': searchParams.get('s_type')});
+                                if (nodeTypeOption) {
+                                    nodeTypeOption.selected = true;
+                                }
+                            } else {
+                                setTimeout(function () {
+                                    $("#node-type").val(null).trigger('change');
+                                }, 500);
+                            }
+                            /**
+                             * Initiate Dropdown
+                             */
+                            $("#node-type").select2({
+                                data: nodeTypeOptions,
+                            });
+
+                        });
+                    },
+
+                    openModal(node_id, node_name, location_id, integration_code, node_type) {
+                        this.loading = false;
+                        this.open = true;
+                        this.node_id = node_id;
+                        this.location_id = location_id;
+                        this.node_name = node_name;
+                        this.integration_code = integration_code;
+                        this.node_type = node_type;
+                    },
+                    closeModal() {
+                        this.open = false;
+                    },
+                    async createBackup() {
+                        this.loading = true;
+
+                        let url = "/api/proxy/nodes/" + this.node_id + "/take_snapshot/?" + new URLSearchParams({
+                            location: this.location_id,
+                        });
+
+                        let data = {
+                            location: this.location_id,
+                            notes: this.onDemandBackup.notes,
+                            storage_point_ids: this.onDemandBackup.storage_point_ids,
+                        }
+
+                        let response = await fetch(url, {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            method: 'POST',
+                            body: JSON.stringify(data)
+                        }).then(async (response) => {
+                            this.loading = false;
+                            if (response.ok) {
+                                return response.json();
+                            } else {
+                                let json;
+                                try {
+                                    json = await response.json();
+                                } catch (exception_var) {
+                                    json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                                }
+
+                                this.onDemandBackupErrors = json;
+                                throw new Error(json.detail);
+                            }
+                        }).then((json) => {
+                            Alpine.store('notifications').items.push({
+                                show: true,
+                                success: true,
+                                heading: 'Success!',
+                                details: json.detail
+                            });
+                            this.closeModal();
+                        }).catch((error) => {
+                            Alpine.store('notifications').items.push({
+                                show: true,
+                                error: true,
+                                heading: 'Error!',
+                                details: error.message
+                            });
+                        });
+                    },
+                    executeSearch(p_no, p_size) {
+                        if(p_no){
+                            this.search.p_no = p_no;
+                        }
+                        if(p_size){
+                            this.search.p_size = p_size;
+                        }
+                        /**
+                         * Node Status
+                         */
+                        if($('#node-status').select2('data').length > 0) {
+                            this.search.s_status = $('#node-status').select2('data')[0].id
+                        }
+                        else {
+                            this.search.s_status = null;
+                        }
+
+                        /**
+                         * Node Type
+                         */
+                        if($('#node-type').select2('data').length > 0) {
+                            this.search.s_type = $('#node-type').select2('data')[0].id
+                        }
+                        else {
+                            this.search.s_type = null;
+                        }
+
+                        let url = "/console/nodes/?" + new URLSearchParams(_.omitBy(this.search, _.isNull));
+                        window.location.href = url+"#section-nodes";
+                    },
+                    resetSearch() {
+                        let url = "/console/nodes/";
+                        window.location.href = url;
+                    }
+                }));
+            });
+
+
+
+        </script>
+    {% else %}
+        {% include "console/_welcome.html" %}
+    {% endif %}
+
+{% endblock %}

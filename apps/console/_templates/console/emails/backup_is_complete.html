@@ -1,0 +1,50 @@
+{% extends "console/emails/_master.html" %}
+{% block content %}
+    <h2>Woo-hoo!</h2>
+    <p>The backup of node <strong>{{ node_name }}</strong> (<strong>{{ node_type }}</strong>) is complete and size of
+        backup is <strong>{{ backup_size }}</strong>.</p>
+
+    <p>It took <strong>{{ backup_duration }}</strong> and backup was completed at <strong>{{ backup_time }}</strong>.
+    </p>
+
+    <p>Backup ID: {{ backup_name }}</p>
+
+    <!-- Action -->
+    <table class="body-action" align="center" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+            <td align="center">
+                <!-- Border based button https://litmus.com/blog/a-guide-to-bulletproof-buttons-in-email-design -->
+                <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                    <tr>
+                        <td align="center">
+                            <table border="0" cellspacing="0" cellpadding="0">
+                                <tr>
+                                    <td>
+                                        <a href="{{ action_url }}" class="button button--" target="_blank">view
+                                            backups</a>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+
+    <p>Thanks,
+        <br>{{ sender_name }}</p>
+    <p><strong>P.S.</strong> Need immediate help getting started? Check out our <a href="{{ help_url }}">help
+        documentation</a>. Or, just reply to this email, support team is always ready to help!</p>
+    <!-- Sub copy -->
+    <table class="body-sub">
+        <tr>
+            <td>
+                <p class="sub">If you’re having trouble with the button above, copy and paste the URL below into your
+                    web browser.</p>
+                <p class="sub">{{ action_url }}</p>
+            </td>
+        </tr>
+    </table>
+
+{% endblock %}

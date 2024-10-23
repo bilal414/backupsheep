@@ -1,0 +1,278 @@
+{% extends "console/_master.html" %}
+{% block title %}{{ heading }}{% endblock %}
+{% block meta_title %}{{ heading }}{% endblock %}
+{% block meta_description %}{{ heading }}{% endblock %}
+{% block meta_keywords %}{{ heading }}{% endblock %}
+{% block page_class %}page_console console-page sb-l-o sb-r-c{% endblock %}
+{% block content %}
+
+    <div x-data="referralPage">
+        <div class="overflow-hidden bg-white">
+            <div class="mx-auto max-w-7xl">
+                <div class="mx-auto grid  grid-cols-1 gap-y-16 gap-x-8 sm:gap-y-20 lg:mx-0 lg:max-w-none lg:grid-cols-2">
+                    <div class="lg:pr-4 ">
+                        <div class="lg:max-w-lg">
+                            <p class="mt-2 text-3xl font-bold tracking-tight text-gray-900 sm:text-4xl">How the program
+                                works</p>
+                            <dl class="mt-6 max-w-xl space-y-8 text-base leading-7 text-gray-600 lg:max-w-none">
+                                <div class="relative pl-3">
+                                    <dd class="inline">Grab your unique referral URL. Use this in your website footer,
+                                        podcast, newsletter and social media posts.
+                                    </dd>
+                                    <dd class="inline">
+                                        <p class="mt-6 block ">
+                                            You'll get following rewards.
+                                        </p>
+                                        <ul role="list" class="mt-6 space-y-6">
+                                            <li class="flex">
+                                                <svg class="flex-shrink-0 w-6 h-6 text-indigo-500"
+                                                     xmlns="http://www.w3.org/2000/svg"
+                                                     fill="none" viewBox="0 0 24 24" stroke-width="2"
+                                                     stroke="currentColor"
+                                                     aria-hidden="true">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                          d="M5 13l4 4L19 7"></path>
+                                                </svg>
+                                                <span class="ml-3 text-gray-700">30% lifetime commission on their payments to us</span>
+                                            </li>
+
+                                            <li class="flex">
+                                                <svg class="flex-shrink-0 w-6 h-6 text-indigo-500"
+                                                     xmlns="http://www.w3.org/2000/svg"
+                                                     fill="none" viewBox="0 0 24 24" stroke-width="2"
+                                                     stroke="currentColor"
+                                                     aria-hidden="true">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                          d="M5 13l4 4L19 7"></path>
+                                                </svg>
+                                                <span class="ml-3 text-gray-700">Monthly payout via PayPal or Wise Money Transfer</span>
+                                            </li>
+                                        </ul>
+                                        <p class="mt-6 block ">
+                                            Your referred customer will get following rewards.
+                                        </p>
+                                        <ul role="list" class="mt-6 space-y-6">
+                                            <li class="flex">
+                                                <svg class="flex-shrink-0 w-6 h-6 text-indigo-500"
+                                                     xmlns="http://www.w3.org/2000/svg"
+                                                     fill="none" viewBox="0 0 24 24" stroke-width="2"
+                                                     stroke="currentColor"
+                                                     aria-hidden="true">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                          d="M5 13l4 4L19 7"></path>
+                                                </svg>
+                                                <span class="ml-3 text-gray-700">15% off for the first year.</span>
+                                            </li>
+                                        </ul>
+
+
+                                    </dd>
+                                </div>
+
+                            </dl>
+                        </div>
+                    </div>
+                    <img src="{{ STATIC_URL }}website/images/referral.webp"
+                         alt="BackupSheep Referral Program"
+                         class="w-[48rem] max-w-none rounded-xl shadow-xl ring-1 ring-gray-400/10 sm:w-[57rem] md:-ml-4 lg:-ml-0"
+                         width="2432" height="1442">
+                </div>
+            </div>
+        </div>
+        <div class="flex flex-col">
+            <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
+                <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
+                    {% if affiliate %}
+                        {% for link in affiliate.links %}
+
+                            <div class="mt-12">
+                                <div class="sm:flex sm:items-center">
+                                    <div class="sm:flex-auto">
+                                        <h1 class=" text-2xl block ">Your unique referral URLs</h1>
+                                        <p class="mt-2 text-sm text-gray-700">Use this URL where ever you talk about
+                                            BackupSheep.</p>
+                                    </div>
+                                </div>
+                                <div class="mt-8 flex flex-col">
+                                    <div class="-my-2 -mx-4 overflow-x-auto sm:-mx-6 lg:-mx-8">
+                                        <div class="inline-block min-w-full py-2 align-middle md:px-6 lg:px-8">
+                                            <div class="overflow-hidden shadow ring-1 ring-black ring-opacity-5 md:rounded-lg">
+                                                <table class="min-w-full divide-y divide-gray-300">
+                                                    <thead class="bg-gray-50">
+                                                    <tr>
+                                                        <th scope="col"
+                                                            class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6">
+                                                            Link
+                                                        </th>
+                                                        <th scope="col"
+                                                            class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
+                                                            Visitors
+                                                        </th>
+                                                        <th scope="col"
+                                                            class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
+                                                            Leads
+                                                        </th>
+                                                        <th scope="col"
+                                                            class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
+                                                            Conversions
+                                                        </th>
+                                                    </tr>
+                                                    </thead>
+                                                    <tbody class="divide-y divide-gray-200 bg-white">
+                                                    <tr>
+                                                        <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-900 sm:pl-6">
+                                                            <a class="text-indigo-700 cursor-pointer"
+                                                               @click="copyToClipboard('{{ link.url }}')">{{ link.url }}</a>
+                                                        </td>
+                                                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                                                            {{ link.visitors }}
+                                                        </td>
+                                                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                                                            {{ link.leads }}
+                                                        </td>
+                                                        <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                                                            {{ link.conversions }}
+                                                        </td>
+                                                    </tr>
+
+                                                    <!-- More people... -->
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        {% endfor %}
+                        <div class="mt-5 mx-auto sm:flex sm:justify-center md:mt-8 aos-init aos-animate"
+                             data-aos="fade-up"
+                             data-aos-delay="200">
+                            <div class="rounded-md shadow">
+                                <a target="_blank" href="{{ affiliate_sso_url }}"
+                                   class="w-full flex items-center justify-center px-8 py-3 border border-transparent text-lg font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 md:py-4 md:text-lg md:px-10">
+                                    Login to affiliate dashboard
+                                </a>
+                            </div>
+                        </div>
+                    {% else %}
+                        <div class="rounded-md bg-yellow-50 p-4 mt-8">
+                            <div class="flex">
+                                <div class="flex-shrink-0">
+                                    <svg class="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg"
+                                         viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                        <path fill-rule="evenodd"
+                                              d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z"
+                                              clip-rule="evenodd"/>
+                                    </svg>
+                                </div>
+                                <div class="ml-3">
+                                    <h3 class="text-sm font-medium text-yellow-800">Attention needed</h3>
+                                    <div class="mt-2 text-sm text-yellow-700">
+                                        <p>We are unable to create your account with
+                                            email {{ request.user.member.email }} in our referral system. Please contact
+                                            support at support@backupsheep.com</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="bg-white mt-12">
+                <div class="mx-auto max-w-7xl py-16 px-6 sm:py-12 lg:px-8">
+                    <div class="mx-auto max-w-2xl text-center">
+                        <h2 class="mt-2 text-3xl font-bold tracking-tight text-gray-900 sm:text-4xl">Frequently asked
+                            questions</h2>
+                        <p class="mt-6 text-base leading-7 text-gray-600">Have a different question and can’t find the
+                            answer you’re looking for? Reach out to our support team by <a
+                                    href="mailto:support@backupsheep.com"
+                                    class="font-semibold text-indigo-600 hover:text-indigo-500">sending
+                                us an email</a> and we’ll get back to you as soon as we can.</p>
+                    </div>
+                    <div class="mt-20">
+                        <dl class="space-y-16 sm:grid sm:grid-cols-2 sm:gap-x-6 sm:gap-y-16 sm:space-y-0 lg:gap-x-10">
+                            <div>
+                                <dt class="text-base font-semibold leading-7 text-gray-900">How do I get paid?
+                                </dt>
+                                <dd class="mt-2 text-base leading-7 text-gray-600">Commission fees pay out after 30
+                                    days, on
+                                    the first business day of each month. We pay our affiliates via Paypal or Wise Money
+                                    Transfer and have no minimums to hit before you receive your money.
+                                </dd>
+                            </div>
+
+                            <div>
+                                <dt class="text-base font-semibold leading-7 text-gray-900">When do I get paid?
+                                </dt>
+                                <dd class="mt-2 text-base leading-7 text-gray-600">Every single month you have at least
+                                    one
+                                    referral, we send you money. There are no minimum payouts. Referrals are paid out
+                                    after
+                                    30 days on the following 1st of the month. So if you refer someone on May 25th,
+                                    you’ll
+                                    get paid on July 1st.
+                                </dd>
+                            </div>
+
+                            <div>
+                                <dt class="text-base font-semibold leading-7 text-gray-900">How do I track my referrals?
+                                </dt>
+                                <dd class="mt-2 text-base leading-7 text-gray-600">We use easy-to-use dashboard from our
+                                    affiliate partner Rewardful.
+                                </dd>
+                            </div>
+
+                            <div>
+                                <dt class="text-base font-semibold leading-7 text-gray-900">What if I forgot to ask
+                                    someone
+                                    to use my URL?
+                                </dt>
+                                <dd class="mt-2 text-base leading-7 text-gray-600">Email us who you referred and when,
+                                    and
+                                    we’ll manually attribute the affiliate conversion to you.
+                                </dd>
+                            </div>
+                            <div>
+                                <dt class="text-base font-semibold leading-7 text-gray-900">Do I need to be a
+                                    BackupSheep
+                                    customer?
+                                </dt>
+                                <dd class="mt-2 text-base leading-7 text-gray-600">Nope! While it’s a great advantage to
+                                    use
+                                    BackupSheep yourself so you can talk about how it works and how it personally
+                                    benefits
+                                    your website and business, it’s not a requirement.
+                                </dd>
+                            </div>
+                            <div>
+                                <dt class="text-base font-semibold leading-7 text-gray-900">How do I promote BackupSheep?
+                                </dt>
+                                <dd class="mt-2 text-base leading-7 text-gray-600">Any way you’d like! You’re free to
+                                    talk about BackupSheep on your website, newsletter, video channel,
+                                    social media, or anywhere else.
+                                </dd>
+                            </div>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+    <script>
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('referralPage', () => ({
+                log: {},
+                copyToClipboard(string) {
+                    navigator.clipboard.writeText(string);
+                    Alpine.store('notifications').items.push({
+                        show: true,
+                        success: true,
+                        heading: 'Copied!',
+                        details: string
+                    });
+                },
+            }));
+        });
+    </script>
+{% endblock %}
