@@ -14,19 +14,7 @@ class APIAuthLoginSerializer(serializers.Serializer):
 
     @staticmethod
     def validate_email(value):
-        if CoreMember.objects.filter(
-                user__email__iexact=value, status=CoreMember.Status.DISABLED
-        ).exists():
-            raise serializers.ValidationError(
-                "Your account is disabled. Please contact administrator."
-            )
-        elif CoreMember.objects.filter(
-                user__email__iexact=value, status=CoreMember.Status.PENDING
-        ).exists():
-            raise serializers.ValidationError(
-                "Your account is pending. Please contact administrator."
-            )
-        elif not CoreMember.objects.filter(user__email__iexact=value).exists():
+        if not CoreMember.objects.filter(user__email__iexact=value).exists():
             raise serializers.ValidationError("Email not found")
         return value
 

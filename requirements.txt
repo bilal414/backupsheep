@@ -1,13 +1,12 @@
 setuptools==69.1.0
-pip==24.0
-asgiref==3.7.2
-Django==5.0.7
+pip==24.2
+Django==5.1.1
 sqlparse==0.4.4
 tzdata==2024.1
 python-dotenv==1.0.1
 psycopg2-binary==2.9.9
 requests==2.32.0
-boto3==1.34.46
+boto3==1.35.22
 djangorestframework==3.15.2
 gunicorn==21.2.0
 humanfriendly==10.0
@@ -37,7 +36,7 @@ ftputil==5.0.4
 mysql-connector-python==8.0.30
 beautifulsoup4==4.12.3
 celery==5.4.0
-django-celery-beat==2.6.0
+django-celery-beat==2.7.0
 django-celery-results==2.5.1
 gcloud==0.18.3
 git+https://github.com/hellysmile/fake-useragent.git@460686d0c729c2b22172dc75760408c87b7d6618
