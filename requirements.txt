@@ -1,5 +1,6 @@
 # Core Python packages
-setuptools==82.0.1
+# Pinned <81: setuptools 81 removed pkg_resources, which the legacy gcloud==0.18.3 still imports.
+setuptools==80.10.2
 pip==26.0.1
 
 # Django and REST Framework
