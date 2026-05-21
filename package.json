@@ -1,0 +1,15 @@
+{
+  "name": "backupsheep-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Frontend CSS build (Tailwind) for the BackupSheep console.",
+  "scripts": {
+    "build:css": "tailwindcss -i ./apps/console/_static/console/css/styles.css -o ./apps/console/_static/console/css/compiled.css --minify"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.0",
+    "@tailwindcss/forms": "^0.5.7",
+    "@tailwindcss/typography": "^0.5.10",
+    "tailwindcss": "^4.3.0"
+  }
+}

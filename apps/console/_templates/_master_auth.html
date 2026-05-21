@@ -9,12 +9,11 @@
     <link rel="shortcuticon" href="{{ STATIC_URL }}images/favicon.png" type="image/x-icon">
     <link rel="icon" href="{{ STATIC_URL }}images/favicon.png" type="image/x-icon">
     <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
-    <script src="https://cdn.tailwindcss.com?plugins=forms,typography,aspect-ratio,line-clamp"></script>
-    <link rel="stylesheet" href="https://unpkg.com/flowbite@1.5.2/dist/flowbite.min.css"/>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flowbite@4.0.2/dist/flowbite.min.css"/>
 </head>
 <body class="{% block page_class %}{% endblock %}">
     {% block content %}{% endblock %}
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js"></script>
     {% include "_notifications.html" %}
     {% include "_loading.html" %}
     {% block extra_scripts %}{% endblock %}
