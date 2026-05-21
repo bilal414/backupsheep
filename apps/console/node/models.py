@@ -2103,11 +2103,6 @@ class CoreNode(TimeStampedModel):
             else:
                 return True
 
-    def billing_good_standing(self):
-        try:
-            return self.connection.account.billing.good_standing()
-        except Exception as e:
-            return False
 
     def last_backup_date(self):
         node_type_object = getattr(self, self.connection.integration.code)

@@ -1500,22 +1500,6 @@ class DownloadStoragePointNotFound(APIException):
         return f"{self.message}"
 
 
-class AccountNotGoodStanding(APIException):
-    status_code = 403
-    default_detail = "Sorry, your account cannot perform this action as it is currently not in good standing."
-    default_code = "account_not_in_good_standing"
-
-    def __init__(
-        self,
-        message=default_detail,
-    ):
-        self.message = message
-        super().__init__(self.message)
-
-    def __str__(self):
-        return f"{self.message}"
-
-
 class TransferStorageNotFound(APIException):
     status_code = 503
     default_detail = "Looks like storage_id is invalid. Please contact support."

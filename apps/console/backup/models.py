@@ -24,7 +24,7 @@ from apps._tasks.exceptions import (
     NodeBackupFailedError,
     NodeBackupStatusCheckTimeOutError,
     NodeBackupStatusCheckCallError,
-    NodeSnapshotDeleteFailed, AccountNotGoodStanding,
+    NodeSnapshotDeleteFailed,
 )
 from apps.api.v1.utils.api_helpers import bs_decrypt, bs_encrypt
 from ..utils.models import UtilBackup
@@ -1802,10 +1802,6 @@ class BaseBackupStoragePoints(TimeStampedModel):
     def generate_download_url(self):
         import boto3
         encryption_key = self.storage.account.get_encryption_key()
-
-        # Deny download if billing is not in good standing
-        if not self.storage.account.billing.good_standing:
-            raise AccountNotGoodStanding()
 
         if self.storage.type.code == "aws_s3":
             s3_client = boto3.client(

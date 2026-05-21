@@ -97,21 +97,6 @@ class InviteView(LoginRequiredMixin, TemplateView):
         context["invites_received"] = self.request.user.member.invites_received()
         return self.render_to_response(context)
 
-class BillingView(LoginRequiredMixin, TemplateView):
-    template_name = "console/setting/billing.html"
-
-    def get(self, request, *args, **kwargs):
-        context = self.get_context_data(**kwargs)
-        context["heading"] = "Settings - Billing"
-        context["active_url"] = "billing"
-        member = self.request.user.member
-        account = member.get_current_account()
-        context["account"] = account
-        context["stripe_customer_portal_url"] = account.billing.stripe_customer_portal_url
-
-        # return redirect(account.billing.stripe_customer_portal_url)
-        return self.render_to_response(context)
-
 
 class NotificationView(LoginRequiredMixin, TemplateView):
     template_name = "console/setting/notification.html"

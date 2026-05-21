@@ -16,7 +16,7 @@ from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
     SnapshotCreateError,
     SnapshotCreateNodeValidationFailed,
-    SnapshotCreateNodeNotActive, NodeValidationFailed, AccountNotGoodStanding,
+    SnapshotCreateNodeNotActive, NodeValidationFailed,
 )
 from apps._tasks.integration.basecamp import backup_basecamp
 from apps._tasks.integration.website import backup_website
@@ -69,10 +69,6 @@ class CoreNodeView(viewsets.ModelViewSet):
         node = self.get_object()
         notes = self.request.data.get("notes")
         storage_point_ids = self.request.data.get("storage_point_ids")
-
-        # Deny download if billing is not in good standing
-        if not node.connection.account.billing.good_standing:
-            raise AccountNotGoodStanding()
 
         if not node.backup_ready_to_initiate():
             raise SnapshotCreateNodeNotActive(

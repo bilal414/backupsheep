@@ -121,26 +121,6 @@ def get_random_password():
     return mypw
 
 
-def stripe_get_access_token_from_code(code):
-    secret_key = getattr(settings, "STRIPE_SECRET_KEY")
-
-    data_type = "JSON"
-
-    api_url = "https://connect.stripe.com/oauth/token"
-
-    data = {
-        "client_secret": secret_key,
-        "grant_type": "authorization_code",
-        "code": code,
-    }
-
-    headers = {"Content-type": "application/x-www-form-urlencoded"}
-
-    result = requests.post(api_url, data=data, headers=headers)
-
-    return result
-
-
 def generate_random_email_verification(length=16, chars=ascii_lowercase + digits, split=4, delimiter="-"):
     code = "".join([choice(chars) for i in xrange(length)])
     if split:
