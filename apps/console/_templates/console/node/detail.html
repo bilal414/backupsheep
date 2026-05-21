@@ -1209,25 +1209,15 @@
                                                 </div>
                                             </td>
                                             <td class="px-4 py-2 whitespace-nowrap text-right text-sm font-medium">
-                                                <button x-show="storagePoint.storage_file_id && !storagePoint.show_request_download"
+                                                <button x-show="storagePoint.storage_file_id"
                                                         @click="downloadBackup(storagePoint, 'copy')" type="button"
                                                         class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Copy Link
                                                 </button>
-{#                                                <button x-show="storagePoint.storage_file_id && !storagePoint.show_request_download"#}
-{#                                                        @click="openBackupTransferModal(storagePoint)" type="button"#}
-{#                                                        class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
-{#                                                    Transfer#}
-{#                                                </button>#}
-                                                <button x-show="storagePoint.storage_file_id && !storagePoint.show_request_download"
+                                                <button x-show="storagePoint.storage_file_id"
                                                         @click="downloadBackup(storagePoint)" type="button"
                                                         class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Download
-                                                </button>
-                                                <button x-show="storagePoint.storage_file_id && storagePoint.show_request_download"
-                                                        @click="downloadBackup(storagePoint)" type="button"
-                                                        class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                                    Request Download
                                                 </button>
                                             </td>
                                         </tr>
@@ -3025,15 +3015,6 @@
                             });
                         } else if (data.url === "restore_in_progress") {
                             let detail = 'Your backup is being moved from cold storage to hot storage to download. Your link will be ready within the next 1-5 minutes.';
-                            Alpine.store('notifications').items.push({
-                                show: true,
-                                success: true,
-                                heading: 'Success!',
-                                details: detail
-                            });
-                        } else if (data.url === "download_requested") {
-                            this.closeBackupDownloadModal();
-                            let detail = 'You download will be ready in few minutes and you will get email with download link.';
                             Alpine.store('notifications').items.push({
                                 show: true,
                                 success: true,

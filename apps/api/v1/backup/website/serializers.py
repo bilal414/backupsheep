@@ -51,7 +51,6 @@ class CoreWebsiteBackupTransferSerializer(serializers.Serializer):
 class CoreWebsiteBackupStoragePointsSerializer(serializers.ModelSerializer):
     storage = CoreBackupStorageSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
-    show_request_download = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = CoreWebsiteBackupStoragePoints
@@ -60,15 +59,6 @@ class CoreWebsiteBackupStoragePointsSerializer(serializers.ModelSerializer):
     @staticmethod
     def get_status_display(obj):
         return obj.get_status_display()
-
-    @staticmethod
-    def get_show_request_download(obj):
-        return (
-            obj.storage.name == "Storage 01"
-            or obj.storage.name == "Storage 02"
-            or obj.storage.name == "Storage 03"
-            or obj.storage.name == "Storage 04"
-        ) and obj.storage.type.code == "bs"
 
 
 class CoreWebsiteBackupSerializer(serializers.ModelSerializer):

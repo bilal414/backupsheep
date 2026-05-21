@@ -64,7 +64,6 @@
         </span>
                 </a>
 
-                {% if not is_appsumo_plan %}
                     <a href="{% url 'console:settings:group' %}"
                        class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium">
                         <!-- Heroicon name: outline/user-group -->
@@ -118,7 +117,6 @@
                                       Notifications
                                     </span>
                     </a>
-                {% endif %}
             </nav>
         </aside>
 
@@ -170,12 +168,10 @@
                                         class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
                                         Email
                                     </th>
-                                    {% if not is_appsumo_plan %}
                                         <th scope="col"
                                             class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
                                             API Token
                                         </th>
-                                    {% endif %}
                                     <th scope="col"
                                         class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
                                         Groups <small>(Type)</small>
@@ -213,13 +209,11 @@
                                                 {{ membership.member.user.email }}
                                             </div>
                                         </td>
-                                        {% if not is_appsumo_plan %}
                                             <td class="px-4 py-4 whitespace-nowrap">
                                                 <div class="text-sm font-medium text-gray-700">
                                                     {{ membership.member.user.auth_token }}
                                                 </div>
                                             </td>
-                                        {% endif %}
                                         <td class="px-4 py-4 whitespace-nowrap">
                                             <div class="text-sm font-medium text-gray-700">
                                                 <ul>

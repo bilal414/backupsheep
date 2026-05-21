@@ -64,7 +64,6 @@
                     </span>
                 </a>
 
-                {% if not is_appsumo_plan %}
                     <a href="{% url 'console:settings:group' %}"
                        class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium">
                         <svg class="text-gray-400 group-hover:text-gray-700 flex-shrink-0 -ml-1 mr-3 h-6 w-6"
@@ -103,8 +102,6 @@
                       Invites
                     </span>
                     </a>
-                {% endif %}
-                {% if not is_appsumo_plan %}
                     <a href="{% url 'console:settings:notification' %}"
                        class="text-gray-700 hover:text-gray-700 hover:bg-gray-50 group rounded-md px-3 py-2 flex items-center text-sm font-medium">
                         <svg class="text-gray-400 group-hover:text-gray-700 flex-shrink-0 -ml-1 mr-3 h-6 w-6"
@@ -117,7 +114,6 @@
                                           Notifications
                                         </span>
                     </a>
-                {% endif %}
             </nav>
         </aside>
         <div class="space-y-6 sm:px-6 lg:px-0 lg:col-span-9">
