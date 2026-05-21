@@ -13,7 +13,7 @@
 
 services:
   db:
-    image: postgres:14
+    image: postgres:18
     environment:
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}
