@@ -8,7 +8,7 @@ class SendEmail:
         self.activation_token = ''
 
     @staticmethod
-    def app_message(message=None, email=settings.APP_EMAIL):
+    def app_message(message=None, email=None):
         # if settings.DJANGO_SERVER != 'prod':
         #     email = settings.APP_EMAIL
         pass

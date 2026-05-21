@@ -19,7 +19,7 @@ def snapshot_wordpress(backup):
     backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
     backup.save()
 
-    working_dir = f"/home/ubuntu/backupsheep"
+    working_dir = f"."
     local_dir = f"_storage/{backup.uuid}/"
     local_zip = f"_storage/{backup.uuid}.zip"
     mkdir_p(local_dir)
@@ -31,7 +31,7 @@ def snapshot_wordpress(backup):
     log_file.write(f"UUID: {backup.uuid} \n")
     log_file.write(f"Time: {backup.created} \n")
     log_file.write(f"Attempt Number: {backup.attempt_no} \n")
-    tree_log_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}-dir-tree.log"
+    tree_log_path = f"_storage/{backup.uuid}-dir-tree.log"
 
     try:
         """

@@ -19,13 +19,13 @@ def snapshot_website(backup):
     backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
     backup.save()
 
-    working_dir = f"/home/ubuntu/backupsheep"
+    working_dir = f"."
     local_dir = f"_storage/{backup.uuid}/"
     local_zip = f"_storage/{backup.uuid}.zip"
     mkdir_p(local_dir)
 
     # Backup Log
-    log_file_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}.log"
+    log_file_path = f"_storage/{backup.uuid}.log"
     log_file = open(log_file_path, "a+")
     log_file.write(f"Node:{node.name}\n")
     log_file.write(f"UUID: {backup.uuid} \n")
@@ -37,7 +37,7 @@ def snapshot_website(backup):
     backup_file_list = open(backup_file_list_path, "a+")
 
     # MD% Hash
-    md5_log_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}.md5"
+    md5_log_path = f"_storage/{backup.uuid}.md5"
 
     # 24 hours
     command_timeout = 12 * 3600
@@ -53,12 +53,12 @@ def snapshot_website(backup):
         ssh_key_path = None
 
         if node.connection.auth_website.use_private_key:
-            ssh_key_path = f"/home/ubuntu/backupsheep/_storage/ssh_{backup.uuid}"
+            ssh_key_path = f"_storage/ssh_{backup.uuid}"
             ssh_key_file = open(ssh_key_path, "w+")
             ssh_key_file.write(bs_decrypt(node.connection.auth_website.private_key, encryption_key))
             ssh_key_file.close()
         elif node.connection.auth_website.use_public_key:
-            ssh_key_path = f"/home/ubuntu/backupsheep/_storage/ssh_{backup.uuid}"
+            ssh_key_path = f"_storage/ssh_{backup.uuid}"
             execstr = f"cp {settings.SSH_KEY_PATH} {ssh_key_path}"
             process = subprocess.Popen(execstr, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
             process.communicate()
@@ -328,7 +328,7 @@ def snapshot_website(backup):
                         log_file.write(f"LFTP: {line.replace(working_dir, '').replace('_storage/', '')}\n")
 
                     cleaned_line = line.replace(
-                        "/home/ubuntu/backupsheep/", ""
+                        "./", ""
                     ).replace(local_dir, "").replace(
                         bs_decrypt(node.connection.auth_website.username, encryption_key) or '',
                         "******",
@@ -515,7 +515,7 @@ def snapshot_website(backup):
                         log_file.write(f"LFTP: {line.replace(working_dir, '').replace('_storage/', '')}\n")
 
                     cleaned_line = line.replace(
-                        "/home/ubuntu/backupsheep/_storage/", ""
+                        "_storage/", ""
                     ).replace(local_dir, "").replace(
                         bs_decrypt(node.connection.auth_website.username, encryption_key) or '',
                         "******",

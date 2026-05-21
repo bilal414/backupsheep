@@ -1329,9 +1329,8 @@ class CoreWebsite(TimeStampedModel):
         from apps._tasks.integration.backup.website import snapshot_website
         from apps._tasks.integration.backup.incremental import snapshot_incremental
         from apps._tasks.integration.backup.full_v2 import snapshot_full_v2
-        from apps._tasks.integration.storage.tasks import storage_upload
+        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreWebsiteBackupStoragePoints
-        from apps._tasks.helper.tasks import delete_from_disk
 
         backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
         backup.save()
@@ -1371,8 +1370,17 @@ class CoreWebsite(TimeStampedModel):
                     ).set()
                 )
 
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set()
-            chord(storage_upload_task_list, final_call_back_task).apply_async()
+            if storage_upload_task_list:
+                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
+                backup.save()
+                chord(
+                    storage_upload_task_list,
+                    finalize_backup.si(self.node.id, backup.id),
+                ).apply_async()
+            else:
+                # No storage destination accepted the backup; finalize_backup will
+                # mark it failed and clean up rather than silently discarding it.
+                finalize_backup.apply_async(args=[self.node.id, backup.id])
         except Exception as e:
             capture_exception(e)
         return backup
@@ -1405,8 +1413,7 @@ class CoreDatabase(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from ..connection.models import CoreAuthDatabase
-        from apps._tasks.integration.storage.tasks import storage_upload
-        from apps._tasks.helper.tasks import delete_from_disk
+        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from apps._tasks.integration.backup.mariadb import snapshot_mariadb
         from apps._tasks.integration.backup.mysql import snapshot_mysql
         from apps._tasks.integration.backup.postgresql import snapshot_postgresql
@@ -1450,8 +1457,17 @@ class CoreDatabase(TimeStampedModel):
                     ).set()
                 )
 
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set()
-            chord(storage_upload_task_list, final_call_back_task).apply_async()
+            if storage_upload_task_list:
+                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
+                backup.save()
+                chord(
+                    storage_upload_task_list,
+                    finalize_backup.si(self.node.id, backup.id),
+                ).apply_async()
+            else:
+                # No storage destination accepted the backup; finalize_backup will
+                # mark it failed and clean up rather than silently discarding it.
+                finalize_backup.apply_async(args=[self.node.id, backup.id])
         except Exception as e:
             raise NodeBackupFailedError(
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
@@ -1477,9 +1493,8 @@ class CoreWordPress(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from apps._tasks.integration.backup.wordpress import snapshot_wordpress
-        from apps._tasks.integration.storage.tasks import storage_upload
+        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreWordPressBackupStoragePoints
-        from apps._tasks.helper.tasks import delete_from_disk
 
         backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
         backup.save()
@@ -1506,8 +1521,17 @@ class CoreWordPress(TimeStampedModel):
                     ).set()
                 )
 
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set()
-            chord(storage_upload_task_list, final_call_back_task).apply_async()
+            if storage_upload_task_list:
+                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
+                backup.save()
+                chord(
+                    storage_upload_task_list,
+                    finalize_backup.si(self.node.id, backup.id),
+                ).apply_async()
+            else:
+                # No storage destination accepted the backup; finalize_backup will
+                # mark it failed and clean up rather than silently discarding it.
+                finalize_backup.apply_async(args=[self.node.id, backup.id])
         except Exception as e:
             capture_exception(e)
         return backup
@@ -1527,9 +1551,8 @@ class CoreBasecamp(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from apps._tasks.integration.backup.basecamp import snapshot_basecamp
-        from apps._tasks.integration.storage.tasks import storage_upload
+        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreBasecampBackupStoragePoints
-        from apps._tasks.helper.tasks import delete_from_disk
 
         backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
         backup.save()
@@ -1556,8 +1579,17 @@ class CoreBasecamp(TimeStampedModel):
                     ).set()
                 )
 
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set()
-            chord(storage_upload_task_list, final_call_back_task).apply_async()
+            if storage_upload_task_list:
+                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
+                backup.save()
+                chord(
+                    storage_upload_task_list,
+                    finalize_backup.si(self.node.id, backup.id),
+                ).apply_async()
+            else:
+                # No storage destination accepted the backup; finalize_backup will
+                # mark it failed and clean up rather than silently discarding it.
+                finalize_backup.apply_async(args=[self.node.id, backup.id])
         except Exception as e:
             capture_exception(e)
         return backup

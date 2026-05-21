@@ -23,6 +23,11 @@ from dotenv import dotenv_values
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
+# Local working directory for in-progress backups and their logs. Backup tasks run
+# with the project root as CWD (see supervisor config), so this resolves to the same
+# place as the relative "_storage/" paths they use; ensure it exists.
+os.makedirs(os.path.join(BASE_DIR, "_storage"), exist_ok=True)
+
 if "BACKUPSHEEP_SECRETS" in os.environ:
     config = json.loads(os.environ.get("BACKUPSHEEP_SECRETS"))
 else:
@@ -296,6 +301,30 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
+# Task modules the worker must import at boot so every task is registered. These
+# do not live in the conventional "<app>/tasks.py" location, so Celery's app
+# autodiscovery does not find them; backups are dispatched by name via
+# send_task()/chord(), which fails on an unregistered task unless listed here.
+CELERY_IMPORTS = (
+    "apps._tasks.helper.tasks",
+    "apps._tasks.integration.aws",
+    "apps._tasks.integration.aws_rds",
+    "apps._tasks.integration.basecamp",
+    "apps._tasks.integration.database",
+    "apps._tasks.integration.digitalocean",
+    "apps._tasks.integration.google_cloud",
+    "apps._tasks.integration.hetzner",
+    "apps._tasks.integration.lightsail",
+    "apps._tasks.integration.oracle",
+    "apps._tasks.integration.ovh_ca",
+    "apps._tasks.integration.ovh_eu",
+    "apps._tasks.integration.ovh_us",
+    "apps._tasks.integration.upcloud",
+    "apps._tasks.integration.vultr",
+    "apps._tasks.integration.website",
+    "apps._tasks.integration.wordpress",
+    "apps._tasks.integration.storage.tasks",
+)
 # Local scheduled backups are driven by django-celery-beat's database scheduler
 # (replaces the SaaS AWS EventBridge Scheduler).
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"

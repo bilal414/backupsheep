@@ -102,10 +102,10 @@ def backup_database(
             # Delete Any Downloaded Files
             if backup:
                 delete_from_disk.apply_async(
-                    args=[self.request.id, "dir"],
+                    args=[backup.uuid_str, "dir"],
                 )
                 delete_from_disk.apply_async(
-                    args=[self.request.id, "zip"],
+                    args=[backup.uuid_str, "zip"],
                 )
         except Exception as error:
             capture_exception(error)
