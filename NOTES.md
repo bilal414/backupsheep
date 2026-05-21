@@ -46,27 +46,39 @@ self-host without complicated setup.
      Removed the two API modules built on it: `apps/api/v1/storage/bs/` and
      `apps/api/v1/storage/backupsheep/`, plus their includes in `storage/urls.py`.
 
+10. SaaS BackupSheep-hosted storage subsystem (the `bs` storage type / CoreStorageBS
+    / storage_bs relation) — fully removed (commit "remove SaaS BackupSheep-hosted
+    storage subsystem"): the bs_* task backends, dead incremental_restic.py, the
+    `bs` dispatch, the BS-only methods/tasks (transfer*, generate_download,
+    soft_delete_temp, remove_deplicate, backup_download_request, etc.), the BS
+    download path in the 4 backup views (presigned-URL download stays), the
+    exists_on_bs_* helpers, and FieldError-causing storage_bs__ filters. Also
+    ported the missing `api_mail` util.
+11. AppSumo (SaaS lifetime-deal) — fully removed (commit "remove AppSumo"):
+    UtilAppSumoCode model, serializer fields, the account API action, AppSumoView
+    + appsumo.html + route, settings-template nav links, and the
+    `billing.plan.name == "AppSumo"` gates (simplified to non-AppSumo behavior).
+
 ## Verification status
-AST import check over `apps/api/v1` (all level-0 `from apps... import`, checking
-module file + top-level symbol existence): **0 missing modules, 0 missing
-symbols** across 1179 imports. The ported API import graph is fully resolved.
-NOT yet run: full `python manage.py check`/`runserver` (needs deps installed +
-a real `.env`).
+Whole-`apps` AST import audit (level-0 `from apps... import`, module + top-level
+symbol existence): **0 missing modules, 0 missing symbols**. All edited files
+byte-compile under python3.12. NOT yet run: full `python manage.py
+check`/`runserver` (needs deps installed + a real `.env`).
 
 ## Next steps
-1. Full `python manage.py check` on a **python3.12** venv (`/usr/bin/python3.12`;
+1. **Broader SaaS billing/plan removal (biggest remaining item).** ~30
+   `account.billing.*` references across ~10 files are all broken (CoreBilling was
+   never ported) and SaaS: plan limits/gating, the console `BillingView` +
+   `billing.html` (Stripe customer-portal page), `calc_account_good_standing`
+   (plan-overage task in helper/tasks.py), and node/backup limit checks. Decide
+   self-hosted behavior (no plans/limits) and strip them.
+2. Cosmetic template leftovers (harmless — render correctly): `{% if not
+   is_appsumo_plan %}` nav guards in the settings templates (var is never set →
+   always shows the item) and `show_request_download` (serializer field + the
+   buttons in `node/detail.html`; always False now). Optional cleanup.
+3. Full `python manage.py check` on a **python3.12** venv (`/usr/bin/python3.12`;
    Django 6 requires py>=3.12) with `pip install -r requirements.txt` + a real
    `.env` (see `.env_sample`). PyPI is reachable in this env.
-2. Remaining SaaS-storage leftovers OUTSIDE the API URLconf (don't block API
-   import, but break celery): `CoreStorageBS` is still imported in
-   `apps/_tasks/integration/storage/backblaze_b2_old.py`,
-   `apps/_tasks/integration/backup/incremental_restic.py`,
-   `apps/_tasks/helper/tasks.py`. Strip these (SaaS storage migration logic).
-3. Console UI (`apps/console/...`) likely still has a "BackupSheep storage"
-   setup page/links pointing at the removed `bs`/`backupsheep` endpoints — audit
-   and remove those too.
-4. Broader AppSumo removal (e.g. the commented appsumo block + `UtilAppSumoCode`
-   in `apps/api/v1/account/views.py`).
 
 ## How to verify imports resolve (no DB / no deps needed)
 Run an `ast`-based script over `apps/api/v1` checking each level-0 `ImportFrom`
