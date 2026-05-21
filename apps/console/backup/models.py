@@ -11,7 +11,7 @@ from django.conf import settings
 from django.db import models, IntegrityError
 from django.db.models import UniqueConstraint
 from django.urls import reverse
-from gcloud.exceptions import NotFound
+from google.cloud.exceptions import NotFound
 from model_utils import Choices
 from model_utils.fields import StatusField
 from model_utils.models import TimeStampedModel
