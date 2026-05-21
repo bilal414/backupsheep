@@ -28,10 +28,6 @@ from apps._tasks.integration.storage.azure import storage_azure
 from apps._tasks.integration.storage.backblaze_b2 import (
     storage_backblaze_b2,
 )
-from apps._tasks.integration.storage.bs import storage_bs
-
-from apps._tasks.integration.storage.bs_ceph import storage_bs_ceph
-from apps._tasks.integration.storage.bs_google_cloud import bs_google_cloud
 from apps._tasks.integration.storage.cloudflare import storage_cloudflare
 from apps._tasks.integration.storage.do_spaces import (
     storage_do_spaces,
@@ -176,13 +172,6 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
             storage_rackcorp(stored_backup)
         elif stored_backup.storage.type.code == "ibm":
             storage_ibm(stored_backup)
-        elif stored_backup.storage.type.code == "bs":
-            if stored_backup.storage.storage_bs.endpoint == "s3.backupsheep.com":
-                storage_bs_ceph(stored_backup)
-            elif stored_backup.storage.storage_bs.endpoint == "storage.cloud.google.com":
-                bs_google_cloud(stored_backup)
-            else:
-                storage_bs(stored_backup)
 
         """
         Set storage point status to complete

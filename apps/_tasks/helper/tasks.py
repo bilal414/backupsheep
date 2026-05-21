@@ -247,7 +247,6 @@ def send_log_to_telegram(self, chat_id, message):
 )
 def account_delete(self):
     try:
-        from apps.console.storage.models import CoreStorageBS
         from apps.console.node.models import CoreSchedule, CoreNode
         import boto3
         from apps.console.backup.models import (
@@ -311,88 +310,6 @@ def send_postmark_email(self, to_email, template, context):
                     print(f"email not verified : {to_email}")
     except Exception as e:
         capture_exception(e)
-
-
-
-@current_app.task(
-    name="bs_storage_clean_delete_markers",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
-def bs_storage_clean_delete_markers(self):
-    from apps.console.backup.models import (
-        CoreDatabaseBackupStoragePoints,
-        CoreWebsiteBackupStoragePoints,
-    )
-    import boto3
-
-    try:
-        for storage_point in CoreWebsiteBackupStoragePoints.objects.filter(
-            storage__type__code="bs",
-            status=CoreWebsiteBackupStoragePoints.Status.DELETE_COMPLETED,
-        ).order_by("-created"):
-            if storage_point.storage_file_id:
-                if ".amazonaws.com" in storage_point.storage.storage_bs.endpoint:
-                    s3_client = boto3.client("s3", storage_point.storage.storage_bs.region)
-
-                    prefix = f"{storage_point.storage.storage_bs.prefix}{storage_point.storage_file_id}"
-
-                    response = s3_client.list_object_versions(
-                        Prefix=prefix,
-                        Bucket=storage_point.storage.storage_bs.bucket_name,
-                    )
-                    versions = response.get("Versions", [])
-                    delete_markers = response.get("DeleteMarkers", [])
-
-                    for version in versions:
-                        s3_client.delete_object(
-                            Bucket=storage_point.storage.storage_bs.bucket_name,
-                            Key=prefix,
-                            VersionId=version["VersionId"],
-                        )
-
-                    for delete_marker in delete_markers:
-                        s3_client.delete_object(
-                            Bucket=storage_point.storage.storage_bs.bucket_name,
-                            Key=prefix,
-                            VersionId=delete_marker["VersionId"],
-                        )
-
-        for storage_point in CoreDatabaseBackupStoragePoints.objects.filter(
-            storage__type__code="bs",
-            status=CoreDatabaseBackupStoragePoints.Status.DELETE_COMPLETED,
-        ).order_by("-created"):
-            if storage_point.storage_file_id:
-                if ".amazonaws.com" in storage_point.storage.storage_bs.endpoint:
-                    s3_client = boto3.client("s3", storage_point.storage.storage_bs.region)
-
-                    prefix = f"{storage_point.storage.storage_bs.prefix}{storage_point.storage_file_id}"
-
-                    response = s3_client.list_object_versions(
-                        Prefix=prefix,
-                        Bucket=storage_point.storage.storage_bs.bucket_name,
-                    )
-                    versions = response.get("Versions", [])
-                    delete_markers = response.get("DeleteMarkers", [])
-
-                    for version in versions:
-                        s3_client.delete_object(
-                            Bucket=storage_point.storage.storage_bs.bucket_name,
-                            Key=prefix,
-                            VersionId=version["VersionId"],
-                        )
-
-                    for delete_marker in delete_markers:
-                        s3_client.delete_object(
-                            Bucket=storage_point.storage.storage_bs.bucket_name,
-                            Key=prefix,
-                            VersionId=delete_marker["VersionId"],
-                        )
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
 
 
 """
@@ -465,51 +382,6 @@ def node_delete_requested(self, node_id):
 
 
 @current_app.task(
-    name="delete_bs_storage_for_node",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
-def delete_bs_storage_for_node(self, node_id):
-    from apps.console.node.models import CoreNode
-    from apps.console.backup.models import (
-        CoreWebsiteBackupStoragePoints,
-        CoreDatabaseBackupStoragePoints,
-        CoreWordPressBackupStoragePoints,
-    )
-
-    try:
-        if node_id:
-            node = CoreNode.objects.get(id=node_id)
-
-            if node.type == CoreNode.Type.WEBSITE:
-                for storage_point in CoreWebsiteBackupStoragePoints.objects.filter(
-                    backup__website__node_id=node_id,
-                    status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
-                    storage__type__code="bs",
-                ):
-                    storage_point.soft_delete()
-            elif node.type == CoreNode.Type.DATABASE:
-                for storage_point in CoreDatabaseBackupStoragePoints.objects.filter(
-                    backup__database__node_id=node_id,
-                    status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_COMPLETE,
-                    storage__type__code="bs",
-                ):
-                    storage_point.soft_delete()
-            elif node.type == CoreNode.Type.SAAS:
-                for storage_point in CoreWordPressBackupStoragePoints.objects.filter(
-                    backup__wordpress__node_id=node_id,
-                    status=CoreWordPressBackupStoragePoints.Status.UPLOAD_COMPLETE,
-                    storage__type__code="bs",
-                ):
-                    storage_point.soft_delete()
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
     name="clean_delete_failed_backups",
     track_started=True,
     default_retry_delay=1 * 60,
@@ -555,7 +427,6 @@ def clean_delete_failed_backups(self):
     except Exception as e:
         capture_exception(e)
         raise self.retry()
-
 
 
 @current_app.task(
@@ -822,110 +693,6 @@ def calc_stats_storage_insight(self):
                     storage.stats_database_size = storage.database_backups__size__sum
                     storage.stats_wordpress_size = storage.wordpress_backups__size__sum
                     storage.save()
-
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="cleanup_storage",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
-def cleanup_storage(self, storage_point_id, node_type):
-    from apps.console.backup.models import (
-        CoreWebsiteBackupStoragePoints,
-        CoreDatabaseBackupStoragePoints,
-    )
-
-    try:
-        if node_type == "website":
-            web_storage_point = CoreWebsiteBackupStoragePoints.objects.get(
-                id=storage_point_id,
-                storage__storage_bs__isnull=False,
-                storage__storage_bs__endpoint__contains="filebase",
-                status=CoreWebsiteBackupStoragePoints.Status.DELETE_COMPLETED,
-            )
-            web_storage_point.soft_delete_temp()
-        elif node_type == "database":
-            database_storage_point = CoreDatabaseBackupStoragePoints.objects.get(
-                id=storage_point_id,
-                storage__storage_bs__isnull=False,
-                storage__storage_bs__endpoint__contains="filebase",
-                status=CoreDatabaseBackupStoragePoints.Status.DELETE_COMPLETED,
-            )
-            database_storage_point.soft_delete_temp()
-
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="backup_download_request",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-    queue="backup_download_request",
-)
-def backup_download_request(self, storage_point_id=None, backup_type=None, member_id=None):
-    from apps.console.backup.models import (
-        CoreWebsiteBackupStoragePoints,
-        CoreDatabaseBackupStoragePoints,
-        CoreWordPressBackupStoragePoints,
-    )
-
-    try:
-        storage_point = None
-
-        if backup_type == "website":
-            storage_point = CoreWebsiteBackupStoragePoints.objects.get(id=storage_point_id)
-        elif backup_type == "database":
-            storage_point = CoreDatabaseBackupStoragePoints.objects.get(id=storage_point_id)
-        elif backup_type == "wordpress":
-            storage_point = CoreWordPressBackupStoragePoints.objects.get(id=storage_point_id)
-
-        if storage_point:
-            storage_point.generate_download(member_id)
-
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-
-@current_app.task(
-    name="backup_transfer_request",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=4,
-    bind=True,
-    queue="backup_transfer_request",
-)
-def backup_transfer_request(self, storage_point_id=None, backup_type=None):
-    from apps.console.backup.models import (
-        CoreWebsiteBackupStoragePoints,
-        CoreDatabaseBackupStoragePoints,
-        CoreWordPressBackupStoragePoints,
-    )
-
-    try:
-        if backup_type == "website":
-            if CoreWebsiteBackupStoragePoints.objects.filter(id=storage_point_id).exists():
-                storage_point = CoreWebsiteBackupStoragePoints.objects.get(id=storage_point_id)
-                storage_point.remove_deplicate()
-        elif backup_type == "database":
-            if CoreDatabaseBackupStoragePoints.objects.filter(id=storage_point_id).exists():
-                storage_point = CoreDatabaseBackupStoragePoints.objects.get(id=storage_point_id)
-                storage_point.remove_deplicate()
-        elif backup_type == "wordpress":
-            if CoreWordPressBackupStoragePoints.objects.filter(id=storage_point_id).exists():
-                storage_point = CoreWordPressBackupStoragePoints.objects.get(id=storage_point_id)
-                storage_point.remove_deplicate()
 
     except Exception as e:
         capture_exception(e)

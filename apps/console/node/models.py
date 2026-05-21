@@ -2210,23 +2210,6 @@ class CoreNode(TimeStampedModel):
                         backup=backup
                     )
 
-            """
-            If all user storage points fail validation then add BackupSheep default storage
-            """
-            if backup.storage_points.count() == 0:
-                storage = CoreStorage.objects.filter(
-                    storage_bs__isnull=False,
-                    account=self.connection.account,
-                    status=CoreStorage.Status.ACTIVE,
-                ).first()
-                backup.storage_points.add(storage)
-
-                self.connection.account.create_backup_log(
-                    message=f"Using BackupSheep Storage for node ({self.name}) backup ({backup.uuid_str}) because "
-                            f"validation failed for all your selected storage points.",
-                    node=self,
-                    backup=backup
-                )
         self.save()
         return backup
 

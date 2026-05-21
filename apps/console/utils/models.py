@@ -179,21 +179,6 @@ class UtilBackup(TimeStampedModel):
         if storage_id:
             return self.storage_points.filter(id=storage_id).exists()
 
-    def exists_on_bs_nas_storage(self):
-        return self.storage_points.filter(storage_bs__host__isnull=False).exists()
-
-    def exists_on_bs_idrivee2_storage(self):
-        return self.storage_points.filter(storage_bs__endpoint="n2c1.fra.idrivee2-37.com").exists()
-
-    def exists_on_bs_s3_storage(self):
-        return self.storage_points.filter(storage_bs__endpoint="s3.backupsheep.com").exists()
-
-    def exists_on_bs_aws_storage(self):
-        return self.storage_points.filter(storage_bs__bucket_name="backupsheep-europe-frankfurt").exists()
-
-    def exists_on_bs_google_cloud_storage(self):
-        return self.storage_points.filter(storage_bs__bucket_name="backupsheep-eu").exists()
-
     def delete_requested(self):
         self.status = self.Status.DELETE_REQUESTED
         self.save()
