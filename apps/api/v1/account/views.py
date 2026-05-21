@@ -10,12 +10,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 from apps.console.account.models import CoreAccount
-from apps.console.billing.models import CorePlan
 from apps.console.utils.models import UtilAppSumoCode
 from .filters import CoreAccountFilter
 from .permissions import CoreAccountViewPermissions
 from .serializers import CoreAccountSerializer, CoreAccountWriteSerializer
-from apps._tasks.helper.tasks import billing_sync_all
 from ..utils.api_filters import DateRangeFilter
 from ..utils.api_serializers import ReadWriteSerializerMixin
 
@@ -113,23 +111,6 @@ class CoreAccountView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     #         code.account = account
     #         code.save()
     #     return Response(status=status.HTTP_202_ACCEPTED, data={})
-
-    @action(detail=True, methods=["post"])
-    def sync_billing(self, request, pk=None):
-        if self.request.user.member.memberships.filter(account_id=pk).exists():
-            membership = self.request.user.member.memberships.get(account_id=pk)
-            billing_sync_all(
-                membership.account.billing.id,
-            )
-            return Response(
-                status=status.HTTP_202_ACCEPTED,
-                data={"detail": f"Your billing, storage and nodes will be synced in next few minutes."},
-            )
-        else:
-            return Response(
-                status=status.HTTP_404_NOT_FOUND,
-                data={"detail": f"Sorry you don't have access to this account."},
-            )
 
     @action(detail=True, methods=["post"])
     def remove_membership(self, request, pk=None):

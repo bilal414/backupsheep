@@ -47,6 +47,7 @@ ovh==1.2.0
 paramiko==4.0.0
 ftputil==5.1.0
 requests==2.33.1
+requests-toolbelt==1.0.0
 gunicorn==25.3.0
 ipaddress==1.0.23
 
@@ -60,6 +61,7 @@ humanfriendly==10.0
 humanize==4.15.0
 shortuuid==1.0.13
 phonenumbers==9.0.28
+twilio==9.10.9
 Pillow==12.2.0
 beautifulsoup4==4.14.3
 slack-sdk==3.41.0

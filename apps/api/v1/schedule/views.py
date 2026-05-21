@@ -21,7 +21,7 @@ from django.utils.text import slugify
 from rest_framework.decorators import action
 from celery import current_app
 
-from apps.utils.api_exceptions import ExceptionDefault
+from apps.api.v1.utils.api_exceptions import ExceptionDefault
 
 
 class CoreScheduleView(viewsets.ModelViewSet):

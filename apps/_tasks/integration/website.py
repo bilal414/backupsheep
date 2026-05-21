@@ -17,7 +17,6 @@ from apps._tasks.helper.tasks import (
     delete_from_disk,
 )
 from apps.console.backup.models import CoreWebsiteBackupStoragePoints
-from apps.console.billing.models import CoreBilling
 from apps.console.connection.models import CoreConnection
 from apps.console.node.models import CoreNode, CoreSchedule
 from apps.console.utils.models import UtilBackup

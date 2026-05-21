@@ -38,7 +38,7 @@ from apps.console.node.models import CoreNode
 from rest_framework import status
 
 from apps.console.storage.models import CoreStorage
-from apps.utils.api_exceptions import ExceptionDefault
+from apps.api.v1.utils.api_exceptions import ExceptionDefault
 from google.cloud import storage as gc_storage
 from google.oauth2 import service_account
 

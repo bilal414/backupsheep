@@ -1,4 +1,3 @@
-import stripe
 from requests_oauthlib import OAuth2Session
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
@@ -9,7 +8,6 @@ from django.contrib import messages
 from sentry_sdk import capture_exception, capture_message
 from django.core.cache import cache
 from apps.api.v1.utils.api_helpers import bs_encrypt
-from apps.console.billing.models import CorePayPalCredit
 from apps.console.member.models import CoreMember
 from apps.console.connection.models import (
     CoreConnection,
@@ -30,7 +28,7 @@ from apps.console.storage.models import (
     CoreStoragePCloud,
     CoreStorageOneDrive,
 )
-from apps.utils.api_exceptions import ExceptionDefault
+from apps.api.v1.utils.api_exceptions import ExceptionDefault
 from ..utils.api_authentication import CsrfExemptSessionAuthentication
 import time
 import ovh
@@ -820,103 +818,6 @@ class APICallbackOVHEU(APIView):
             "Your account is successfully connected. You can add schedules for this server.",
         )
         return redirect("console:setup:integration_open", integration_code="ovh_eu")
-
-
-class APICallbackPaypal(APIView):
-    authentication_classes = (CsrfExemptSessionAuthentication,)
-    permission_classes = ()
-    parser_classes = (FormParser,)
-
-    def post(self, request):
-
-        try:
-
-            params = self.request.data.copy()
-
-            if params.get("custom", None):
-                f = Fernet(settings.PAYPAL_ENCRYPTION_KEY)
-
-                decrypted_username = f.decrypt(params.get("custom", None).encode())
-
-                decrypted_username = decrypted_username.decode("utf-8")
-
-                member = CoreMember.objects.get(user__username=decrypted_username)
-
-                if CoreMember.objects.filter(user__username=decrypted_username).exists():
-
-                    if (
-                        params.get("txn_type", None) == "web_accept"
-                        and params.get("payment_type", None) == "instant"
-                        and params.get("payment_status", None) == "Completed"
-                        and CorePayPalCredit.objects.filter(txn_id=params.get("txn_id", None), is_applied=True).exists()
-                        is False
-                    ):
-
-                        VERIFY_URL_PROD = "https://www.paypal.com/cgi-bin/webscr"
-
-                        # VERIFY_URL_TEST = 'https://www.sandbox.paypal.com/cgi-bin/webscr'
-
-                        # Switch as appropriate
-                        VERIFY_URL = VERIFY_URL_PROD
-
-                        params["cmd"] = "_notify-validate"
-
-                        # Post back to PayPal for validation
-                        headers = {
-                            "User-Agent": "BackupSheep-IPN-VerificationScript",
-                            "content-type": "application/x-www-form-urlencoded",
-                            "host": "www.paypal.com",
-                        }
-
-                        r = requests.post(VERIFY_URL, params=params, headers=headers, verify=True)
-
-                        r.raise_for_status()
-
-                        # Check return message and take action as needed
-                        if r.text == "VERIFIED":
-                            paypal_credit = CorePayPalCredit()
-                            paypal_credit.txn_id = params["txn_id"]
-                            paypal_credit.data = params
-                            paypal_credit.billing = member.account.billing
-                            paypal_credit.save()
-                            stripe_customer = stripe.Customer.retrieve(member.account.billing.stripe_customer_id)
-                            tax = params.get("tax", 0)
-                            amount = params.get("mc_gross", 0)
-                            credit = float(amount) - float(tax)
-                            # account_balance = stripe_customer.account_balance
-                            stripe_customer.balance = stripe_customer.balance - int(round(credit * 100))
-                            stripe_customer.save()
-                            paypal_credit.is_applied = True
-                            paypal_credit.save()
-
-                        elif r.text == "INVALID":
-                            raise response_paypal_payment_unable_to_verify()
-                        else:
-                            raise response_paypal_payment_unable_to_verify()
-                        r.close()
-                    else:
-                        raise response_paypal_payment_checks_failed()
-                else:
-                    raise response_paypal_credit_member_not_found()
-            else:
-                pass
-
-        except Exception as e:
-            capture_exception(e)
-            if hasattr(e, "detail"):
-                response = e.detail
-            else:
-                response = dict()
-                response["message"] = (
-                    "API Error: " + str(e.args[0]) if hasattr(e, "args") else "API call failed. Please contact support."
-                )
-                response["status"] = "error"
-            raise ExceptionDefault(detail=response)
-        content = {
-            "response": "ok",
-        }
-
-        return Response(content)
 
 
 class APICallbackDropbox(APIView):

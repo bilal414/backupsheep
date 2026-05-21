@@ -11,7 +11,6 @@ from apps._tasks.exceptions import (
     NodeValidationFailedError,
     NodeBackupFailedError,
 )
-from apps.console.billing.models import CoreBilling
 from apps.console.connection.models import CoreConnection
 from apps.console.node.models import CoreNode, CoreSchedule
 from apps.console.utils.models import UtilBackup

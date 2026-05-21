@@ -1,44 +1,64 @@
-# Session handoff notes (gitignored — local scratch)
+# Session handoff notes (tracked so they survive across sessions)
 
 ## Goal
 Converting from the SaaS codebase (`bilal414/app_backupsheep_com`) to a
 self-hosted / individual codebase (`bilal414/backupsheep`) so users can set it
-up for their own use. **Remove everything SaaS-related (billing, AppSumo, etc.).**
+up for their own use. **Import all functionality but remove everything
+SaaS-related (billing, AppSumo, BackupSheep-hosted storage, etc.)** so users can
+self-host without complicated setup.
 
 ## Working branch
-`claude/update-requirements-ARh42` (pushed through commit `a88c2d1`)
+`claude/resume-previous-session-YiGg4` — merged in PR #19's import-fix work
+(`claude/update-requirements-ARh42`) as the base, then continued below.
 
 ## Done so far
-1. `requirements.txt` — bumped all outdated deps to latest; pinned `setuptools==80.10.2`
-   (`<81`) because legacy `gcloud` needs the removed `pkg_resources`.
-   - NOTE: missing-from-requirements (used in code): `requests_toolbelt`, `twilio`.
+### From PR #19 (import wiring)
+1. `requirements.txt` — bumped all outdated deps to latest; pinned `setuptools<81`
+   (legacy `gcloud` needs the removed `pkg_resources`).
 2. Console templates: `/api/proxy/` → `/api/v1/` (17 calls, 8 files).
-3. API imports: `apps.console.api.v1` → `apps.api.v1` (260 files). The API was
-   moved out of console during the port; code lives in `apps/api/v1/`.
-4. `_tasks` imports → `apps._tasks` (50 files). All imported symbols verified to
-   exist EXCEPT `billing_sync_all` (SaaS billing — to be removed, not ported).
+3. API imports: `apps.console.api.v1` → `apps.api.v1` (260 files).
+4. `_tasks` imports → `apps._tasks` (50 files).
 
-## Access note
-- GitHub `get_file_contents` is blocked unless the SESSION allowlist includes the
-  repo. `app_backupsheep_com` must be allowlisted BEFORE the session starts.
-- `search_code` works cross-repo but returns only truncated fragments.
+### This session
+5. Added the two missing API utils (copied verbatim from the source repo, both
+   self-contained — only rest_framework/django imports):
+   - `apps/api/v1/utils/api_permissions.py` (`MemberPermissions`, `WebhookPermissions`)
+   - `apps/api/v1/utils/api_filters.py` (`DateRangeFilter`)
+6. SaaS billing removal (stripped, not ported):
+   - 15 `apps/_tasks/integration/*.py` — dropped dead `CoreBilling` import (import-only).
+   - `apps/api/v1/incoming/` — removed the Stripe subscription webhook
+     (`APIIncomingStripe`) + its route; module kept as an empty placeholder.
+   - `apps/api/v1/account/views.py` — removed `CorePlan` + `billing_sync_all`
+     imports and the `sync_billing` action (no template/JS callers).
+   - `apps/api/v1/callback/views.py` — removed `import stripe`, `CorePayPalCredit`
+     import, and the entire `APICallbackPaypal` IPN view; removed its `callback/urls.py` route.
+7. Added missing deps to `requirements.txt`: `requests-toolbelt==1.0.0`, `twilio==9.10.9`.
+8. Fixed 3 wrong import paths `apps.utils.api_exceptions` →
+   `apps.api.v1.utils.api_exceptions` (schedule/views, callback/views,
+   backup/website/views). `ExceptionDefault` lives there and is byte-identical to
+   the source repo's `apps/utils/api_exceptions.py` (which was not ported).
 
-## Next steps
-1. Copy verbatim from `app_backupsheep_com` (NOT SaaS — needed by the API):
-   - `apps/console/api/v1/utils/api_permissions.py` → `apps/api/v1/utils/api_permissions.py`
-     (`MemberPermissions` — DRF permission, tenant isolation; do NOT guess)
-   - `apps/console/api/v1/utils/api_filters.py` → `apps/api/v1/utils/api_filters.py`
-     (`DateRangeFilter` — extends `BaseFilterBackend`)
-2. SaaS/billing removal (strip, don't port):
-   - `billing_sync_all` (original: `apps/console/api/v1/_tasks/helper/tasks.py`,
-     depends on `CoreBilling` from `apps.console.billing.models`).
-   - `CoreBilling` / `console.billing` referenced in 18 files in this repo
-     (e.g. `apps/api/v1/incoming/views.py`, `apps/api/v1/account/views.py`,
-     `apps/api/v1/callback/views.py`, several `apps/_tasks/integration/*.py`).
-   - Map every SaaS/billing reference first, then remove in reviewable chunks.
-3. After the above, attempt to boot the app (Django `check` / `runserver`) on
-   Python 3.12 venv; Django 6 requires py>=3.12.
+## Verification status
+AST import check over `apps/api/v1` (all `from apps... import` with level 0):
+- MISSING MODULES: 0
+- MISSING SYMBOLS: 5 — only the storage models below remain.
 
-## How to verify imports resolve (no DB needed)
-Run a small `ast`-based script over `apps/api/v1` checking each `ImportFrom`
-target module/symbol exists. (Used previously to confirm `_tasks` symbols.)
+## Next steps (storage models — needs a product decision)
+Three storage models referenced by the API are NOT ported in this repo (they
+exist in `app_backupsheep_com/apps/console/storage/models.py`):
+1. `CoreStorageStatus` (lookup: code/name/description) — CORE, **port it**.
+   Used by `apps/api/v1/storage/serializers.py`.
+2. `CoreStorageBS` ("BackupSheep storage" — BS-hosted buckets/NAS with internal
+   `move_node_hel_*`/`fsn_*` datacenter flags) — **SaaS, remove**. Drives the
+   `apps/api/v1/storage/bs/` and `apps/api/v1/storage/backupsheep/` API modules.
+3. `CoreStorageDefault` (global storage-backend pool, no account FK, `active`) —
+   likely **SaaS** (backs the BS-hosted offering). Referenced by
+   `apps/api/v1/schedule/serializers.py` — check removal depth there.
+
+After resolving storage: run full `python manage.py check` on a **python3.12**
+venv (`/usr/bin/python3.12`) with deps installed + a real `.env` (see
+`.env_sample`); Django 6 requires py>=3.12. PyPI is reachable in this env.
+
+## How to verify imports resolve (no DB / no deps needed)
+Run an `ast`-based script over `apps/api/v1` checking each level-0 `ImportFrom`
+target module + symbol exists as a first-party file/top-level name.

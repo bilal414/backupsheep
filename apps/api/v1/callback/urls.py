@@ -8,7 +8,6 @@ urlpatterns = [
     re_path(r'^callback/ovh/ca/?$', APICallbackOVHCA.as_view()),
     re_path(r'^callback/ovh/eu/?$', APICallbackOVHEU.as_view()),
     re_path(r'^callback/ovh/us/?$', APICallbackOVHUS.as_view()),
-    re_path(r'^callback/paypal/?$', APICallbackPaypal.as_view()),
     re_path(r'^callback/dropbox/?$', APICallbackDropbox.as_view()),
     re_path(r'^callback/google_drive/?$', APICallbackGoogleDrive.as_view()),
     re_path(r'^callback/google_cloud_storage/?$', APICallbackGoogleStorage.as_view()),
