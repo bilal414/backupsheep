@@ -291,6 +291,41 @@ MS_GRAPH_ENDPOINT = config["MS_GRAPH_ENDPOINT"]
 GOOGLE_CLIENT_ID = config["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = config["GOOGLE_CLIENT_SECRET"]
 
+# Cloud provider API endpoints (used by the server/volume snapshot integrations).
+# These are public, stable API hosts with sensible defaults so cloud backups work
+# out of the box; override in .env only if a provider changes its endpoint.
+DIGITALOCEAN_API = config.get("DIGITALOCEAN_API", "https://api.digitalocean.com")
+HETZNER_API = config.get("HETZNER_API", "https://api.hetzner.cloud")
+UPCLOUD_API = config.get("UPCLOUD_API", "https://api.upcloud.com/1.3")
+VULTR_API = config.get("VULTR_API", "https://api.vultr.com")
+GOOGLE_COMPUTE_API = config.get("GOOGLE_COMPUTE_API", "https://compute.googleapis.com")
+GOOGLE_RESOURCE_API = config.get(
+    "GOOGLE_RESOURCE_API", "https://cloudresourcemanager.googleapis.com"
+)
+
+# OAuth token endpoints (only used when refreshing OAuth-based cloud connections).
+DIGITALOCEAN_TOKEN_URL = config.get(
+    "DIGITALOCEAN_TOKEN_URL", "https://cloud.digitalocean.com/v1/oauth/token"
+)
+GOOGLE_OAUTH_TOKEN_URL = config.get(
+    "GOOGLE_OAUTH_TOKEN_URL", "https://oauth2.googleapis.com/token"
+)
+
+# DigitalOcean OAuth app (only needed for OAuth-based connections; Personal Access
+# Token connections do not require these).
+DIGITALOCEAN_APP_CLIENT_ID = config.get("DIGITALOCEAN_APP_CLIENT_ID", "")
+DIGITALOCEAN_APP_CLIENT_SECRET = config.get("DIGITALOCEAN_APP_CLIENT_SECRET", "")
+
+# OVH Public Cloud application credentials, per OVH endpoint region. Create an
+# application at the matching console (ovh.com / ovhcloud.com) and set these to back
+# up OVH instances/volumes.
+OVH_CA_APP_KEY = config.get("OVH_CA_APP_KEY", "")
+OVH_CA_APP_SECRET = config.get("OVH_CA_APP_SECRET", "")
+OVH_EU_APP_KEY = config.get("OVH_EU_APP_KEY", "")
+OVH_EU_APP_SECRET = config.get("OVH_EU_APP_SECRET", "")
+OVH_US_APP_KEY = config.get("OVH_US_APP_KEY", "")
+OVH_US_APP_SECRET = config.get("OVH_US_APP_SECRET", "")
+
 # Celery (task queue + scheduled backups)
 # Broker is Redis by default; override CELERY_BROKER_URL in .env for another broker.
 CELERY_BROKER_URL = config.get("CELERY_BROKER_URL", "redis://localhost:6379/0")

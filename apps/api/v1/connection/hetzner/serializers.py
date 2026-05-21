@@ -112,7 +112,10 @@ class CoreAuthHetznerWriteSerializer(serializers.ModelSerializer):
                 "Authorization": f"Bearer {api_key}",
             }
             result = requests.get(
-                settings.HETZNER_API + "/v1/actions", headers=headers, verify=True
+                settings.HETZNER_API + "/v1/servers",
+                headers=headers,
+                params={"per_page": 1},
+                verify=True,
             )
             if result.status_code != 200:
                 raise serializers.ValidationError(

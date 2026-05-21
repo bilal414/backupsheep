@@ -368,7 +368,14 @@ class CoreAuthHetzner(TimeStampedModel):
 
     def validate(self, check_errors=None, raise_exp=None):
         client = self.get_client()
-        result = requests.get(settings.HETZNER_API + "/v1/actions", headers=client, verify=True)
+        # The bare global GET /v1/actions list was removed (410 Gone) in Jan 2025;
+        # hit a lightweight authenticated endpoint to confirm the token instead.
+        result = requests.get(
+            settings.HETZNER_API + "/v1/servers",
+            headers=client,
+            params={"per_page": 1},
+            verify=True,
+        )
         if result.status_code == 200:
             return True
         else:

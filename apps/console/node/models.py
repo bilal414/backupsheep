@@ -890,8 +890,8 @@ class CoreLightsail(UtilCloud):
                         backup.save()
             elif self.node.type == CoreNode.Type.VOLUME:
                 response = client.create_disk_snapshot(
-                    diskName=backup.uuid_str,
-                    diskSnapshotName=self.unique_id,
+                    diskName=self.unique_id,
+                    diskSnapshotName=backup.uuid_str,
                 )
                 if response.get("operations"):
                     operation = response["operations"][0]
@@ -1010,7 +1010,7 @@ class CoreVultr(UtilCloud):
                     raise NodeBackupFailedError(
                         self.node,
                         backup.uuid_str, backup.attempt_no, backup.type,
-                        "Vultr 12 snapshot limit exceeded. Vultr limits each account to have maximum of 12 snapshots.",
+                        "API rate limit exceeded. We will try again shortly.",
                     )
                 elif result.status_code == 401:
                     raise NodeBackupFailedError(
@@ -1267,12 +1267,7 @@ class CoreGoogleCloud(UtilCloud):
                         f"/zones/{self.node.google_cloud.zone}"
                         f"/disks/{disk['name']}/createSnapshot",
                         headers=client,
-                        data=json.dumps(
-                            {"name": backup.uuid_str,
-                             "sourceInstance": f"projects/{self.node.google_cloud.project_id}"
-                                               f"/zones/{self.node.google_cloud.zone}"
-                                               f"/disks/{disk['name']}"}
-                        ),
+                        data=json.dumps({"name": backup.uuid_str}),
                     )
                     if result.status_code == 200:
                         snapshot = result.json()
