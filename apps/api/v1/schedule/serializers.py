@@ -1,15 +1,11 @@
 import json
-import time
 
-import boto3
 import humanfriendly
 import pytz
-from botocore.exceptions import ClientError
 from celery.schedules import crontab_parser
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from django.conf import settings
 from apps.console.account.models import CoreAccount
 from apps.api.v1.utils.api_helpers import (
     CurrentAccountDefault,
@@ -155,76 +151,43 @@ class CoreScheduleSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
-        try:
-            aws_scheduler = boto3.client(
-                "scheduler",
-                aws_access_key_id=settings.AWS_SCHEDULER_ACCESS_KEY,
-                aws_secret_access_key=settings.AWS_SCHEDULER_SECRET_KEY,
-                region_name="us-east-1"
+        if data["type"] == CoreSchedule.Type.CRON:
+            cron_expression = (
+                f"{data['minute']} {data['hour']} {data['day_of_month']} "
+                f"{data['month_of_year']} {data['day_of_week']}"
             )
+            if not croniter.is_valid(cron_expression):
+                raise serializers.ValidationError(
+                    "Invalid schedule configuration. Try changing cron values."
+                )
+            data['rate_value'] = None
+            data['rate_unit'] = None
+        elif data["type"] == CoreSchedule.Type.RATE:
+            if not data.get('rate_value') or data['rate_value'] < 1:
+                raise serializers.ValidationError(
+                    "Invalid schedule configuration. Rate value must be a positive integer."
+                )
+            data['minute'] = None
+            data['hour'] = None
+            data['day_of_month'] = None
+            data['month_of_year'] = None
+            data['day_of_week'] = None
+            data['year'] = None
+        elif data["type"] == CoreSchedule.Type.ONETIME:
+            if not data.get('onetime_datetime'):
+                raise serializers.ValidationError(
+                    "Invalid schedule configuration. A date and time is required."
+                )
+            data['rate_value'] = None
+            data['rate_unit'] = None
+            data['minute'] = None
+            data['hour'] = None
+            data['day_of_month'] = None
+            data['month_of_year'] = None
+            data['day_of_week'] = None
+            data['year'] = None
 
-            schedule_settings = {
-                "RoleArn": "arn:aws:iam::557987923879:role/bs-event-scheduler-lambda",
-                "Arn": "arn:aws:lambda:us-east-1:557987923879:function:bsProdForwardCronToAPI",
-            }
-
-            schedule_expression = None
-            if data["type"] == CoreSchedule.Type.CRON:
-                schedule_expression = f"cron({data['minute']} {data['hour']} {data['day_of_month']} {data['month_of_year']} {data['day_of_week']} {data['year']})"
-                data['rate_value'] = None
-                data['rate_unit'] = None
-            elif data["type"] == CoreSchedule.Type.RATE:
-                schedule_expression = f"rate({data['rate_value']} {data['rate_unit']})"
-                data['minute'] = None
-                data['hour'] = None
-                data['hour'] = None
-                data['day_of_month'] = None
-                data['month_of_year'] = None
-                data['day_of_week'] = None
-                data['year'] = None
-            elif data["type"] == CoreSchedule.Type.ONETIME:
-                schedule_expression = f"at({data['onetime_datetime']})"
-                data['rate_value'] = None
-                data['rate_unit'] = None
-                data['minute'] = None
-                data['hour'] = None
-                data['hour'] = None
-                data['day_of_month'] = None
-                data['month_of_year'] = None
-                data['day_of_week'] = None
-                data['year'] = None
-
-            schedule_name = f"validation_{int(time.time())}"
-            aws_schedule = {
-                "Name": schedule_name,
-                "State": "ENABLED",
-                "ScheduleExpression": schedule_expression,
-                "ScheduleExpressionTimezone": data["timezone"],
-                "Target": schedule_settings,
-                "FlexibleTimeWindow": {"Mode": "OFF"},
-            }
-
-            aws_response = aws_scheduler.create_schedule(**aws_schedule)
-            if aws_response.get("ScheduleArn"):
-                aws_scheduler.delete_schedule(Name=schedule_name)
-
-            return data
-
-        except ClientError as err:
-            error_msg = err.__str__().lower()
-
-            if "invalid schedule expression" in error_msg and "cron" in error_msg:
-                raise serializers.ValidationError("Invalid schedule configuration. "
-                                                  "Try changing cron values or contact support.")
-
-            elif "invalid schedule expression" in error_msg and "rate" in error_msg:
-                raise serializers.ValidationError("Invalid schedule configuration. "
-                                                  "Try changing rate values or contact support.")
-            else:
-                raise serializers.ValidationError(err.__str__())
-        except Exception as e:
-            raise serializers.ValidationError("Invalid schedule configuration. "
-                                              "Try changing different values or contact support.")
+        return data
 
     # @staticmethod
     # def validate_minute(data):
