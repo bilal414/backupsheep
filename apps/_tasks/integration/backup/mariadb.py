@@ -66,7 +66,7 @@ def snapshot_mariadb(backup):
         # if node.connection.auth_database.version != "mariadb_10_3" and node.connection.auth_database.version != "mariadb_10_2":
         #     option_column_statistics = "--column-statistics=0"
 
-        database_version_path = f"sudo docker exec {node.connection.auth_database.version} /usr/bin/"
+        database_version_path = node.connection.auth_database.bin_path()
 
         if (
                 node.connection.auth_database.use_public_key

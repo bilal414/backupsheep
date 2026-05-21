@@ -1519,11 +1519,15 @@ class CoreAuthDatabase(TimeStampedModel):
         POSTGRESQL = 3, "PostgreSQL"
 
     class DatabaseVersion(models.TextChoices):
+        MYSQL_8_4 = "mysql_8_4", "MySQL 8.4"
         MYSQL_8_0 = "mysql_8_0", "MySQL 8.0"
         MYSQL_5_7 = "mysql_5_7", "MySQL 5.7"
         MYSQL_5_6 = "mysql_5_6", "MySQL 5.6"
         MYSQL_5_5 = "mysql_5_5", "MySQL 5.5"
 
+        MARIADB_11_8 = "mariadb_11_8", "MariaDB 11.8"
+        MARIADB_11_4 = "mariadb_11_4", "MariaDB 11.4"
+        MARIADB_10_11 = "mariadb_10_11", "MariaDB 10.11"
         MARIADB_10_10 = "mariadb_10_10", "MariaDB 10.10"
         MARIADB_10_9 = "mariadb_10_9", "MariaDB 10.9"
         MARIADB_10_8 = "mariadb_10_8", "MariaDB 10.8"
@@ -1575,6 +1579,30 @@ class CoreAuthDatabase(TimeStampedModel):
 
     class Meta:
         db_table = "core_auth_database"
+
+    def bin_path(self):
+        """Local directory of the version-matched client tools for direct-mode backups.
+
+        The SaaS build ran `docker exec <version-container> <tool>`; the self-hosted
+        worker image ships the tools instead, and this picks the right one by version:
+        - PostgreSQL: the exact /usr/lib/postgresql/<N>/bin (pg_dump is forward
+          compatible, so the newest installed client is used as a fallback).
+        - MySQL: a real MySQL client if dropped in at /opt/mysql/bin, else the system client.
+        - MariaDB (and anything else): the system mariadb client (mariadb-dump / mysqldump).
+        """
+        version = self.version or ""
+        if version.startswith("postgres_"):
+            wanted = version.split("postgres_", 1)[1]
+            for v in [wanted, "18", "17", "16", "15", "14"]:
+                candidate = f"/usr/lib/postgresql/{v}/bin/"
+                if os.path.isdir(candidate):
+                    return candidate
+            return "/usr/bin/"
+        if version.startswith("mysql_"):
+            if os.path.exists("/opt/mysql/bin/mysqldump"):
+                return "/opt/mysql/bin/"
+            return "/usr/bin/"
+        return "/usr/bin/"
 
     def check_connection(self, data=None, check_errors=None):
         import mysql.connector

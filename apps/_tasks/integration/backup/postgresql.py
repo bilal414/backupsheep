@@ -50,6 +50,8 @@ def snapshot_postgresql(backup):
         node.connection.auth_database.check_connection()
         log_file.write(f"Integration Validation: Passed \n")
 
+        database_version_path = node.connection.auth_database.bin_path()
+
         if (
                 node.connection.auth_database.use_public_key
                 or node.connection.auth_database.use_private_key
@@ -271,7 +273,7 @@ def snapshot_postgresql(backup):
                 username = bs_decrypt(node.connection.auth_database.username, encryption_key)
                 password = bs_decrypt(node.connection.auth_database.password, encryption_key)
 
-                command = f"PGPASSWORD='{password}' pg_dump" \
+                command = f"PGPASSWORD='{password}' {database_version_path}pg_dump" \
                           f" -h {node.connection.auth_database.host}" \
                           f" -p {node.connection.auth_database.port}" \
                           f" -U {username}" \
@@ -319,7 +321,7 @@ def snapshot_postgresql(backup):
                     password = bs_decrypt(node.connection.auth_database.password, encryption_key)
 
                     command = (
-                        f"PGPASSWORD='{password}' pg_dump"
+                        f"PGPASSWORD='{password}' {database_version_path}pg_dump"
                         f" -h {node.connection.auth_database.host}"
                         f" -p {node.connection.auth_database.port}"
                         f" -U {username}"

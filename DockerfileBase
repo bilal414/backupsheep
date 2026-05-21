@@ -22,13 +22,16 @@ RUN apt-get update \
     && tar -xvf lftp-4.9.2.tar.gz && cd lftp-4.9.2 && ./configure && make install \
     && pip install psycopg2
 
-# PostgreSQL 18 client tools (pg_dump / psql / pg_restore) from the PGDG apt repo.
-# pg_wrapper resolves `pg_dump`/`psql` to v18, which can dump any PostgreSQL server <= 18.
+# PostgreSQL client tools (pg_dump / psql / pg_restore) for versions 14-18 from the
+# PGDG apt repo, installed side-by-side under /usr/lib/postgresql/<N>/bin. Database
+# backups select the exact pg_dump for the target server's version (CoreAuthDatabase.bin_path).
+# MariaDB clients (mariadb-dump / mysqldump) come from the mariadb-server install above;
+# drop a real MySQL client into /opt/mysql/bin to use it for MySQL targets.
 RUN install -d /usr/share/postgresql-common/pgdg \
     && curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
-    && apt-get -y install postgresql-client-18
+    && apt-get -y install postgresql-client-14 postgresql-client-15 postgresql-client-16 postgresql-client-17 postgresql-client-18
 
 RUN wget https://github.com/robbyrussell/oh-my-zsh/raw/master/tools/install.sh -O - | zsh || true
 

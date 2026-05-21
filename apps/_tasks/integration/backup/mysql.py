@@ -75,12 +75,7 @@ def snapshot_mysql(backup):
         if node.database.option_gtid_purged_off and "mysql_5_5" not in node.connection.auth_database.version:
             option_gtid_purged_off = "--set-gtid-purged=OFF"
 
-        if "mysql_5_5" in node.connection.auth_database.version:
-            cli_path = "/usr/local/mysql/bin/"
-        else:
-            cli_path = "/usr/bin/"
-
-        database_version_path = f"sudo docker exec {node.connection.auth_database.version} {cli_path}"
+        database_version_path = node.connection.auth_database.bin_path()
 
         if (
             node.connection.auth_database.use_public_key
