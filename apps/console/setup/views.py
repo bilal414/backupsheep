@@ -91,17 +91,10 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
         if CoreStorageType.objects.filter(code=integration_code).exists() and integration_code != "bs":
             storage_type = CoreStorageType.objects.get(code=integration_code)
 
-            if storage_type.code == "bs":
-                query = Q(
-                    account=member.get_current_account(),
-                    type=storage_type,
-                    status=CoreStorage.Status.ACTIVE
-                )
-            else:
-                query = Q(
-                    account=member.get_current_account(),
-                    type=storage_type,
-                )
+            query = Q(
+                account=member.get_current_account(),
+                type=storage_type,
+            )
 
             storage_list = CoreStorage.objects.filter(query).order_by("-created")
             # storage_list = (
