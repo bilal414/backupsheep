@@ -58,6 +58,12 @@ self-host without complicated setup.
     UtilAppSumoCode model, serializer fields, the account API action, AppSumoView
     + appsumo.html + route, settings-template nav links, and the
     `billing.plan.name == "AppSumo"` gates (simplified to non-AppSumo behavior).
+12. SaaS billing / plan-quota subsystem — fully removed (commit "remove SaaS
+    billing / plan-quota subsystem"): the `good_standing` gates (snapshots/
+    downloads no longer plan-gated), the AccountNotGoodStanding exception, the
+    plan/quota/overage celery tasks + overage email alerts, the dead stripe
+    Connect OAuth helper, and the console BillingView + billing.html + route +
+    "Plan & Billing" nav links. No `account.billing.*` references remain.
 
 ## Verification status
 Whole-`apps` AST import audit (level-0 `from apps... import`, module + top-level
@@ -66,19 +72,18 @@ byte-compile under python3.12. NOT yet run: full `python manage.py
 check`/`runserver` (needs deps installed + a real `.env`).
 
 ## Next steps
-1. **Broader SaaS billing/plan removal (biggest remaining item).** ~30
-   `account.billing.*` references across ~10 files are all broken (CoreBilling was
-   never ported) and SaaS: plan limits/gating, the console `BillingView` +
-   `billing.html` (Stripe customer-portal page), `calc_account_good_standing`
-   (plan-overage task in helper/tasks.py), and node/backup limit checks. Decide
-   self-hosted behavior (no plans/limits) and strip them.
-2. Cosmetic template leftovers (harmless — render correctly): `{% if not
-   is_appsumo_plan %}` nav guards in the settings templates (var is never set →
-   always shows the item) and `show_request_download` (serializer field + the
-   buttons in `node/detail.html`; always False now). Optional cleanup.
-3. Full `python manage.py check` on a **python3.12** venv (`/usr/bin/python3.12`;
+1. Full `python manage.py check` on a **python3.12** venv (`/usr/bin/python3.12`;
    Django 6 requires py>=3.12) with `pip install -r requirements.txt` + a real
    `.env` (see `.env_sample`). PyPI is reachable in this env.
+2. Optional cosmetic cleanup (all harmless — render/behave correctly as-is):
+   - `{% if not is_appsumo_plan %}` nav guards in the settings templates (var is
+     never set → always shows the item).
+   - `show_request_download` (serializer field + buttons in `node/detail.html`;
+     always False now → normal download button always shows).
+   - Dead `{% if storage.code == "bs" %}` conditionals in
+     `_setup_and_list_storage.html` (never true).
+   - The now-unreferenced usage models (`CoreUsageStorage/Node/Backup` in
+     `apps/console/usage/models.py`) — no UI, no writers; drop with a migration.
 
 ## How to verify imports resolve (no DB / no deps needed)
 Run an `ast`-based script over `apps/api/v1` checking each level-0 `ImportFrom`
