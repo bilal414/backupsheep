@@ -15,7 +15,6 @@ urlpatterns = [
                 path('', include('apps.console.log.urls')),
                 path('', include('apps.console.setup.urls')),
                 path('', include('apps.console.notification.urls')),
-                path('', include('apps.console.referral.urls')),
             ]
         ),
     ),
