@@ -75,15 +75,15 @@ check`/`runserver` (needs deps installed + a real `.env`).
 1. Full `python manage.py check` on a **python3.12** venv (`/usr/bin/python3.12`;
    Django 6 requires py>=3.12) with `pip install -r requirements.txt` + a real
    `.env` (see `.env_sample`). PyPI is reachable in this env.
-2. Optional cosmetic cleanup (all harmless — render/behave correctly as-is):
-   - `{% if not is_appsumo_plan %}` nav guards in the settings templates (var is
-     never set → always shows the item).
-   - `show_request_download` (serializer field + buttons in `node/detail.html`;
-     always False now → normal download button always shows).
-   - Dead `{% if storage.code == "bs" %}` conditionals in
-     `_setup_and_list_storage.html` (never true).
-   - The now-unreferenced usage models (`CoreUsageStorage/Node/Backup` in
-     `apps/console/usage/models.py`) — no UI, no writers; drop with a migration.
+2. Optional: drop the now-unreferenced usage models (`CoreUsageStorage/Node/Backup`
+   in `apps/console/usage/models.py`) with a migration — no UI, no writers.
+
+### Template SaaS cleanup — done
+Removed the cosmetic SaaS leftovers from templates: the `{% if not
+is_appsumo_plan %}` nav guards (unwrapped), the `show_request_download` buttons +
+serializer fields + the `download_requested` JS branch, the `storage.code == "bs"`
+blocks in the storage-setup page, the orphaned plan-overage email templates, and
+the commented Billing link in the header.
 
 ## How to verify imports resolve (no DB / no deps needed)
 Run an `ast`-based script over `apps/api/v1` checking each level-0 `ImportFrom`
