@@ -117,23 +117,6 @@ class CoreMember(TimeStampedModel):
     def send_verification_email(self):
         self.notification_email.get().send_verification_email()
 
-    def send_welcome_email(self):
-        from apps.console.notification.models import CoreNotificationLogEmail
-
-        email_notification = CoreNotificationLogEmail()
-        email_notification.member = self
-        email_notification.email = self.email
-        email_notification.template = "welcome"
-        email_notification.context = {
-            "action_url": f"{settings.APP_URL}",
-            "help_url": f"{settings.APP_URL}",
-            "sender_name": f"{settings.APP_NAME} - Notification Bot",
-        }
-        email_notification.save()
-
-        # Now Send email
-        email_notification.send()
-
     def send_password_reset(self, next_url=None):
         from apps.console.notification.models import CoreNotificationLogEmail
 
