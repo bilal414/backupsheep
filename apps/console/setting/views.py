@@ -34,25 +34,6 @@ class ProfileView(LoginRequiredMixin, TemplateView):
         return self.render_to_response(context)
 
 
-class AppSumoView(LoginRequiredMixin, TemplateView):
-    template_name = "console/setting/appsumo.html"
-
-    def get(self, request, *args, **kwargs):
-        context = self.get_context_data(**kwargs)
-
-        account = self.request.user.member.get_current_account()
-
-        if account.appsumo_code_count > 0:
-            context["heading"] = "Settings - AppSumo"
-            context["active_url"] = "account"
-            context["account"] = account
-            context["timezones"] = pytz.all_timezones
-            return self.render_to_response(context)
-        else:
-            return redirect("console:home:index")
-
-
-
 class PasswordView(LoginRequiredMixin, TemplateView):
     template_name = "console/setting/password.html"
 
@@ -84,10 +65,7 @@ class GroupView(LoginRequiredMixin, TemplateView):
         context["active_url"] = "group"
         context["types"] = CoreAccountGroup.Type.choices
         context["account"] = self.request.user.member.get_current_account()
-        if context["account"].billing.plan.name == "AppSumo":
-            return redirect("console:home:index")
-        else:
-            return self.render_to_response(context)
+        return self.render_to_response(context)
 
 
 class UserView(LoginRequiredMixin, TemplateView):
@@ -102,10 +80,7 @@ class UserView(LoginRequiredMixin, TemplateView):
         ] = self.request.user.member.get_current_account().enrollments.all()
         context["account"] = self.request.user.member.get_current_account()
         context["member"] = self.request.user.member
-        if context["account"].billing.plan.name == "AppSumo":
-            return redirect("console:home:index")
-        else:
-            return self.render_to_response(context)
+        return self.render_to_response(context)
 
 class InviteView(LoginRequiredMixin, TemplateView):
     template_name = "console/setting/invite.html"
@@ -120,10 +95,7 @@ class InviteView(LoginRequiredMixin, TemplateView):
         ] = self.request.user.member.get_current_account().enrollments.all()
         context["account"] = self.request.user.member.get_current_account()
         context["invites_received"] = self.request.user.member.invites_received()
-        if context["account"].billing.plan.name == "AppSumo":
-            return redirect("console:home:index")
-        else:
-            return self.render_to_response(context)
+        return self.render_to_response(context)
 
 class BillingView(LoginRequiredMixin, TemplateView):
     template_name = "console/setting/billing.html"
@@ -158,7 +130,4 @@ class NotificationView(LoginRequiredMixin, TemplateView):
         context[
             "slack_oauth_url"
         ] = f"https://slack.com/oauth/v2/authorize?client_id=2942549037255.2957176196498&scope=incoming-webhook&redirect_uri={settings.APP_URL}/api/v1/callback/slack/"
-        if context["account"].billing.plan.name == "AppSumo":
-            return redirect("console:home:index")
-        else:
-            return self.render_to_response(context)
+        return self.render_to_response(context)

@@ -619,7 +619,7 @@ def calc_stats_nodes_used(self):
 def calc_account_good_standing(self):
     try:
         for account in CoreAccount.objects.filter().order_by("created"):
-            if account.billing.plan.name == "Developer" or account.billing.plan.name == "AppSumo":
+            if account.billing.plan.name == "Developer":
                 storage_usage_ok = True
                 node_usage_ok = True
 

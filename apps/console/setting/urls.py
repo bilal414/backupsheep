@@ -18,7 +18,6 @@ urlpatterns = [
                 path("invites/", views.InviteView.as_view(), name="invite"),
                 path("billing/", views.BillingView.as_view(), name="billing"),
                 path("notifications/", views.NotificationView.as_view(), name="notification"),
-                path("appsumo/", views.AppSumoView.as_view(), name="appsumo"),
             ]
         ),
     ),

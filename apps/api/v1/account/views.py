@@ -1,5 +1,3 @@
-import stripe
-from django.conf import settings
 from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, mixins
@@ -10,7 +8,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 from apps.console.account.models import CoreAccount
-from apps.console.utils.models import UtilAppSumoCode
 from .filters import CoreAccountFilter
 from .permissions import CoreAccountViewPermissions
 from .serializers import CoreAccountSerializer, CoreAccountWriteSerializer
@@ -36,81 +33,6 @@ class CoreAccountView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         member = self.request.user.member
         queryset = CoreAccount.objects.filter(members=member, memberships__primary=True)
         return queryset
-
-    # @action(detail=True, methods=["post"])
-    # def appsumo(self, request, pk=None):
-    #     account = self.get_object()
-    #     appsumo_code = self.request.data.get("appsumo_code")
-    #
-    #     if account.appsumo_code_count < 2 and UtilAppSumoCode.objects.filter(code=appsumo_code, account__isnull=True).exists():
-    #         # This is first code so apply it to membership.
-    #         if account.appsumo_code_count == 0:
-    #             stripe.api_key = settings.STRIPE_SECRET_KEY
-    #             promo_code = stripe.PromotionCode.list(limit=1, code=appsumo_code)["data"][0]
-    #             plan = settings.STRIPE_APPSUMO_PLAN_PRICE_ID
-    #
-    #             subscription = stripe.Subscription.retrieve(account.billing.stripe_plan_sub)
-    #
-    #             try:
-    #                 stripe.Subscription.modify(
-    #                     account.billing.stripe_plan_sub,
-    #                     cancel_at_period_end=False,
-    #                     proration_behavior=None,
-    #                     trial_end="now",
-    #                     promotion_code=promo_code["id"],
-    #                     items=[
-    #                         {
-    #                          'id': subscription['items']['data'][0].id,
-    #                          "price": plan},
-    #                     ],
-    #                 )
-    #             except Exception as e:
-    #                 # Above is USD. Try with old plan of CAD
-    #                 stripe.Subscription.modify(
-    #                     account.billing.stripe_plan_sub,
-    #                     cancel_at_period_end=False,
-    #                     proration_behavior=None,
-    #                     trial_end="now",
-    #                     promotion_code=promo_code["id"],
-    #                     items=[
-    #                         {
-    #                             'id': subscription['items']['data'][0].id,
-    #                             "price": "price_1IsbnCLtk6SsKI58D8mts6j0"},
-    #                     ],
-    #                 )
-    #             # # Update Storage
-    #             # subscription = stripe.Subscription.retrieve(account.billing.stripe_storage_sub)
-    #             #
-    #             # stripe.Subscription.modify(
-    #             #     account.billing.stripe_storage_sub,
-    #             #     cancel_at_period_end=False,
-    #             #     proration_behavior=None,
-    #             #     trial_end="now",
-    #             #     promotion_code=promo_code["id"],
-    #             #     items=[
-    #             #         {
-    #             #          'id': subscription['items']['data'][0].id,
-    #             #          "price": settings.STRIPE_STORAGE_PRICE_ID},
-    #             #     ],
-    #             # )
-    #             account.appsumo = True
-    #             account.save()
-    #             account.billing.plan = CorePlan.objects.get(code=plan)
-    #             account.billing.save()
-    #
-    #         # This is second code so apply it to storage
-    #         elif account.appsumo_code_count == 1:
-    #             stripe.api_key = settings.STRIPE_SECRET_KEY
-    #             promo_code = stripe.PromotionCode.list(limit=1, code=appsumo_code)["data"][0]
-    #             stripe.PromotionCode.modify(
-    #                 promo_code["id"],
-    #                 active=False,
-    #                 metadata={"account_id": account.id},
-    #             )
-    #         code = UtilAppSumoCode.objects.get(code=appsumo_code, account__isnull=True)
-    #         code.account = account
-    #         code.save()
-    #     return Response(status=status.HTTP_202_ACCEPTED, data={})
 
     @action(detail=True, methods=["post"])
     def remove_membership(self, request, pk=None):

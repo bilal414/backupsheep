@@ -34,19 +34,6 @@ class UtilSetting(models.Model):
         db_table = "util_setting"
 
 
-class UtilAppSumoCode(TimeStampedModel):
-    class Status(models.IntegerChoices):
-        ACTIVE = 1, "Active"
-        REFUNDED = 2, "Refunded"
-
-    account = models.ForeignKey(CoreAccount, related_name="appsumo_codes", on_delete=models.CASCADE, null=True)
-    code = models.CharField(max_length=64)
-    status = models.IntegerField(choices=Status.choices, default=Status.ACTIVE)
-
-    class Meta:
-        db_table = "util_appsumo_code"
-
-
 class UtilBase(models.Model):
     def __str__(self):
         return f"{self.name} "

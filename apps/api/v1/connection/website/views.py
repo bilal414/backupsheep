@@ -71,12 +71,8 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         member = self.request.user.member
         query = Q(integrations__code="website")
 
-        if member.get_primary_account().billing.plan.name == "AppSumo":
-            query &= Q(code="node-w-eu-03")
-            endpoints = CoreConnectionLocation.objects.filter(query).values()
-        else:
-            query &= ~Q(code="node-w-eu-03")
-            endpoints = CoreConnectionLocation.objects.filter(query).values()
+        query &= ~Q(code="node-w-eu-03")
+        endpoints = CoreConnectionLocation.objects.filter(query).values()
         return Response(endpoints)
 
     @action(detail=True, methods=["get"])

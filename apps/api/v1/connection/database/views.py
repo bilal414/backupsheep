@@ -65,12 +65,8 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         member = self.request.user.member
         query = Q(integrations__code="database")
 
-        if member.get_primary_account().billing.plan.name == "AppSumo":
-            query &= Q(code="node-d-eu-05")
-            endpoints = CoreConnectionLocation.objects.filter(query).values()
-        else:
-            query &= ~Q(code="node-d-eu-05")
-            endpoints = CoreConnectionLocation.objects.filter(query).values()
+        query &= ~Q(code="node-d-eu-05")
+        endpoints = CoreConnectionLocation.objects.filter(query).values()
 
         return Response(endpoints)
 
