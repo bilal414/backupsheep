@@ -8,7 +8,7 @@ from django.shortcuts import redirect
 from django.contrib import messages
 from sentry_sdk import capture_exception, capture_message
 from django.core.cache import cache
-from apps.console.api.v1.utils.api_helpers import bs_encrypt
+from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.billing.models import CorePayPalCredit
 from apps.console.member.models import CoreMember
 from apps.console.connection.models import (

@@ -8,14 +8,14 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1.saas.wordpress.filters import CoreWordPressFilter
-from apps.console.api.v1.saas.wordpress.permissions import CoreWordPressViewPermissions
-from apps.console.api.v1.saas.wordpress.serializers import (
+from apps.api.v1.saas.wordpress.filters import CoreWordPressFilter
+from apps.api.v1.saas.wordpress.permissions import CoreWordPressViewPermissions
+from apps.api.v1.saas.wordpress.serializers import (
     CoreWordPressReadSerializer,
     CoreWordPressWriteSerializer,
 )
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_serializers import ReadWriteSerializerMixin
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup, CoreWordPressBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
 from apps.console.node.models import CoreDatabase, CoreNode, CoreWordPress

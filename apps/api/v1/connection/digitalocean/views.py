@@ -13,7 +13,7 @@ from apps.console.connection.models import (
     CoreConnectionLocation,
     CoreIntegration,
 )
-from apps.console.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberPermissions
 from apps.console.node.models import CoreDigitalOcean, CoreNode
 from .filters import CoreDigitalOceanFilter
 from .permissions import CoreDigitalOceanViewPermissions

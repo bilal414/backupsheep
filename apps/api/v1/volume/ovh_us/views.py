@@ -7,11 +7,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1.volume.ovh_us.filters import CoreVolumeOVHUSFilter
-from apps.console.api.v1.volume.ovh_us.permissions import CoreVolumeOVHUSViewPermissions
-from apps.console.api.v1.volume.ovh_us.serializers import CoreVolumeOVHUSReadSerializer, CoreVolumeOVHUSWriteSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_serializers import ReadWriteSerializerMixin
+from apps.api.v1.volume.ovh_us.filters import CoreVolumeOVHUSFilter
+from apps.api.v1.volume.ovh_us.permissions import CoreVolumeOVHUSViewPermissions
+from apps.api.v1.volume.ovh_us.serializers import CoreVolumeOVHUSReadSerializer, CoreVolumeOVHUSWriteSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup, CoreOVHUSBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
 from apps.console.node.models import CoreDatabase, CoreNode, CoreOVHUS

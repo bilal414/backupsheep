@@ -18,20 +18,20 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1._tasks.exceptions import (
+from apps.api.v1._tasks.exceptions import (
     SnapshotCreateMissingParams,
     SnapshotCreateError,
     DownloadMissingParams,
     DownloadStoragePointNotFound,
     DownloadStoragePointError, StoragePointError,
 )
-from apps.console.api.v1.backup.database.filters import CoreDatabaseBackupFilter
-from apps.console.api.v1.backup.database.permissions import (
+from apps.api.v1.backup.database.filters import CoreDatabaseBackupFilter
+from apps.api.v1.backup.database.permissions import (
     CoreDatabaseBackupViewPermissions,
 )
-from apps.console.api.v1.backup.database.serializers import CoreDatabaseBackupSerializer, CoreDatabaseBackupStoragePointsSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_helpers import get_start_end_of_previous_day
+from apps.api.v1.backup.database.serializers import CoreDatabaseBackupSerializer, CoreDatabaseBackupStoragePointsSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
 from apps.console.backup.models import CoreDatabaseBackup
 from apps.console.node.models import CoreNode
 from rest_framework import status

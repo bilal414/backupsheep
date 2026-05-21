@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.saas.basecamp.views import CoreBasecampView
+from apps.api.v1.saas.basecamp.views import CoreBasecampView
 
 router = routers.SimpleRouter()
 

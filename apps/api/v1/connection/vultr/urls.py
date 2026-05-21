@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.connection.vultr.views import CoreVultrView
+from apps.api.v1.connection.vultr.views import CoreVultrView
 
 router = routers.SimpleRouter()
 

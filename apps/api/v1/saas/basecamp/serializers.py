@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from apps.console.node.models import CoreBasecamp, CoreNode, CoreSchedule
 from apps.console.utils.models import UtilBackup
-from apps.console.api.v1.node.serializers import (
+from apps.api.v1.node.serializers import (
     CoreNodeReadSerializer,
     CoreSaaSNodeWriteSerializer,
 )

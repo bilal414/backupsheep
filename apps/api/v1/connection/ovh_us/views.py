@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.console.connection.models import CoreConnection, CoreConnectionLocation
-from apps.console.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberPermissions
 from apps.console.node.models import CoreOVHCA, CoreOVHUS, CoreNode
 from .filters import CoreOVHUSFilter
 from .serializers import CoreOVHUSConnectionReadSerializer, CoreOVHUSConnectionWriteSerializer

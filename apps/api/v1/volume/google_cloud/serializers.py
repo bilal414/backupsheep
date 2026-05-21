@@ -1,6 +1,6 @@
 from rest_framework import serializers
-from apps.console.api.v1.node.serializers import CoreNodeReadSerializer
-from apps.console.api.v1.node.serializers import CoreVolumeNodeWriteSerializer
+from apps.api.v1.node.serializers import CoreNodeReadSerializer
+from apps.api.v1.node.serializers import CoreVolumeNodeWriteSerializer
 from apps.console.node.models import CoreGoogleCloud, CoreNode, CoreSchedule
 from apps.console.utils.models import UtilBackup
 

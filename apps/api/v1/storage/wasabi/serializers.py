@@ -4,8 +4,8 @@ import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from apps.console.api.v1.storage.serializers import CoreStorageTypeSerializer
-from apps.console.api.v1.utils.api_helpers import (
+from apps.api.v1.storage.serializers import CoreStorageTypeSerializer
+from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault, StorageDefault, bs_decrypt, bs_encrypt,
 )

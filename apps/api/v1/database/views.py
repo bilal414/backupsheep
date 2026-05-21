@@ -7,14 +7,14 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1.database.filters import CoreDatabaseFilter
-from apps.console.api.v1.database.permissions import CoreDatabaseViewPermissions
-from apps.console.api.v1.database.serializers import (
+from apps.api.v1.database.filters import CoreDatabaseFilter
+from apps.api.v1.database.permissions import CoreDatabaseViewPermissions
+from apps.api.v1.database.serializers import (
     CoreDatabaseReadSerializer,
     CoreDatabaseWriteSerializer,
 )
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_serializers import ReadWriteSerializerMixin
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
 from apps.console.node.models import CoreDatabase, CoreNode

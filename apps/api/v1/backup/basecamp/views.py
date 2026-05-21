@@ -14,7 +14,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1._tasks.exceptions import (
+from apps.api.v1._tasks.exceptions import (
     SnapshotCreateMissingParams,
     SnapshotCreateError,
     DownloadMissingParams,
@@ -22,16 +22,16 @@ from apps.console.api.v1._tasks.exceptions import (
     DownloadStoragePointError,
     StoragePointError,
 )
-from apps.console.api.v1.backup.basecamp.filters import CoreBasecampBackupFilter
-from apps.console.api.v1.backup.basecamp.permissions import (
+from apps.api.v1.backup.basecamp.filters import CoreBasecampBackupFilter
+from apps.api.v1.backup.basecamp.permissions import (
     CoreBasecampBackupViewPermissions,
 )
-from apps.console.api.v1.backup.basecamp.serializers import (
+from apps.api.v1.backup.basecamp.serializers import (
     CoreBasecampBackupSerializer,
     CoreBasecampBackupStoragePointsSerializer,
 )
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_helpers import get_start_end_of_previous_day
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
 from apps.console.backup.models import CoreBasecampBackup
 from apps.console.node.models import CoreNode
 from rest_framework import status

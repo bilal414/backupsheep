@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.connection.oracle.views import CoreOracleView
+from apps.api.v1.connection.oracle.views import CoreOracleView
 
 router = routers.SimpleRouter()
 

@@ -5,7 +5,7 @@ from apps.console.backup.models import (
     CoreDigitalOceanBackup,
 )
 from apps.console.node.models import CoreDigitalOcean, CoreNode, CoreSchedule
-from apps.console.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
 
 
 class CoreDigitalOceanSerializer(serializers.ModelSerializer):

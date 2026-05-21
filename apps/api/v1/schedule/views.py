@@ -11,10 +11,10 @@ from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 from sentry_sdk import capture_exception
 
-from apps.console.api.v1.schedule.filters import CoreScheduleFilter
-from apps.console.api.v1.schedule.permissions import CoreScheduleViewPermissions
-from apps.console.api.v1.schedule.serializers import CoreScheduleSerializer, CoreScheduleRunSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.schedule.filters import CoreScheduleFilter
+from apps.api.v1.schedule.permissions import CoreScheduleViewPermissions
+from apps.api.v1.schedule.serializers import CoreScheduleSerializer, CoreScheduleRunSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
 from apps.console.node.models import CoreNode, CoreSchedule, CoreScheduleRun
 from rest_framework import status
 from django.utils.text import slugify

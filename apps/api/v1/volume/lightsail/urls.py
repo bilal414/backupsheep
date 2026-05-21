@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.volume.lightsail.views import CoreVolumeLightsailView
+from apps.api.v1.volume.lightsail.views import CoreVolumeLightsailView
 
 router = routers.SimpleRouter()
 

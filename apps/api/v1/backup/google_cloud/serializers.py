@@ -5,7 +5,7 @@ from apps.console.backup.models import (
     CoreGoogleCloudBackup,
 )
 from apps.console.node.models import CoreGoogleCloud, CoreNode, CoreSchedule
-from apps.console.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
 
 
 class CoreGoogleCloudSerializer(serializers.ModelSerializer):

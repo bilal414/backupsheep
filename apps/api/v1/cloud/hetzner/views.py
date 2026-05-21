@@ -7,11 +7,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1.cloud.hetzner.filters import CoreCloudHetznerFilter
-from apps.console.api.v1.cloud.hetzner.permissions import CoreCloudHetznerViewPermissions
-from apps.console.api.v1.cloud.hetzner.serializers import CoreCloudHetznerReadSerializer, CoreCloudHetznerWriteSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_serializers import ReadWriteSerializerMixin
+from apps.api.v1.cloud.hetzner.filters import CoreCloudHetznerFilter
+from apps.api.v1.cloud.hetzner.permissions import CoreCloudHetznerViewPermissions
+from apps.api.v1.cloud.hetzner.serializers import CoreCloudHetznerReadSerializer, CoreCloudHetznerWriteSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup, CoreHetznerBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
 from apps.console.node.models import CoreDatabase, CoreNode, CoreHetzner

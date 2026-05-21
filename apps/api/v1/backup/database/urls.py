@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.backup.database.views import CoreDatabaseBackupView
+from apps.api.v1.backup.database.views import CoreDatabaseBackupView
 
 router = routers.SimpleRouter()
 

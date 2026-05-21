@@ -4,7 +4,7 @@ from django.utils.timezone import get_current_timezone
 from firebase_admin.auth import UserNotFoundError
 from rest_framework import serializers
 from firebase_admin import auth
-from apps.console.api.v1.utils.api_helpers import CurrentAccountDefault, CurrentMemberDefault
+from apps.api.v1.utils.api_helpers import CurrentAccountDefault, CurrentMemberDefault
 from apps.console.invite.models import CoreInvite
 from apps.console.member.models import CoreMember
 

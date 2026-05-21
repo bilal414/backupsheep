@@ -12,7 +12,7 @@ from apps.console.connection.models import (
     CoreConnectionLocation,
     CoreIntegration,
 )
-from apps.console.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberPermissions
 from .filters import CoreWebsiteFilter
 from .permissions import CoreWebsiteViewPermissions
 from .serializers import CoreWebsiteConnectionReadSerializer, CoreWebsiteConnectionWriteSerializer

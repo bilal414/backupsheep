@@ -6,7 +6,7 @@ from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
 from apps.console.account.models import CoreAccount
-from apps.console.api.v1.utils.api_helpers import (
+from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
     IntegrationDefault,
@@ -20,8 +20,8 @@ from apps.console.connection.models import (
     CoreAuthVultr,
 )
 from apps.console.node.models import CoreNode
-from apps.console.api.v1.account.serializers import CoreAccountSerializer
-from apps.console.api.v1.connection.serializers import (
+from apps.api.v1.account.serializers import CoreAccountSerializer
+from apps.api.v1.connection.serializers import (
     CoreIntegrationSerializer,
     CoreConnectionLocationSerializer,
 )

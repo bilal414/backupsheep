@@ -2,7 +2,7 @@ import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 from apps.console.account.models import CoreAccount
-from apps.console.api.v1.utils.api_helpers import (
+from apps.api.v1.utils.api_helpers import (
     CurrentAccountDefault,
     CurrentMemberDefault,
 )
@@ -13,7 +13,7 @@ from apps.console.connection.models import (
 )
 from apps.console.node.models import CoreHetzner, CoreNode, CoreSchedule
 from apps.console.utils.models import UtilBackup
-from apps.console.api.v1.node.serializers import CoreNodeReadSerializer, CoreCloudNodeWriteSerializer
+from apps.api.v1.node.serializers import CoreNodeReadSerializer, CoreCloudNodeWriteSerializer
 
 
 class CoreCloudHetznerReadSerializer(serializers.ModelSerializer):

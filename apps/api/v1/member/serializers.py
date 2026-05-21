@@ -5,7 +5,7 @@ from firebase_admin.auth import UserNotFoundError
 from rest_framework import serializers
 from firebase_admin import auth
 from apps.console.account.models import CoreAccount
-from apps.console.api.v1.account.serializers import CoreAccountSerializer
+from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.console.member.models import CoreMember, CoreMemberAccount
 
 

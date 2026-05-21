@@ -7,11 +7,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1.volume.vultr.filters import CoreVolumeVultrFilter
-from apps.console.api.v1.volume.vultr.permissions import CoreVolumeVultrViewPermissions
-from apps.console.api.v1.volume.vultr.serializers import CoreVolumeVultrReadSerializer, CoreVolumeVultrWriteSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_serializers import ReadWriteSerializerMixin
+from apps.api.v1.volume.vultr.filters import CoreVolumeVultrFilter
+from apps.api.v1.volume.vultr.permissions import CoreVolumeVultrViewPermissions
+from apps.api.v1.volume.vultr.serializers import CoreVolumeVultrReadSerializer, CoreVolumeVultrWriteSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup, CoreVultrBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
 from apps.console.node.models import CoreDatabase, CoreNode, CoreVultr

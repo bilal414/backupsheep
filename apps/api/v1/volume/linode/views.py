@@ -7,11 +7,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1.volume.linode.filters import CoreVolumeLinodeFilter
-from apps.console.api.v1.volume.linode.permissions import CoreVolumeLinodeViewPermissions
-from apps.console.api.v1.volume.linode.serializers import CoreVolumeLinodeReadSerializer, CoreVolumeLinodeWriteSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_serializers import ReadWriteSerializerMixin
+from apps.api.v1.volume.linode.filters import CoreVolumeLinodeFilter
+from apps.api.v1.volume.linode.permissions import CoreVolumeLinodeViewPermissions
+from apps.api.v1.volume.linode.serializers import CoreVolumeLinodeReadSerializer, CoreVolumeLinodeWriteSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup, CoreLinodeBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
 from apps.console.node.models import CoreDatabase, CoreNode, CoreLinode
