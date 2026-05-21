@@ -38,26 +38,35 @@ self-host without complicated setup.
    backup/website/views). `ExceptionDefault` lives there and is byte-identical to
    the source repo's `apps/utils/api_exceptions.py` (which was not ported).
 
+9. Storage models (3 unported models referenced by the API) — resolved:
+   - `CoreStorageStatus` (storage/serializers.py) and `CoreStorageDefault`
+     (schedule/serializers.py) were **dead imports** (never used) → dropped.
+   - `CoreStorageBS` ("BackupSheep storage" — BS-hosted buckets/NAS with internal
+     `move_node_hel_*`/`fsn_*` datacenter flags) is **SaaS** and was never ported.
+     Removed the two API modules built on it: `apps/api/v1/storage/bs/` and
+     `apps/api/v1/storage/backupsheep/`, plus their includes in `storage/urls.py`.
+
 ## Verification status
-AST import check over `apps/api/v1` (all `from apps... import` with level 0):
-- MISSING MODULES: 0
-- MISSING SYMBOLS: 5 — only the storage models below remain.
+AST import check over `apps/api/v1` (all level-0 `from apps... import`, checking
+module file + top-level symbol existence): **0 missing modules, 0 missing
+symbols** across 1179 imports. The ported API import graph is fully resolved.
+NOT yet run: full `python manage.py check`/`runserver` (needs deps installed +
+a real `.env`).
 
-## Next steps (storage models — needs a product decision)
-Three storage models referenced by the API are NOT ported in this repo (they
-exist in `app_backupsheep_com/apps/console/storage/models.py`):
-1. `CoreStorageStatus` (lookup: code/name/description) — CORE, **port it**.
-   Used by `apps/api/v1/storage/serializers.py`.
-2. `CoreStorageBS` ("BackupSheep storage" — BS-hosted buckets/NAS with internal
-   `move_node_hel_*`/`fsn_*` datacenter flags) — **SaaS, remove**. Drives the
-   `apps/api/v1/storage/bs/` and `apps/api/v1/storage/backupsheep/` API modules.
-3. `CoreStorageDefault` (global storage-backend pool, no account FK, `active`) —
-   likely **SaaS** (backs the BS-hosted offering). Referenced by
-   `apps/api/v1/schedule/serializers.py` — check removal depth there.
-
-After resolving storage: run full `python manage.py check` on a **python3.12**
-venv (`/usr/bin/python3.12`) with deps installed + a real `.env` (see
-`.env_sample`); Django 6 requires py>=3.12. PyPI is reachable in this env.
+## Next steps
+1. Full `python manage.py check` on a **python3.12** venv (`/usr/bin/python3.12`;
+   Django 6 requires py>=3.12) with `pip install -r requirements.txt` + a real
+   `.env` (see `.env_sample`). PyPI is reachable in this env.
+2. Remaining SaaS-storage leftovers OUTSIDE the API URLconf (don't block API
+   import, but break celery): `CoreStorageBS` is still imported in
+   `apps/_tasks/integration/storage/backblaze_b2_old.py`,
+   `apps/_tasks/integration/backup/incremental_restic.py`,
+   `apps/_tasks/helper/tasks.py`. Strip these (SaaS storage migration logic).
+3. Console UI (`apps/console/...`) likely still has a "BackupSheep storage"
+   setup page/links pointing at the removed `bs`/`backupsheep` endpoints — audit
+   and remove those too.
+4. Broader AppSumo removal (e.g. the commented appsumo block + `UtilAppSumoCode`
+   in `apps/api/v1/account/views.py`).
 
 ## How to verify imports resolve (no DB / no deps needed)
 Run an `ast`-based script over `apps/api/v1` checking each level-0 `ImportFrom`

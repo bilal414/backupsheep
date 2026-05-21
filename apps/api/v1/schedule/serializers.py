@@ -21,7 +21,7 @@ from apps.console.connection.models import (
     CoreConnectionLocation,
 )
 from apps.console.node.models import CoreDatabase, CoreNode, CoreSchedule, CoreScheduleRun
-from apps.console.storage.models import CoreStorage, CoreStorageDefault
+from apps.console.storage.models import CoreStorage
 from croniter import croniter
 
 
