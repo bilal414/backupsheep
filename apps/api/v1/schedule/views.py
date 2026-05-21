@@ -56,7 +56,7 @@ class CoreScheduleView(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
         schedule = serializer.instance
-        schedule.aws_schedule_create()
+        schedule.schedule_create()
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
@@ -67,7 +67,7 @@ class CoreScheduleView(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
         schedule = serializer.instance
-        schedule.aws_schedule_update()
+        schedule.schedule_update()
 
         if getattr(instance, "_prefetched_objects_cache", None):
             # If 'prefetch_related' has been applied to a queryset, we need to
@@ -90,7 +90,7 @@ class CoreScheduleView(viewsets.ModelViewSet):
                     status=status.HTTP_409_CONFLICT,
                 )
             else:
-                instance.aws_schedule_delete()
+                instance.schedule_delete()
                 instance.delete()
                 return Response({"detail": "Schedule will be deleted soon."}, status=status.HTTP_204_NO_CONTENT)
 
@@ -125,7 +125,7 @@ class CoreScheduleView(viewsets.ModelViewSet):
         schedule = self.get_object()
         schedule.status = CoreSchedule.Status.PAUSED
         schedule.save()
-        schedule.aws_schedule_update()
+        schedule.schedule_update()
         return Response({"detail": "Schedule is paused."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
@@ -133,5 +133,5 @@ class CoreScheduleView(viewsets.ModelViewSet):
         schedule = self.get_object()
         schedule.status = CoreSchedule.Status.ACTIVE
         schedule.save()
-        schedule.aws_schedule_update()
+        schedule.schedule_update()
         return Response({"detail": "Schedule is resumed."}, status=status.HTTP_200_OK)

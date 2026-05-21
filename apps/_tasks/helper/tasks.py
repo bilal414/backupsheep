@@ -26,6 +26,32 @@ from apps.console.utils.models import UtilBackup
 from slack_sdk import WebhookClient
 
 
+@current_app.task(name="run_scheduled_backup", bind=True, ignore_result=True)
+def run_scheduled_backup(self, schedule_id=None):
+    """Fired by django-celery-beat for each active schedule; enqueues the node backup.
+
+    Replaces the SaaS path where AWS EventBridge called /schedules/{id}/trigger/.
+    """
+    from apps.console.node.models import CoreSchedule, CoreScheduleRun
+
+    try:
+        schedule = CoreSchedule.objects.get(
+            id=schedule_id, status=CoreSchedule.Status.ACTIVE
+        )
+    except CoreSchedule.DoesNotExist:
+        return
+
+    CoreScheduleRun.objects.create(schedule=schedule, request_id=uuid.uuid4().hex)
+    current_app.send_task(
+        schedule.node.backup_task_name(),
+        kwargs={
+            "node_id": schedule.node.id,
+            "schedule_id": schedule.id,
+            "storage_ids": schedule.storage_ids,
+        },
+    )
+
+
 @current_app.task(
     name="digitalocean_refresh_tokens",
     track_started=True,
@@ -369,7 +395,7 @@ def node_delete_requested(self, node_id):
                         backup.soft_delete()
 
                     for schedule in CoreSchedule.objects.filter(node=node):
-                        schedule.aws_schedule_delete()
+                        schedule.schedule_delete()
 
                     for schedule in node.schedules.all():
                         schedule.delete()
