@@ -185,7 +185,7 @@
 
             async getObjects() {
                 this.loading = true;
-                let url = "/api/proxy/connections/" + this.integration_code + "/" + this.connection_id + "/objects/?" + new URLSearchParams({
+                let url = "/api/v1/connections/" + this.integration_code + "/" + this.connection_id + "/objects/?" + new URLSearchParams({
                     location: this.location_id,
                     object_type: this.object_type,
                 });

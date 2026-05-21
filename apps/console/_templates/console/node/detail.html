@@ -2589,7 +2589,7 @@
                 async createBackup() {
                     this.loading = true;
 
-                    let url = "/api/proxy/nodes/" + this.node_id + "/take_snapshot/?" + new URLSearchParams({
+                    let url = "/api/v1/nodes/" + this.node_id + "/take_snapshot/?" + new URLSearchParams({
                         location: this.location_id,
                     });
 
@@ -2751,7 +2751,7 @@
                 async cancelBackup(backupID) {
                     Alpine.store('showLoading').toggle();
 
-                    let url = "/api/proxy/backups/{{object.connection.integration.code|lower}}/" + backupID + "/cancel" + "/?" + new URLSearchParams({
+                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + backupID + "/cancel" + "/?" + new URLSearchParams({
                         location: this.location_id,
                     });
 
@@ -3172,7 +3172,7 @@
                 async deleteNode() {
                     this.loading = true;
 
-                    let url = "/api/proxy/nodes/" + this.node_id + "/delete/?" + new URLSearchParams({
+                    let url = "/api/v1/nodes/" + this.node_id + "/delete/?" + new URLSearchParams({
                         location: this.location_id,
                     });
 
@@ -3224,7 +3224,7 @@
                 async deleteBackup() {
                     this.loading = true;
 
-                    let url = "/api/proxy/backups/" + this.backup.integration + "/" + this.backup.id + "/?" + new URLSearchParams({
+                    let url = "/api/v1/backups/" + this.backup.integration + "/" + this.backup.id + "/?" + new URLSearchParams({
                         location: this.location_id,
                     });
 
@@ -3537,7 +3537,7 @@
                     let url = null;
                     let method = null;
 
-                    url = "/api/proxy/connections/{{ object.connection.integration.code }}/{{ object.connection.id }}/validate?" + new URLSearchParams({
+                    url = "/api/v1/connections/{{ object.connection.integration.code }}/{{ object.connection.id }}/validate?" + new URLSearchParams({
                         location: {{ object.connection.location.id }},
                     });
                     method = "GET";
@@ -3581,7 +3581,7 @@
                 async validateNode() {
                     Alpine.store('showLoading').toggle("Checking {{ object.get_type_display|lower }} status with {{ object.connection.integration.name }}.", "Node Validation");
 
-                    let url = "/api/proxy/nodes/" + {{object.id}} +"/validate" + "/?" + new URLSearchParams({
+                    let url = "/api/v1/nodes/" + {{object.id}} +"/validate" + "/?" + new URLSearchParams({
                         location: {{ object.connection.location.id }},
                     });
 
@@ -3628,7 +3628,7 @@
                     Alpine.store('showLoading').toggle();
 
                     let method = "GET";
-                    let url = "/api/proxy/storage/" + storage_code + "/" + storage_id + "/validate" + "/?" + new URLSearchParams({
+                    let url = "/api/v1/storage/" + storage_code + "/" + storage_id + "/validate" + "/?" + new URLSearchParams({
                         location: {{ object.connection.location.id }},
                     });
 
