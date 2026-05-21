@@ -10,7 +10,6 @@ urlpatterns = [
     re_path(r'^callback/ovh/us/?$', APICallbackOVHUS.as_view()),
     re_path(r'^callback/dropbox/?$', APICallbackDropbox.as_view()),
     re_path(r'^callback/google_drive/?$', APICallbackGoogleDrive.as_view()),
-    re_path(r'^callback/google_cloud_storage/?$', APICallbackGoogleStorage.as_view()),
     re_path(r'^callback/google_cloud/?$', APIGoogleCloud.as_view()),
     re_path(r'^callback/pcloud/?$', APICallbackPCloud.as_view()),
     re_path(r'^callback/microsoft/?$', APICallbackMicrosoft.as_view()),

@@ -35,7 +35,6 @@ import ovh
 import requests
 from rest_framework.parsers import FormParser
 import dropbox
-import httplib2
 from googleapiclient import discovery
 from cryptography.fernet import Fernet
 from google.oauth2 import id_token
@@ -989,80 +988,6 @@ class APICallbackGoogleDrive(APIView):
                 "Unable to connect your storage. Check if the domain administrators have disabled " "Drive apps.",
             )
             return redirect("console:setup:integration_storage_open", integration_code="google_drive")
-
-
-# Todo: Need to delete this because we are using service accounts.
-class APICallbackGoogleStorage(APIView):
-    def get(self, request):
-
-        try:
-            member = self.request.user.member
-            account = member.get_current_account()
-            encryption_key = account.get_encryption_key()
-
-            credentials = request.session["google_cloud_flow"].step2_exchange(self.request.query_params.get("code"))
-
-            if credentials.access_token:
-                is_new = True
-                storage = CoreStorage()
-                storage_google_cloud = CoreStorageGoogleCloud()
-                http = credentials.authorize(httplib2.Http())
-                service = discovery.build("storage", "v1", http=http)
-
-                # service.buckets().insert(body={'name': 'yolo1'}, project='bilal414').execute()
-
-                about = service.about().get(fields="appInstalled,user").execute()
-
-                if CoreStorageGoogleCloud.objects.filter(
-                    storage__account=account,
-                    email_address=about["user"]["emailAddress"],
-                ).exists():
-                    storage_google_cloud = CoreStorageGoogleCloud.objects.get(
-                        storage__account=account,
-                        email_address=about["user"]["emailAddress"],
-                    )
-
-                    storage = storage_google_cloud.storage
-                    is_new = False
-
-                storage.account = account
-
-                if is_new:
-                    storage.status = CoreStorage.Status.ACTIVE
-                    storage.type = CoreStorageType.objects.get(code="google_cloud_storage")
-                storage.name = about["user"]["displayName"] + " -  " + about["user"]["emailAddress"]
-
-                storage.save()
-
-                storage_google_cloud.storage = storage
-                storage_google_cloud.access_token = bs_encrypt(credentials.access_token, encryption_key)
-                storage_google_cloud.refresh_token = bs_encrypt(credentials.refresh_token, encryption_key)
-                storage_google_cloud.email_address = about["user"]["emailAddress"]
-                storage_google_cloud.save()
-
-                messages.add_message(request, messages.SUCCESS, "Your storage is successfully connected.")
-
-                return redirect("console:storage:google_storage")
-            else:
-                messages.add_message(
-                    request,
-                    messages.ERROR,
-                    "Unable to connect Google Cloud storage. Check if the domain administrators "
-                    "have disabled Google Cloud on your account.",
-                )
-
-                return redirect("console:storage:google_storage")
-
-        except Exception as e:
-            capture_exception(e)
-            messages.add_message(
-                request,
-                messages.ERROR,
-                "Unable to connect Google Cloud storage. Check if the domain administrators "
-                "have disabled Google Cloud on your account.",
-            )
-
-            return redirect("console:storage:google_storage")
 
 
 # Todo: Need to delete this because we are using service accounts.
