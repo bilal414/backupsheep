@@ -1,8 +1,8 @@
 import os
-import httplib2
-from apiclient import discovery
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient import discovery
 from googleapiclient.errors import ResumableUploadError
-from oauth2client.client import GoogleCredentials
 
 from apps._tasks.exceptions import (
     NodeSnapshotDeleteFailed,
@@ -198,27 +198,24 @@ def storage_google_drive_delete(node, backup_name):
             backup = CoreWordPressBackup.objects.get(uuid=backup_name)
 
         if backup:
-            credentials = GoogleCredentials(
-                client_id=settings.GOOGLE_CLIENT_ID,
-                client_secret=settings.GOOGLE_CLIENT_SECRET,
-                token_uri="https://accounts.google.com/o/oauth2/token",
-                token_expiry=None,
-                access_token=bs_decrypt(
+            credentials = Credentials(
+                token=bs_decrypt(
                     backup.storage_byo.storage_google_drive.access_token, encryption_key
                 ),
                 refresh_token=bs_decrypt(
                     backup.storage_byo.storage_google_drive.refresh_token, encryption_key
                 ),
-                user_agent="backupsheep-agent/1.0",
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=settings.GOOGLE_CLIENT_ID,
+                client_secret=settings.GOOGLE_CLIENT_SECRET,
             )
 
-            http = credentials.authorize(httplib2.Http())
-            credentials.refresh(http)
-            backup.storage_byo.storage_google_drive.access_token = (
-                credentials.access_token
+            credentials.refresh(Request())
+            backup.storage_byo.storage_google_drive.access_token = bs_encrypt(
+                credentials.token, encryption_key
             )
-            backup.storage_byo.storage_google_drive.refresh_token = (
-                credentials.refresh_token
+            backup.storage_byo.storage_google_drive.refresh_token = bs_encrypt(
+                credentials.refresh_token, encryption_key
             )
             backup.storage_byo.storage_google_drive.save()
             service = discovery.build("drive", "v3", credentials=credentials)

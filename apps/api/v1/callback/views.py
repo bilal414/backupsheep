@@ -36,7 +36,7 @@ import requests
 from rest_framework.parsers import FormParser
 import dropbox
 import httplib2
-from apiclient import discovery
+from googleapiclient import discovery
 from cryptography.fernet import Fernet
 from google.oauth2 import id_token
 import google.oauth2.credentials
