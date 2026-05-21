@@ -101,14 +101,11 @@ def backup_database(
             node.backup_timeout_reset(self.request.id)
             # Delete Any Downloaded Files
             if backup:
-                queue = f"delete_from_disk__{node.connection.location.queue}"
                 delete_from_disk.apply_async(
                     args=[self.request.id, "dir"],
-                    queue=queue,
                 )
                 delete_from_disk.apply_async(
                     args=[self.request.id, "zip"],
-                    queue=queue,
                 )
         except Exception as error:
             capture_exception(error)

@@ -1365,17 +1365,13 @@ class CoreWebsite(TimeStampedModel):
             for stored_website_backup in backup.stored_website_backups.filter(
                     status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_READY
             ):
-                queue = f"storage_upload__{self.node.connection.integration.code}__{self.node.get_integration_alt_code()}__{self.node.connection.location.queue}"
                 storage_upload_task_list.append(
                     storage_upload.s(
                         self.node.id, backup.id, stored_website_backup.id
-                    ).set(queue=queue)
+                    ).set()
                 )
 
-            queue = f"delete_from_disk__{backup.website.node.connection.location.queue}"
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set(
-                queue=queue
-            )
+            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set()
             chord(storage_upload_task_list, final_call_back_task).apply_async()
         except Exception as e:
             capture_exception(e)
@@ -1448,19 +1444,13 @@ class CoreDatabase(TimeStampedModel):
             for stored_database_backup in backup.stored_database_backups.filter(
                     status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_READY
             ):
-                queue = f"storage_upload__{self.node.connection.integration.code}__{self.node.get_integration_alt_code()}__{self.node.connection.location.queue}"
                 storage_upload_task_list.append(
                     storage_upload.s(
                         self.node.id, backup.id, stored_database_backup.id
-                    ).set(queue=queue)
+                    ).set()
                 )
 
-            queue = (
-                f"delete_from_disk__{backup.database.node.connection.location.queue}"
-            )
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set(
-                queue=queue
-            )
+            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set()
             chord(storage_upload_task_list, final_call_back_task).apply_async()
         except Exception as e:
             raise NodeBackupFailedError(
@@ -1510,17 +1500,13 @@ class CoreWordPress(TimeStampedModel):
             for stored_wordpress_backup in backup.stored_wordpress_backups.filter(
                     status=CoreWordPressBackupStoragePoints.Status.UPLOAD_READY
             ):
-                queue = f"storage_upload__{self.node.get_type_display().lower()}__{self.node.get_integration_alt_code()}__{self.node.connection.location.queue}"
                 storage_upload_task_list.append(
                     storage_upload.s(
                         self.node.id, backup.id, stored_wordpress_backup.id
-                    ).set(queue=queue)
+                    ).set()
                 )
 
-            queue = f"delete_from_disk__{backup.wordpress.node.connection.location.queue}"
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set(
-                queue=queue
-            )
+            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set()
             chord(storage_upload_task_list, final_call_back_task).apply_async()
         except Exception as e:
             capture_exception(e)
@@ -1564,17 +1550,13 @@ class CoreBasecamp(TimeStampedModel):
             for stored_basecamp_backup in backup.stored_basecamp_backups.filter(
                     status=CoreBasecampBackupStoragePoints.Status.UPLOAD_READY
             ):
-                queue = f"storage_upload__{self.node.get_type_display().lower()}__{self.node.get_integration_alt_code()}__{self.node.connection.location.queue}"
                 storage_upload_task_list.append(
                     storage_upload.s(
                         self.node.id, backup.id, stored_basecamp_backup.id
-                    ).set(queue=queue)
+                    ).set()
                 )
 
-            queue = f"delete_from_disk__{backup.basecamp.node.connection.location.queue}"
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set(
-                queue=queue
-            )
+            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set()
             chord(storage_upload_task_list, final_call_back_task).apply_async()
         except Exception as e:
             capture_exception(e)

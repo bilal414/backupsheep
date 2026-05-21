@@ -108,7 +108,6 @@ class CoreScheduleView(viewsets.ModelViewSet):
 
             current_app.send_task(
                 schedule.node.backup_task_name(),
-                queue=schedule.queue_name,
                 kwargs={
                     "node_id": schedule.node.id,
                     "schedule_id": schedule.id,

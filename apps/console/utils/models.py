@@ -215,7 +215,6 @@ class UtilBackup(TimeStampedModel):
             current_app.send_task(
                 self.schedule.node.backup_task_name(),
                 task_id=self.celery_task_id,
-                queue=self.schedule.queue_name,
                 kwargs={
                     "node_id": self.schedule.node.id,
                     "schedule_id": self.schedule.id,

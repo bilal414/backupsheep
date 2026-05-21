@@ -94,18 +94,8 @@ class CoreNodeView(viewsets.ModelViewSet):
             # backup_basecamp(node.id, storage_ids=storage_point_ids)
             # backup_website(node.id, storage_ids=storage_point_ids)
 
-            integration_code = node.get_integration_alt_code()
-
-            queue_name = (
-                f"on_demand_backup"
-                f"__{node.get_type_display().lower()}"
-                f"__{integration_code}"
-                f"__{node.connection.location.queue}"
-            )
-
             result = current_app.send_task(
                 node.backup_task_name(),
-                queue=queue_name,
                 kwargs={
                     "node_id": pk,
                     "schedule_id": None,
@@ -164,10 +154,8 @@ class CoreNodeView(viewsets.ModelViewSet):
         """
         Delete Node
         """
-        queue = f"node_delete_requested__{node.connection.location.queue}"
         node_delete_requested.apply_async(
             args=[node.id],
-            queue=queue,
         )
 
         # log = CoreLog(account=self.request.user.member.get_current_account(), type=CoreLog.Type.NODE)

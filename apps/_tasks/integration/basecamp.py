@@ -111,14 +111,11 @@ def backup_basecamp(
 
             # Delete Any Downloaded Files
             if backup:
-                queue = f"delete_from_disk__{node.connection.location.queue}"
                 delete_from_disk.apply_async(
                     args=[backup.uuid_str, "dir"],
-                    queue=queue,
                 )
                 delete_from_disk.apply_async(
                     args=[backup.uuid_str, "zip"],
-                    queue=queue,
                 )
         except Exception as error:
             try:

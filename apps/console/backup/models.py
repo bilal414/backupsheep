@@ -1761,10 +1761,8 @@ class CoreWebsiteBackup(UtilBackup):
         """
         Delete files
         """
-        queue = f"delete_from_disk__{self.website.node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[self.uuid_str, "both"],
-            queue=queue,
         )
 
         """
@@ -2733,10 +2731,8 @@ class CoreWordPressBackup(UtilBackup):
         """
         Delete files
         """
-        queue = f"delete_from_disk__{self.wordpress.node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[self.uuid_str, "both"],
-            queue=queue,
         )
 
         """
@@ -2933,10 +2929,8 @@ class CoreBasecampBackup(UtilBackup):
         """
         Delete files
         """
-        queue = f"delete_from_disk__{self.basecamp.node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[self.uuid_str, "both"],
-            queue=queue,
         )
 
         """
@@ -3099,10 +3093,8 @@ class CoreDatabaseBackup(UtilBackup):
         """
         Delete files
         """
-        queue = f"delete_from_disk__{self.database.node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[self.uuid_str, "both"],
-            queue=queue,
         )
 
         """
