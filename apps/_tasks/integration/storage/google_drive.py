@@ -112,7 +112,7 @@ def storage_google_drive(stored_backup):
             """
             file_metadata = {
                 "name": f"{stored_backup.backup.uuid_str}.zip",
-                "mimeType": "application\zip",
+                "mimeType": "application/zip",
                 "parents": [node_folder],
             }
 

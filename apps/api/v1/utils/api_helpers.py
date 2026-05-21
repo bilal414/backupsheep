@@ -33,13 +33,14 @@ def validate_crontab(cron_syntax, data=None):
         return "Syntax error in cron"
 
     validate_crontab_regex = re.compile(
-        "{0}\s+{1}\s+{2}\s+{3}\s+{4}".format(
-            "(?P<minutes>([0-5]?\d)\-([0-5]?\d)|(\*|[0-5]?\d)\/(60|[0-5]?\d)|(([0-5]?\d)\,){0,}([0-5]?\d)|\*)",
-            "(?P<hours>(2[0-3]|[01]?\d)\-(2[0-3]|[01]?\d)|(2[0-3]|[01]?\d|\*)\/(2[0-3]|[01]?\d)|((2[0-3]|[01]?\d)\,){0,}(2[0-3]|[01]?\d)|\*)",
-            "(?P<days>(3[01]|[12]\d|0?[1-9])\-(3[01]|[12]\d|0?[1-9])|(\*|3[01]|[12]\d|0?[1-9])\/(3[01]|[12]\d|0?[1-9])|((3[01]|[12]\d|0?[1-9])\,){0,}(3[01]|[12]\d|0?[1-9])|\*)",
-            "(?P<months>((?i)jan|(?i)feb|(?i)mar|(?i)apr|(?i)may|(?i)jun|(?i)jul|(?i)aug|(?i)sep|(?i)oct|(?i)nov|(?i)dec|1[012]|0?[1-9])\-((?i)jan|(?i)feb|(?i)mar|(?i)apr|(?i)may|(?i)jun|(?i)jul|(?i)aug|(?i)sep|(?i)oct|(?i)nov|(?i)dec|1[012]|0?[1-9])|((?i)jan|(?i)feb|(?i)mar|(?i)apr|(?i)may|(?i)jun|(?i)jul|(?i)aug|(?i)sep|(?i)oct|(?i)nov|(?i)dec|\*|1[012]|0?[1-9])\/((?i)jan|(?i)feb|(?i)mar|(?i)apr|(?i)may|(?i)jun|(?i)jul|(?i)aug|(?i)sep|(?i)oct|(?i)nov|(?i)dec|1[012]|0?[1-9])|(((?i)jan|(?i)feb|(?i)mar|(?i)apr|(?i)may|(?i)jun|(?i)jul|(?i)aug|(?i)sep|(?i)oct|(?i)nov|(?i)dec|1[012]|0?[1-9])\,){0,}((?i)jan|(?i)feb|(?i)mar|(?i)apr|(?i)may|(?i)jun|(?i)jul|(?i)aug|(?i)sep|(?i)oct|(?i)nov|(?i)dec|1[012]|0?[1-9])|\*|(?i)jan|(?i)feb|(?i)mar|(?i)apr|(?i)may|(?i)jun|(?i)jul|(?i)aug|(?i)sep|(?i)oct|(?i)nov|(?i)dec)",
-            "(?P<weekdays>(((?i)sun|(?i)mon|(?i)tue|(?i)wed|(?i)fri|(?i)sat|[0-6])\-((?i)sun|(?i)mon|(?i)tue|(?i)wed|(?i)fri|(?i)sat|[0-6]))|(((?i)sun|(?i)mon|(?i)tue|(?i)wed|(?i)fri|(?i)sat|\*|[0-6])\/((?i)sun|(?i)mon|(?i)tue|(?i)wed|(?i)fri|(?i)sat|[0-6]))|(((?i)sun|(?i)mon|(?i)tue|(?i)wed|(?i)fri|(?i)sat|[0-6])\,){0,}((?i)sun|(?i)mon|(?i)tue|(?i)wed|(?i)fri|(?i)sat|[0-6])|\*|(?i)sun|(?i)mon|(?i)tue|(?i)wed|(?i)fri|(?i)sat)",
-        )
+        r"{0}\s+{1}\s+{2}\s+{3}\s+{4}".format(
+            r"(?P<minutes>([0-5]?\d)\-([0-5]?\d)|(\*|[0-5]?\d)\/(60|[0-5]?\d)|(([0-5]?\d)\,){0,}([0-5]?\d)|\*)",
+            r"(?P<hours>(2[0-3]|[01]?\d)\-(2[0-3]|[01]?\d)|(2[0-3]|[01]?\d|\*)\/(2[0-3]|[01]?\d)|((2[0-3]|[01]?\d)\,){0,}(2[0-3]|[01]?\d)|\*)",
+            r"(?P<days>(3[01]|[12]\d|0?[1-9])\-(3[01]|[12]\d|0?[1-9])|(\*|3[01]|[12]\d|0?[1-9])\/(3[01]|[12]\d|0?[1-9])|((3[01]|[12]\d|0?[1-9])\,){0,}(3[01]|[12]\d|0?[1-9])|\*)",
+            r"(?P<months>(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|1[012]|0?[1-9])\-(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|1[012]|0?[1-9])|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\*|1[012]|0?[1-9])\/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|1[012]|0?[1-9])|((jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|1[012]|0?[1-9])\,){0,}(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|1[012]|0?[1-9])|\*|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
+            r"(?P<weekdays>((sun|mon|tue|wed|fri|sat|[0-6])\-(sun|mon|tue|wed|fri|sat|[0-6]))|((sun|mon|tue|wed|fri|sat|\*|[0-6])\/(sun|mon|tue|wed|fri|sat|[0-6]))|((sun|mon|tue|wed|fri|sat|[0-6])\,){0,}(sun|mon|tue|wed|fri|sat|[0-6])|\*|sun|mon|tue|wed|fri|sat)",
+        ),
+        re.IGNORECASE,
     )
     try:
         crontab = validate_crontab_regex.match(cron_syntax).groupdict()
@@ -122,7 +123,7 @@ def get_random_password():
 
 
 def generate_random_email_verification(length=16, chars=ascii_lowercase + digits, split=4, delimiter="-"):
-    code = "".join([choice(chars) for i in xrange(length)])
+    code = "".join([choice(chars) for i in range(length)])
     if split:
         code = delimiter.join([code[start : start + split] for start in range(0, len(code), split)])
 

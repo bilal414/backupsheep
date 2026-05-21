@@ -53,7 +53,7 @@ class CoreStorageLinodeWriteSerializer(serializers.ModelSerializer):
     access_key = serializers.CharField(write_only=True)
     secret_key = serializers.CharField(write_only=True)
     bucket_name = serializers.CharField(write_only=True)
-    no_delete = serializers.NullBooleanField(write_only=True, required=False)
+    no_delete = serializers.BooleanField(allow_null=True, write_only=True, required=False)
     prefix = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True, default='')
     endpoint = serializers.CharField(write_only=True)
     storage = serializers.PrimaryKeyRelatedField(read_only=True)

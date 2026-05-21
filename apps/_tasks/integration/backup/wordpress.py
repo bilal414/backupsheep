@@ -277,7 +277,7 @@ def snapshot_wordpress(backup):
         )
 
         # ZIP all downloaded files.
-        execstr = f"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
+        execstr = rf"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
         subprocess.run(
             execstr,
             stdout=subprocess.PIPE,

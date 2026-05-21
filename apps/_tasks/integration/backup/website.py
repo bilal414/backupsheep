@@ -546,7 +546,7 @@ def snapshot_website(backup):
         # Generate MD5 Hash
         backup.total_files = 0
 
-        execstr = f"sudo find . -type f -exec md5sum {{}} \; > {md5_log_path}"
+        execstr = rf"sudo find . -type f -exec md5sum {{}} \; > {md5_log_path}"
         subprocess.run(execstr, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, timeout=3600, cwd=local_dir)
 
         with open(md5_log_path, "r", errors="ignore") as f_in:
@@ -574,7 +574,7 @@ def snapshot_website(backup):
             cwd=local_dir,
         )
         # ZIP all downloaded files.
-        execstr = f"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
+        execstr = rf"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
         subprocess.run(
             execstr,
             stdout=subprocess.PIPE,

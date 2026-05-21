@@ -81,7 +81,7 @@ def snapshot_postgresql(backup):
                     f"password='{password}' "
                     f"dbname={database_name} "
                     f"port={node.connection.auth_database.port} "
-                    f"sslmode=prefer' -lqt | cut -d \| -f 1"
+                    rf"sslmode=prefer' -lqt | cut -d \| -f 1"
                 )
 
                 log_file.write(f"PostgreSQL: {execstr}\n")

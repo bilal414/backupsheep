@@ -1690,7 +1690,7 @@ class CoreAuthDatabase(TimeStampedModel):
                 #     f" password='{password}'"
                 #     f" port='{port}'"
                 #     f" {dbname}"
-                #     f' sslmode=prefer" -lqt | cut -d \| -f 1'
+                #     fr' sslmode=prefer" -lqt | cut -d \| -f 1'
                 # )
 
                 # PostgreSQL 14.5 on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 7.5.0-3ubuntu1~18.04) 7.5.0, 64-bit
@@ -2285,7 +2285,7 @@ class CoreAuthDatabase(TimeStampedModel):
                             " dbname='%s'"
                             " password='%s'"
                             " port=%s"
-                            ' sslmode=prefer" -c "\dt" -qAtX | cut -d \| -f 2'
+                            r' sslmode=prefer" -c "\dt" -qAtX | cut -d \| -f 2'
                             % (
                                 self.host,
                                 bs_decrypt(self.username, encryption_key),
@@ -2300,7 +2300,7 @@ class CoreAuthDatabase(TimeStampedModel):
                             " user='%s'"
                             " password='%s'"
                             " port=%s"
-                            ' sslmode=prefer" -lqt | cut -d \| -f 1'
+                            r' sslmode=prefer" -lqt | cut -d \| -f 1'
                             % (
                                 self.host,
                                 bs_decrypt(self.username, encryption_key),
