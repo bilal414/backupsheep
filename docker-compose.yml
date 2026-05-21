@@ -1,0 +1,43 @@
+# Self-hosted BackupSheep stack: app (web + celery worker + celery beat),
+# PostgreSQL, and Redis (the Celery broker for background and scheduled backups).
+#
+# The app image builds FROM the `backupsheep-base` image, so build that once first:
+#     docker build -f DockerfileBase -t backupsheep-base .
+# then:
+#     docker compose up --build
+#
+# Configure .env (see .env_sample). For this stack use the service names below:
+#     DB_HOST=db
+#     DB_PORT=5432
+#     CELERY_BROKER_URL=redis://redis:6379/0
+
+services:
+  db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    depends_on:
+      - db
+      - redis
+    ports:
+      # nginx (inside the container) serves the app on port 80
+      - "8000:80"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
