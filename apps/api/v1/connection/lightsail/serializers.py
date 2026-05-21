@@ -1,4 +1,3 @@
-import boto.ec2
 import boto3
 import pytz
 from django.utils.timezone import get_current_timezone

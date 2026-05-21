@@ -1,4 +1,3 @@
-import boto.ec2
 import pytz
 import requests
 from django.conf import settings

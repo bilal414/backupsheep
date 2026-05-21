@@ -1,7 +1,6 @@
 import json
 from json import JSONDecodeError
 
-import boto.ec2
 import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
