@@ -18,7 +18,7 @@ from apps.console.node.models import CoreDigitalOcean, CoreNode
 from .filters import CoreDigitalOceanFilter
 from .permissions import CoreDigitalOceanViewPermissions
 from .serializers import CoreDigitalOceanConnectionReadSerializer, CoreDigitalOceanConnectionWriteSerializer
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin

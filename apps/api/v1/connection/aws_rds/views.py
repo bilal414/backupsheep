@@ -13,7 +13,7 @@ from apps.console.node.models import CoreAWSRDS, CoreNode
 from .filters import CoreAWSRDSFilter
 from .permissions import CoreAWSRDSViewPermissions
 from .serializers import CoreAWSRDSConnectionReadSerializer, CoreAWSRDSConnectionWriteSerializer
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin

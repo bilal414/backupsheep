@@ -13,7 +13,7 @@ from apps.console.node.models import CoreLightsail, CoreNode
 from .filters import CoreLightsailFilter
 from .permissions import CoreLightsailViewPermissions
 from .serializers import CoreLightsailConnectionReadSerializer, CoreLightsailConnectionWriteSerializer
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin

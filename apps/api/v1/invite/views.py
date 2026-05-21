@@ -37,7 +37,7 @@ class CoreInviteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         return queryset
 
     def create(self, request, *args, **kwargs):
-        from apps.api.v1._tasks.helper.tasks import send_postmark_email
+        from apps._tasks.helper.tasks import send_postmark_email
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)

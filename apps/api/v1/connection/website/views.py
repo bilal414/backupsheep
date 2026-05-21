@@ -16,7 +16,7 @@ from apps.api.v1.utils.api_permissions import MemberPermissions
 from .filters import CoreWebsiteFilter
 from .permissions import CoreWebsiteViewPermissions
 from .serializers import CoreWebsiteConnectionReadSerializer, CoreWebsiteConnectionWriteSerializer
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin

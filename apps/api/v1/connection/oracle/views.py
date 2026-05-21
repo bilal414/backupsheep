@@ -13,7 +13,7 @@ from apps.console.node.models import CoreOracle, CoreNode
 from .filters import CoreOracleFilter
 from .permissions import CoreOracleViewPermissions
 from .serializers import CoreOracleConnectionReadSerializer, CoreOracleConnectionWriteSerializer
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin

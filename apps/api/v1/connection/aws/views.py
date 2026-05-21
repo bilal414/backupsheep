@@ -21,7 +21,7 @@ from .serializers import (
     CoreAWSConnectionReadSerializer,
     CoreAWSConnectionWriteSerializer,
 )
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
 

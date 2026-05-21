@@ -15,7 +15,7 @@ from apps.console.utils.models import UtilAppSumoCode
 from .filters import CoreAccountFilter
 from .permissions import CoreAccountViewPermissions
 from .serializers import CoreAccountSerializer, CoreAccountWriteSerializer
-from .._tasks.helper.tasks import billing_sync_all
+from apps._tasks.helper.tasks import billing_sync_all
 from ..utils.api_filters import DateRangeFilter
 from ..utils.api_serializers import ReadWriteSerializerMixin
 

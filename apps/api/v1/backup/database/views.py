@@ -18,7 +18,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.api.v1._tasks.exceptions import (
+from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
     SnapshotCreateError,
     DownloadMissingParams,

@@ -13,7 +13,7 @@ from apps.console.node.models import CoreVultr, CoreNode
 from .filters import CoreVultrFilter
 from .permissions import CoreVultrViewPermissions
 from .serializers import CoreVultrConnectionReadSerializer, CoreVultrConnectionWriteSerializer
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin

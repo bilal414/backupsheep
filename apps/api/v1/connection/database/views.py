@@ -12,7 +12,7 @@ from apps.api.v1.utils.api_permissions import MemberPermissions
 from .filters import CoreDatabaseFilter
 from .permissions import CoreDatabaseViewPermissions
 from .serializers import CoreDatabaseConnectionReadSerializer, CoreDatabaseConnectionWriteSerializer
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
 from rest_framework import status

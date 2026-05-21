@@ -21,7 +21,7 @@ from .serializers import (
     CoreWordPressConnectionReadSerializer,
     CoreWordPressConnectionWriteSerializer,
 )
-from ..._tasks.exceptions import (
+from apps._tasks.exceptions import (
     NodeConnectionErrorEligibleObjects,
     IntegrationValidationFailed, IntegrationValidationError,
 )
