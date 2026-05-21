@@ -6,11 +6,11 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_serializers import ReadWriteSerializerMixin
-from apps.console.api.v1.website.filters import CoreWebsiteFilter
-from apps.console.api.v1.website.permissions import CoreWebsiteViewPermissions
-from apps.console.api.v1.website.serializers import CoreWebsiteReadSerializer, CoreWebsiteWriteSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
+from apps.api.v1.website.filters import CoreWebsiteFilter
+from apps.api.v1.website.permissions import CoreWebsiteViewPermissions
+from apps.api.v1.website.serializers import CoreWebsiteReadSerializer, CoreWebsiteWriteSerializer
 from apps.console.backup.models import CoreWebsiteBackup
 from apps.console.connection.models import CoreConnection, CoreAuthWebsite
 from apps.console.node.models import CoreWebsite, CoreNode

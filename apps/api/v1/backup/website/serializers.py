@@ -4,7 +4,7 @@ from django.utils.dateparse import parse_datetime
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 from apps.console.account.models import CoreAccount
-from apps.console.api.v1.utils.api_helpers import (
+from apps.api.v1.utils.api_helpers import (
     CurrentAccountDefault,
     CurrentMemberDefault,
 )
@@ -19,7 +19,7 @@ from apps.console.connection.models import (
 )
 from apps.console.node.models import CoreWebsite, CoreNode, CoreSchedule
 from apps.console.storage.models import CoreStorage, CoreStorageType
-from apps.console.api.v1.backup.serializers import CoreBackupScheduleSerializer, CoreBackupStorageSerializer
+from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer, CoreBackupStorageSerializer
 
 
 class CoreWebsiteSerializer(serializers.ModelSerializer):

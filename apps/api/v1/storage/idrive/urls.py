@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.storage.idrive.views import CoreStorageIDriveView
+from apps.api.v1.storage.idrive.views import CoreStorageIDriveView
 
 router = routers.SimpleRouter()
 

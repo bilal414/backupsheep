@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.storage.bs.views import CoreStorageBSView
+from apps.api.v1.storage.bs.views import CoreStorageBSView
 
 router = routers.SimpleRouter()
 

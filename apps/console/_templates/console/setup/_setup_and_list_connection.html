@@ -1983,12 +1983,12 @@
                 let method = null;
 
                 if (this.connection.id) {
-                    url = "/api/proxy/connections/" + this.integrationCode + "/" + this.connection.id + "/?" + new URLSearchParams({
+                    url = "/api/v1/connections/" + this.integrationCode + "/" + this.connection.id + "/?" + new URLSearchParams({
                         location: this.connection.location?.id,
                     });
                     method = "PATCH";
                 } else {
-                    url = "/api/proxy/connections/" + this.integrationCode + "/?" + new URLSearchParams({
+                    url = "/api/v1/connections/" + this.integrationCode + "/?" + new URLSearchParams({
                         location: this.connection.location?.id,
                     });
                     method = "POST";
@@ -2150,7 +2150,7 @@
                 let url = null;
                 let method = null;
 
-                url = "/api/proxy/connections/" + this.integrationCode + "/" + connection_id + "/validate?" + new URLSearchParams({
+                url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/validate?" + new URLSearchParams({
                     location: location_id,
                 });
                 method = "GET";
@@ -2195,7 +2195,7 @@
                 let url = null;
                 let method = null;
 
-                url = "/api/proxy/connections/" + this.integrationCode + "/" + connection_id + "/update_db_type_and_version?" + new URLSearchParams({
+                url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/update_db_type_and_version?" + new URLSearchParams({
                     location: location_id,
                 });
                 method = "GET";

@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.volume.upcloud.views import CoreVolumeUpCloudView
+from apps.api.v1.volume.upcloud.views import CoreVolumeUpCloudView
 
 router = routers.SimpleRouter()
 

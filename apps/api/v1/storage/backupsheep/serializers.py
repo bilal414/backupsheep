@@ -2,7 +2,7 @@ import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from apps.console.api.v1.storage.serializers import CoreStorageTypeSerializer
+from apps.api.v1.storage.serializers import CoreStorageTypeSerializer
 from apps.console.backup.models import CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints
 from apps.console.storage.models import CoreStorageBS, CoreStorage
 

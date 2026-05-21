@@ -18,7 +18,7 @@ from apps.console.storage.models import CoreStorage
 from .filters import CoreStorageDoSpacesFilter
 from .permissions import CoreStorageDoSpacesPermissions
 from .serializers import CoreStorageReadSerializer, CoreStorageWriteSerializer
-from ..._tasks.exceptions import IntegrationValidationFailed, StorageValidationFailed
+from apps._tasks.exceptions import IntegrationValidationFailed, StorageValidationFailed
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_helpers import get_start_end_of_previous_day
 from ...utils.api_serializers import ReadWriteSerializerMixin

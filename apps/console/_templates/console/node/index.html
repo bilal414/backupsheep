@@ -737,7 +737,7 @@
                     async createBackup() {
                         this.loading = true;
 
-                        let url = "/api/proxy/nodes/" + this.node_id + "/take_snapshot/?" + new URLSearchParams({
+                        let url = "/api/v1/nodes/" + this.node_id + "/take_snapshot/?" + new URLSearchParams({
                             location: this.location_id,
                         });
 

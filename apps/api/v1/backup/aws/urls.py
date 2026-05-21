@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.backup.aws.views import CoreAWSBackupView
+from apps.api.v1.backup.aws.views import CoreAWSBackupView
 
 router = routers.SimpleRouter()
 

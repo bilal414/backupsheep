@@ -17,7 +17,7 @@ from .serializers import (
     CoreBasecampConnectionReadSerializer,
     CoreBasecampConnectionWriteSerializer,
 )
-from ..._tasks.exceptions import (
+from apps._tasks.exceptions import (
     NodeConnectionErrorEligibleObjects, IntegrationValidationError,
 )
 from ...utils.api_filters import DateRangeFilter

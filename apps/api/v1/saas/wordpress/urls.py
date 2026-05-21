@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.saas.wordpress.views import CoreWordPressView
+from apps.api.v1.saas.wordpress.views import CoreWordPressView
 
 router = routers.SimpleRouter()
 

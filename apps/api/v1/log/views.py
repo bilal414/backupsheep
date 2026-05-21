@@ -5,7 +5,7 @@ from rest_framework import viewsets
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
-from apps.console.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberPermissions
 from apps.console.log.models import CoreLog
 from .filters import CoreLogFilter
 from .permissions import CoreLogViewPermissions

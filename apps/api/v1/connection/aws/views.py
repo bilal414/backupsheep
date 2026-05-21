@@ -13,7 +13,7 @@ from apps.console.connection.models import (
     CoreConnectionLocation,
     CoreIntegration,
 )
-from apps.console.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberPermissions
 from apps.console.node.models import CoreAWS, CoreNode
 from .filters import CoreAWSFilter
 from .permissions import CoreAWSViewPermissions
@@ -21,7 +21,7 @@ from .serializers import (
     CoreAWSConnectionReadSerializer,
     CoreAWSConnectionWriteSerializer,
 )
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
 

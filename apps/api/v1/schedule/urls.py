@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.schedule.views import CoreScheduleView
+from apps.api.v1.schedule.views import CoreScheduleView
 
 router = routers.SimpleRouter()
 

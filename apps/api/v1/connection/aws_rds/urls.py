@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.connection.aws_rds.views import CoreAWSRDSView
+from apps.api.v1.connection.aws_rds.views import CoreAWSRDSView
 
 router = routers.SimpleRouter()
 

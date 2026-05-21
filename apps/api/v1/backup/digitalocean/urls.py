@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.backup.digitalocean.views import CoreDigitalOceanBackupView
+from apps.api.v1.backup.digitalocean.views import CoreDigitalOceanBackupView
 
 router = routers.SimpleRouter()
 

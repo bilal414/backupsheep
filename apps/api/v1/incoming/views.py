@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from firebase_admin import auth
 from sentry_sdk import capture_exception
 
-from apps.console.api.v1._tasks.helper.tasks import billing_sync_all
+from apps._tasks.helper.tasks import billing_sync_all
 from apps.console.billing.models import CoreBilling
 
 

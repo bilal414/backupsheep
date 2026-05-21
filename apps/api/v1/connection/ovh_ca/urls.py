@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.connection.ovh_ca.views import CoreOVHCAView
+from apps.api.v1.connection.ovh_ca.views import CoreOVHCAView
 
 router = routers.SimpleRouter()
 

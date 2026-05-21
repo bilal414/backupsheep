@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.volume.ovh_us.views import CoreVolumeOVHUSView
+from apps.api.v1.volume.ovh_us.views import CoreVolumeOVHUSView
 
 router = routers.SimpleRouter()
 

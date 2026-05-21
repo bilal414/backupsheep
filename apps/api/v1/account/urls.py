@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.account.views import CoreAccountView
+from apps.api.v1.account.views import CoreAccountView
 
 router = routers.SimpleRouter()
 

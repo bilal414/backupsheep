@@ -11,8 +11,8 @@ urlpatterns += [
         "saas/",
         include(
             [
-                path("", include("apps.console.api.v1.saas.wordpress.urls")),
-                path("", include("apps.console.api.v1.saas.basecamp.urls")),
+                path("", include("apps.api.v1.saas.wordpress.urls")),
+                path("", include("apps.api.v1.saas.basecamp.urls")),
             ]
         ),
     ),

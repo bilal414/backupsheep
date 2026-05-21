@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.connection.website.views import CoreWebsiteView
+from apps.api.v1.connection.website.views import CoreWebsiteView
 
 router = routers.SimpleRouter()
 

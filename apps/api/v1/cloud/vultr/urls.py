@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.cloud.vultr.views import CoreCloudVultrView
+from apps.api.v1.cloud.vultr.views import CoreCloudVultrView
 
 router = routers.SimpleRouter()
 

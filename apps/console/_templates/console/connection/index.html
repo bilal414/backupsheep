@@ -637,7 +637,7 @@
                 async saveConnection() {
                     this.loading = true;
 
-                    let url = "/api/proxy/connections/" + this.connection.integration.code + "/" + this.connection.id + "/?" + new URLSearchParams({
+                    let url = "/api/v1/connections/" + this.connection.integration.code + "/" + this.connection.id + "/?" + new URLSearchParams({
                         location: this.connection.location.id,
                     });
 

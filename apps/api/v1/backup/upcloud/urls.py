@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.backup.upcloud.views import CoreUpCloudBackupView
+from apps.api.v1.backup.upcloud.views import CoreUpCloudBackupView
 
 router = routers.SimpleRouter()
 

@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.notification.views import CoreNotificationSlackView, CoreNotificationTelegramView, \
+from apps.api.v1.notification.views import CoreNotificationSlackView, CoreNotificationTelegramView, \
     CoreNotificationEmailView
 
 router = routers.SimpleRouter()

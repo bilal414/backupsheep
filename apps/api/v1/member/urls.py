@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.member.views import CoreMemberView
+from apps.api.v1.member.views import CoreMemberView
 
 router = routers.SimpleRouter()
 

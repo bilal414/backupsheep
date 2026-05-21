@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.storage.do_spaces.views import CoreStorageDoSpacesView
+from apps.api.v1.storage.do_spaces.views import CoreStorageDoSpacesView
 
 router = routers.SimpleRouter()
 

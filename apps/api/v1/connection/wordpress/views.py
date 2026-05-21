@@ -13,7 +13,7 @@ from apps.console.connection.models import (
     CoreConnectionLocation,
     CoreIntegration,
 )
-from apps.console.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberPermissions
 from apps.console.node.models import CoreWordPress, CoreNode
 from .filters import CoreWordPressFilter
 from .permissions import CoreWordPressViewPermissions
@@ -21,7 +21,7 @@ from .serializers import (
     CoreWordPressConnectionReadSerializer,
     CoreWordPressConnectionWriteSerializer,
 )
-from ..._tasks.exceptions import (
+from apps._tasks.exceptions import (
     NodeConnectionErrorEligibleObjects,
     IntegrationValidationFailed, IntegrationValidationError,
 )

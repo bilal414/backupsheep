@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.volume.linode.views import CoreVolumeLinodeView
+from apps.api.v1.volume.linode.views import CoreVolumeLinodeView
 
 router = routers.SimpleRouter()
 

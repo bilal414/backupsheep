@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.storage.scaleway.views import CoreStorageScalewayView
+from apps.api.v1.storage.scaleway.views import CoreStorageScalewayView
 
 router = routers.SimpleRouter()
 

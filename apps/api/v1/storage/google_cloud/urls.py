@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.storage.google_cloud.views import CoreStorageGoogleCloudView
+from apps.api.v1.storage.google_cloud.views import CoreStorageGoogleCloudView
 
 router = routers.SimpleRouter()
 

@@ -1377,7 +1377,7 @@
                 if (path) {
                     params.path = path;
                 }
-                let url = "/api/proxy/connections/" + this.integration_code + "/" + this.connection_id + "/objects/?" + new URLSearchParams(params);
+                let url = "/api/v1/connections/" + this.integration_code + "/" + this.connection_id + "/objects/?" + new URLSearchParams(params);
 
                 let response = await fetch(url, {
                     headers: {
