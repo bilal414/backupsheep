@@ -9,13 +9,13 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
-from apps.console.api.v1.backup.hetzner.filters import CoreHetznerBackupFilter
-from apps.console.api.v1.backup.hetzner.permissions import (
+from apps.api.v1.backup.hetzner.filters import CoreHetznerBackupFilter
+from apps.api.v1.backup.hetzner.permissions import (
     CoreHetznerBackupViewPermissions,
 )
-from apps.console.api.v1.backup.hetzner.serializers import CoreHetznerBackupSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_helpers import get_start_end_of_previous_day
+from apps.api.v1.backup.hetzner.serializers import CoreHetznerBackupSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
 from apps.console.backup.models import CoreHetznerBackup
 from apps.console.node.models import CoreNode
 from rest_framework import status

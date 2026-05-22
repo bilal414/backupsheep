@@ -12,11 +12,11 @@ from apps.console.connection.models import (
     CoreConnectionLocation,
     CoreIntegration,
 )
-from apps.console.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberPermissions
 from .filters import CoreWebsiteFilter
 from .permissions import CoreWebsiteViewPermissions
 from .serializers import CoreWebsiteConnectionReadSerializer, CoreWebsiteConnectionWriteSerializer
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
@@ -71,12 +71,8 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         member = self.request.user.member
         query = Q(integrations__code="website")
 
-        if member.get_primary_account().billing.plan.name == "AppSumo":
-            query &= Q(code="node-w-eu-03")
-            endpoints = CoreConnectionLocation.objects.filter(query).values()
-        else:
-            query &= ~Q(code="node-w-eu-03")
-            endpoints = CoreConnectionLocation.objects.filter(query).values()
+        query &= ~Q(code="node-w-eu-03")
+        endpoints = CoreConnectionLocation.objects.filter(query).values()
         return Response(endpoints)
 
     @action(detail=True, methods=["get"])

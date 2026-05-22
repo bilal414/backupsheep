@@ -1,5 +1,5 @@
 from django.conf import settings
-from django.conf.urls import include
+from django.urls import include
 from django.urls import path
 
 from apps.console.auth import views

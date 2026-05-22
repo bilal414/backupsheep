@@ -24,13 +24,13 @@ def snapshot_postgresql(backup):
     error_text = ''
 
     # Backup Log
-    log_file_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}.log"
+    log_file_path = f"_storage/{backup.uuid}.log"
     log_file = open(log_file_path, "a+")
     log_file.write(f"Node:{node.name}\n")
     log_file.write(f"UUID: {backup.uuid} \n")
     log_file.write(f"Time: {backup.created} \n")
     log_file.write(f"Attempt Number: {backup.attempt_no} \n")
-    tree_log_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}-dir-tree.log"
+    tree_log_path = f"_storage/{backup.uuid}-dir-tree.log"
 
     try:
         if node.database.option_postgres:
@@ -50,7 +50,7 @@ def snapshot_postgresql(backup):
         node.connection.auth_database.check_connection()
         log_file.write(f"Integration Validation: Passed \n")
 
-        database_version_path = f"sudo docker exec {node.connection.auth_database.version} /usr/bin/"
+        database_version_path = node.connection.auth_database.bin_path()
 
         if (
                 node.connection.auth_database.use_public_key
@@ -81,7 +81,7 @@ def snapshot_postgresql(backup):
                     f"password='{password}' "
                     f"dbname={database_name} "
                     f"port={node.connection.auth_database.port} "
-                    f"sslmode=prefer' -lqt | cut -d \| -f 1"
+                    rf"sslmode=prefer' -lqt | cut -d \| -f 1"
                 )
 
                 log_file.write(f"PostgreSQL: {execstr}\n")
@@ -273,8 +273,7 @@ def snapshot_postgresql(backup):
                 username = bs_decrypt(node.connection.auth_database.username, encryption_key)
                 password = bs_decrypt(node.connection.auth_database.password, encryption_key)
 
-                command = f"sudo docker exec -e PGPASSWORD='{password}'" \
-                          f" {node.connection.auth_database.version} /usr/bin/pg_dump" \
+                command = f"PGPASSWORD='{password}' {database_version_path}pg_dump" \
                           f" -h {node.connection.auth_database.host}" \
                           f" -p {node.connection.auth_database.port}" \
                           f" -U {username}" \
@@ -322,8 +321,7 @@ def snapshot_postgresql(backup):
                     password = bs_decrypt(node.connection.auth_database.password, encryption_key)
 
                     command = (
-                        f"sudo docker exec -e PGPASSWORD='{password}'"
-                        f" {node.connection.auth_database.version} /usr/bin/pg_dump"
+                        f"PGPASSWORD='{password}' {database_version_path}pg_dump"
                         f" -h {node.connection.auth_database.host}"
                         f" -p {node.connection.auth_database.port}"
                         f" -U {username}"
@@ -398,10 +396,8 @@ def snapshot_postgresql(backup):
         """
         Delete directory because no need for it now that we have zip
         """
-        queue = f"delete_from_disk__{node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "dir"],
-            queue=queue,
         )
     except Exception as e:
         log_file.write(f"Error: {e.__str__()} \n")
@@ -409,10 +405,8 @@ def snapshot_postgresql(backup):
         """
         Delete files
         """
-        queue = f"delete_from_disk__{node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "both"],
-            queue=queue,
         )
         raise NodeBackupFailedError(node, backup.uuid_str, backup.attempt_no, backup.type, e.__str__())
     finally:

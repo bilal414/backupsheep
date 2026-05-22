@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.storage.alibaba.views import CoreStorageAliBabaView
+from apps.api.v1.storage.alibaba.views import CoreStorageAliBabaView
 
 router = routers.SimpleRouter()
 

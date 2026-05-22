@@ -8,20 +8,20 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
 
-from apps.console.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberPermissions
 from apps.console.node.models import CoreNode
 from .filters import CoreNodeFilter
 from .serializers import CoreNodeSerializer
-from .._tasks.exceptions import (
+from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
     SnapshotCreateError,
     SnapshotCreateNodeValidationFailed,
-    SnapshotCreateNodeNotActive, NodeValidationFailed, AccountNotGoodStanding,
+    SnapshotCreateNodeNotActive, NodeValidationFailed,
 )
-from .._tasks.integration.basecamp import backup_basecamp
-from .._tasks.integration.website import backup_website
+from apps._tasks.integration.basecamp import backup_basecamp
+from apps._tasks.integration.website import backup_website
 from ..utils.api_filters import DateRangeFilter
-from apps.console.api.v1._tasks.helper.tasks import node_delete_requested
+from apps._tasks.helper.tasks import node_delete_requested
 from ..utils.api_helpers import delete_snar_file
 
 
@@ -70,10 +70,6 @@ class CoreNodeView(viewsets.ModelViewSet):
         notes = self.request.data.get("notes")
         storage_point_ids = self.request.data.get("storage_point_ids")
 
-        # Deny download if billing is not in good standing
-        if not node.connection.account.billing.good_standing:
-            raise AccountNotGoodStanding()
-
         if not node.backup_ready_to_initiate():
             raise SnapshotCreateNodeNotActive(
                 message="The node must be in ACTIVE status before you can request a snapshot."
@@ -98,18 +94,8 @@ class CoreNodeView(viewsets.ModelViewSet):
             # backup_basecamp(node.id, storage_ids=storage_point_ids)
             # backup_website(node.id, storage_ids=storage_point_ids)
 
-            integration_code = node.get_integration_alt_code()
-
-            queue_name = (
-                f"on_demand_backup"
-                f"__{node.get_type_display().lower()}"
-                f"__{integration_code}"
-                f"__{node.connection.location.queue}"
-            )
-
             result = current_app.send_task(
                 node.backup_task_name(),
-                queue=queue_name,
                 kwargs={
                     "node_id": pk,
                     "schedule_id": None,
@@ -168,10 +154,8 @@ class CoreNodeView(viewsets.ModelViewSet):
         """
         Delete Node
         """
-        queue = f"node_delete_requested__{node.connection.location.queue}"
         node_delete_requested.apply_async(
             args=[node.id],
-            queue=queue,
         )
 
         # log = CoreLog(account=self.request.user.member.get_current_account(), type=CoreLog.Type.NODE)

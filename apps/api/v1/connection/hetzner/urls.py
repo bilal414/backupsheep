@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.connection.hetzner.views import CoreHetznerView
+from apps.api.v1.connection.hetzner.views import CoreHetznerView
 
 router = routers.SimpleRouter()
 

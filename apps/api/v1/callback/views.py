@@ -1,4 +1,3 @@
-import stripe
 from requests_oauthlib import OAuth2Session
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
@@ -8,8 +7,7 @@ from django.shortcuts import redirect
 from django.contrib import messages
 from sentry_sdk import capture_exception, capture_message
 from django.core.cache import cache
-from apps.console.api.v1.utils.api_helpers import bs_encrypt
-from apps.console.billing.models import CorePayPalCredit
+from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.member.models import CoreMember
 from apps.console.connection.models import (
     CoreConnection,
@@ -30,15 +28,14 @@ from apps.console.storage.models import (
     CoreStoragePCloud,
     CoreStorageOneDrive,
 )
-from apps.utils.api_exceptions import ExceptionDefault
+from apps.api.v1.utils.api_exceptions import ExceptionDefault
 from ..utils.api_authentication import CsrfExemptSessionAuthentication
 import time
 import ovh
 import requests
 from rest_framework.parsers import FormParser
 import dropbox
-import httplib2
-from apiclient import discovery
+from googleapiclient import discovery
 from cryptography.fernet import Fernet
 from google.oauth2 import id_token
 import google.oauth2.credentials
@@ -822,103 +819,6 @@ class APICallbackOVHEU(APIView):
         return redirect("console:setup:integration_open", integration_code="ovh_eu")
 
 
-class APICallbackPaypal(APIView):
-    authentication_classes = (CsrfExemptSessionAuthentication,)
-    permission_classes = ()
-    parser_classes = (FormParser,)
-
-    def post(self, request):
-
-        try:
-
-            params = self.request.data.copy()
-
-            if params.get("custom", None):
-                f = Fernet(settings.PAYPAL_ENCRYPTION_KEY)
-
-                decrypted_username = f.decrypt(params.get("custom", None).encode())
-
-                decrypted_username = decrypted_username.decode("utf-8")
-
-                member = CoreMember.objects.get(user__username=decrypted_username)
-
-                if CoreMember.objects.filter(user__username=decrypted_username).exists():
-
-                    if (
-                        params.get("txn_type", None) == "web_accept"
-                        and params.get("payment_type", None) == "instant"
-                        and params.get("payment_status", None) == "Completed"
-                        and CorePayPalCredit.objects.filter(txn_id=params.get("txn_id", None), is_applied=True).exists()
-                        is False
-                    ):
-
-                        VERIFY_URL_PROD = "https://www.paypal.com/cgi-bin/webscr"
-
-                        # VERIFY_URL_TEST = 'https://www.sandbox.paypal.com/cgi-bin/webscr'
-
-                        # Switch as appropriate
-                        VERIFY_URL = VERIFY_URL_PROD
-
-                        params["cmd"] = "_notify-validate"
-
-                        # Post back to PayPal for validation
-                        headers = {
-                            "User-Agent": "BackupSheep-IPN-VerificationScript",
-                            "content-type": "application/x-www-form-urlencoded",
-                            "host": "www.paypal.com",
-                        }
-
-                        r = requests.post(VERIFY_URL, params=params, headers=headers, verify=True)
-
-                        r.raise_for_status()
-
-                        # Check return message and take action as needed
-                        if r.text == "VERIFIED":
-                            paypal_credit = CorePayPalCredit()
-                            paypal_credit.txn_id = params["txn_id"]
-                            paypal_credit.data = params
-                            paypal_credit.billing = member.account.billing
-                            paypal_credit.save()
-                            stripe_customer = stripe.Customer.retrieve(member.account.billing.stripe_customer_id)
-                            tax = params.get("tax", 0)
-                            amount = params.get("mc_gross", 0)
-                            credit = float(amount) - float(tax)
-                            # account_balance = stripe_customer.account_balance
-                            stripe_customer.balance = stripe_customer.balance - int(round(credit * 100))
-                            stripe_customer.save()
-                            paypal_credit.is_applied = True
-                            paypal_credit.save()
-
-                        elif r.text == "INVALID":
-                            raise response_paypal_payment_unable_to_verify()
-                        else:
-                            raise response_paypal_payment_unable_to_verify()
-                        r.close()
-                    else:
-                        raise response_paypal_payment_checks_failed()
-                else:
-                    raise response_paypal_credit_member_not_found()
-            else:
-                pass
-
-        except Exception as e:
-            capture_exception(e)
-            if hasattr(e, "detail"):
-                response = e.detail
-            else:
-                response = dict()
-                response["message"] = (
-                    "API Error: " + str(e.args[0]) if hasattr(e, "args") else "API call failed. Please contact support."
-                )
-                response["status"] = "error"
-            raise ExceptionDefault(detail=response)
-        content = {
-            "response": "ok",
-        }
-
-        return Response(content)
-
-
 class APICallbackDropbox(APIView):
     def get(self, request):
         try:
@@ -1088,80 +988,6 @@ class APICallbackGoogleDrive(APIView):
                 "Unable to connect your storage. Check if the domain administrators have disabled " "Drive apps.",
             )
             return redirect("console:setup:integration_storage_open", integration_code="google_drive")
-
-
-# Todo: Need to delete this because we are using service accounts.
-class APICallbackGoogleStorage(APIView):
-    def get(self, request):
-
-        try:
-            member = self.request.user.member
-            account = member.get_current_account()
-            encryption_key = account.get_encryption_key()
-
-            credentials = request.session["google_cloud_flow"].step2_exchange(self.request.query_params.get("code"))
-
-            if credentials.access_token:
-                is_new = True
-                storage = CoreStorage()
-                storage_google_cloud = CoreStorageGoogleCloud()
-                http = credentials.authorize(httplib2.Http())
-                service = discovery.build("storage", "v1", http=http)
-
-                # service.buckets().insert(body={'name': 'yolo1'}, project='bilal414').execute()
-
-                about = service.about().get(fields="appInstalled,user").execute()
-
-                if CoreStorageGoogleCloud.objects.filter(
-                    storage__account=account,
-                    email_address=about["user"]["emailAddress"],
-                ).exists():
-                    storage_google_cloud = CoreStorageGoogleCloud.objects.get(
-                        storage__account=account,
-                        email_address=about["user"]["emailAddress"],
-                    )
-
-                    storage = storage_google_cloud.storage
-                    is_new = False
-
-                storage.account = account
-
-                if is_new:
-                    storage.status = CoreStorage.Status.ACTIVE
-                    storage.type = CoreStorageType.objects.get(code="google_cloud_storage")
-                storage.name = about["user"]["displayName"] + " -  " + about["user"]["emailAddress"]
-
-                storage.save()
-
-                storage_google_cloud.storage = storage
-                storage_google_cloud.access_token = bs_encrypt(credentials.access_token, encryption_key)
-                storage_google_cloud.refresh_token = bs_encrypt(credentials.refresh_token, encryption_key)
-                storage_google_cloud.email_address = about["user"]["emailAddress"]
-                storage_google_cloud.save()
-
-                messages.add_message(request, messages.SUCCESS, "Your storage is successfully connected.")
-
-                return redirect("console:storage:google_storage")
-            else:
-                messages.add_message(
-                    request,
-                    messages.ERROR,
-                    "Unable to connect Google Cloud storage. Check if the domain administrators "
-                    "have disabled Google Cloud on your account.",
-                )
-
-                return redirect("console:storage:google_storage")
-
-        except Exception as e:
-            capture_exception(e)
-            messages.add_message(
-                request,
-                messages.ERROR,
-                "Unable to connect Google Cloud storage. Check if the domain administrators "
-                "have disabled Google Cloud on your account.",
-            )
-
-            return redirect("console:storage:google_storage")
 
 
 # Todo: Need to delete this because we are using service accounts.

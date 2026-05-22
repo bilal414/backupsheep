@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.cloud.aws.views import CoreCloudAWSView
+from apps.api.v1.cloud.aws.views import CoreCloudAWSView
 
 router = routers.SimpleRouter()
 

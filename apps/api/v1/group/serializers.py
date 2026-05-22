@@ -4,7 +4,7 @@ from rest_framework import serializers
 from django.contrib.auth.models import Group, Permission
 
 from apps.console.account.models import CoreAccountGroup
-from apps.console.api.v1.utils.api_helpers import (
+from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
     GenerateGroup,

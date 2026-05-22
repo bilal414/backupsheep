@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.backup.wordpress.views import CoreWordPressBackupView
+from apps.api.v1.backup.wordpress.views import CoreWordPressBackupView
 
 router = routers.SimpleRouter()
 

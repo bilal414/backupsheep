@@ -27,13 +27,13 @@ def snapshot_mysql(backup):
     ssh_key_path = None
 
     # Backup Log
-    log_file_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}.log"
+    log_file_path = f"_storage/{backup.uuid}.log"
     log_file = open(log_file_path, "a+")
     log_file.write(f"Node:{node.name}\n")
     log_file.write(f"UUID: {backup.uuid} \n")
     log_file.write(f"Time: {backup.created} \n")
     log_file.write(f"Attempt Number: {backup.attempt_no} \n")
-    tree_log_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}-dir-tree.log"
+    tree_log_path = f"_storage/{backup.uuid}-dir-tree.log"
 
     try:
         """
@@ -75,12 +75,7 @@ def snapshot_mysql(backup):
         if node.database.option_gtid_purged_off and "mysql_5_5" not in node.connection.auth_database.version:
             option_gtid_purged_off = "--set-gtid-purged=OFF"
 
-        if "mysql_5_5" in node.connection.auth_database.version:
-            cli_path = "/usr/local/mysql/bin/"
-        else:
-            cli_path = "/usr/bin/"
-
-        database_version_path = f"sudo docker exec {node.connection.auth_database.version} {cli_path}"
+        database_version_path = node.connection.auth_database.bin_path()
 
         if (
             node.connection.auth_database.use_public_key
@@ -450,10 +445,8 @@ def snapshot_mysql(backup):
         """
         Delete directory because no need for it now that we have zip
         """
-        queue = f"delete_from_disk__{node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "dir"],
-            queue=queue,
         )
 
     except Exception as e:
@@ -462,10 +455,8 @@ def snapshot_mysql(backup):
         """
         Delete files
         """
-        queue = f"delete_from_disk__{node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "both"],
-            queue=queue,
         )
         raise NodeBackupFailedError(
             node, backup.uuid_str, backup.attempt_no, backup.type, e.__str__()

@@ -368,7 +368,14 @@ class CoreAuthHetzner(TimeStampedModel):
 
     def validate(self, check_errors=None, raise_exp=None):
         client = self.get_client()
-        result = requests.get(settings.HETZNER_API + "/v1/actions", headers=client, verify=True)
+        # The bare global GET /v1/actions list was removed (410 Gone) in Jan 2025;
+        # hit a lightweight authenticated endpoint to confirm the token instead.
+        result = requests.get(
+            settings.HETZNER_API + "/v1/servers",
+            headers=client,
+            params={"per_page": 1},
+            verify=True,
+        )
         if result.status_code == 200:
             return True
         else:
@@ -1519,11 +1526,15 @@ class CoreAuthDatabase(TimeStampedModel):
         POSTGRESQL = 3, "PostgreSQL"
 
     class DatabaseVersion(models.TextChoices):
+        MYSQL_8_4 = "mysql_8_4", "MySQL 8.4"
         MYSQL_8_0 = "mysql_8_0", "MySQL 8.0"
         MYSQL_5_7 = "mysql_5_7", "MySQL 5.7"
         MYSQL_5_6 = "mysql_5_6", "MySQL 5.6"
         MYSQL_5_5 = "mysql_5_5", "MySQL 5.5"
 
+        MARIADB_11_8 = "mariadb_11_8", "MariaDB 11.8"
+        MARIADB_11_4 = "mariadb_11_4", "MariaDB 11.4"
+        MARIADB_10_11 = "mariadb_10_11", "MariaDB 10.11"
         MARIADB_10_10 = "mariadb_10_10", "MariaDB 10.10"
         MARIADB_10_9 = "mariadb_10_9", "MariaDB 10.9"
         MARIADB_10_8 = "mariadb_10_8", "MariaDB 10.8"
@@ -1534,6 +1545,9 @@ class CoreAuthDatabase(TimeStampedModel):
         MARIADB_10_3 = "mariadb_10_3", "MariaDB 10.3"
         MARIADB_10_2 = "mariadb_10_2", "MariaDB 10.2"
         MARIADB_10_1 = "mariadb_10_1", "MariaDB 10.1"
+        POSTGRESQL_18 = "postgres_18", "PostgreSQL 18"
+        POSTGRESQL_17 = "postgres_17", "PostgreSQL 17"
+        POSTGRESQL_16 = "postgres_16", "PostgreSQL 16"
         POSTGRESQL_15 = "postgres_15", "PostgreSQL 15"
         POSTGRESQL_14 = "postgres_14", "PostgreSQL 14"
         POSTGRESQL_13 = "postgres_13", "PostgreSQL 13"
@@ -1572,6 +1586,30 @@ class CoreAuthDatabase(TimeStampedModel):
 
     class Meta:
         db_table = "core_auth_database"
+
+    def bin_path(self):
+        """Local directory of the version-matched client tools for direct-mode backups.
+
+        The SaaS build ran `docker exec <version-container> <tool>`; the self-hosted
+        worker image ships the tools instead, and this picks the right one by version:
+        - PostgreSQL: the exact /usr/lib/postgresql/<N>/bin (pg_dump is forward
+          compatible, so the newest installed client is used as a fallback).
+        - MySQL: a real MySQL client if dropped in at /opt/mysql/bin, else the system client.
+        - MariaDB (and anything else): the system mariadb client (mariadb-dump / mysqldump).
+        """
+        version = self.version or ""
+        if version.startswith("postgres_"):
+            wanted = version.split("postgres_", 1)[1]
+            for v in [wanted, "18", "17", "16", "15", "14"]:
+                candidate = f"/usr/lib/postgresql/{v}/bin/"
+                if os.path.isdir(candidate):
+                    return candidate
+            return "/usr/bin/"
+        if version.startswith("mysql_"):
+            if os.path.exists("/opt/mysql/bin/mysqldump"):
+                return "/opt/mysql/bin/"
+            return "/usr/bin/"
+        return "/usr/bin/"
 
     def check_connection(self, data=None, check_errors=None):
         import mysql.connector
@@ -1690,7 +1728,7 @@ class CoreAuthDatabase(TimeStampedModel):
                 #     f" password='{password}'"
                 #     f" port='{port}'"
                 #     f" {dbname}"
-                #     f' sslmode=prefer" -lqt | cut -d \| -f 1'
+                #     fr' sslmode=prefer" -lqt | cut -d \| -f 1'
                 # )
 
                 # PostgreSQL 14.5 on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 7.5.0-3ubuntu1~18.04) 7.5.0, 64-bit
@@ -2285,7 +2323,7 @@ class CoreAuthDatabase(TimeStampedModel):
                             " dbname='%s'"
                             " password='%s'"
                             " port=%s"
-                            ' sslmode=prefer" -c "\dt" -qAtX | cut -d \| -f 2'
+                            r' sslmode=prefer" -c "\dt" -qAtX | cut -d \| -f 2'
                             % (
                                 self.host,
                                 bs_decrypt(self.username, encryption_key),
@@ -2300,7 +2338,7 @@ class CoreAuthDatabase(TimeStampedModel):
                             " user='%s'"
                             " password='%s'"
                             " port=%s"
-                            ' sslmode=prefer" -lqt | cut -d \| -f 1'
+                            r' sslmode=prefer" -lqt | cut -d \| -f 1'
                             % (
                                 self.host,
                                 bs_decrypt(self.username, encryption_key),

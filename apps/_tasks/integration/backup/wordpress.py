@@ -19,7 +19,7 @@ def snapshot_wordpress(backup):
     backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
     backup.save()
 
-    working_dir = f"/home/ubuntu/backupsheep"
+    working_dir = f"."
     local_dir = f"_storage/{backup.uuid}/"
     local_zip = f"_storage/{backup.uuid}.zip"
     mkdir_p(local_dir)
@@ -31,7 +31,7 @@ def snapshot_wordpress(backup):
     log_file.write(f"UUID: {backup.uuid} \n")
     log_file.write(f"Time: {backup.created} \n")
     log_file.write(f"Attempt Number: {backup.attempt_no} \n")
-    tree_log_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}-dir-tree.log"
+    tree_log_path = f"_storage/{backup.uuid}-dir-tree.log"
 
     try:
         """
@@ -277,7 +277,7 @@ def snapshot_wordpress(backup):
         )
 
         # ZIP all downloaded files.
-        execstr = f"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
+        execstr = rf"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
         subprocess.run(
             execstr,
             stdout=subprocess.PIPE,
@@ -319,10 +319,8 @@ def snapshot_wordpress(backup):
         """
         Delete directory because no need for it now that we have zip
         """
-        queue = f"delete_from_disk__{node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "dir"],
-            queue=queue,
         )
     except Exception as e:
         log_file.write(f"Error: {e.__str__()} \n")
@@ -330,10 +328,8 @@ def snapshot_wordpress(backup):
         """
         Delete files
         """
-        queue = f"delete_from_disk__{node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "both"],
-            queue=queue,
         )
         raise NodeBackupFailedError(
             node, backup.uuid_str, backup.attempt_no, backup.type, e.__str__()

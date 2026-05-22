@@ -20,7 +20,7 @@ def snapshot_incremental(backup):
     mkdir_p(local_dir)
 
     # Backup Log
-    log_file_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}.log"
+    log_file_path = f"_storage/{backup.uuid}.log"
     log_file = open(log_file_path, "a+")
     log_file.write(f"Node:{node.name}\n")
     log_file.write(f"UUID: {backup.uuid} \n")
@@ -168,7 +168,7 @@ def snapshot_incremental(backup):
         """
         Create final backup zip folder
         """
-        execstr = f"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
+        execstr = rf"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
         subprocess.run(
             execstr,
             stdout=subprocess.PIPE,
@@ -194,10 +194,8 @@ def snapshot_incremental(backup):
         """
         Delete directory because no need for it now that we have zip
         """
-        queue = f"delete_from_disk__{node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "dir"],
-            queue=queue,
         )
 
     except Exception as e:
@@ -208,10 +206,8 @@ def snapshot_incremental(backup):
         """
         Delete files
         """
-        queue = f"delete_from_disk__{node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "both"],
-            queue=queue,
         )
 
         error = e.__str__()

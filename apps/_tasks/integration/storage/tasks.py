@@ -28,10 +28,6 @@ from apps._tasks.integration.storage.azure import storage_azure
 from apps._tasks.integration.storage.backblaze_b2 import (
     storage_backblaze_b2,
 )
-from apps._tasks.integration.storage.bs import storage_bs
-
-from apps._tasks.integration.storage.bs_ceph import storage_bs_ceph
-from apps._tasks.integration.storage.bs_google_cloud import bs_google_cloud
 from apps._tasks.integration.storage.cloudflare import storage_cloudflare
 from apps._tasks.integration.storage.do_spaces import (
     storage_do_spaces,
@@ -106,7 +102,7 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     else:
         raise TaskParamsNotProvided()
 
-    log_file_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid_str}.log"
+    log_file_path = f"_storage/{backup.uuid_str}.log"
     log_file = open(log_file_path, "a+")
 
     storage_type_name = f"Storage ({stored_backup.storage.type.name})"
@@ -115,13 +111,6 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     log_file.write(f"{storage_type_name}: {stored_backup.storage.name} \n")
 
     try:
-        """
-        Set main backup status to upload upload-in-progress since no storage point is uploaded.
-        """
-        if backup.storage_points_uploaded() == 0:
-            backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
-            backup.save()
-
         stored_backup.status = stored_backup.Status.UPLOAD_IN_PROGRESS
         stored_backup.celery_task_id = self.request.id
         stored_backup.save()
@@ -176,97 +165,19 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
             storage_rackcorp(stored_backup)
         elif stored_backup.storage.type.code == "ibm":
             storage_ibm(stored_backup)
-        elif stored_backup.storage.type.code == "bs":
-            if stored_backup.storage.storage_bs.endpoint == "s3.backupsheep.com":
-                storage_bs_ceph(stored_backup)
-            elif stored_backup.storage.storage_bs.endpoint == "storage.cloud.google.com":
-                bs_google_cloud(stored_backup)
-            else:
-                storage_bs(stored_backup)
+        else:
+            stored_backup.status = stored_backup.Status.UPLOAD_FAILED
+            stored_backup.save()
+            log_file.write(
+                f"{storage_type_name}: Unsupported storage type "
+                f"'{stored_backup.storage.type.code}'\n"
+            )
 
-        """
-        Set storage point status to complete
-        """
-        stored_backup.status = stored_backup.Status.UPLOAD_COMPLETE
-        stored_backup.save()
-
+        # The backend sets the storage point to UPLOAD_COMPLETE on success (or a
+        # failure status / raises). Backup-level completion (status, notification,
+        # retention) is handled exactly once by the finalize_backup chord callback
+        # after every upload finishes.
         log_file.write(f"{storage_type_name}: {stored_backup.get_status_display()} \n")
-
-        """
-        NEED AT LEAST ONE STORAGE POINT UPLOADED
-        ----------------------------------------
-        Now we have to check if at-least one upload is complete. Then we will send email notification and 
-        also delete old backups of it's scheduled backup. 
-        """
-
-        if (
-            backup.storage_points_uploaded() > 0
-            and backup.status != UtilBackup.Status.COMPLETE
-        ):
-            log_file.write(f"Message: At-least one upload is complete. \n")
-
-            """
-            Now we can mark backup complete
-            """
-            backup.status = UtilBackup.Status.COMPLETE
-            backup.save()
-            log_file.write(f"Status: {backup.get_status_display()}\n")
-
-            """
-            Notify user about successful backup.
-            """
-            node.notify_backup_success(backup)
-
-            """
-            Now mark backups delete requested based on schedule.
-            """
-            if backup.schedule:
-                log_file.write(f"Schedule: {backup.schedule.name}\n")
-
-                """
-                DELETE PREVIOUS BACKUPS if KEEP LAST # IS USED
-                """
-                if (backup.schedule.keep_last or 0) > 0:
-                    log_file.write(f"Retention Policy: {backup.schedule.keep_last}\n")
-
-                    if node.type == CoreNode.Type.WEBSITE:
-                        while backup.schedule.website_backups.filter(
-                            status=UtilBackup.Status.COMPLETE
-                        ).count() > (backup.schedule.keep_last or 0):
-                            backup_to_delete = (
-                                backup.schedule.website_backups.filter(
-                                    status=UtilBackup.Status.COMPLETE
-                                )
-                                .order_by("created")
-                                .first()
-                            )
-                            backup_to_delete.soft_delete()
-                    elif node.type == CoreNode.Type.DATABASE:
-                        while backup.schedule.database_backups.filter(
-                            status=UtilBackup.Status.COMPLETE
-                        ).count() > (backup.schedule.keep_last or 0):
-                            backup_to_delete = (
-                                backup.schedule.database_backups.filter(
-                                    status=UtilBackup.Status.COMPLETE
-                                )
-                                .order_by("created")
-                                .first()
-                            )
-                            backup_to_delete.soft_delete()
-                    elif node.type == CoreNode.Type.SAAS:
-                        while backup.schedule.wordpress_backups.filter(
-                            status=UtilBackup.Status.COMPLETE
-                        ).count() > (backup.schedule.keep_last or 0):
-                            backup_to_delete = (
-                                backup.schedule.wordpress_backups.filter(
-                                    status=UtilBackup.Status.COMPLETE
-                                )
-                                .order_by("created")
-                                .first()
-                            )
-                            backup_to_delete.soft_delete()
-            else:
-                log_file.write(f"Message: This is on-demand backup\n")
 
     except NodeGoogleDriveNotEnoughStorageError as e:
         node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
@@ -353,60 +264,98 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     except Exception as e:
         capture_exception(e)
 
-        try:
-            if (
-                "user-provided path" in e.__str__().lower()
-                and "does not exist" in e.__str__().lower()
-            ):
-                stored_backup.status = stored_backup.Status.UPLOAD_FAILED_FILE_NOT_FOUND
-                stored_backup.save()
-
-            if attempt_no <= 3:
-                node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-
-            stored_backup.status = stored_backup.Status.UPLOAD_RETRY
+        # A missing local backup file cannot be fixed by retrying; fail immediately.
+        if (
+            "user-provided path" in e.__str__().lower()
+            and "does not exist" in e.__str__().lower()
+        ):
+            stored_backup.status = stored_backup.Status.UPLOAD_FAILED_FILE_NOT_FOUND
             stored_backup.save()
-
             node.connection.account.create_storage_log(
                 e.__str__(), node, backup, stored_backup.storage
             )
-            log_file.write(f"Error: {e.__str__()} \n")
-            raise self.retry()
-        except MaxRetriesExceededError:
-            stored_backup.status = stored_backup.Status.UPLOAD_FAILED
-            stored_backup.save()
-            log_file.write(f"Error: Giving up after max retries \n")
-    finally:
-        # """
-        # Upload failed, so we will upload it to BackupSheep storage by default.
-        # """
-        # if backup.storage_points_bs() == 0 and attempt_no == 3:
-        #     log_file.write(f"Info: Looks like no backups were uploaded. "
-        #                    f"Uploading it to BackupSheep storage just to be safe. \n")
-        #
-        #     storage = CoreStorage.objects.filter(
-        #         storage_bs__isnull=False,
-        #         account=node.connection.account,
-        #         status=CoreStorage.Status.ACTIVE,
-        #     ).first()
-        #
-        #     if node.type == CoreNode.Type.WEBSITE:
-        #         if not CoreWebsiteBackupStoragePoints.objects.filter(backup=backup, storage=storage).exists():
-        #             stored_backup = CoreWebsiteBackupStoragePoints(backup=backup, storage=storage)
-        #             stored_backup.save()
-        #             backup.stored_website_backups.add(stored_backup)
-        #             storage_upload(node_id, backup_id, stored_backup.id)
-        #     elif node.type == CoreNode.Type.DATABASE:
-        #         if not CoreDatabaseBackupStoragePoints.objects.filter(backup=backup, storage=storage).exists():
-        #             stored_backup = CoreDatabaseBackupStoragePoints(backup=backup, storage=storage)
-        #             stored_backup.save()
-        #             backup.stored_database_backups.add(stored_backup)
-        #             storage_upload(node_id, backup_id, stored_backup.id)
-        #     elif node.type == CoreNode.Type.SAAS:
-        #         if not CoreWordPressBackupStoragePoints.objects.filter(backup=backup, storage=storage).exists():
-        #             stored_backup = CoreWordPressBackupStoragePoints(backup=backup, storage=storage)
-        #             stored_backup.save()
-        #             backup.stored_wordpress_backups.add(stored_backup)
-        #             storage_upload(node_id, backup_id, stored_backup.id)
+            log_file.write(f"Error (not retryable): {e.__str__()} \n")
+        else:
+            try:
+                if attempt_no <= 3:
+                    node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
 
+                stored_backup.status = stored_backup.Status.UPLOAD_RETRY
+                stored_backup.save()
+
+                node.connection.account.create_storage_log(
+                    e.__str__(), node, backup, stored_backup.storage
+                )
+                log_file.write(f"Error: {e.__str__()} \n")
+                raise self.retry()
+            except MaxRetriesExceededError:
+                stored_backup.status = stored_backup.Status.UPLOAD_FAILED
+                stored_backup.save()
+                log_file.write(f"Error: Giving up after max retries \n")
+    finally:
         log_file.close()
+
+
+@current_app.task(
+    name="finalize_backup",
+    track_started=True,
+    bind=True,
+    default_retry_delay=300,
+    max_retries=8,
+)
+def finalize_backup(self, node_id, backup_id):
+    """Chord callback: runs exactly once after every storage_upload for a backup
+    finishes. Decides the backup's final state from the real upload tally, applies
+    the schedule retention policy, and cleans up the local working files.
+
+    Marking completion here (instead of inside each parallel storage_upload) removes
+    the previous race conditions and the false "complete on first success".
+    """
+    from apps._tasks.helper.tasks import delete_from_disk
+
+    node = CoreNode.objects.get(id=node_id)
+
+    if node.type == CoreNode.Type.WEBSITE:
+        backup = CoreWebsiteBackup.objects.get(id=backup_id)
+    elif node.type == CoreNode.Type.DATABASE:
+        backup = CoreDatabaseBackup.objects.get(id=backup_id)
+    elif node.type == CoreNode.Type.SAAS:
+        if node.connection.integration.code == "wordpress":
+            backup = CoreWordPressBackup.objects.get(id=backup_id)
+        elif node.connection.integration.code == "basecamp":
+            backup = CoreBasecampBackup.objects.get(id=backup_id)
+        else:
+            raise TaskParamsNotProvided()
+    else:
+        raise TaskParamsNotProvided()
+
+    try:
+        if backup.storage_points_uploaded() > 0:
+            # At least one destination has the backup -> success.
+            if backup.status != UtilBackup.Status.COMPLETE:
+                backup.status = UtilBackup.Status.COMPLETE
+                backup.save()
+                node.notify_backup_success(backup)
+
+                # Retention: keep only the newest `keep_last` completed backups of
+                # this schedule (applies to every file-based node type, incl. basecamp).
+                if backup.schedule and (backup.schedule.keep_last or 0) > 0:
+                    keep_last = backup.schedule.keep_last
+                    completed = list(
+                        backup.__class__.objects.filter(
+                            schedule=backup.schedule,
+                            status=UtilBackup.Status.COMPLETE,
+                        ).order_by("created")
+                    )
+                    for old_backup in completed[:-keep_last]:
+                        old_backup.soft_delete()
+        else:
+            # Nothing was stored anywhere -> failure (do not silently mark complete).
+            if backup.status != UtilBackup.Status.COMPLETE:
+                backup.status = UtilBackup.Status.UPLOAD_FAILED
+                backup.save()
+    except Exception as e:
+        capture_exception(e)
+    finally:
+        # Local working files are no longer needed once uploads are settled.
+        delete_from_disk.apply_async(args=[backup.uuid_str, "both"])

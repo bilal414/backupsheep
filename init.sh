@@ -4,8 +4,11 @@
 #systemctl enable nginx
 service nginx start
 
-#tail -f /dev/null
 python manage.py collectstatic --noinput
 python manage.py migrate
-gunicorn backupsheep.wsgi:application --workers=4 --timeout=3600 --bind 0.0.0.0:8000
+
+# Run the web server, the Celery worker (executes backups) and the Celery beat
+# scheduler (fires scheduled backups) under supervisor. Requires CELERY_BROKER_URL
+# (e.g. a Redis service) to be reachable.
+supervisord -c /code/_supervisor/supervisord.conf
 

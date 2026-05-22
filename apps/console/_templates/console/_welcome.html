@@ -1,0 +1,71 @@
+<div class="bg-gray-50 mt-10">
+    <div class="max-w-2xl mx-auto py-12 px-4 sm:px-6 sm:py-12 lg:max-w-7xl lg:px-8 rounded-full">
+        <div class="max-w-4xl">
+                <h2 class="text-4xl font-extrabold tracking-tight text-gray-700">Thank you for choosing BackupSheep!</h2>
+        </div>
+
+        <h2 class="text-4xl font-extrabold tracking-tight text-indigo-600 mt-10">Getting Started</h2>
+
+        <div class="grid grid-cols-1 gap-y-12 sm:grid-cols-2 sm:gap-x-6 lg:grid-cols-2 lg:gap-x-8 mt-6">
+
+            <div>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-indigo-500" fill="none"
+                     viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+                </svg>
+                <h3 class="mt-6 text-lg font-semibold text-gray-700">
+                    <a href="{% url 'console:setup:integration_select' %}">1. Setup Integration</a>
+                </h3>
+                <p class="mt-2 text-lg text-gray-700">
+                    Setup integration to connect with your cloud hosting account, websites, database and storage
+                    accounts.
+                </p>
+            </div>
+
+            <div>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-indigo-500" fill="none"
+                     viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
+                </svg>
+                <h3 class="mt-6 text-lg font-semibold text-gray-700">
+                    2. Setup Node
+                </h3>
+                <p class="mt-2 text-lg text-gray-700">
+                    Using the integration, create a backup node which can be a cloud server, volume, database or
+                    files/folders.
+                </p>
+            </div>
+
+            <div>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-indigo-500" fill="none"
+                     viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                </svg>
+                <h3 class="mt-6 text-lg font-semibold text-gray-700">
+                    3. Setup Schedule
+                </h3>
+                <p class="mt-2 text-lg text-gray-700">
+                    You can configure schedule(s) for each node and choose when and where to store your backups.
+                </p>
+            </div>
+
+            <div>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-indigo-500" fill="none"
+                     viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
+                </svg>
+                <h3 class="mt-6 text-lg font-semibold text-gray-700">
+                    4. Setup Storage (optional)
+                </h3>
+                <p class="mt-2 text-lg text-gray-700">
+                    Bring your storage accounts for website and database backups. Cloud server snapshots are not
+                    downloadable.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,5 +1,5 @@
 <div x-data="headerNav"
-     class="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-gray-200 bg-white px-4 shadow-sm sm:gap-x-6 sm:px-6 lg:px-8">
+     class="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-gray-200 bg-white px-4 shadow-xs sm:gap-x-6 sm:px-6 lg:px-8">
     <button @click="sideBar = ! sideBar" type="button" class="-m-2.5 p-2.5 text-gray-700 lg:hidden">
         <span class="sr-only">Open sidebar</span>
         <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
@@ -71,15 +71,13 @@
                      x-transition:leave-end="transform opacity-0 scale-95"
                      @click.away="isOpen = false"
                      style="display: none;"
-                     class="absolute right-0 z-10 mt-2.5 w-48 origin-top-right rounded-md bg-white py-2 shadow-lg ring-1 ring-gray-900/5 focus:outline-none"
+                     class="absolute right-0 z-10 mt-2.5 w-48 origin-top-right rounded-md bg-white py-2 shadow-lg ring-1 ring-gray-900/5 focus:outline-hidden"
                      role="menu" aria-orientation="vertical" aria-labelledby="user-menu-button"
                      tabindex="-1">
                     <!-- Active: "bg-gray-50", Not Active: "" -->
 {#                    <a href="{% url 'console:about_me:demographics' %}" class="block px-3 py-1 text-sm leading-6 text-gray-900" role="menuitem"#}
 {#                       tabindex="-1" id="user-menu-item-0">About Me</a>#}
-{#                    <a href="{% url 'console:about_me:billing' %}" class="block px-3 py-1 text-sm leading-6 text-gray-900" role="menuitem"#}
-{#                       tabindex="-1" id="user-menu-item-0">Billing</a>#}
-                    <a href="{% url 'console:about_me:timezone' %}" class="block px-3 py-1 text-sm leading-6 text-gray-900" role="menuitem"
+                    <a href="{% url 'console:settings:profile' %}" class="block px-3 py-1 text-sm leading-6 text-gray-900" role="menuitem"
                        tabindex="-1" id="user-menu-item-0">{{ member.timezone }}</a>
                     <form id="logout-form" method="post" action="{% url 'console:auth:logout' %}">
                         {% csrf_token %}

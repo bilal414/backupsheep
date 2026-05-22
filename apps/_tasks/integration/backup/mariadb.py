@@ -24,13 +24,13 @@ def snapshot_mariadb(backup):
     ssh_key_path = None
 
     # Backup Log
-    log_file_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}.log"
+    log_file_path = f"_storage/{backup.uuid}.log"
     log_file = open(log_file_path, "a+")
     log_file.write(f"Node:{node.name}\n")
     log_file.write(f"UUID: {backup.uuid} \n")
     log_file.write(f"Time: {backup.created} \n")
     log_file.write(f"Attempt Number: {backup.attempt_no} \n")
-    tree_log_path = f"/home/ubuntu/backupsheep/_storage/{backup.uuid}-dir-tree.log"
+    tree_log_path = f"_storage/{backup.uuid}-dir-tree.log"
 
     try:
         """
@@ -66,7 +66,7 @@ def snapshot_mariadb(backup):
         # if node.connection.auth_database.version != "mariadb_10_3" and node.connection.auth_database.version != "mariadb_10_2":
         #     option_column_statistics = "--column-statistics=0"
 
-        database_version_path = f"sudo docker exec {node.connection.auth_database.version} /usr/bin/"
+        database_version_path = node.connection.auth_database.bin_path()
 
         if (
                 node.connection.auth_database.use_public_key
@@ -432,10 +432,8 @@ def snapshot_mariadb(backup):
         """
         Delete directory because no need for it now that we have zip
         """
-        queue = f"delete_from_disk__{node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "dir"],
-            queue=queue,
         )
 
     except Exception as e:
@@ -444,10 +442,8 @@ def snapshot_mariadb(backup):
         """
         Delete files
         """
-        queue = f"delete_from_disk__{node.connection.location.queue}"
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "both"],
-            queue=queue,
         )
         raise NodeBackupFailedError(
             node, backup.uuid_str, backup.attempt_no, backup.type, e.__str__()

@@ -22,9 +22,34 @@ from apps.console.member.models import CoreMember
 from apps.console.notification.models import CoreNotificationEmail, CoreNotificationSlack
 from apps.console.storage.models import CoreStorageType, CoreStorage, CoreStorageOneDrive, CoreStorageDropbox, \
     CoreStorageGoogleDrive
-from apps.console.usage.models import CoreUsageNode, CoreUsageStorage
 from apps.console.utils.models import UtilBackup
 from slack_sdk import WebhookClient
+
+
+@current_app.task(name="run_scheduled_backup", bind=True, ignore_result=True)
+def run_scheduled_backup(self, schedule_id=None):
+    """Fired by django-celery-beat for each active schedule; enqueues the node backup.
+
+    Replaces the SaaS path where AWS EventBridge called /schedules/{id}/trigger/.
+    """
+    from apps.console.node.models import CoreSchedule, CoreScheduleRun
+
+    try:
+        schedule = CoreSchedule.objects.get(
+            id=schedule_id, status=CoreSchedule.Status.ACTIVE
+        )
+    except CoreSchedule.DoesNotExist:
+        return
+
+    CoreScheduleRun.objects.create(schedule=schedule, request_id=uuid.uuid4().hex)
+    current_app.send_task(
+        schedule.node.backup_task_name(),
+        kwargs={
+            "node_id": schedule.node.id,
+            "schedule_id": schedule.id,
+            "storage_ids": schedule.storage_ids,
+        },
+    )
 
 
 @current_app.task(
@@ -247,7 +272,6 @@ def send_log_to_telegram(self, chat_id, message):
 )
 def account_delete(self):
     try:
-        from apps.console.storage.models import CoreStorageBS
         from apps.console.node.models import CoreSchedule, CoreNode
         import boto3
         from apps.console.backup.models import (
@@ -313,88 +337,6 @@ def send_postmark_email(self, to_email, template, context):
         capture_exception(e)
 
 
-
-@current_app.task(
-    name="bs_storage_clean_delete_markers",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
-def bs_storage_clean_delete_markers(self):
-    from apps.console.backup.models import (
-        CoreDatabaseBackupStoragePoints,
-        CoreWebsiteBackupStoragePoints,
-    )
-    import boto3
-
-    try:
-        for storage_point in CoreWebsiteBackupStoragePoints.objects.filter(
-            storage__type__code="bs",
-            status=CoreWebsiteBackupStoragePoints.Status.DELETE_COMPLETED,
-        ).order_by("-created"):
-            if storage_point.storage_file_id:
-                if ".amazonaws.com" in storage_point.storage.storage_bs.endpoint:
-                    s3_client = boto3.client("s3", storage_point.storage.storage_bs.region)
-
-                    prefix = f"{storage_point.storage.storage_bs.prefix}{storage_point.storage_file_id}"
-
-                    response = s3_client.list_object_versions(
-                        Prefix=prefix,
-                        Bucket=storage_point.storage.storage_bs.bucket_name,
-                    )
-                    versions = response.get("Versions", [])
-                    delete_markers = response.get("DeleteMarkers", [])
-
-                    for version in versions:
-                        s3_client.delete_object(
-                            Bucket=storage_point.storage.storage_bs.bucket_name,
-                            Key=prefix,
-                            VersionId=version["VersionId"],
-                        )
-
-                    for delete_marker in delete_markers:
-                        s3_client.delete_object(
-                            Bucket=storage_point.storage.storage_bs.bucket_name,
-                            Key=prefix,
-                            VersionId=delete_marker["VersionId"],
-                        )
-
-        for storage_point in CoreDatabaseBackupStoragePoints.objects.filter(
-            storage__type__code="bs",
-            status=CoreDatabaseBackupStoragePoints.Status.DELETE_COMPLETED,
-        ).order_by("-created"):
-            if storage_point.storage_file_id:
-                if ".amazonaws.com" in storage_point.storage.storage_bs.endpoint:
-                    s3_client = boto3.client("s3", storage_point.storage.storage_bs.region)
-
-                    prefix = f"{storage_point.storage.storage_bs.prefix}{storage_point.storage_file_id}"
-
-                    response = s3_client.list_object_versions(
-                        Prefix=prefix,
-                        Bucket=storage_point.storage.storage_bs.bucket_name,
-                    )
-                    versions = response.get("Versions", [])
-                    delete_markers = response.get("DeleteMarkers", [])
-
-                    for version in versions:
-                        s3_client.delete_object(
-                            Bucket=storage_point.storage.storage_bs.bucket_name,
-                            Key=prefix,
-                            VersionId=version["VersionId"],
-                        )
-
-                    for delete_marker in delete_markers:
-                        s3_client.delete_object(
-                            Bucket=storage_point.storage.storage_bs.bucket_name,
-                            Key=prefix,
-                            VersionId=delete_marker["VersionId"],
-                        )
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
 """
 NO NEED TO RUN IT ON REGULAR BASIS ANYMORE. 
 """
@@ -453,57 +395,12 @@ def node_delete_requested(self, node_id):
                         backup.soft_delete()
 
                     for schedule in CoreSchedule.objects.filter(node=node):
-                        schedule.aws_schedule_delete()
+                        schedule.schedule_delete()
 
                     for schedule in node.schedules.all():
                         schedule.delete()
 
                 node.delete()
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="delete_bs_storage_for_node",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
-def delete_bs_storage_for_node(self, node_id):
-    from apps.console.node.models import CoreNode
-    from apps.console.backup.models import (
-        CoreWebsiteBackupStoragePoints,
-        CoreDatabaseBackupStoragePoints,
-        CoreWordPressBackupStoragePoints,
-    )
-
-    try:
-        if node_id:
-            node = CoreNode.objects.get(id=node_id)
-
-            if node.type == CoreNode.Type.WEBSITE:
-                for storage_point in CoreWebsiteBackupStoragePoints.objects.filter(
-                    backup__website__node_id=node_id,
-                    status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
-                    storage__type__code="bs",
-                ):
-                    storage_point.soft_delete()
-            elif node.type == CoreNode.Type.DATABASE:
-                for storage_point in CoreDatabaseBackupStoragePoints.objects.filter(
-                    backup__database__node_id=node_id,
-                    status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_COMPLETE,
-                    storage__type__code="bs",
-                ):
-                    storage_point.soft_delete()
-            elif node.type == CoreNode.Type.SAAS:
-                for storage_point in CoreWordPressBackupStoragePoints.objects.filter(
-                    backup__wordpress__node_id=node_id,
-                    status=CoreWordPressBackupStoragePoints.Status.UPLOAD_COMPLETE,
-                    storage__type__code="bs",
-                ):
-                    storage_point.soft_delete()
     except Exception as e:
         capture_exception(e)
         raise self.retry()
@@ -557,7 +454,6 @@ def clean_delete_failed_backups(self):
         raise self.retry()
 
 
-
 @current_app.task(
     name="delete_requested_integrations",
     track_started=True,
@@ -594,190 +490,6 @@ def delete_requested_storages(self):
     try:
         for storage in CoreStorage.objects.filter(status=CoreStorage.Status.DELETE_REQUESTED).order_by("-created"):
             storage.delete()
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="notification_usage_node_alert",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
-def notification_usage_node_alert(self):
-    try:
-        template_id = 26676770
-        for usage in (
-            CoreUsageNode.objects.filter(plan_node_overage__gt=0, email_alert_sent=None)
-            .distinct("account")
-            .order_by("-created")
-        ):
-            data = {
-                "node_used_all": usage.node_used_all,
-                "plan_node_overage": usage.plan_node_overage,
-                "plan_name": usage.account.billing.plan.name,
-                "plan_node_quota": usage.plan_node_quota,
-            }
-            send_postmark_email(usage.account.get_primary_member().email, template_id, "usage_node_alert", data)
-            usage.email_alert_sent = True
-            usage.save()
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="notification_developer_plan_changes",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
-def notification_developer_plan_changes(self):
-    try:
-        template_id = 30568965
-
-        for account in CoreAccount.objects.filter(billing__plan__name="Developer"):
-            if account.usage_node.filter().first().node_used_all > 0:
-                print(account.id)
-                data = {}
-                send_postmark_email(account.get_primary_member().email, template_id, "developer_plan_changes", data)
-    except Exception as e:
-        print(e.__str__())
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="calc_stats_storage_used",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-    queue="internal",
-)
-def calc_stats_storage_used(self, account_id=None):
-    try:
-        for account in CoreAccount.objects.filter():
-            if (
-                account.get_node_count_wordpress() > 0
-                or account.get_node_count_website()
-                or account.get_node_count_database() > 0
-            ):
-                account_storage = CoreUsageStorage(account=account)
-                account_storage.plan_storage_quota = account.billing.free_storage
-                account_storage.plan_storage_overage = account.plan_storage_overage
-                account_storage.storage_used_all = account.storage_used()
-                account_storage.storage_used_bs = account.storage_used(storage_type_code="bs")
-                account_storage.storage_used_byo = account.storage_used(only_byo_storage=True)
-                account_storage.save()
-                print(account.id)
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="notification_usage_storage_alert",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
-def notification_usage_storage_alert(self):
-    try:
-        template_id = 30569414
-        for account in CoreAccount.objects.filter().order_by("-created"):
-            usage = account.usage_storage.filter().first()
-            if usage:
-                if usage.plan_storage_overage > 0:
-                    print(account.id)
-                    data = {
-                        "plan_storage_overage": humanfriendly.format_size(usage.plan_storage_overage or 0),
-                        "storage_used_all": humanfriendly.format_size(usage.storage_used_all or 0),
-                        "storage_used_bs": humanfriendly.format_size(usage.storage_used_bs or 0),
-                        "plan_name": usage.account.billing.plan.name,
-                        "plan_storage_quota": humanfriendly.format_size(usage.plan_storage_quota or 0),
-                    }
-                    send_postmark_email(
-                        usage.account.get_primary_member().email, template_id, "usage_storage_alert", data
-                    )
-                    usage.save()
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="calc_stats_nodes_used",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-    queue="internal",
-)
-def calc_stats_nodes_used(self):
-    try:
-        for account in CoreAccount.objects.filter().order_by("created"):
-            usage_node = CoreUsageNode(account=account)
-
-            usage_node.node_used_all = account.get_node_count(exclude_paused=True)
-            usage_node.plan_node_quota = account.billing.plan.nodes
-
-            if usage_node.node_used_all > usage_node.plan_node_quota:
-                usage_node.plan_node_overage = usage_node.node_used_all - usage_node.plan_node_quota
-            else:
-                usage_node.plan_node_overage = 0
-            usage_node.save()
-            print(account.id)
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="calc_account_good_standing",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-    queue="internal",
-)
-def calc_account_good_standing(self):
-    try:
-        for account in CoreAccount.objects.filter().order_by("created"):
-            if account.billing.plan.name == "Developer" or account.billing.plan.name == "AppSumo":
-                storage_usage_ok = True
-                node_usage_ok = True
-
-                # Check storage overage
-                storage_usage = account.usage_storage.filter().order_by("-created").first()
-                if storage_usage:
-                    if storage_usage.plan_storage_overage > 0:
-                        storage_usage_ok = False
-
-                # Check storage overage
-                node_usage = account.usage_node.filter().order_by("-created").first()
-                if node_usage:
-                    if node_usage.plan_node_overage > 0:
-                        node_usage_ok = False
-
-                # We will add node usage_ok
-                if storage_usage_ok and node_usage_ok:
-                    account.billing.status = account.billing.Status.ACTIVE
-                elif not storage_usage_ok and not node_usage_ok:
-                    account.billing.status = account.billing.Status.OVER_USAGE_NODE_AND_STORAGE
-                elif not storage_usage_ok:
-                    account.billing.status = account.billing.Status.OVER_USAGE_STORAGE
-                elif not node_usage_ok:
-                    account.billing.status = account.billing.Status.OVER_USAGE_NODE
-
-                account.billing.save()
-            else:
-                account.billing.status = account.billing.Status.ACTIVE
-                account.billing.save()
     except Exception as e:
         capture_exception(e)
         raise self.retry()
@@ -822,110 +534,6 @@ def calc_stats_storage_insight(self):
                     storage.stats_database_size = storage.database_backups__size__sum
                     storage.stats_wordpress_size = storage.wordpress_backups__size__sum
                     storage.save()
-
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="cleanup_storage",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
-def cleanup_storage(self, storage_point_id, node_type):
-    from apps.console.backup.models import (
-        CoreWebsiteBackupStoragePoints,
-        CoreDatabaseBackupStoragePoints,
-    )
-
-    try:
-        if node_type == "website":
-            web_storage_point = CoreWebsiteBackupStoragePoints.objects.get(
-                id=storage_point_id,
-                storage__storage_bs__isnull=False,
-                storage__storage_bs__endpoint__contains="filebase",
-                status=CoreWebsiteBackupStoragePoints.Status.DELETE_COMPLETED,
-            )
-            web_storage_point.soft_delete_temp()
-        elif node_type == "database":
-            database_storage_point = CoreDatabaseBackupStoragePoints.objects.get(
-                id=storage_point_id,
-                storage__storage_bs__isnull=False,
-                storage__storage_bs__endpoint__contains="filebase",
-                status=CoreDatabaseBackupStoragePoints.Status.DELETE_COMPLETED,
-            )
-            database_storage_point.soft_delete_temp()
-
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-@current_app.task(
-    name="backup_download_request",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-    queue="backup_download_request",
-)
-def backup_download_request(self, storage_point_id=None, backup_type=None, member_id=None):
-    from apps.console.backup.models import (
-        CoreWebsiteBackupStoragePoints,
-        CoreDatabaseBackupStoragePoints,
-        CoreWordPressBackupStoragePoints,
-    )
-
-    try:
-        storage_point = None
-
-        if backup_type == "website":
-            storage_point = CoreWebsiteBackupStoragePoints.objects.get(id=storage_point_id)
-        elif backup_type == "database":
-            storage_point = CoreDatabaseBackupStoragePoints.objects.get(id=storage_point_id)
-        elif backup_type == "wordpress":
-            storage_point = CoreWordPressBackupStoragePoints.objects.get(id=storage_point_id)
-
-        if storage_point:
-            storage_point.generate_download(member_id)
-
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
-
-
-
-@current_app.task(
-    name="backup_transfer_request",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=4,
-    bind=True,
-    queue="backup_transfer_request",
-)
-def backup_transfer_request(self, storage_point_id=None, backup_type=None):
-    from apps.console.backup.models import (
-        CoreWebsiteBackupStoragePoints,
-        CoreDatabaseBackupStoragePoints,
-        CoreWordPressBackupStoragePoints,
-    )
-
-    try:
-        if backup_type == "website":
-            if CoreWebsiteBackupStoragePoints.objects.filter(id=storage_point_id).exists():
-                storage_point = CoreWebsiteBackupStoragePoints.objects.get(id=storage_point_id)
-                storage_point.remove_deplicate()
-        elif backup_type == "database":
-            if CoreDatabaseBackupStoragePoints.objects.filter(id=storage_point_id).exists():
-                storage_point = CoreDatabaseBackupStoragePoints.objects.get(id=storage_point_id)
-                storage_point.remove_deplicate()
-        elif backup_type == "wordpress":
-            if CoreWordPressBackupStoragePoints.objects.filter(id=storage_point_id).exists():
-                storage_point = CoreWordPressBackupStoragePoints.objects.get(id=storage_point_id)
-                storage_point.remove_deplicate()
 
     except Exception as e:
         capture_exception(e)

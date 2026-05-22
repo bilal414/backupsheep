@@ -5,7 +5,7 @@ from apps.console.backup.models import (
     CoreOracleBackup,
 )
 from apps.console.node.models import CoreOracle, CoreNode, CoreSchedule
-from apps.console.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
 
 
 class CoreOracleSerializer(serializers.ModelSerializer):

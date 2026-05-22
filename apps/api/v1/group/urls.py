@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.group.views import CoreAccountGroupView
+from apps.api.v1.group.views import CoreAccountGroupView
 
 router = routers.SimpleRouter()
 

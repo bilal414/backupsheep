@@ -17,7 +17,6 @@ from apps._tasks.helper.tasks import (
     delete_from_disk,
 )
 from apps.console.backup.models import CoreWebsiteBackupStoragePoints
-from apps.console.billing.models import CoreBilling
 from apps.console.connection.models import CoreConnection
 from apps.console.node.models import CoreNode, CoreSchedule
 from apps.console.utils.models import UtilBackup
@@ -110,14 +109,11 @@ def backup_website(
             node.backup_timeout_reset(self.request.id)
             # Delete Any Downloaded Files
             if backup:
-                queue = f"delete_from_disk__{node.connection.location.queue}"
                 delete_from_disk.apply_async(
                     args=[backup.uuid_str, "dir"],
-                    queue=queue,
                 )
                 delete_from_disk.apply_async(
                     args=[backup.uuid_str, "zip"],
-                    queue=queue,
                 )
         except Exception as error:
             capture_exception(error)

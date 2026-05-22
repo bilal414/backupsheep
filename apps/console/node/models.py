@@ -890,8 +890,8 @@ class CoreLightsail(UtilCloud):
                         backup.save()
             elif self.node.type == CoreNode.Type.VOLUME:
                 response = client.create_disk_snapshot(
-                    diskName=backup.uuid_str,
-                    diskSnapshotName=self.unique_id,
+                    diskName=self.unique_id,
+                    diskSnapshotName=backup.uuid_str,
                 )
                 if response.get("operations"):
                     operation = response["operations"][0]
@@ -1010,7 +1010,7 @@ class CoreVultr(UtilCloud):
                     raise NodeBackupFailedError(
                         self.node,
                         backup.uuid_str, backup.attempt_no, backup.type,
-                        "Vultr 12 snapshot limit exceeded. Vultr limits each account to have maximum of 12 snapshots.",
+                        "API rate limit exceeded. We will try again shortly.",
                     )
                 elif result.status_code == 401:
                     raise NodeBackupFailedError(
@@ -1267,12 +1267,7 @@ class CoreGoogleCloud(UtilCloud):
                         f"/zones/{self.node.google_cloud.zone}"
                         f"/disks/{disk['name']}/createSnapshot",
                         headers=client,
-                        data=json.dumps(
-                            {"name": backup.uuid_str,
-                             "sourceInstance": f"projects/{self.node.google_cloud.project_id}"
-                                               f"/zones/{self.node.google_cloud.zone}"
-                                               f"/disks/{disk['name']}"}
-                        ),
+                        data=json.dumps({"name": backup.uuid_str}),
                     )
                     if result.status_code == 200:
                         snapshot = result.json()
@@ -1329,9 +1324,8 @@ class CoreWebsite(TimeStampedModel):
         from apps._tasks.integration.backup.website import snapshot_website
         from apps._tasks.integration.backup.incremental import snapshot_incremental
         from apps._tasks.integration.backup.full_v2 import snapshot_full_v2
-        from apps._tasks.integration.storage.tasks import storage_upload
+        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreWebsiteBackupStoragePoints
-        from apps._tasks.helper.tasks import delete_from_disk
 
         backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
         backup.save()
@@ -1365,18 +1359,23 @@ class CoreWebsite(TimeStampedModel):
             for stored_website_backup in backup.stored_website_backups.filter(
                     status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_READY
             ):
-                queue = f"storage_upload__{self.node.connection.integration.code}__{self.node.get_integration_alt_code()}__{self.node.connection.location.queue}"
                 storage_upload_task_list.append(
                     storage_upload.s(
                         self.node.id, backup.id, stored_website_backup.id
-                    ).set(queue=queue)
+                    ).set()
                 )
 
-            queue = f"delete_from_disk__{backup.website.node.connection.location.queue}"
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set(
-                queue=queue
-            )
-            chord(storage_upload_task_list, final_call_back_task).apply_async()
+            if storage_upload_task_list:
+                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
+                backup.save()
+                chord(
+                    storage_upload_task_list,
+                    finalize_backup.si(self.node.id, backup.id),
+                ).apply_async()
+            else:
+                # No storage destination accepted the backup; finalize_backup will
+                # mark it failed and clean up rather than silently discarding it.
+                finalize_backup.apply_async(args=[self.node.id, backup.id])
         except Exception as e:
             capture_exception(e)
         return backup
@@ -1409,8 +1408,7 @@ class CoreDatabase(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from ..connection.models import CoreAuthDatabase
-        from apps._tasks.integration.storage.tasks import storage_upload
-        from apps._tasks.helper.tasks import delete_from_disk
+        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from apps._tasks.integration.backup.mariadb import snapshot_mariadb
         from apps._tasks.integration.backup.mysql import snapshot_mysql
         from apps._tasks.integration.backup.postgresql import snapshot_postgresql
@@ -1448,20 +1446,23 @@ class CoreDatabase(TimeStampedModel):
             for stored_database_backup in backup.stored_database_backups.filter(
                     status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_READY
             ):
-                queue = f"storage_upload__{self.node.connection.integration.code}__{self.node.get_integration_alt_code()}__{self.node.connection.location.queue}"
                 storage_upload_task_list.append(
                     storage_upload.s(
                         self.node.id, backup.id, stored_database_backup.id
-                    ).set(queue=queue)
+                    ).set()
                 )
 
-            queue = (
-                f"delete_from_disk__{backup.database.node.connection.location.queue}"
-            )
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set(
-                queue=queue
-            )
-            chord(storage_upload_task_list, final_call_back_task).apply_async()
+            if storage_upload_task_list:
+                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
+                backup.save()
+                chord(
+                    storage_upload_task_list,
+                    finalize_backup.si(self.node.id, backup.id),
+                ).apply_async()
+            else:
+                # No storage destination accepted the backup; finalize_backup will
+                # mark it failed and clean up rather than silently discarding it.
+                finalize_backup.apply_async(args=[self.node.id, backup.id])
         except Exception as e:
             raise NodeBackupFailedError(
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
@@ -1487,9 +1488,8 @@ class CoreWordPress(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from apps._tasks.integration.backup.wordpress import snapshot_wordpress
-        from apps._tasks.integration.storage.tasks import storage_upload
+        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreWordPressBackupStoragePoints
-        from apps._tasks.helper.tasks import delete_from_disk
 
         backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
         backup.save()
@@ -1510,18 +1510,23 @@ class CoreWordPress(TimeStampedModel):
             for stored_wordpress_backup in backup.stored_wordpress_backups.filter(
                     status=CoreWordPressBackupStoragePoints.Status.UPLOAD_READY
             ):
-                queue = f"storage_upload__{self.node.get_type_display().lower()}__{self.node.get_integration_alt_code()}__{self.node.connection.location.queue}"
                 storage_upload_task_list.append(
                     storage_upload.s(
                         self.node.id, backup.id, stored_wordpress_backup.id
-                    ).set(queue=queue)
+                    ).set()
                 )
 
-            queue = f"delete_from_disk__{backup.wordpress.node.connection.location.queue}"
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set(
-                queue=queue
-            )
-            chord(storage_upload_task_list, final_call_back_task).apply_async()
+            if storage_upload_task_list:
+                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
+                backup.save()
+                chord(
+                    storage_upload_task_list,
+                    finalize_backup.si(self.node.id, backup.id),
+                ).apply_async()
+            else:
+                # No storage destination accepted the backup; finalize_backup will
+                # mark it failed and clean up rather than silently discarding it.
+                finalize_backup.apply_async(args=[self.node.id, backup.id])
         except Exception as e:
             capture_exception(e)
         return backup
@@ -1541,9 +1546,8 @@ class CoreBasecamp(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from apps._tasks.integration.backup.basecamp import snapshot_basecamp
-        from apps._tasks.integration.storage.tasks import storage_upload
+        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreBasecampBackupStoragePoints
-        from apps._tasks.helper.tasks import delete_from_disk
 
         backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
         backup.save()
@@ -1564,18 +1568,23 @@ class CoreBasecamp(TimeStampedModel):
             for stored_basecamp_backup in backup.stored_basecamp_backups.filter(
                     status=CoreBasecampBackupStoragePoints.Status.UPLOAD_READY
             ):
-                queue = f"storage_upload__{self.node.get_type_display().lower()}__{self.node.get_integration_alt_code()}__{self.node.connection.location.queue}"
                 storage_upload_task_list.append(
                     storage_upload.s(
                         self.node.id, backup.id, stored_basecamp_backup.id
-                    ).set(queue=queue)
+                    ).set()
                 )
 
-            queue = f"delete_from_disk__{backup.basecamp.node.connection.location.queue}"
-            final_call_back_task = delete_from_disk.si(backup.uuid_str, "zip").set(
-                queue=queue
-            )
-            chord(storage_upload_task_list, final_call_back_task).apply_async()
+            if storage_upload_task_list:
+                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
+                backup.save()
+                chord(
+                    storage_upload_task_list,
+                    finalize_backup.si(self.node.id, backup.id),
+                ).apply_async()
+            else:
+                # No storage destination accepted the backup; finalize_backup will
+                # mark it failed and clean up rather than silently discarding it.
+                finalize_backup.apply_async(args=[self.node.id, backup.id])
         except Exception as e:
             capture_exception(e)
         return backup
@@ -1645,7 +1654,6 @@ class CoreSchedule(TimeStampedModel):
     encrypt_backup = models.BooleanField(default=False, null=True)
     timezone = models.CharField(max_length=64)
     notes = models.TextField(null=True, blank=True)
-    aws_schedule_arn = models.TextField(null=True, blank=True)
     added_by = models.ForeignKey(
         CoreMember,
         related_name="added_schedules",
@@ -1692,261 +1700,73 @@ class CoreSchedule(TimeStampedModel):
         #     self.celery_periodic_task.save()
         self.save()
 
-    def aws_schedule_expression(self):
+    def _periodic_schedule(self):
+        """Return (PeriodicTask field name, schedule object) for this schedule's type."""
+        from django_celery_beat.models import (
+            CrontabSchedule,
+            IntervalSchedule,
+            ClockedSchedule,
+        )
+
         if self.type == CoreSchedule.Type.CRON:
-            return (
-                f"{self.type}({self.minute} {self.hour} {self.day_of_month} {self.month_of_year} {self.day_of_week} {self.year})"
+            crontab, _ = CrontabSchedule.objects.get_or_create(
+                minute=self.minute or "*",
+                hour=self.hour or "*",
+                day_of_week=self.day_of_week or "*",
+                day_of_month=self.day_of_month or "*",
+                month_of_year=self.month_of_year or "*",
+                timezone=self.timezone or "UTC",
             )
+            return "crontab", crontab
         elif self.type == CoreSchedule.Type.RATE:
-            return f"{self.type}({self.rate_value} {self.rate_unit})"
+            interval, _ = IntervalSchedule.objects.get_or_create(
+                every=self.rate_value,
+                period=self.rate_unit,
+            )
+            return "interval", interval
         elif self.type == CoreSchedule.Type.ONETIME:
-            return f"{self.type}({self.at_datetime})"
+            clocked, _ = ClockedSchedule.objects.get_or_create(clocked_time=self.at_datetime)
+            return "clocked", clocked
+        return None, None
 
-    def aws_schedule_create(self):
-        import boto3
-        from rest_framework.authtoken.models import Token
-
-        aws_scheduler = boto3.client(
-            "scheduler",
-            aws_access_key_id=settings.AWS_SCHEDULER_ACCESS_KEY,
-            aws_secret_access_key=settings.AWS_SCHEDULER_SECRET_KEY,
-            region_name="us-east-1"
+    def schedule_create(self):
+        """Create the local django-celery-beat PeriodicTask that drives this schedule."""
+        field, schedule_obj = self._periodic_schedule()
+        if not field:
+            return
+        periodic_task = PeriodicTask.objects.create(
+            name=self.uuid_str,
+            task="run_scheduled_backup",
+            args=json.dumps([self.id]),
+            enabled=(self.status == CoreSchedule.Status.ACTIVE),
+            one_off=(self.type == CoreSchedule.Type.ONETIME),
+            **{field: schedule_obj},
         )
+        self.celery_periodic_task = periodic_task
+        self.save(update_fields=["celery_periodic_task"])
 
-        host = settings.AWS_SCHEDULER_API_HOST
+    def schedule_update(self):
+        """Update (or create) the PeriodicTask to match this schedule."""
+        if not self.celery_periodic_task:
+            return self.schedule_create()
+        field, schedule_obj = self._periodic_schedule()
+        if not field:
+            return
+        periodic_task = self.celery_periodic_task
+        periodic_task.crontab = None
+        periodic_task.interval = None
+        periodic_task.clocked = None
+        setattr(periodic_task, field, schedule_obj)
+        periodic_task.one_off = self.type == CoreSchedule.Type.ONETIME
+        periodic_task.enabled = self.status == CoreSchedule.Status.ACTIVE
+        periodic_task.args = json.dumps([self.id])
+        periodic_task.save()
 
-        path = f"/api/v1/schedules/{self.id}/trigger/"
-
-        # AWS Labmda will use token to make call
-        member = self.node.connection.account.get_primary_member()
-        api_token, _ = Token.objects.get_or_create(user=member.user)
-        token = api_token.key
-
-        schedule_settings = {
-            "RoleArn": settings.AWS_SCHEDULER_ROLE_ARN,
-            "Arn": settings.AWS_SCHEDULER_FUNCTION_ARN,
-            "RetryPolicy": {"MaximumEventAgeInSeconds": 24 * 3600, "MaximumRetryAttempts": 100},
-            "Input": json.dumps(
-                {"host": host, "path": path, "token": token}
-            ),
-        }
-
-        flex_window = {"Mode": "OFF"}
-
-        state = "ENABLED"
-
-        aws_schedule = {
-            "Name": self.uuid_str,
-            "State": state,
-            "ScheduleExpression": self.aws_schedule_expression(),
-            "ScheduleExpressionTimezone": self.timezone,
-            "Target": schedule_settings,
-            "FlexibleTimeWindow": flex_window,
-        }
-
-        aws_response = aws_scheduler.create_schedule(**aws_schedule)
-        self.aws_schedule_arn = aws_response.get("ScheduleArn")
-        self.save()
-
-    def aws_schedule_update(self):
-        import boto3
-        from rest_framework.authtoken.models import Token
-
-        aws_scheduler = boto3.client(
-            "scheduler",
-            aws_access_key_id=settings.AWS_SCHEDULER_ACCESS_KEY,
-            aws_secret_access_key=settings.AWS_SCHEDULER_SECRET_KEY,
-            region_name="us-east-1"
-        )
-
-        host = settings.AWS_SCHEDULER_API_HOST
-
-        path = f"/api/v1/schedules/{self.id}/trigger/"
-
-        # AWS Labmda will use token to make call
-        member = self.node.connection.account.get_primary_member()
-        api_token, _ = Token.objects.get_or_create(user=member.user)
-        token = api_token.key
-
-        schedule_settings = {
-            "RoleArn": settings.AWS_SCHEDULER_ROLE_ARN,
-            "Arn": settings.AWS_SCHEDULER_FUNCTION_ARN,
-            "RetryPolicy": {"MaximumEventAgeInSeconds": 24 * 3600, "MaximumRetryAttempts": 100},
-            "Input": json.dumps(
-                {"host": host, "path": path, "token": token}
-            ),
-        }
-
-        flex_window = {"Mode": "OFF"}
-
-        if self.status == self.Status.ACTIVE:
-            state = "ENABLED"
-        else:
-            state = "DISABLED"
-
-        aws_schedule = {
-            "Name": self.uuid_str,
-            "State": state,
-            "ScheduleExpression": self.aws_schedule_expression(),
-            "ScheduleExpressionTimezone": self.timezone,
-            "Target": schedule_settings,
-            "FlexibleTimeWindow": flex_window,
-        }
-
-        aws_scheduler.get_schedule(Name=self.uuid_str)
-        aws_response = aws_scheduler.update_schedule(**aws_schedule)
-        self.aws_schedule_arn = aws_response.get("ScheduleArn")
-        self.save()
-
-    def aws_schedule_delete(self):
-        import boto3
-
-        aws_scheduler = boto3.client(
-            "scheduler",
-            aws_access_key_id=settings.AWS_SCHEDULER_ACCESS_KEY,
-            aws_secret_access_key=settings.AWS_SCHEDULER_SECRET_KEY,
-            region_name="us-east-1"
-        )
-
-        aws_scheduler.delete_schedule(Name=self.uuid_str)
-        self.aws_schedule_arn = None
-        self.save()
-
-    def aws_schedule_expression_tmp(self):
-        # https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html#cron-based
-
-        if self.day_of_month == "*" and self.day_of_week == "*":
-            day_of_month = "*"
-            day_of_week = "?"
-        elif self.day_of_month != "*" and self.day_of_week == "*":
-            day_of_month = self.day_of_month
-            day_of_week = "?"
-        elif self.day_of_month == "*" and self.day_of_week != "*":
-            day_of_month = "?"
-            day_of_week = self.day_of_week
-        elif self.day_of_month != "*" and self.day_of_week != "*":
-            day_of_month = self.day_of_month
-            day_of_week = "?"
-        else:
-            day_of_month = self.day_of_month
-            day_of_week = self.day_of_week
-
-        # 0 doesn't work in AWS. 7 is Sunday.
-        day_of_week = day_of_week.replace("0", "1")
-
-        if "*/" in day_of_month:
-            day_of_month = "1"
-
-        if "*/" in self.hour:
-            self.hour = "0"
-
-        year = "*"
-
-        return f"{self.minute} {self.hour} {day_of_month} {self.month_of_year} {day_of_week} {year}"
-
-    def aws_schedule_sync_tmp(self):
-        import boto3
-        from rest_framework.authtoken.models import Token
-
-        aws_scheduler = boto3.client(
-            "scheduler",
-            aws_access_key_id=settings.AWS_SCHEDULER_ACCESS_KEY,
-            aws_secret_access_key=settings.AWS_SCHEDULER_SECRET_KEY,
-            region_name="us-east-1"
-        )
-
-        if "localhost" in settings.APP_DOMAIN:
-            host = "backupsheep.net"
-        else:
-            host = settings.AWS_SCHEDULER_API_HOST
-
-        path = f"/api/v1/schedules/{self.id}/trigger/"
-
-        # AWS Labmda will use token to make call
-        member = self.node.connection.account.get_primary_member()
-        api_token, _ = Token.objects.get_or_create(user=member.user)
-        token = api_token.key
-
-        schedule_settings = {
-            "RoleArn": settings.AWS_SCHEDULER_ROLE_ARN,
-            "Arn": settings.AWS_SCHEDULER_FUNCTION_ARN,
-            "RetryPolicy": {"MaximumEventAgeInSeconds": 24 * 3600, "MaximumRetryAttempts": 100},
-            "Input": json.dumps(
-                {"host": host, "path": path, "token": token}
-            ),
-        }
-
-        flex_window = {"Mode": "OFF"}
-
-        if self.status == self.Status.ACTIVE:
-            state = "ENABLED"
-        else:
-            state = "DISABLED"
-
-        aws_schedule = {
-            "Name": self.uuid_str,
-            "State": state,
-            "ScheduleExpression": f"cron({self.aws_schedule_expression_tmp()})",
-            "ScheduleExpressionTimezone": self.timezone,
-            "Target": schedule_settings,
-            "FlexibleTimeWindow": flex_window,
-        }
-
-        try:
-            """
-            Update Schedule
-            """
-            aws_scheduler.get_schedule(Name=self.uuid_str)
-
-            aws_response = aws_scheduler.update_schedule(**aws_schedule)
-
-            self.aws_schedule_arn = aws_response.get("ScheduleArn")
-            self.save()
-            print(f"Updated...{self.aws_schedule_arn}")
-        except ClientError as err:
-            if err.response['Error']['Code'] == 'ResourceNotFoundException':
-                """
-                Create Schedule
-                """
-                aws_response = aws_scheduler.create_schedule(**aws_schedule)
-                self.aws_schedule_arn = aws_response.get("ScheduleArn")
-                self.save()
-                print(f"Created...{self.aws_schedule_arn}")
-
-
-    def setup_periodic_task(self):
-        pass
-        # if self.type == "crontab":
-        #     crontab_schedule, created = CrontabSchedule.objects.get_or_create(
-        #         minute=self.minute,
-        #         hour=self.hour,
-        #         day_of_week=self.day_of_week,
-        #         day_of_month=self.day_of_month,
-        #         month_of_year=self.month_of_year,
-        #         timezone=self.timezone,
-        #     )
-        #     name = f"schedule__{self.id}__{str(uuid.uuid4())}"
-        #     queue = f"queue_periodic__{self.id}__{self.node.get_type_display().lower()}__{self.node.connection.integration.code}__{self.node.connection.location.queue}"
-        #     task = f"backup_{self.node.connection.integration.code}"
-        #
-        #     if (
-        #             self.node.type == CoreNode.Type.WEBSITE
-        #             or self.node.type == CoreNode.Type.DATABASE
-        #             or self.node.type == CoreNode.Type.SAAS
-        #     ):
-        #         data = [self.node.id, self.id, None]
-        #     else:
-        #         data = [self.node.id, self.id]
-        #
-        #     periodic_task = PeriodicTask.objects.create(
-        #         crontab=crontab_schedule,
-        #         name=name,
-        #         queue=queue,
-        #         task=task,
-        #         args=json.dumps(data),
-        #     )
-        #     self.celery_periodic_task = periodic_task
-        #     self.save()
+    def schedule_delete(self):
+        """Remove the local PeriodicTask for this schedule."""
+        if self.celery_periodic_task:
+            self.celery_periodic_task.delete()
+            self.celery_periodic_task = None
 
 
 class CoreScheduleRun(TimeStampedModel):
@@ -2103,11 +1923,6 @@ class CoreNode(TimeStampedModel):
             else:
                 return True
 
-    def billing_good_standing(self):
-        try:
-            return self.connection.account.billing.good_standing()
-        except Exception as e:
-            return False
 
     def last_backup_date(self):
         node_type_object = getattr(self, self.connection.integration.code)
@@ -2210,23 +2025,6 @@ class CoreNode(TimeStampedModel):
                         backup=backup
                     )
 
-            """
-            If all user storage points fail validation then add BackupSheep default storage
-            """
-            if backup.storage_points.count() == 0:
-                storage = CoreStorage.objects.filter(
-                    storage_bs__isnull=False,
-                    account=self.connection.account,
-                    status=CoreStorage.Status.ACTIVE,
-                ).first()
-                backup.storage_points.add(storage)
-
-                self.connection.account.create_backup_log(
-                    message=f"Using BackupSheep Storage for node ({self.name}) backup ({backup.uuid_str}) because "
-                            f"validation failed for all your selected storage points.",
-                    node=self,
-                    backup=backup
-                )
         self.save()
         return backup
 

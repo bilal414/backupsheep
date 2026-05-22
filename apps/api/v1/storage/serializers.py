@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from apps.console.storage.models import CoreStorage, CoreStorageType, CoreStorageStatus
+from apps.console.storage.models import CoreStorage, CoreStorageType
 
 
 class CoreStorageTypeSerializer(serializers.ModelSerializer):

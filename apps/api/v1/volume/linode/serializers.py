@@ -2,9 +2,9 @@ import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 from apps.console.account.models import CoreAccount
-from apps.console.api.v1.node.serializers import CoreNodeReadSerializer
-from apps.console.api.v1.utils.api_helpers import CurrentAccountDefault, CurrentMemberDefault
-from apps.console.api.v1.node.serializers import CoreVolumeNodeWriteSerializer
+from apps.api.v1.node.serializers import CoreNodeReadSerializer
+from apps.api.v1.utils.api_helpers import CurrentAccountDefault, CurrentMemberDefault
+from apps.api.v1.node.serializers import CoreVolumeNodeWriteSerializer
 from apps.console.connection.models import CoreConnection, CoreIntegration, CoreConnectionLocation
 from apps.console.node.models import CoreLinode, CoreNode, CoreSchedule
 from apps.console.utils.models import UtilBackup

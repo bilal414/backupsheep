@@ -7,11 +7,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1.volume.lightsail.filters import CoreVolumeLightsailFilter
-from apps.console.api.v1.volume.lightsail.permissions import CoreVolumeLightsailViewPermissions
-from apps.console.api.v1.volume.lightsail.serializers import CoreVolumeLightsailReadSerializer, CoreVolumeLightsailWriteSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_serializers import ReadWriteSerializerMixin
+from apps.api.v1.volume.lightsail.filters import CoreVolumeLightsailFilter
+from apps.api.v1.volume.lightsail.permissions import CoreVolumeLightsailViewPermissions
+from apps.api.v1.volume.lightsail.serializers import CoreVolumeLightsailReadSerializer, CoreVolumeLightsailWriteSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup, CoreLightsailBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
 from apps.console.node.models import CoreDatabase, CoreNode, CoreLightsail

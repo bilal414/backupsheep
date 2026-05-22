@@ -11,17 +11,17 @@ from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 from sentry_sdk import capture_exception
 
-from apps.console.api.v1.schedule.filters import CoreScheduleFilter
-from apps.console.api.v1.schedule.permissions import CoreScheduleViewPermissions
-from apps.console.api.v1.schedule.serializers import CoreScheduleSerializer, CoreScheduleRunSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.schedule.filters import CoreScheduleFilter
+from apps.api.v1.schedule.permissions import CoreScheduleViewPermissions
+from apps.api.v1.schedule.serializers import CoreScheduleSerializer, CoreScheduleRunSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
 from apps.console.node.models import CoreNode, CoreSchedule, CoreScheduleRun
 from rest_framework import status
 from django.utils.text import slugify
 from rest_framework.decorators import action
 from celery import current_app
 
-from apps.utils.api_exceptions import ExceptionDefault
+from apps.api.v1.utils.api_exceptions import ExceptionDefault
 
 
 class CoreScheduleView(viewsets.ModelViewSet):
@@ -56,7 +56,7 @@ class CoreScheduleView(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
         schedule = serializer.instance
-        schedule.aws_schedule_create()
+        schedule.schedule_create()
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
@@ -67,7 +67,7 @@ class CoreScheduleView(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
         schedule = serializer.instance
-        schedule.aws_schedule_update()
+        schedule.schedule_update()
 
         if getattr(instance, "_prefetched_objects_cache", None):
             # If 'prefetch_related' has been applied to a queryset, we need to
@@ -90,7 +90,7 @@ class CoreScheduleView(viewsets.ModelViewSet):
                     status=status.HTTP_409_CONFLICT,
                 )
             else:
-                instance.aws_schedule_delete()
+                instance.schedule_delete()
                 instance.delete()
                 return Response({"detail": "Schedule will be deleted soon."}, status=status.HTTP_204_NO_CONTENT)
 
@@ -108,7 +108,6 @@ class CoreScheduleView(viewsets.ModelViewSet):
 
             current_app.send_task(
                 schedule.node.backup_task_name(),
-                queue=schedule.queue_name,
                 kwargs={
                     "node_id": schedule.node.id,
                     "schedule_id": schedule.id,
@@ -125,7 +124,7 @@ class CoreScheduleView(viewsets.ModelViewSet):
         schedule = self.get_object()
         schedule.status = CoreSchedule.Status.PAUSED
         schedule.save()
-        schedule.aws_schedule_update()
+        schedule.schedule_update()
         return Response({"detail": "Schedule is paused."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
@@ -133,5 +132,5 @@ class CoreScheduleView(viewsets.ModelViewSet):
         schedule = self.get_object()
         schedule.status = CoreSchedule.Status.ACTIVE
         schedule.save()
-        schedule.aws_schedule_update()
+        schedule.schedule_update()
         return Response({"detail": "Schedule is resumed."}, status=status.HTTP_200_OK)

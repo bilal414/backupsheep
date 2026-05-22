@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.storage.tencent.views import CoreStorageTencentView
+from apps.api.v1.storage.tencent.views import CoreStorageTencentView
 
 router = routers.SimpleRouter()
 

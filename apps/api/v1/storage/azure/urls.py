@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.storage.azure.views import CoreStorageAzureView
+from apps.api.v1.storage.azure.views import CoreStorageAzureView
 
 router = routers.SimpleRouter()
 

@@ -2164,9 +2164,6 @@ class CoreStorage(TimeStampedModel):
             elif hasattr(self, 'storage_ibm'):
                 storage = getattr(self, 'storage_ibm')
                 return storage.validate()
-            elif hasattr(self, 'storage_bs'):
-                storage = getattr(self, 'storage_bs')
-                return storage.validate()
         except Exception as e:
             capture_exception(e)
             if show_error:

@@ -9,7 +9,6 @@ from apps._tasks.exceptions import (
     ConnectionNotReadyForBackupError,
     ConnectionValidationFailedError, IntegrationValidationError,
 )
-from apps.console.billing.models import CoreBilling
 from apps.console.connection.models import CoreConnection
 from apps.console.node.models import CoreNode, CoreSchedule
 from apps.console.utils.models import UtilBackup
@@ -102,14 +101,11 @@ def backup_database(
             node.backup_timeout_reset(self.request.id)
             # Delete Any Downloaded Files
             if backup:
-                queue = f"delete_from_disk__{node.connection.location.queue}"
                 delete_from_disk.apply_async(
-                    args=[self.request.id, "dir"],
-                    queue=queue,
+                    args=[backup.uuid_str, "dir"],
                 )
                 delete_from_disk.apply_async(
-                    args=[self.request.id, "zip"],
-                    queue=queue,
+                    args=[backup.uuid_str, "zip"],
                 )
         except Exception as error:
             capture_exception(error)

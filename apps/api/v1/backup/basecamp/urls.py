@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.backup.basecamp.views import CoreBasecampBackupView
+from apps.api.v1.backup.basecamp.views import CoreBasecampBackupView
 
 router = routers.SimpleRouter()
 

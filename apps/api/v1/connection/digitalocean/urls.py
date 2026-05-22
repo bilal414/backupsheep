@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.connection.digitalocean.views import CoreDigitalOceanView
+from apps.api.v1.connection.digitalocean.views import CoreDigitalOceanView
 
 router = routers.SimpleRouter()
 

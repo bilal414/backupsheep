@@ -12,7 +12,6 @@ urlpatterns = [
         include(
             [
                 path("", include("apps.api.v1.storage.all.urls")),
-                path("", include("apps.api.v1.storage.backupsheep.urls")),
                 path("", include("apps.api.v1.storage.aws_s3.urls")),
                 path("", include("apps.api.v1.storage.do_spaces.urls")),
                 path("", include("apps.api.v1.storage.wasabi.urls")),
@@ -38,7 +37,6 @@ urlpatterns = [
                 path("", include("apps.api.v1.storage.tencent.urls")),
                 path("", include("apps.api.v1.storage.rackcorp.urls")),
                 path("", include("apps.api.v1.storage.ibm.urls")),
-                path("", include("apps.api.v1.storage.bs.urls")),
             ]
         ),
     ),

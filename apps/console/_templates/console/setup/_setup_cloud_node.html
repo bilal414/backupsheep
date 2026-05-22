@@ -1,6 +1,6 @@
 <div x-data="setupOpenConnection()">
     <div>
-        <nav class="relative z-0 rounded-lg shadow flex divide-x divide-gray-200" aria-label="Tabs">
+        <nav class="relative z-0 rounded-lg shadow-sm flex divide-x divide-gray-200" aria-label="Tabs">
             {% if integration.code != "upcloud" and integration.code != "oracle" %}
                 <a x-bind:class="object_type === 'cloud' ? 'text-gray-700' : 'text-gray-700 hover:text-gray-700'" href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
                    class="rounded-l-lg group relative min-w-0 flex-1 overflow-hidden bg-white py-4 px-4 text-sm font-medium text-center hover:bg-gray-50 focus:z-10" aria-current="page">
@@ -21,7 +21,7 @@
         <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
             <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
                 <template x-if="loading">
-                    <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg pb-4 pt-4">
+                    <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg pb-4 pt-4">
                         <div class="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-indigo-500">
                             <svg class="animate-spin h-14 w-14 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -31,10 +31,10 @@
                     </div>
                 </template>
                 <template x-if="error">
-                    <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                    <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg">
                         <div class="rounded-md bg-red-50 p-4">
                             <div class="flex">
-                                <div class="flex-shrink-0">
+                                <div class="shrink-0">
                                     <!-- Heroicon name: solid/x-circle -->
                                     <svg class="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                         <path fill-rule="evenodd"
@@ -56,7 +56,7 @@
                             </div>
                         </div>
                         <button @click="openUrl(oauth_url)" type="button"
-                                class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 mt-3">
+                                class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 mt-3">
 
                             <img class="max-h-10 mx-auto" src="{{ STATIC_URL }}{{ integration.image }}" alt="{{ integration.name }} Backups">
 
@@ -66,7 +66,7 @@
                         </button>
                     </div>
                 </template>
-                <div class="bg-white shadow sm:rounded-lg" x-show="objectList?.length === 0">
+                <div class="bg-white shadow-sm sm:rounded-lg" x-show="objectList?.length === 0">
                     <div class="px-4 py-5 sm:p-6">
                         <h3 class="text-lg leading-6 font-medium text-gray-700">
                             No {% if object_code == "cloud" %}servers{% else %}{{ object_code }}s{% endif %} found
@@ -85,7 +85,7 @@
                 </div>
 
                 <template x-if="objectList?.length > 0">
-                    <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                    <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg">
                         <div class="overflow-x-auto">
                             <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
                                 <thead class="bg-gray-50">
@@ -110,7 +110,7 @@
                                     <tr>
                                         <td class="px-6 py-4 whitespace-nowrap">
                                             <div class="flex items-center">
-                                                <div class="flex-shrink-0 h-10 w-10">
+                                                <div class="shrink-0 h-10 w-10">
                                                     <svg x-show="object_type==='cloud'" xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 rounded-full text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
                                                     </svg>
@@ -122,7 +122,7 @@
                                                 <div class="ml-4">
                                                     <div class="text-sm font-medium text-gray-700">
                                                         <span x-text="object._bs_name"></span>
-                                                        <span x-show="object._bs_vol_type" class="inline-flex items-center rounded bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800">
+                                                        <span x-show="object._bs_vol_type" class="inline-flex items-center rounded-sm bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800">
                                                           <svg class="mr-1.5 h-2 w-2 text-indigo-400" fill="currentColor" viewBox="0 0 8 8">
                                                             <circle cx="4" cy="4" r="3"></circle>
                                                           </svg>
@@ -143,9 +143,9 @@
                                             </div>
                                         </td>
                                         <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                            <span class="relative z-0 inline-flex shadow-sm rounded-md">
+                                            <span class="relative z-0 inline-flex shadow-xs rounded-md">
                                               <button @click="linkObject(object)" x-bind:disabled="object._bs_attached===true" type="button"
-                                                      class="ml-4 flex-shrink-0 px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50">
+                                                      class="ml-4 shrink-0 px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50">
                                                 Link Node
                                               </button>
                                             </span>
@@ -185,7 +185,7 @@
 
             async getObjects() {
                 this.loading = true;
-                let url = "/api/proxy/connections/" + this.integration_code + "/" + this.connection_id + "/objects/?" + new URLSearchParams({
+                let url = "/api/v1/connections/" + this.integration_code + "/" + this.connection_id + "/objects/?" + new URLSearchParams({
                     location: this.location_id,
                     object_type: this.object_type,
                 });

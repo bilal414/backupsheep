@@ -5,7 +5,6 @@ import arrow
 import boto3
 import pytz
 from botocore.config import Config
-from celery import current_app
 from django.conf import settings
 from django.db.models import Q
 from django.utils.dateparse import parse_datetime
@@ -18,20 +17,20 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1._tasks.exceptions import (
+from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
     SnapshotCreateError,
     DownloadMissingParams,
     DownloadStoragePointNotFound,
     DownloadStoragePointError, StoragePointError,
 )
-from apps.console.api.v1.backup.database.filters import CoreDatabaseBackupFilter
-from apps.console.api.v1.backup.database.permissions import (
+from apps.api.v1.backup.database.filters import CoreDatabaseBackupFilter
+from apps.api.v1.backup.database.permissions import (
     CoreDatabaseBackupViewPermissions,
 )
-from apps.console.api.v1.backup.database.serializers import CoreDatabaseBackupSerializer, CoreDatabaseBackupStoragePointsSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_helpers import get_start_end_of_previous_day
+from apps.api.v1.backup.database.serializers import CoreDatabaseBackupSerializer, CoreDatabaseBackupStoragePointsSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
 from apps.console.backup.models import CoreDatabaseBackup
 from apps.console.node.models import CoreNode
 from rest_framework import status
@@ -92,33 +91,8 @@ class CoreDatabaseBackupView(viewsets.ModelViewSet):
                     storage_point = backup.stored_database_backups.get(
                         id=storage_point_id
                     )
-                    # NEW
-
-                    if (
-                        storage_point.storage.name == "Storage 01"
-                        or storage_point.storage.name == "Storage 02"
-                        or storage_point.storage.name == "Storage 03"
-                        or storage_point.storage.name == "Storage 04"
-                    ) and storage_point.storage.type.code == "bs":
-                        member_id = request.user.member.id
-                        queue_name = f"backup_download_request" f"__{backup.node.connection.location.queue}"
-
-                        current_app.send_task(
-                            "backup_download_request",
-                            queue=queue_name,
-                            kwargs={
-                                "storage_point_id": storage_point_id,
-                                "backup_type": "database",
-                                "member_id": member_id,
-                            },
-                        )
-                        return Response(
-                            {"url": "download_requested"},
-                            status=status.HTTP_201_CREATED,
-                        )
-                    else:
-                        download_url = storage_point.generate_download_url()
-                        return Response({"url": download_url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+                    download_url = storage_point.generate_download_url()
+                    return Response({"url": download_url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
                 else:
                     raise DownloadStoragePointNotFound()
             except Exception as e:

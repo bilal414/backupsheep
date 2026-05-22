@@ -5,7 +5,6 @@ import arrow
 import boto3
 import pytz
 from botocore.config import Config
-from celery import current_app
 from django.conf import settings
 from django.db.models import Q
 from django.utils.dateparse import parse_datetime
@@ -18,27 +17,27 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 
-from apps.console.api.v1._tasks.exceptions import (
+from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
     SnapshotCreateError,
     DownloadMissingParams,
     DownloadStoragePointNotFound,
-    DownloadStoragePointError, StoragePointError, TransferStorageNotFound
+    DownloadStoragePointError, StoragePointError
 )
-from apps.console.api.v1.backup.website.filters import CoreWebsiteBackupFilter
-from apps.console.api.v1.backup.website.permissions import (
+from apps.api.v1.backup.website.filters import CoreWebsiteBackupFilter
+from apps.api.v1.backup.website.permissions import (
     CoreWebsiteBackupViewPermissions,
 )
-from apps.console.api.v1.backup.website.serializers import CoreWebsiteBackupSerializer, \
-    CoreWebsiteBackupStoragePointsSerializer, CoreWebsiteBackupTransferSerializer
-from apps.console.api.v1.utils.api_filters import DateRangeFilter
-from apps.console.api.v1.utils.api_helpers import get_start_end_of_previous_day
+from apps.api.v1.backup.website.serializers import CoreWebsiteBackupSerializer, \
+    CoreWebsiteBackupStoragePointsSerializer
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
 from apps.console.backup.models import CoreWebsiteBackup
 from apps.console.node.models import CoreNode
 from rest_framework import status
 
 from apps.console.storage.models import CoreStorage
-from apps.utils.api_exceptions import ExceptionDefault
+from apps.api.v1.utils.api_exceptions import ExceptionDefault
 from google.cloud import storage as gc_storage
 from google.oauth2 import service_account
 
@@ -97,36 +96,8 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
                         id=storage_point_id
                     )
 
-                    # NEW
-                    if (
-                        storage_point.storage.name == "Storage 01"
-                        or storage_point.storage.name == "Storage 02"
-                        or storage_point.storage.name == "Storage 03"
-                        or storage_point.storage.name == "Storage 04"
-                    ) and storage_point.storage.type.code == "bs":
-                        member_id = request.user.member.id
-
-                        queue_name = (
-                            f"backup_download_request"
-                            f"__{backup.node.connection.location.queue}"
-                        )
-
-                        current_app.send_task(
-                            "backup_download_request",
-                            queue=queue_name,
-                            kwargs={
-                                "storage_point_id": storage_point_id,
-                                "backup_type": "website",
-                                "member_id": member_id,
-                            },
-                        )
-                        return Response(
-                            {"url": "download_requested"},
-                            status=status.HTTP_201_CREATED,
-                        )
-                    else:
-                        download_url = storage_point.generate_download_url()
-                        return Response({"url": download_url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+                    download_url = storage_point.generate_download_url()
+                    return Response({"url": download_url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
                 else:
                     raise DownloadStoragePointNotFound()
             except Exception as e:
@@ -134,50 +105,6 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
         else:
             raise DownloadMissingParams()
 
-    @action(detail=True, methods=["post"])
-    def transfer_backup(self, request, pk=None):
-        try:
-            backup = self.get_object()
-
-            serializer = CoreWebsiteBackupTransferSerializer(
-                data=self.request.data, context={"backup": backup}
-            )
-
-            if serializer.is_valid():
-                storage_point_id = serializer.validated_data.get("storage_point_id")
-                storage_ids = serializer.validated_data.get("storage_ids")
-
-                for storage_id in storage_ids:
-                    if backup.stored_website_backups.filter(
-                            id=storage_point_id
-                    ).exists():
-                        storage_point = backup.stored_website_backups.get(
-                            id=storage_point_id
-                        )
-                        storage_point.transfer(storage_id=storage_id)
-                        # queue_name = (
-                        #     f"backup_transfer_request"
-                        #     f"__{backup.node.connection.location.queue}"
-                        # )
-                        #
-                        # current_app.send_task(
-                        #     "backup_transfer_request",
-                        #     queue=queue_name,
-                        #     kwargs={
-                        #         "storage_point_id": storage_point_id,
-                        #         "backup_type": "website",
-                        #         "storage_id": storage_id,
-                        #     },
-                        # )
-                        return Response(
-                            status=status.HTTP_201_CREATED,
-                        )
-                    else:
-                        return Response(status=status.HTTP_201_CREATED)
-            else:
-                raise ExceptionDefault(detail=serializer.errors)
-        except Exception as e:
-            raise TransferStorageNotFound(e.__str__())
 
     @action(detail=True)
     def download_transfer_log(self, request, pk=None):

@@ -8,7 +8,7 @@ from apps.console.connection.models import (
     CoreConnectionLocation,
     CoreAWSRegion,
 )
-from apps.console.api.v1.account.serializers import CoreAccountSerializer
+from apps.api.v1.account.serializers import CoreAccountSerializer
 
 
 class CoreAWSRegionSerializer(serializers.ModelSerializer):

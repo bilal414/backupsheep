@@ -4,8 +4,8 @@ import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from apps.console.api.v1.storage.serializers import CoreStorageTypeSerializer
-from apps.console.api.v1.utils.api_helpers import (
+from apps.api.v1.storage.serializers import CoreStorageTypeSerializer
+from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault, CurrentAccountDefault, StorageDefault, bs_decrypt, bs_encrypt,
 )
 from apps.console.backup.models import CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints
@@ -57,7 +57,7 @@ class CoreStorageFilebaseWriteSerializer(serializers.ModelSerializer):
     access_key = serializers.CharField(write_only=True)
     secret_key = serializers.CharField(write_only=True)
     bucket_name = serializers.CharField(write_only=True)
-    no_delete = serializers.NullBooleanField(write_only=True, required=False)
+    no_delete = serializers.BooleanField(allow_null=True, write_only=True, required=False)
     prefix = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True, default='')
     storage = serializers.PrimaryKeyRelatedField(read_only=True)
     region = serializers.PrimaryKeyRelatedField(

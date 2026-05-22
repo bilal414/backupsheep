@@ -270,7 +270,7 @@ class CoreAccount(TimeStampedModel):
 
     def get_node_count_storage_integrations(self):
         from ..node.models import CoreStorage
-        return CoreStorage.objects.filter(account=self, storage_bs__isnull=True).count()
+        return CoreStorage.objects.filter(account=self).count()
 
     def get_node_count_non_europe(self):
         from ..node.models import CoreNode

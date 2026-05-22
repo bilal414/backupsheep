@@ -1,4 +1,4 @@
-from django.conf.urls import include
+from django.urls import include
 from django.urls import path
 
 app_name = "console"
@@ -15,7 +15,6 @@ urlpatterns = [
                 path('', include('apps.console.log.urls')),
                 path('', include('apps.console.setup.urls')),
                 path('', include('apps.console.notification.urls')),
-                path('', include('apps.console.referral.urls')),
             ]
         ),
     ),

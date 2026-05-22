@@ -4,7 +4,7 @@ from django.utils.dateparse import parse_datetime
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 from apps.console.account.models import CoreAccount
-from apps.console.api.v1.utils.api_helpers import (
+from apps.api.v1.utils.api_helpers import (
     CurrentAccountDefault,
     CurrentMemberDefault,
 )
@@ -19,7 +19,7 @@ from apps.console.connection.models import (
 )
 from apps.console.node.models import CoreWebsite, CoreNode, CoreSchedule
 from apps.console.storage.models import CoreStorage, CoreStorageType
-from apps.console.api.v1.backup.serializers import CoreBackupScheduleSerializer, CoreBackupStorageSerializer
+from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer, CoreBackupStorageSerializer
 
 
 class CoreWebsiteSerializer(serializers.ModelSerializer):
@@ -51,7 +51,6 @@ class CoreWebsiteBackupTransferSerializer(serializers.Serializer):
 class CoreWebsiteBackupStoragePointsSerializer(serializers.ModelSerializer):
     storage = CoreBackupStorageSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
-    show_request_download = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = CoreWebsiteBackupStoragePoints
@@ -60,15 +59,6 @@ class CoreWebsiteBackupStoragePointsSerializer(serializers.ModelSerializer):
     @staticmethod
     def get_status_display(obj):
         return obj.get_status_display()
-
-    @staticmethod
-    def get_show_request_download(obj):
-        return (
-            obj.storage.name == "Storage 01"
-            or obj.storage.name == "Storage 02"
-            or obj.storage.name == "Storage 03"
-            or obj.storage.name == "Storage 04"
-        ) and obj.storage.type.code == "bs"
 
 
 class CoreWebsiteBackupSerializer(serializers.ModelSerializer):

@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.connection.database.views import CoreDatabaseView
+from apps.api.v1.connection.database.views import CoreDatabaseView
 
 router = routers.SimpleRouter()
 

@@ -11,7 +11,7 @@
     <div x-data="nodeDetails('{{ object.notify_on_success|yesno:"true,false" }}', '{{ object.notify_on_fail|yesno:"true,false" }}')">
         <div class="grid grid-cols-1 gap-4 lg:grid-cols-2 md:grid-cols-2">
             <div>
-                <div class="bg-white shadow overflow-hidden sm:rounded-lg">
+                <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg">
                     <div class="px-2 py-3 sm:px-2  bg-indigo-500">
                         <h3 class="text-lg leading-6  text-white">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
@@ -27,27 +27,27 @@
                     <div class="border-t border-gray-200 px-4 py-5 sm:px-6">
                         <div class="flex items-center justify-center">
                             <button @click="openBackupModal()" type="button"
-                                    class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                    class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                 Create {% if object.type == 3 or object.type == 4 or object.type == 5 %}Backup{% else %}
                                 Snapshot{% endif %}
                             </button>
                             <button @click="openScheduleModal()" type="button"
-                                    class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                    class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                 Add Schedule
                             </button>
                             {% if object.type == 1 or object.type == 2 %}
                                 <button @click="openModifyModal()" type="button"
-                                        class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                        class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                     Modify
                                 </button>
                             {% elif object.type == 3 or object.type == 4 %}
                                 <a href="{% url 'console:setup:integration_modify_node' integration_code=object.get_type_display|lower connection_id=object.connection.id object_code='objects' node_id=object.id %}"
-                                   class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                   class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                     Modify
                                 </a>
                             {% elif object.type == 5 %}
                                 <a href="{% url 'console:setup:integration_modify_node' integration_code=object.get_integration_alt_code|lower connection_id=object.connection.id object_code='objects' node_id=object.id %}"
-                                   class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                   class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                     Modify
                                 </a>
                             {% endif %}
@@ -55,18 +55,18 @@
                             {% if object.status == 1 %}
 
                                 <button @click="openPauseBackupsModal()" type="button"
-                                        class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                        class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                     Pause
                                 </button>
 
                             {% elif object.status == 6 or object.status == 8 %}
                                 <button @click="openResumeBackupsModal()" type="button"
-                                        class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                        class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                     Resume
                                 </button>
                             {% endif %}
                             <button @click="openDeleteNodeModal()" type="button"
-                                    class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                    class="inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                 Delete
                             </button>
                         </div>
@@ -75,7 +75,7 @@
                 </div>
             </div>
             <div>
-                <div class="bg-white shadow overflow-hidden sm:rounded-lg">
+                <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg">
                     <div class="px-2 py-3 sm:px-2  bg-indigo-500">
                         <h3 class="text-lg leading-6  text-white">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
@@ -94,12 +94,12 @@
                                     <button type="button"
                                             @click="toggleNotification('success')"
                                             :class="{ 'bg-indigo-600': notify_on_success, 'bg-gray-200': !(notify_on_success) }"
-                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
                                         <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
                                         <span :class="{ 'translate-x-5': notify_on_success, 'translate-x-0': !(notify_on_success) }"
                                               aria-hidden="true"
-                                              class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                              class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                     </button>
                                     <span class="ml-3" id="annual-billing-label">
                                         <span class="text-sm font-medium text-gray-700">Notify On Success </span>
@@ -112,12 +112,12 @@
                                     <button type="button"
                                             @click="toggleNotification('fail')"
                                             :class="{ 'bg-indigo-600': notify_on_fail, 'bg-gray-200': !(notify_on_fail) }"
-                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
                                         <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
                                         <span :class="{ 'translate-x-5': notify_on_fail, 'translate-x-0': !(notify_on_fail) }"
                                               aria-hidden="true"
-                                              class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                              class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                     </button>
                                     <span class="ml-3" id="annual-billing-label">
                                 <span class="text-sm font-medium text-gray-700">Notify On Failure </span>
@@ -132,7 +132,7 @@
 
         <div class="grid grid-cols-1 gap-4 lg:grid-cols-2 md:grid-cols-2">
             <div>
-                <div class="bg-white shadow overflow-hidden sm:rounded-lg mt-6">
+                <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6">
                     <div class="px-2 py-3 sm:px-2  bg-indigo-500">
                         <h3 class="text-lg leading-6  text-white">
                             {% if object.type == 1 %}
@@ -177,23 +177,23 @@
                                 </dt>
                                 <dd class="mt-1 text-sm text-gray-700">
                                     {% if object.status == 1 or object.status == 2 %}
-                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                        <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-100 text-green-800">
                                             {{ object.get_status_display }}
                                         </span>
                                     {% elif object.status == 3 %}
-                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                        <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-blue-100 text-blue-800">
                                             {{ object.get_status_display }}
                                         </span>
                                     {% elif object.status == 4 %}
-                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
+                                        <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-100 text-purple-800">
                                             {{ object.get_status_display }}
                                         </span>
                                     {% elif object.status == 6 or object.status == 8 %}
-                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                        <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-yellow-100 text-yellow-800">
                                             {{ object.get_status_display }}
                                         </span>
                                     {% else %}
-                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                                        <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-100 text-red-800">
                                             {{ object.get_status_display }}
                                         </span>
                                     {% endif %}
@@ -253,7 +253,7 @@
                 </div>
             </div>
             <div>
-                <div class="bg-white shadow overflow-hidden sm:rounded-lg mt-6">
+                <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6">
                     <div class="px-2 py-3 sm:px-2  bg-indigo-500">
                         <h3 class="text-lg leading-6  text-white">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
@@ -341,7 +341,7 @@
         </div>
 
         <div class="grid grid-cols-1 gap-4 mt-6">
-            <div class="bg-white shadow overflow-hidden sm:rounded-lg  ">
+            <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg  ">
 
                 {% if object.schedules.count > 0 %}
                     <div class="px-2 py-3 sm:px-2  bg-indigo-500">
@@ -395,15 +395,15 @@
                                     <td class="px-4 py-2 whitespace-nowrap">
                                         <div class="text-sm font-medium text-gray-700">
                                             {% if schedule.status == 1 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-100 text-green-800">
                                         {{ schedule.get_status_display }}
                                     </span>
                                             {% elif schedule.status == 2 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-yellow-100 text-yellow-800">
                                         {{ schedule.get_status_display }}
                                     </span>
                                             {% elif schedule.status == 3 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-100 text-red-800">
                                         {{ schedule.get_status_display }}
                                     </span>
                                             {% endif %}
@@ -434,28 +434,28 @@
                                     <td class="px-4 py-2 whitespace-nowrap text-right text-sm font-medium">
                                         {% if schedule.status == 3 %}
                                             <button @click="resumeSchedule('{{ schedule.id }}')" type="button"
-                                                    class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                 Undo
                                             </button>
                                         {% else %}
                                             <button @click="openScheduleModal('{{ schedule.id }}')" type="button"
-                                                    class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                 Modify
                                             </button>
                                             {% if schedule.status == 1 %}
                                                 <button @click="pauseSchedule('{{ schedule.id }}')" type="button"
-                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Pause
                                                 </button>
                                             {% elif schedule.status == 2 %}
                                                 <button @click="resumeSchedule('{{ schedule.id }}')" type="button"
-                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Resume
                                                 </button>
                                             {% endif %}
 
                                             <button @click="deleteSchedule('{{ schedule.id }}')" type="button"
-                                                    class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                 Delete
                                             </button>
 
@@ -469,7 +469,7 @@
 
                 {% else %}
                     <button @click="openScheduleModal()" type="button"
-                            class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                         <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-12 w-12 text-gray-400" fill="none"
                              viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -487,7 +487,7 @@
         {% if backup_count > 0 %}
             <div class="grid grid-cols-1 gap-4 mt-6" id="section-backup">
                 <div>
-                    <div class="bg-white shadow overflow-hidden sm:rounded-lg">
+                    <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg">
                         <div class="px-2 py-3 sm:px-2  bg-indigo-500">
                             <h3 class="text-lg leading-6  text-white">
                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
@@ -508,12 +508,12 @@
                                 <button type="button"
                                         @click="toggleBackups()"
                                         :class="{ 'bg-indigo-600': list_all_backups, 'bg-gray-200': !(list_all_backups) }"
-                                        class="float-right bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                        class="float-right bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                         role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
                                     <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
                                     <span :class="{ 'translate-x-5': list_all_backups, 'translate-x-0': !(list_all_backups) }"
                                           aria-hidden="true"
-                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                 </button>
                             </h3>
 
@@ -571,19 +571,19 @@
                                         <td class="px-4 py-2 whitespace-nowrap">
                                             <div class="text-sm font-medium text-gray-700">
                                                 {% if backup.status == 3 %}
-                                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                                    <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-100 text-green-800">
                                                     {{ backup.get_status_display }}
                                                 </span>
                                                 {% elif backup.status == 4 or backup.status == 11 or backup.status == 12 or backup.status == 13 or backup.status == 15  or backup.status == 20  or backup.status == 16 %}
-                                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                                                    <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-100 text-red-800">
                                                     {{ backup.get_status_display }}
                                                 </span>
                                                 {% elif backup.status == 5 or backup.status == 7 or backup.status == 14 or backup.status == 19 %}
-                                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                                    <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-yellow-100 text-yellow-800">
                                                     {{ backup.get_status_display }}
                                                 </span>
                                                 {% else %}
-                                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
+                                                    <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-100 text-purple-800">
                                                     {{ backup.get_status_display }}
                                                 </span>
                                                 {% endif %}
@@ -630,58 +630,58 @@
                                                 {% if object.type == 3 or object.type == 4 or object.type == 5 %}
                                                     <button @click="openBackupDownloadModal('{{ backup.id }}', '{{ backup.uuid }}')"
                                                             type="button"
-                                                            class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                            class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                         Download
                                                     </button>
                                                 {% endif %}
                                                 {#                                              <button @click="openBackupDeleteModal('{{ object.connection.integration.code }}', '{{ backup.id }}', '{{ backup.uuid }}')" type="button"#}
-                                                {#                                                      class="-ml-px relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">#}
+                                                {#                                                      class="-ml-px relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">#}
                                                 {#                                                Delete#}
                                                 {#                                              </button>#}
                                                 <button @click="openBackupDeleteModal('{{ object.connection.integration.code }}', '{{ backup.id }}', '{{ backup.uuid }}')"
                                                         type="button"
-                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Delete
                                                 </button>
                                             {% elif backup.status == 2 or backup.status == 5 or backup.status == 8 or backup.status == 9 or backup.status == 10  or backup.status == 11 or backup.status == 17 or backup.status == 18 %}
                                                 <button @click="cancelBackup('{{ backup.id }}')" type="button"
-                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Cancel
                                                 </button>
                                             {% elif backup.status == 7 %}
 {#                                                <button @click="cancelBackup('{{ backup.id }}')" type="button"#}
-{#                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
+{#                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
 {#                                                    Retry#}
 {#                                                </button>#}
                                             {% elif backup.status == 15 %}
                                                 {#                                              <button @click="" type="button"#}
-                                                {#                                                      class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
+                                                {#                                                      class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
                                                 {#                                                Logs#}
                                                 {#                                              </button>#}
                                                 <!-- DELETE_COMPLETED -->
                                             {% elif backup.status == 14 %}
                                                 {#                                              <button @click="" type="button"#}
-                                                {#                                                      class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
+                                                {#                                                      class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
                                                 {#                                                Logs#}
                                                 {#                                              </button>#}
                                             {% endif %}
 
                                             {% if object.type == 1 and object.type == 2 %}
                                                 <a href="{% url 'console:log:index' %}?backup={{ backup.id }}"
-                                                   class="cursor-pointer  inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                   class="cursor-pointer  inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Logs
                                                 </a>
                                             {% endif %}
                                             {% if backup.show_transfer_log and object.type == 3 %}
                                                 {% if backup.status == 3 or backup.status == 4 or backup.status == 11 or backup.status == 12 or backup.status == 13 or backup.status == 15  or backup.status == 20  or backup.status == 16  or backup.status == 19  or backup.status == 21  or backup.status == 30 %}
                                                     <a @click="downloadTransferLog('{{ backup.id }}')"
-                                                       class="cursor-pointer inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                       class="cursor-pointer inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                         Log File
                                                     </a>
 {#                                                    {% if backup.show_dir_tree %}#}
 {##}
 {#                                                        <a @click="downloadDirTree('{{ backup.id }}')"#}
-{#                                                           class="cursor-pointer inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
+{#                                                           class="cursor-pointer inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
 {#                                                            Dir Tree#}
 {#                                                        </a>#}
 {#                                                    {% endif %}#}
@@ -690,19 +690,19 @@
                                             {% if backup.show_db_log_file and object.type == 4 %}
                                                 {% if backup.status == 3 or backup.status == 4 or backup.status == 11 or backup.status == 12 or backup.status == 13 or backup.status == 15  or backup.status == 20  or backup.status == 16  or backup.status == 19  or backup.status == 21  or backup.status == 30  %}
                                                     <a @click="downloadTransferLog('{{ backup.id }}')"
-                                                       class="cursor-pointer inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                       class="cursor-pointer inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                         Log File
                                                     </a>
                                                 {% endif %}
                                             {% endif %}
 {#                                          <button @click="retryBackup('{{ backup.id }}')" type="button"#}
-{#                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
+{#                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
 {#                                                    Retry#}
 {#                                                </button>#}
 {#                                            {% if backup.show_transfer_log and object.type == 4 %}#}
 {#                                                {% if backup.status == 3 or backup.status == 4 or backup.status == 11 or backup.status == 12 or backup.status == 13 or backup.status == 15  or backup.status == 20  or backup.status == 16 %}#}
 {#                                                    <a @click="downloadTransferLog('{{ backup.id }}')"#}
-{#                                                       class="cursor-pointer inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
+{#                                                       class="cursor-pointer inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
 {#                                                        Transfer Log#}
 {#                                                    </a>#}
 {#                                                {% endif %}#}
@@ -852,13 +852,13 @@
                                                            name="storage-{{ storage.id }}" type="checkbox"
                                                            value="{{ storage.id }}"
                                                            x-model="onDemandBackup.storage_point_ids"
-                                                           class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded">
+                                                           class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded-sm">
                                                 </div>
                                                 <div class="ml-3 text-sm">
                                                     <label for="ondemand-storage-{{ storage.id }}"
                                                            class="font-medium text-gray-700">{{ storage.name }}
                                                         {% if storage.type.code == "bs" %}
-                                                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800"> Default </span>
+                                                            <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-100 text-purple-800"> Default </span>
                                                         {% endif %}
                                                     </label>
                                                     {% if storage.type.code != "bs" %}
@@ -883,7 +883,7 @@
                                 </label>
                                 <div class="mt-1">
                                     <textarea x-model="onDemandBackup.notes" id="about" name="about" rows="3"
-                                              class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                              class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
                                 </div>
                                 <p class="mt-2 text-sm text-gray-700">Optional notes about the
                                     {% if object.type == 3 or object.type == 4 or object.type == 5 %}backup{% else %}
@@ -895,12 +895,12 @@
 
                     <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                         <button @click="createBackup()" type="button"
-                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                             Create {% if object.type == 3 or object.type == 4 or object.type == 5 %}Backup{% else %}
                             Snapshot{% endif %}
                         </button>
                         <button @click="closeBackupModal()" type="button"
-                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                             Cancel
                         </button>
                     </div>
@@ -975,7 +975,7 @@
                                 </label>
                                 <div class="mt-1">
                                     <textarea x-model="notes" id="about" name="about" rows="3"
-                                              class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                              class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
                                 </div>
                                 <p class="mt-2 text-sm text-gray-700">Optional notes about this action.</p>
                             </div>
@@ -984,12 +984,12 @@
 
                     <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                         <button @click="pauseBackups()" type="button"
-                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                             Pause {% if object.type == 3 or object.type == 4 or object.type == 5 %}Backups{% else %}
                             Snapshots{% endif %}
                         </button>
                         <button @click="closePauseBackupsModal()" type="button"
-                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                             Cancel
                         </button>
                     </div>
@@ -1066,7 +1066,7 @@
                                 </label>
                                 <div class="mt-1">
                                     <textarea x-model="notes" id="about" name="about" rows="3"
-                                              class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                              class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
                                 </div>
                                 <p class="mt-2 text-sm text-gray-700">Optional notes about this action.</p>
                             </div>
@@ -1075,12 +1075,12 @@
 
                     <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                         <button @click="resumeBackups()" type="button"
-                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                             Resume {% if object.type == 3 or object.type == 4 or object.type == 5 %}Backups{% else %}
                             Snapshots{% endif %}
                         </button>
                         <button @click="closeResumeBackupsModal()" type="button"
-                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                             Cancel
                         </button>
                     </div>
@@ -1198,36 +1198,26 @@
                                                 <div class="text-sm font-medium text-gray-700">
                                                     <div class="text-sm font-medium text-gray-700">
                                                         <span x-show="storagePoint.status===3"
-                                                              class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                                              class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-100 text-green-800">
                                                             <span x-text="storagePoint.status_display"></span>
                                                         </span>
                                                         <span x-show="storagePoint.status!==3"
-                                                              class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                                              class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-yellow-100 text-yellow-800">
                                                             <span x-text="storagePoint.status_display"></span>
                                                         </span>
                                                     </div>
                                                 </div>
                                             </td>
                                             <td class="px-4 py-2 whitespace-nowrap text-right text-sm font-medium">
-                                                <button x-show="storagePoint.storage_file_id && !storagePoint.show_request_download"
+                                                <button x-show="storagePoint.storage_file_id"
                                                         @click="downloadBackup(storagePoint, 'copy')" type="button"
-                                                        class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Copy Link
                                                 </button>
-{#                                                <button x-show="storagePoint.storage_file_id && !storagePoint.show_request_download"#}
-{#                                                        @click="openBackupTransferModal(storagePoint)" type="button"#}
-{#                                                        class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
-{#                                                    Transfer#}
-{#                                                </button>#}
-                                                <button x-show="storagePoint.storage_file_id && !storagePoint.show_request_download"
+                                                <button x-show="storagePoint.storage_file_id"
                                                         @click="downloadBackup(storagePoint)" type="button"
-                                                        class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Download
-                                                </button>
-                                                <button x-show="storagePoint.storage_file_id && storagePoint.show_request_download"
-                                                        @click="downloadBackup(storagePoint)" type="button"
-                                                        class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                                    Request Download
                                                 </button>
                                             </td>
                                         </tr>
@@ -1240,7 +1230,7 @@
 
                     <div x-show="!loading" class="mt-5 sm:mt-6 ">
                         <button @click="closeBackupDownloadModal()" type="button"
-                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                             Close
                         </button>
                     </div>
@@ -1331,13 +1321,13 @@
                                                                name="storage-{{ storage.id }}" type="checkbox"
                                                                value="{{ storage.id }}"
                                                                x-model="transferBackup.storage_point_ids"
-                                                               class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded">
+                                                               class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded-sm">
                                                     </div>
                                                     <div class="ml-3 text-sm">
                                                         <label for="storage-{{ storage.id }}"
                                                                class="font-medium text-gray-700">{{ storage.name }}
                                                             {% if storage.type.code == "bs" %}
-                                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-600 text-white"> Depreciated </span>
+                                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-600 text-white"> Depreciated </span>
                                                             {% endif %}
                                                         </label>
                                                         {% if storage.type.code != "bs" %}
@@ -1362,12 +1352,12 @@
 
                     <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                         <button @click="transferBackupRequest()" type="button"
-                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                             Transfer {% if object.type == 3 or object.type == 4 or object.type == 5 %}Backup{% else %}
                             Snapshot{% endif %}
                         </button>
                         <button @click="closeBackupTransferModal()" type="button"
-                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                             Cancel
                         </button>
                     </div>
@@ -1443,7 +1433,7 @@
                                 </label>
                                 <div class="mt-1">
                                     <textarea x-model="notes" id="about" name="about" rows="3"
-                                              class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                              class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
                                 </div>
                                 <p class="mt-2 text-sm text-gray-700">Optional notes about this action.</p>
                             </div>
@@ -1452,11 +1442,11 @@
 
                     <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                         <button @click="deleteNode()" type="button"
-                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                             Delete Node
                         </button>
                         <button @click="closeDeleteNodeModal()" type="button"
-                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                             Cancel
                         </button>
                     </div>
@@ -1529,7 +1519,7 @@
                                 </label>
                                 <div class="mt-1">
                                     <textarea x-model="notes" id="about" name="about" rows="3"
-                                              class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                              class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
                                 </div>
                                 <p class="mt-2 text-sm text-gray-700">Optional notes about this action.</p>
                             </div>
@@ -1538,12 +1528,12 @@
 
                     <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                         <button @click="deleteBackup()" type="button"
-                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                             Delete {% if object.type == 3 or object.type == 4 or object.type == 5 %}backup{% else %}
                             snapshot{% endif %}
                         </button>
                         <button @click="closeBackupDeleteModal()" type="button"
-                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                             Cancel
                         </button>
                     </div>
@@ -1623,7 +1613,7 @@
                                 <div class="mt-1">
                                     <input x-model="schedule.name" type="text" name="name" id="name"
                                            autocomplete="given-name"
-                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                     <p x-show="scheduleErrors.name" class="mt-2 text-sm text-red-600" id="email-error"
                                        x-text="scheduleErrors.name"></p>
                                 </div>
@@ -1666,7 +1656,7 @@
                                 <div class="mt-1">
                                     <input x-model="schedule.rate_value" type="number" name="rate_value" id="rate_value"
                                            autocomplete="rate_value"
-                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                     <p x-show="scheduleErrors.rate_value" class="mt-2 text-sm text-red-600"
                                        id="rate_value-error"
                                        x-text="scheduleErrors.rate_value"></p>
@@ -1714,7 +1704,7 @@
                                 <div class="mt-1">
                                     <input x-model="schedule.minute" type="text" name="minute" id="minute"
                                            autocomplete="minute"
-                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                     <p x-show="scheduleErrors.minute" class="mt-2 text-sm text-red-600" id="email-error"
                                        x-text="scheduleErrors.minute"></p>
 
@@ -1726,7 +1716,7 @@
                                 </label>
                                 <div class="mt-1">
                                     <input x-model="schedule.hour" type="text" name="hour" id="hour" autocomplete="hour"
-                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                     <p x-show="scheduleErrors.hour" class="mt-2 text-sm text-red-600" id="email-error"
                                        x-text="scheduleErrors.hour"></p>
 
@@ -1739,7 +1729,7 @@
                                 <div class="mt-1">
                                     <input x-model="schedule.day_of_month" type="text" name="day_of_month"
                                            id="day_of_month" autocomplete="day_of_month"
-                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                     <p x-show="scheduleErrors.day_of_month" class="mt-2 text-sm text-red-600"
                                        id="email-error" x-text="scheduleErrors.day_of_month"></p>
 
@@ -1752,7 +1742,7 @@
                                 <div class="mt-1">
                                     <input x-model="schedule.month_of_year" type="text" name="month_of_year"
                                            id="month_of_year" autocomplete="month_of_year"
-                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                     <p x-show="scheduleErrors.month_of_year" class="mt-2 text-sm text-red-600"
                                        id="email-error" x-text="scheduleErrors.month_of_year"></p>
 
@@ -1765,7 +1755,7 @@
                                 <div class="mt-1">
                                     <input x-model="schedule.day_of_week" type="text" name="day_of_week"
                                            id="day_of_month" autocomplete="day_of_week"
-                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                     <p x-show="scheduleErrors.day_of_week" class="mt-2 text-sm text-red-600"
                                        id="email-error" x-text="scheduleErrors.day_of_week"></p>
 
@@ -1778,7 +1768,7 @@
                                 <div class="mt-1">
                                     <input x-model="schedule.year" type="text" name="year"
                                            id="year" autocomplete="year"
-                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                     <p x-show="scheduleErrors.year" class="mt-2 text-sm text-red-600"
                                        id="email-error" x-text="scheduleErrors.year"></p>
 
@@ -1788,7 +1778,7 @@
                             <div class="sm:col-span-6" x-show="schedule.type=='cron' && (schedule.minute === '*' || schedule.minute === '*/1')">
                                 <div class="rounded-md bg-blue-50 p-4">
                                     <div class="flex">
-                                        <div class="flex-shrink-0">
+                                        <div class="shrink-0">
                                             <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                                 <path fill-rule="evenodd"
@@ -1829,7 +1819,7 @@
                                         <input x-model="schedule.keep_last" type="number" name="keep_last"
                                                id="keep_last"
                                                autocomplete="keep_last"
-                                               class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                               class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                         <p x-show="scheduleErrors.keep_last" class="mt-2 text-sm text-red-600"
                                            id="email-error" x-text="scheduleErrors.keep_last"></p>
 
@@ -1849,7 +1839,7 @@
                                 <div class="relative">
                                     <button @click="toggleTimezoneDropdown()"
                                             type="button"
-                                            class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                            class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                                             aria-haspopup="listbox" aria-expanded="true"
                                             aria-labelledby="listbox-label">
                                               <span class="block truncate"
@@ -1876,7 +1866,7 @@
                                             x-transition:leave="transition ease-in duration-100"
                                             x-transition:leave-start="opacity-100"
                                             x-transition:leave-end="opacity-0"
-                                            class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                            class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
                                             tabindex="-1"
                                             role="listbox"
                                             aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -1943,13 +1933,13 @@
                                                                name="storage-{{ storage.id }}" type="checkbox"
                                                                value="{{ storage.id }}"
                                                                x-model="schedule.storage_point_ids"
-                                                               class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded">
+                                                               class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded-sm">
                                                     </div>
                                                     <div class="ml-3 text-sm">
                                                         <label for="storage-{{ storage.id }}"
                                                                class="font-medium text-gray-700">{{ storage.name }}
                                                             {% if storage.type.code == "bs" %}
-                                                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800"> Default </span>
+                                                            <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-100 text-purple-800"> Default </span>
                                                             {% endif %}
                                                         </label>
                                                         {% if storage.type.code != "bs" %}
@@ -1975,7 +1965,7 @@
                                 </label>
                                 <div class="mt-1">
                                         <textarea x-model="schedule.notes" id="about" name="about" rows="3"
-                                                  class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                                  class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
                                     <p x-show="scheduleErrors.notes" class="mt-2 text-sm text-red-600" id="email-error"
                                        x-text="scheduleErrors.notes"></p>
                                 </div>
@@ -1986,16 +1976,16 @@
 
                     <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                         <button @click="saveSchedule()" type="button"
-                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                             <span x-show="!schedule.id">Create Schedule</span>
                             <span x-show="schedule.id">Modify Schedule</span>
                         </button>
 {#                        <button disabled type="button"#}
-{#                                class="w-full disabled inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">#}
+{#                                class="w-full disabled inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">#}
 {#                            <span >Maintenance In Progress</span>#}
 {#                        </button>#}
                         <button @click="closeScheduleModal()" type="button"
-                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                             Cancel
                         </button>
                     </div>
@@ -2078,7 +2068,7 @@
                                 <div class="mt-1">
                                     <input x-model="node.name" type="text" name="node-name" id="name"
                                            autocomplete="node-name"
-                                           class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                     <p x-show="modifyErrors?.name" class="mt-2 text-sm text-red-600"
                                        id="node-name-error" x-text="modifyErrors?.name"></p>
                                 </div>
@@ -2087,11 +2077,11 @@
                     </div>
                     <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                         <button @click="modifyNode()" type="button"
-                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                             <span>Modify Node</span>
                         </button>
                         <button @click="closeModifyModal()" type="button"
-                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                             Cancel
                         </button>
                     </div>
@@ -2161,11 +2151,11 @@
 
                     <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                         <button @click="incrementalReset()" type="button"
-                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                             Reset {{ object.website.get_backup_type_display }} Backup
                         </button>
                         <button @click="closeIncrementalResetModal()" type="button"
-                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                             Cancel
                         </button>
                     </div>
@@ -2589,7 +2579,7 @@
                 async createBackup() {
                     this.loading = true;
 
-                    let url = "/api/proxy/nodes/" + this.node_id + "/take_snapshot/?" + new URLSearchParams({
+                    let url = "/api/v1/nodes/" + this.node_id + "/take_snapshot/?" + new URLSearchParams({
                         location: this.location_id,
                     });
 
@@ -2751,7 +2741,7 @@
                 async cancelBackup(backupID) {
                     Alpine.store('showLoading').toggle();
 
-                    let url = "/api/proxy/backups/{{object.connection.integration.code|lower}}/" + backupID + "/cancel" + "/?" + new URLSearchParams({
+                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + backupID + "/cancel" + "/?" + new URLSearchParams({
                         location: this.location_id,
                     });
 
@@ -3031,15 +3021,6 @@
                                 heading: 'Success!',
                                 details: detail
                             });
-                        } else if (data.url === "download_requested") {
-                            this.closeBackupDownloadModal();
-                            let detail = 'You download will be ready in few minutes and you will get email with download link.';
-                            Alpine.store('notifications').items.push({
-                                show: true,
-                                success: true,
-                                heading: 'Success!',
-                                details: detail
-                            });
                         } else {
                             let url = '';
                             url = data.url
@@ -3172,7 +3153,7 @@
                 async deleteNode() {
                     this.loading = true;
 
-                    let url = "/api/proxy/nodes/" + this.node_id + "/delete/?" + new URLSearchParams({
+                    let url = "/api/v1/nodes/" + this.node_id + "/delete/?" + new URLSearchParams({
                         location: this.location_id,
                     });
 
@@ -3224,7 +3205,7 @@
                 async deleteBackup() {
                     this.loading = true;
 
-                    let url = "/api/proxy/backups/" + this.backup.integration + "/" + this.backup.id + "/?" + new URLSearchParams({
+                    let url = "/api/v1/backups/" + this.backup.integration + "/" + this.backup.id + "/?" + new URLSearchParams({
                         location: this.location_id,
                     });
 
@@ -3537,7 +3518,7 @@
                     let url = null;
                     let method = null;
 
-                    url = "/api/proxy/connections/{{ object.connection.integration.code }}/{{ object.connection.id }}/validate?" + new URLSearchParams({
+                    url = "/api/v1/connections/{{ object.connection.integration.code }}/{{ object.connection.id }}/validate?" + new URLSearchParams({
                         location: {{ object.connection.location.id }},
                     });
                     method = "GET";
@@ -3581,7 +3562,7 @@
                 async validateNode() {
                     Alpine.store('showLoading').toggle("Checking {{ object.get_type_display|lower }} status with {{ object.connection.integration.name }}.", "Node Validation");
 
-                    let url = "/api/proxy/nodes/" + {{object.id}} +"/validate" + "/?" + new URLSearchParams({
+                    let url = "/api/v1/nodes/" + {{object.id}} +"/validate" + "/?" + new URLSearchParams({
                         location: {{ object.connection.location.id }},
                     });
 
@@ -3628,7 +3609,7 @@
                     Alpine.store('showLoading').toggle();
 
                     let method = "GET";
-                    let url = "/api/proxy/storage/" + storage_code + "/" + storage_id + "/validate" + "/?" + new URLSearchParams({
+                    let url = "/api/v1/storage/" + storage_code + "/" + storage_id + "/validate" + "/?" + new URLSearchParams({
                         location: {{ object.connection.location.id }},
                     });
 

@@ -8,11 +8,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.console.connection.models import CoreConnection, CoreConnectionLocation, CoreIntegration
-from apps.console.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberPermissions
 from .filters import CoreDatabaseFilter
 from .permissions import CoreDatabaseViewPermissions
 from .serializers import CoreDatabaseConnectionReadSerializer, CoreDatabaseConnectionWriteSerializer
-from ..._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
 from rest_framework import status
@@ -65,12 +65,8 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         member = self.request.user.member
         query = Q(integrations__code="database")
 
-        if member.get_primary_account().billing.plan.name == "AppSumo":
-            query &= Q(code="node-d-eu-05")
-            endpoints = CoreConnectionLocation.objects.filter(query).values()
-        else:
-            query &= ~Q(code="node-d-eu-05")
-            endpoints = CoreConnectionLocation.objects.filter(query).values()
+        query &= ~Q(code="node-d-eu-05")
+        endpoints = CoreConnectionLocation.objects.filter(query).values()
 
         return Response(endpoints)
 

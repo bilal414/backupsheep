@@ -1,6 +1,6 @@
 <div x-data="setupSelectConnection()">
     <button @click="openConnectionModal(null, null, null,'{{ integration.code }}')" type="button"
-            class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+            class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
 
         <img class="max-h-20 mx-auto" src="{{ STATIC_URL }}{{ integration.image }}"
              alt="{{ integration.name }} Backups">
@@ -31,7 +31,7 @@
         <div class="flex flex-col mt-4">
             <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
                 <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
-                    <div class="shadow overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                    <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg">
                         <div class="overflow-x-auto">
                             <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
                                 <thead class="bg-gray-50">
@@ -75,23 +75,23 @@
                                         </td>
                                         <td class="px-4 py-4 whitespace-nowrap">
                                             {% if connection.status == 1 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-100 text-green-800">
                                             {{ connection.get_status_display }}
                                         </span>
                                             {% elif connection.status == 6 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-100 text-purple-800">
                                             {{ connection.get_status_display }}
                                         </span>
                                             {% elif connection.status == 4 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-yellow-100 text-yellow-800">
                                             {{ connection.get_status_display }}
                                         </span>
                                             {% elif connection.status == 5 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-100 text-red-800">
                                             {{ connection.get_status_display }}
                                         </span>
                                             {% else %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-blue-100 text-blue-800">
                                             {{ connection.get_status_display }}
                                         </span>
                                             {% endif %}
@@ -113,29 +113,29 @@
                                         <td class="px-4 py-4 whitespace-nowrap text-sm font-medium">
                                             {% if integration.code == "website" %}
                                                 <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
-                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded-sm shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Create Website Node
                                                 </a>
                                             {% elif integration.code == "database" %}
                                                 <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
-                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded-sm shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Create Database Node
                                                 </a>
                                             {% elif integration.type == "saas" %}
                                                 <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
-                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded-sm shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Create {{ integration.name }} Node
                                                 </a>
                                             {% else %}
                                                 {% if integration.code != "upcloud" and integration.code != "oracle" %}
                                                     <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
-                                                       class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                       class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded-sm shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                         Create Server Node
                                                     </a>
                                                 {% endif %}
                                                 {% if integration.code != "aws_rds" %}
                                                     <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
-                                                       class="{% if integration.code != "upcloud" and integration.code != "oracle" %}ml-2{% endif %} inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                       class="{% if integration.code != "upcloud" and integration.code != "oracle" %}ml-2{% endif %} inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded-sm shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                         Create Volume Node
                                                     </a>
                                                 {% endif %}
@@ -145,52 +145,52 @@
 
                                             {% if connection.status == 5 %}
                                                 <button @click="resumeConnection('{{ connection.id }}')" type="button"
-                                                        class="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Undo
                                                 </button>
                                             {% else %}
-                                                <span class="relative z-0 inline-flex shadow-sm rounded-md">
+                                                <span class="relative z-0 inline-flex shadow-xs rounded-md">
                                                   <button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'modify')"
                                                           type="button" class="relative inline-flex items-center px-2.5 py-1.5 rounded-l-md border border-gray-300 bg-white text-sm font-medium
                                                   text-gray-700 hover:bg-gray-50
                                                   focus:z-10
-                                                  focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                  focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
                                                     Modify
                                                   </button>
                                                    <button @click="validateConnection('{{ connection.id }}', '{{ connection.location.id }}')"
                                                            type="button"
-                                                           class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                           class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
                                                         Validate
                                                     </button>
                                                     <a target="_blank"
                                                        href="{% url 'console:log:index' %}?integration={{ connection.id }}"
-                                                       class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                       class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
                                                         Logs
                                                     </a>
                                                     {% if integration.code != "google_cloud" %}
                                                         <button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'copy')"
                                                                 type="button"
-                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
                                                             Copy
                                                         </button>
                                                     {% endif %}
                                                     {% if connection.status == 1 %}
                                                         <button @click="pauseConnection('{{ connection.id }}')"
                                                                 type="button"
-                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
                                                         Pause
                                                     </button>
                                                     {% elif connection.status == 4 %}
                                                         <button @click="resumeConnection('{{ connection.id }}')"
                                                                 type="button"
-                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
                                                         Resume
                                                     </button>
                                                     {% endif %}
                                                     <button @click="deleteConnection('{{ connection.id }}')"
                                                             type="button"
                                                             class="-ml-px relative inline-flex items-center px-2.5 py-1.5 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10
-                                                      focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                                      focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
                                                         Delete
                                                     </button>
                                             </span>
@@ -458,7 +458,7 @@
                             </label>
                             <div class="mt-1">
                                 <input x-model="connection.name" type="text" name="name" id="name" autocomplete="name"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
                                    x-text="connectionErrors?.name"></p>
                             </div>
@@ -477,7 +477,7 @@
                             <div class="relative mt-2">
                                 <button @click="toggleEndpointDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
 {#                                    <img :src="connection.location?.image_url" class="max-h-6 mr-2  float-left">#}
 
@@ -503,7 +503,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -555,7 +555,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.url" type="text" name="url" id="url"
                                        autocomplete="url"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.url" class="mt-2 text-sm text-red-600"
                                    id="url-error" x-text="connectionErrors.auth?.url"></p>
                             </div>
@@ -572,7 +572,7 @@
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.key" type="text" name="key" id="key"
                                        autocomplete="key"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.key" class="mt-2 text-sm text-red-600"
                                    id="key-error" x-text="connectionErrors.auth?.key"></p>
                             </div>
@@ -581,7 +581,7 @@
                              x-show="integrationCode === 'wordpress'">
                            <div class="rounded-md bg-blue-50 p-4">
                               <div class="flex">
-                                <div class="flex-shrink-0">
+                                <div class="shrink-0">
                                   <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                     <path fill-rule="evenodd" d="M19 10.5a8.5 8.5 0 11-17 0 8.5 8.5 0 0117 0zM8.25 9.75A.75.75 0 019 9h.253a1.75 1.75 0 011.709 2.13l-.46 2.066a.25.25 0 00.245.304H11a.75.75 0 010 1.5h-.253a1.75 1.75 0 01-1.709-2.13l.46-2.066a.25.25 0 00-.245-.304H9a.75.75 0 01-.75-.75zM10 7a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
                                   </svg>
@@ -612,7 +612,7 @@
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.http_user" type="text" name="http_user" id="http_user"
                                        autocomplete="http_user"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.http_user" class="mt-2 text-sm text-red-600"
                                    id="http_user-error" x-text="connectionErrors.auth?.http_user"></p>
                             </div>
@@ -626,7 +626,7 @@
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.http_pass" type="text" name="http_pass" id="http_pass"
                                        autocomplete="http_pass"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.http_pass" class="mt-2 text-sm text-red-600"
                                    id="http_pass-error" x-text="connectionErrors.auth?.http_pass"></p>
                             </div>
@@ -639,7 +639,7 @@
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.profile" type="text" name="profile" id="profile"
                                        autocomplete="profile"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.profile" class="mt-2 text-sm text-red-600"
                                    id="profile-error" x-text="connectionErrors.auth?.profile"></p>
                             </div>
@@ -652,7 +652,7 @@
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.user" type="text" name="user" id="user"
                                        autocomplete="user"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.user" class="mt-2 text-sm text-red-600"
                                    id="user-error" x-text="connectionErrors.auth?.user"></p>
                             </div>
@@ -664,7 +664,7 @@
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.fingerprint" type="text" name="fingerprint" id="fingerprint"
                                        autocomplete="fingerprint"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.fingerprint" class="mt-2 text-sm text-red-600"
                                    id="fingerprint-error" x-text="connectionErrors.auth?.fingerprint"></p>
                             </div>
@@ -676,7 +676,7 @@
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.tenancy" type="text" name="tenancy" id="tenancy"
                                        autocomplete="tenancy"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.tenancy" class="mt-2 text-sm text-red-600"
                                    id="tenancy-error" x-text="connectionErrors.auth?.tenancy"></p>
                             </div>
@@ -688,7 +688,7 @@
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.region" type="text" name="region" id="region"
                                        autocomplete="region"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.region" class="mt-2 text-sm text-red-600"
                                    id="region-error" x-text="connectionErrors.auth?.region"></p>
                             </div>
@@ -700,7 +700,7 @@
                             </label>
                             <div class="mt-1">
                                         <textarea x-model="selectedAuth.private_key" id="private_key" name="private_key" rows="3"
-                                                  class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                                  class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
                                 <p x-show="connectionErrors?.private_key" class="mt-2 text-sm text-red-600" id="private_key-error"
                                    x-text="connectionErrors?.private_key"></p>
                             </div>
@@ -711,7 +711,7 @@
                             </label>
                             <div class="mt-1">
                                         <textarea x-model="selectedAuth.service_key" id="service_key" name="service_key" rows="3"
-                                                  class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                                  class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
                                 <p x-show="connectionErrors?.auth?.service_key" class="mt-2 text-sm text-red-600" id="service_key-error"
                                    x-text="connectionErrors?.auth?.service_key"></p>
                             </div>
@@ -723,7 +723,7 @@
                             <div class="relative mt-2">
                                 <button @click="toggleAWSRegionDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.region?.name||'--Choose AWS Region--'"></span>
@@ -747,7 +747,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -791,7 +791,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.access_key" type="text" name="access_key" id="access_key"
                                        autocomplete="access_key"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.access_key" class="mt-2 text-sm text-red-600"
                                    id="access_key-error" x-text="connectionErrors.auth?.access_key"></p>
                             </div>
@@ -805,7 +805,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.secret_key" type="text" name="secret_key" id="secret_key"
                                        autocomplete="secret_key"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.secret_key" class="mt-2 text-sm text-red-600"
                                    id="secret_key-error" x-text="connectionErrors.auth?.secret_key"></p>
                             </div>
@@ -818,7 +818,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.username" type="text" name="username" id="username"
                                        autocomplete="username"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.username" class="mt-2 text-sm text-red-600"
                                    id="access_key-error" x-text="connectionErrors.auth?.username"></p>
                             </div>
@@ -831,7 +831,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.password" type="text" name="password" id="password"
                                        autocomplete="password"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.password" class="mt-2 text-sm text-red-600"
                                    id="password-error" x-text="connectionErrors.auth?.password"></p>
                             </div>
@@ -854,7 +854,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.api_key" type="text" name="api_key" id="api_key"
                                        autocomplete="api_key"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.api_key" class="mt-2 text-sm text-red-600"
                                    id="api_key-error" x-text="connectionErrors.auth?.api_key"></p>
                             </div>
@@ -868,7 +868,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.database_name" type="text" name="database_name"
                                        id="database_name" autocomplete="database_name"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.database_name" class="mt-2 text-sm text-red-600"
                                    id="database_name-error" x-text="connectionErrors.auth?.database_name"></p>
                             </div>
@@ -880,7 +880,7 @@
                             <div class="relative mt-2">
                                 <button @click="toggleDatabaseTypeDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.type?.name||'--Database Type--'"></span>
@@ -904,7 +904,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -947,7 +947,7 @@
                             <div class="relative mt-2">
                                 <button @click="toggleDatabaseVersionDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.version?.name||'--Database Version--'"></span>
@@ -971,7 +971,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -1013,7 +1013,7 @@
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.port" type="text" name="port" id="port" autocomplete="port"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.port" class="mt-2 text-sm text-red-600"
                                    id="port-error" x-text="connectionErrors.auth?.port"></p>
                             </div>
@@ -1024,7 +1024,7 @@
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.host"  x-on:change.debounce="awsRDSReplicaWarning()" type="text" name="host" id="host" autocomplete="host"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.host" class="mt-2 text-sm text-red-600"
                                    id="host-error" x-text="connectionErrors.auth?.host"></p>
                             </div>
@@ -1032,7 +1032,7 @@
                         <div class="sm:col-span-6" x-show="integrationCode === 'database' && awsRDSReplicaWarning() === true">
                             <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4">
                                 <div class="flex">
-                                    <div class="flex-shrink-0">
+                                    <div class="shrink-0">
                                         <svg class="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg"
                                              viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                             <path fill-rule="evenodd"
@@ -1056,7 +1056,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.username" type="text" name="username" id="username"
                                        autocomplete="username"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.username" class="mt-2 text-sm text-red-600"
                                    id="port-error" x-text="connectionErrors.auth?.username"></p>
                             </div>
@@ -1068,7 +1068,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.password" type="text" name="password" id="password"
                                        autocomplete="password"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.password" class="mt-2 text-sm text-red-600"
                                    id="port-error" x-text="connectionErrors.auth?.password"></p>
                             </div>
@@ -1077,19 +1077,19 @@
                              x-show="integrationCode === 'database' && (selectedAuth.type?.code===1 || selectedAuth.type?.code===2)">
                             <div class="mt-1">
                                 <div class="flex items-center justify-between">
-                                          <span class="flex-grow flex flex-col">
+                                          <span class="grow flex flex-col">
                                             <span class="text-sm font-medium text-gray-700" id="availability-label">Use SSL/TLS? (ssl-mode=PREFERRED)</span>
                                             <span class="text-sm text-gray-700" id="availability-description">Only use this if your database server supports connection using SSL/TLS.</span>
                                           </span>
                                     <button type="button"
                                             @click="toggleUseSSL()"
                                             :class="{ 'bg-indigo-600': selectedAuth.use_ssl, 'bg-gray-200': !(selectedAuth.use_ssl) }"
-                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.use_ssl, 'translate-x-0': !(selectedAuth.use_ssl) }"
                                                   aria-hidden="true"
-                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                     </button>
                                 </div>
                             </div>
@@ -1099,7 +1099,7 @@
                              x-show="integrationCode === 'database' && (selectedAuth.type?.code===1 || selectedAuth.type?.code===2)">
                             <div class="mt-1">
                                 <div class="flex items-center justify-between">
-                                          <span class="flex-grow flex flex-col">
+                                          <span class="grow flex flex-col">
                                             <span class="text-sm font-medium text-gray-700" id="availability-label">Include Stored Procedures?</span>
                                             <span class="text-sm text-gray-700" id="availability-description">Include stored procedures, functions & triggers in backups.
                                                 Please ensure your database user has permissions; otherwise, the backup will fail.</span>
@@ -1107,12 +1107,12 @@
                                     <button type="button"
                                             @click="toggleIncludeStoredProcedure()"
                                             :class="{ 'bg-indigo-600': selectedAuth.include_stored_procedure, 'bg-gray-200': !(selectedAuth.include_stored_procedure) }"
-                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.include_stored_procedure, 'translate-x-0': !(selectedAuth.include_stored_procedure) }"
                                                   aria-hidden="true"
-                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                     </button>
                                 </div>
                             </div>
@@ -1126,7 +1126,7 @@
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.host" type="text" name="host" id="host" autocomplete="host"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.host" class="mt-2 text-sm text-red-600"
                                    id="host-error" x-text="connectionErrors.auth?.host"></p>
                             </div>
@@ -1137,7 +1137,7 @@
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.port" type="text" name="port" id="port" autocomplete="port"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.port" class="mt-2 text-sm text-red-600"
                                    id="port-error" x-text="connectionErrors.auth?.port"></p>
                             </div>
@@ -1150,7 +1150,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.username" type="text" name="username" id="username"
                                        autocomplete="username"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.username" class="mt-2 text-sm text-red-600"
                                    id="username-error" x-text="connectionErrors.auth?.username"></p>
                             </div>
@@ -1164,7 +1164,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.password" type="text" name="password" id="password"
                                        autocomplete="password"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.password" class="mt-2 text-sm text-red-600"
                                    id="password-error" x-text="connectionErrors.auth?.password"></p>
                             </div>
@@ -1177,7 +1177,7 @@
                             <div class="relative mt-2">
                                 <button @click="toggleProtocolDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-sm pl-3 pr-10 py-2 text-left cursor-default focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.protocol?.name||'--Server Protocol--'"></span>
@@ -1201,7 +1201,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm"
+                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -1245,12 +1245,12 @@
                                 <button type="button"
                                         @click="selectedAuth.ftps_use_explicit_ssl = !selectedAuth.ftps_use_explicit_ssl; selectedAuth.use_private_key=false;"
                                         :class="{ 'bg-indigo-600': selectedAuth.ftps_use_explicit_ssl, 'bg-gray-200': !(selectedAuth.ftps_use_explicit_ssl) }"
-                                        class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                        class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                         role="switch" aria-checked="false" aria-labelledby="availability-label"
                                         aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.ftps_use_explicit_ssl, 'translate-x-0': !(selectedAuth.ftps_use_explicit_ssl) }"
                                                   aria-hidden="true"
-                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                 </button>
                             </div>
                             <p x-show="connectionErrors.auth?.protocol" class="mt-2 text-sm text-red-600"
@@ -1260,7 +1260,7 @@
                              x-show="integrationCode === 'website' && selectedAuth.protocol?.name === 'FTPS'">
                             <div class="rounded-md bg-blue-50 p-4">
                                 <div class="flex">
-                                    <div class="flex-shrink-0">
+                                    <div class="shrink-0">
                                         <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
                                              viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                             <path fill-rule="evenodd"
@@ -1290,25 +1290,25 @@
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="mt-1">
                                 <div class="flex items-center justify-between">
-                                          <span class="flex-grow flex flex-col">
+                                          <span class="grow flex flex-col">
                                             <span class="text-sm font-medium text-gray-700" id="availability-label">Use Our Public Key?</span>
                                             <span class="text-sm text-gray-700" id="availability-description">Use the public-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
                                           </span>
                                     <button type="button"
                                             @click="selectedAuth.use_public_key = !selectedAuth.use_public_key; selectedAuth.use_private_key=false;"
                                             :class="{ 'bg-indigo-600': selectedAuth.use_public_key, 'bg-gray-200': !(selectedAuth.use_public_key) }"
-                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.use_public_key, 'translate-x-0': !(selectedAuth.use_public_key) }"
                                                   aria-hidden="true"
-                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                     </button>
                                 </div>
                                 <div class="rounded-md bg-blue-50 p-4 mt-3 mb-3"
                                      x-show="(selectedAuth.use_public_key===true)">
                                     <div class="flex">
-                                        <div class="flex-shrink-0">
+                                        <div class="shrink-0">
                                             <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                                 <path fill-rule="evenodd"
@@ -1324,13 +1324,13 @@
                                         </div>
                                     </div>
                                 </div>
-                                <code class="block break-words whitespace-normal overflow-x-scroll prose bg-indigo-500 text-white p-2 mt-3 rounded-lg"
+                                <code class="block wrap-break-word whitespace-normal overflow-x-scroll prose bg-indigo-500 text-white p-2 mt-3 rounded-lg"
                                       x-show="(selectedAuth.use_public_key===true)">
                                     echo -e 'ssh-rsa
                                     AAAAB3NzaC1yc2EAAAADAQABAAABAQC4PG+UeogbJNjvqNOXHK6TsRcE+Zd7hU67qI5Kelt/jpim/kneW1R6lTD9X39EwYGJxjXG6cZkfio3mEFpVmciKWpT9x9jKMvEQGSupzlhU7qSaFIbf1jtpWlPKs686BsJwfkFrUMk2jtaB/GIcRp39UyZB9heoqsgdPwNu2R6uToCjSmZGgg3dMl5Uwis4obu+NeLDl9r6E9LdwXTV3jJI+ZAn1Ju3S7WOXaG+sNLcs+sPMwBPNyLkHEUbJ0XrEHnWhamcm4tgrNlzv2oV2ysS4qCPGZYLari0nrl43MJK+h5YUeAAqHih9zneIN2Gh45rQwBQcOt37a1T993klDh
                                     backupsheep.com' >> ~/.ssh/authorized_keys
                                 </code>
-                                <code class="block break-words whitespace-normal overflow-x-scroll prose bg-indigo-500 text-white p-2 mt-3 rounded-lg"
+                                <code class="block wrap-break-word whitespace-normal overflow-x-scroll prose bg-indigo-500 text-white p-2 mt-3 rounded-lg"
                                       x-show="(selectedAuth.use_public_key===true)">
                                     chmod 0600 ~/.ssh/authorized_keys
                                 </code>
@@ -1340,7 +1340,7 @@
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="mt-1">
                                 <div class="flex items-center justify-between">
-                                          <span class="flex-grow flex flex-col">
+                                          <span class="grow flex flex-col">
                                             <span class="text-sm font-medium text-gray-700" id="availability-label">Use Your Private Key?</span>
                                             <span class="text-sm text-gray-700"
                                                   id="availability-description">Use the private-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
@@ -1348,18 +1348,18 @@
                                     <button type="button"
                                             @click="selectedAuth.use_private_key = !selectedAuth.use_private_key; selectedAuth.use_public_key=false;"
                                             :class="{ 'bg-indigo-600': selectedAuth.use_private_key, 'bg-gray-200': !(selectedAuth.use_private_key) }"
-                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.use_private_key, 'translate-x-0': !(selectedAuth.use_private_key) }"
                                                   aria-hidden="true"
-                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                     </button>
                                 </div>
                                 <textarea x-model="selectedAuth.private_key" id="private_key" name="private_key"
                                           rows="3"
                                           x-show="(selectedAuth.use_private_key===true)"
-                                          class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md mt-3"></textarea>
+                                          class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md mt-3"></textarea>
                                 <p x-show="connectionErrors.auth?.private_key && selectedAuth.use_private_key===true"
                                    class="mt-2 text-sm text-red-600" id="notes-error"
                                    x-text="connectionErrors.auth?.private_key"></p>
@@ -1370,7 +1370,7 @@
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="mt-1">
                                 <div class="flex items-center justify-between">
-                                          <span class="flex-grow flex flex-col">
+                                          <span class="grow flex flex-col">
                                             <span class="text-sm font-medium text-gray-700" id="availability-label">Use legacy SHA-1 Key Verification?</span>
                                             <span class="text-sm text-gray-700"
                                                   id="availability-description">If your systems do not support SHA-2 variants of RSA key verification algorithms.</span>
@@ -1378,12 +1378,12 @@
                                     <button type="button"
                                             @click="selectedAuth.flag_use_sha1_key_verification = !selectedAuth.flag_use_sha1_key_verification;"
                                             :class="{ 'bg-indigo-600': selectedAuth.flag_use_sha1_key_verification, 'bg-gray-200': !(selectedAuth.flag_use_sha1_key_verification) }"
-                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.flag_use_sha1_key_verification, 'translate-x-0': !(selectedAuth.flag_use_sha1_key_verification) }"
                                                   aria-hidden="true"
-                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                     </button>
                                 </div>
                             </div>
@@ -1405,7 +1405,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.ssh_host" type="text" name="ssh_host" id="ssh_host"
                                        autocomplete="ssh_host"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.ssh_host" class="mt-2 text-sm text-red-600"
                                    id="ssh_host-error" x-text="connectionErrors.auth?.ssh_host"></p>
                             </div>
@@ -1419,7 +1419,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.ssh_port" type="text" name="ssh_port" id="ssh_port"
                                        autocomplete="ssh_port"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.ssh_port" class="mt-2 text-sm text-red-600"
                                    id="ssh_port-error" x-text="connectionErrors.auth?.ssh_port"></p>
                             </div>
@@ -1433,7 +1433,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.ssh_username" type="text" name="ssh_username"
                                        id="ssh_username" autocomplete="ssh_username"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.ssh_username" class="mt-2 text-sm text-red-600"
                                    id="ssh_username-error" x-text="connectionErrors.auth?.ssh_username"></p>
                             </div>
@@ -1449,7 +1449,7 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.ssh_password" type="text" name="ssh_port" id="ssh_port"
                                        autocomplete="ssh_password"
-                                       class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
                                 <p x-show="connectionErrors.auth?.ssh_password" class="mt-2 text-sm text-red-600"
                                    id="ssh_port-error" x-text="connectionErrors.auth?.ssh_password"></p>
                             </div>
@@ -1466,19 +1466,19 @@
                             <div class="mt-1">
                                 <!-- This example requires Tailwind CSS v2.0+ -->
                                 <div class="flex items-center justify-between">
-                                          <span class="flex-grow flex flex-col">
+                                          <span class="grow flex flex-col">
                                             <span class="text-sm font-medium text-gray-700" id="availability-label">Multi-Database User?</span>
                                             <span class="text-sm text-gray-700" id="availability-description">If you use the same user for multiple databases, it's good to enable this option.</span>
                                           </span>
                                     <button type="button"
                                             @click="selectedAuth.all_databases = !selectedAuth.all_databases;"
                                             :class="{ 'bg-indigo-600': selectedAuth.all_databases, 'bg-gray-200': !(selectedAuth.all_databases) }"
-                                            class="bg-gray-200 relative inline-flex flex-shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.all_databases, 'translate-x-0': !(selectedAuth.all_databases) }"
                                                   aria-hidden="true"
-                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform ring-0 transition ease-in-out duration-200"></span>
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                     </button>
                                 </div>
 
@@ -1487,7 +1487,7 @@
                             <div class="mt-3" x-show="selectedAuth.type?.name === 'PostgreSQL'">
                                 <div class="rounded-md bg-blue-50 p-4">
                                     <div class="flex">
-                                        <div class="flex-shrink-0">
+                                        <div class="shrink-0">
                                             <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                                 <path fill-rule="evenodd"
@@ -1514,7 +1514,7 @@
                                  x-show="selectedAuth.type?.name === 'MySQL' || selectedAuth.type?.name === 'MariaDB'">
                                 <div class="rounded-md bg-blue-50 p-4">
                                     <div class="flex">
-                                        <div class="flex-shrink-0">
+                                        <div class="shrink-0">
                                             <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                                 <path fill-rule="evenodd"
@@ -1545,7 +1545,7 @@
                             </label>
                             <div class="mt-1">
                                         <textarea x-model="connection.notes" id="notes" name="notes" rows="3"
-                                                  class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                                  class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
                                 <p x-show="connectionErrors?.notes" class="mt-2 text-sm text-red-600" id="notes-error"
                                    x-text="connectionErrors?.notes"></p>
                             </div>
@@ -1556,12 +1556,12 @@
 
                 <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                     <button @click="saveConnection()" type="button"
-                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                         <span x-show="!connection.id">Add Integration</span>
                         <span x-show="connection.id">Modify Integration</span>
                     </button>
                     <button @click="closeConnectionModal()" type="button"
-                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                         Cancel
                     </button>
                 </div>
@@ -1636,7 +1636,7 @@
                             </label>
                             <div class="mt-1">
                                 <textarea x-model="notes" id="about" name="about" rows="3"
-                                          class="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                          class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
                             </div>
                             <p class="mt-2 text-sm text-gray-700">Optional notes about this action.</p>
                         </div>
@@ -1645,11 +1645,11 @@
 
                 <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                     <button @click="deleteConnection(connection.id)" type="button"
-                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
                         Delete Connection
                     </button>
                     <button @click="closeDeleteConnectionModal()" type="button"
-                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
                         Cancel
                     </button>
                 </div>
@@ -1983,12 +1983,12 @@
                 let method = null;
 
                 if (this.connection.id) {
-                    url = "/api/proxy/connections/" + this.integrationCode + "/" + this.connection.id + "/?" + new URLSearchParams({
+                    url = "/api/v1/connections/" + this.integrationCode + "/" + this.connection.id + "/?" + new URLSearchParams({
                         location: this.connection.location?.id,
                     });
                     method = "PATCH";
                 } else {
-                    url = "/api/proxy/connections/" + this.integrationCode + "/?" + new URLSearchParams({
+                    url = "/api/v1/connections/" + this.integrationCode + "/?" + new URLSearchParams({
                         location: this.connection.location?.id,
                     });
                     method = "POST";
@@ -2150,7 +2150,7 @@
                 let url = null;
                 let method = null;
 
-                url = "/api/proxy/connections/" + this.integrationCode + "/" + connection_id + "/validate?" + new URLSearchParams({
+                url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/validate?" + new URLSearchParams({
                     location: location_id,
                 });
                 method = "GET";
@@ -2195,7 +2195,7 @@
                 let url = null;
                 let method = null;
 
-                url = "/api/proxy/connections/" + this.integrationCode + "/" + connection_id + "/update_db_type_and_version?" + new URLSearchParams({
+                url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/update_db_type_and_version?" + new URLSearchParams({
                     location: location_id,
                 });
                 method = "GET";

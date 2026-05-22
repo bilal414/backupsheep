@@ -2,7 +2,7 @@ import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from apps.console.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
 from apps.console.backup.models import (
     CoreAWSBackup,
 )

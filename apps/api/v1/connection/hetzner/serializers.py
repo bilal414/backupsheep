@@ -1,11 +1,10 @@
-import boto.ec2
 import pytz
 from django.conf import settings
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
 from apps.console.account.models import CoreAccount
-from apps.console.api.v1.utils.api_helpers import (
+from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
     IntegrationDefault, bs_encrypt, bs_decrypt,
@@ -17,8 +16,8 @@ from apps.console.connection.models import (
     CoreAuthHetzner,
 )
 from apps.console.node.models import CoreNode
-from apps.console.api.v1.account.serializers import CoreAccountSerializer
-from apps.console.api.v1.connection.serializers import CoreIntegrationSerializer, CoreConnectionLocationSerializer
+from apps.api.v1.account.serializers import CoreAccountSerializer
+from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreConnectionLocationSerializer
 
 
 
@@ -113,7 +112,10 @@ class CoreAuthHetznerWriteSerializer(serializers.ModelSerializer):
                 "Authorization": f"Bearer {api_key}",
             }
             result = requests.get(
-                settings.HETZNER_API + "/v1/actions", headers=headers, verify=True
+                settings.HETZNER_API + "/v1/servers",
+                headers=headers,
+                params={"per_page": 1},
+                verify=True,
             )
             if result.status_code != 200:
                 raise serializers.ValidationError(

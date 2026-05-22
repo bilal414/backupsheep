@@ -1,6 +1,6 @@
 from rest_framework import routers
 
-from apps.console.api.v1.storage.ibm.views import CoreStorageIBMView
+from apps.api.v1.storage.ibm.views import CoreStorageIBMView
 
 router = routers.SimpleRouter()
 

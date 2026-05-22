@@ -23,6 +23,11 @@ from dotenv import dotenv_values
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
+# Local working directory for in-progress backups and their logs. Backup tasks run
+# with the project root as CWD (see supervisor config), so this resolves to the same
+# place as the relative "_storage/" paths they use; ensure it exists.
+os.makedirs(os.path.join(BASE_DIR, "_storage"), exist_ok=True)
+
 if "BACKUPSHEEP_SECRETS" in os.environ:
     config = json.loads(os.environ.get("BACKUPSHEEP_SECRETS"))
 else:
@@ -285,3 +290,76 @@ MS_GRAPH_ENDPOINT = config["MS_GRAPH_ENDPOINT"]
 # GOOGLE Storage
 GOOGLE_CLIENT_ID = config["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = config["GOOGLE_CLIENT_SECRET"]
+
+# Cloud provider API endpoints (used by the server/volume snapshot integrations).
+# These are public, stable API hosts with sensible defaults so cloud backups work
+# out of the box; override in .env only if a provider changes its endpoint.
+DIGITALOCEAN_API = config.get("DIGITALOCEAN_API", "https://api.digitalocean.com")
+HETZNER_API = config.get("HETZNER_API", "https://api.hetzner.cloud")
+UPCLOUD_API = config.get("UPCLOUD_API", "https://api.upcloud.com/1.3")
+VULTR_API = config.get("VULTR_API", "https://api.vultr.com")
+GOOGLE_COMPUTE_API = config.get("GOOGLE_COMPUTE_API", "https://compute.googleapis.com")
+GOOGLE_RESOURCE_API = config.get(
+    "GOOGLE_RESOURCE_API", "https://cloudresourcemanager.googleapis.com"
+)
+
+# OAuth token endpoints (only used when refreshing OAuth-based cloud connections).
+DIGITALOCEAN_TOKEN_URL = config.get(
+    "DIGITALOCEAN_TOKEN_URL", "https://cloud.digitalocean.com/v1/oauth/token"
+)
+GOOGLE_OAUTH_TOKEN_URL = config.get(
+    "GOOGLE_OAUTH_TOKEN_URL", "https://oauth2.googleapis.com/token"
+)
+
+# DigitalOcean OAuth app (only needed for OAuth-based connections; Personal Access
+# Token connections do not require these).
+DIGITALOCEAN_APP_CLIENT_ID = config.get("DIGITALOCEAN_APP_CLIENT_ID", "")
+DIGITALOCEAN_APP_CLIENT_SECRET = config.get("DIGITALOCEAN_APP_CLIENT_SECRET", "")
+
+# OVH Public Cloud application credentials, per OVH endpoint region. Create an
+# application at the matching console (ovh.com / ovhcloud.com) and set these to back
+# up OVH instances/volumes.
+OVH_CA_APP_KEY = config.get("OVH_CA_APP_KEY", "")
+OVH_CA_APP_SECRET = config.get("OVH_CA_APP_SECRET", "")
+OVH_EU_APP_KEY = config.get("OVH_EU_APP_KEY", "")
+OVH_EU_APP_SECRET = config.get("OVH_EU_APP_SECRET", "")
+OVH_US_APP_KEY = config.get("OVH_US_APP_KEY", "")
+OVH_US_APP_SECRET = config.get("OVH_US_APP_SECRET", "")
+
+# Celery (task queue + scheduled backups)
+# Broker is Redis by default; override CELERY_BROKER_URL in .env for another broker.
+CELERY_BROKER_URL = config.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = "django-db"
+CELERY_CACHE_BACKEND = "django-cache"
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_TRACK_STARTED = True
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+# Task modules the worker must import at boot so every task is registered. These
+# do not live in the conventional "<app>/tasks.py" location, so Celery's app
+# autodiscovery does not find them; backups are dispatched by name via
+# send_task()/chord(), which fails on an unregistered task unless listed here.
+CELERY_IMPORTS = (
+    "apps._tasks.helper.tasks",
+    "apps._tasks.integration.aws",
+    "apps._tasks.integration.aws_rds",
+    "apps._tasks.integration.basecamp",
+    "apps._tasks.integration.database",
+    "apps._tasks.integration.digitalocean",
+    "apps._tasks.integration.google_cloud",
+    "apps._tasks.integration.hetzner",
+    "apps._tasks.integration.lightsail",
+    "apps._tasks.integration.oracle",
+    "apps._tasks.integration.ovh_ca",
+    "apps._tasks.integration.ovh_eu",
+    "apps._tasks.integration.ovh_us",
+    "apps._tasks.integration.upcloud",
+    "apps._tasks.integration.vultr",
+    "apps._tasks.integration.website",
+    "apps._tasks.integration.wordpress",
+    "apps._tasks.integration.storage.tasks",
+)
+# Local scheduled backups are driven by django-celery-beat's database scheduler
+# (replaces the SaaS AWS EventBridge Scheduler).
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"

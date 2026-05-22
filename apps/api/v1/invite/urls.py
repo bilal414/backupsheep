@@ -1,5 +1,5 @@
 from rest_framework import routers
-from apps.console.api.v1.invite.views import CoreInviteView
+from apps.api.v1.invite.views import CoreInviteView
 
 router = routers.SimpleRouter()
 
