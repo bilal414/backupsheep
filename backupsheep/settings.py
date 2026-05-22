@@ -76,6 +76,9 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "django_user_agents.middleware.UserAgentMiddleware",
     "utils.middleware.TimezoneMiddleware",
+    # Forces a not-yet-configured install into the first-run wizard (and locks it
+    # afterward). Must run before RedirectMiddleware so onboarding wins over login.
+    "utils.middleware.OnboardingMiddleware",
     "utils.middleware.RedirectMiddleware",
 
 ]
@@ -244,6 +247,7 @@ HOME_URL = "/console"
 LOGIN_URL = "/login"
 API_PATH = "/api/"
 CONSOLE_URL = "/console"
+ONBOARDING_URL = "/onboarding"
 
 LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/login',
@@ -251,6 +255,7 @@ LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/django-admin/',
     r'/api/',
     r'/error/',
+    r'/onboarding',
 ]
 
 # POSTMARK - Email Service

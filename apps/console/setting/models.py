@@ -93,3 +93,52 @@ class CoreSiteSettings(TimeStampedModel):
 
     def get_email_provider(self):
         return self.email_provider or getattr(settings, "EMAIL_PROVIDER", "none")
+
+    def send_test_email(self, to_email):
+        """Send a plain connectivity-test email via the active provider using the stored
+        credentials. Returns (ok: bool, detail: str). Used by the onboarding email step."""
+        provider = self.get_email_provider()
+        app_name = self.get_app_name()
+        subject = f"{app_name} test email"
+        text = (f"This is a test email from {app_name}. If you received it, your email "
+                f"provider is configured correctly.")
+        try:
+            if provider == "postmark":
+                import json
+                import requests
+                r = requests.post(
+                    f"{self.email_cred('api_url', 'POSTMARK_API_URL')}/email",
+                    headers={"Content-Type": "application/json", "Accept": "application/json",
+                             "X-Postmark-Server-Token": self.email_cred("api_key", "POSTMARK_API_KEY")},
+                    data=json.dumps({"From": f"{app_name} <{self.email_cred('email', 'POSTMARK_EMAIL')}>",
+                                     "To": to_email, "Subject": subject, "TextBody": text,
+                                     "MessageStream": "outbound"}),
+                )
+                return (r.status_code == 200), (r.json().get("Message", "Sent") if r.status_code != 200 else "Sent")
+            elif provider == "mailgun":
+                import requests
+                r = requests.post(
+                    f"{self.email_cred('api_url', 'MAILGUN_API_URL')}/{self.email_cred('domain', 'MAILGUN_DOMAIN')}/messages",
+                    auth=("api", self.email_cred("api_key", "MAILGUN_API_KEY")),
+                    data={"from": f"{app_name} <{self.email_cred('email', 'MAILGUN_EMAIL')}>",
+                          "to": [to_email], "subject": subject, "text": text},
+                )
+                return (r.status_code == 200), ("Sent" if r.status_code == 200 else r.text[:200])
+            elif provider == "ses":
+                import boto3
+                client = boto3.client(
+                    "ses",
+                    aws_access_key_id=self.email_cred("access_key_id", "AWS_SES_ACCESS_KEY_ID"),
+                    aws_secret_access_key=self.email_cred("secret_access_key", "AWS_SES_SECRET_ACCESS_KEY"),
+                    region_name=self.email_cred("region_name", "AWS_SES_REGION_NAME"),
+                )
+                from_email = self.email_cred("from_email") or f"notifications@{self.get_app_domain()}"
+                client.send_email(
+                    Source=f"{app_name} <{from_email}>",
+                    Destination={"ToAddresses": [to_email]},
+                    Message={"Subject": {"Data": subject}, "Body": {"Text": {"Data": text}}},
+                )
+                return True, "Sent"
+            return False, "No email provider is selected."
+        except Exception as e:
+            return False, str(e)[:200]

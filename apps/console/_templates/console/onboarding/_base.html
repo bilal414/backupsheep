@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>{% block title %}Set up {{ app_name }}{% endblock %}</title>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <link rel="icon" href="{{ STATIC_URL }}images/favicon.png" type="image/x-icon">
+    <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
+    <style>[x-cloak]{display:none !important;}</style>
+</head>
+<body class="bg-gray-50 min-h-screen text-gray-900">
+<div class="max-w-2xl mx-auto px-4 py-10">
+    <div class="mb-8">
+        <h1 class="text-2xl font-semibold">Set up {{ app_name|default:"BackupSheep" }}</h1>
+        <p class="text-sm text-gray-500 mt-1">A few steps to get your self-hosted install ready.</p>
+    </div>
+
+    <ol class="flex items-center w-full mb-8">
+        {% for s in steps %}
+            <li class="flex items-center {% if not forloop.last %}flex-1{% endif %}">
+                <span class="flex items-center justify-center w-7 h-7 rounded-full text-xs font-semibold
+                    {% if forloop.counter < step %}bg-green-600 text-white
+                    {% elif forloop.counter == step %}bg-indigo-600 text-white
+                    {% else %}bg-gray-200 text-gray-500{% endif %}">{{ forloop.counter }}</span>
+                <span class="ml-2 text-sm hidden sm:inline {% if forloop.counter == step %}text-indigo-700 font-medium{% else %}text-gray-500{% endif %}">{{ s }}</span>
+                {% if not forloop.last %}<span class="flex-1 h-px bg-gray-200 mx-3"></span>{% endif %}
+            </li>
+        {% endfor %}
+    </ol>
+
+    {% if messages %}
+        <div class="mb-4 space-y-2">
+            {% for m in messages %}
+                <div class="rounded-md px-4 py-3 text-sm
+                    {% if m.tags == 'success' %}bg-green-50 text-green-800 ring-1 ring-green-200
+                    {% elif m.tags == 'error' %}bg-red-50 text-red-800 ring-1 ring-red-200
+                    {% else %}bg-yellow-50 text-yellow-800 ring-1 ring-yellow-200{% endif %}">{{ m }}</div>
+            {% endfor %}
+        </div>
+    {% endif %}
+
+    <div class="bg-white shadow-sm ring-1 ring-gray-200 rounded-lg p-6">
+        {% block step %}{% endblock %}
+    </div>
+</div>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js"></script>
+</body>
+</html>

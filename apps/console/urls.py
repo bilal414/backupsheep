@@ -5,6 +5,7 @@ app_name = "console"
 
 urlpatterns = [
     path('', include('apps.console.auth.urls')),
+    path('onboarding/', include('apps.console.onboarding.urls')),
     path(
         r"console/",
         include(
