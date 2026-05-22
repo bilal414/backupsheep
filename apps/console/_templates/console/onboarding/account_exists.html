@@ -1,0 +1,7 @@
+{% extends "console/onboarding/_base.html" %}
+{% block step %}
+    <h2 class="text-lg font-semibold mb-2">An administrator already exists</h2>
+    <p class="text-sm text-gray-600 mb-5">This install already has an account owner. Sign in to finish setting things up.</p>
+    <a href="{% url 'console:auth:login' %}"
+       class="inline-block bg-indigo-600 text-white text-sm font-medium px-5 py-2 rounded-md hover:bg-indigo-700">Go to sign in</a>
+{% endblock %}

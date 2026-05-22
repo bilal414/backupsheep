@@ -64,16 +64,15 @@ def backup_digitalocean(
         try:
 
             """
-            Check for connection validation 
+            Best-effort pre-checks (these may refresh auth tokens). A transient
+            validation failure must NOT fail the backup -- the snapshot call itself is
+            the real test, so we proceed regardless.
             """
-            if not node.connection.validate():
-                raise ConnectionValidationFailedError(node, attempt_no, backup_type)
-
-            """
-            Check node at cloud provider
-            """
-            if not node.validate():
-                raise NodeValidationFailedError(node, attempt_no, backup_type)
+            try:
+                node.connection.validate()
+                node.validate()
+            except Exception:
+                pass
 
             """
             Initialize the backup
@@ -88,8 +87,8 @@ def backup_digitalocean(
             )
 
             """
-            Connect with website and generate snapshot 
-            Only create snapshot if there's no existing backup action_id which means no existing backup is running.
+            Generate snapshot. Only create if there's no existing action_id/unique_id,
+            which means a snapshot for this backup is already running.
             """
             if node.type == CoreNode.Type.CLOUD:
                 if not backup.action_id:
@@ -99,35 +98,12 @@ def backup_digitalocean(
                     node.digitalocean.create_snapshot(backup)
 
             """
-            Now we have to validate backup
+            Hand off to async polling instead of blocking the worker. poll_cloud_backup
+            waits for the snapshot to finish, finalizes it (retention + success notify),
+            and tolerates flaky status calls without failing the backup.
             """
-            backup.validate()
-
-            """
-            Finally just reset backup. 
-            """
-            node.backup_complete_reset(self.request.id)
-
-            """
-            Now mark backups delete requested based on schedule. 
-            """
-            if backup.schedule:
-                """
-                DELETE PREVIOUS BACKUPS if KEEP LAST # IS USED
-                """
-                if (backup.schedule.keep_last or 0) > 0:
-                    while backup.schedule.digitalocean_backups.filter(
-                        status=UtilBackup.Status.COMPLETE
-                    ).count() > (backup.schedule.keep_last or 0):
-                        backup_to_delete = (
-                            backup.schedule.digitalocean_backups.filter(
-                                status=UtilBackup.Status.COMPLETE
-                            )
-                            .order_by("created")
-                            .first()
-                        )
-                        backup_to_delete.soft_delete()
-            node.notify_backup_success(backup)
+            from apps._tasks.helper.tasks import poll_cloud_backup
+            poll_cloud_backup.apply_async(args=[node.id, backup.id], countdown=60)
         except (
             NodeNotReadyForBackupError,
             ConnectionNotReadyForBackupError,

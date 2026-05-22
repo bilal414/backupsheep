@@ -1,0 +1,19 @@
+{% extends "console/onboarding/_base.html" %}
+{% block step %}
+    <h2 class="text-lg font-semibold mb-1">Create your admin account</h2>
+    <p class="text-sm text-gray-500 mb-5">This is the account owner. You'll sign in with this email address.</p>
+    <form method="post" novalidate>
+        {% csrf_token %}
+        {% if form.non_field_errors %}
+            <div class="rounded-md bg-red-50 ring-1 ring-red-200 text-red-700 text-sm px-4 py-3 mb-4">{{ form.non_field_errors }}</div>
+        {% endif %}
+        {% include "console/onboarding/_field.html" with field=form.full_name %}
+        {% include "console/onboarding/_field.html" with field=form.organization %}
+        {% include "console/onboarding/_field.html" with field=form.email %}
+        {% include "console/onboarding/_field.html" with field=form.password1 %}
+        {% include "console/onboarding/_field.html" with field=form.password2 %}
+        <div class="flex justify-end mt-6">
+            <button type="submit" class="bg-indigo-600 text-white text-sm font-medium px-5 py-2 rounded-md hover:bg-indigo-700">Create account &rarr;</button>
+        </div>
+    </form>
+{% endblock %}

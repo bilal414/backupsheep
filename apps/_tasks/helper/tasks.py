@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import shutil
 import uuid
 import boto3
 import humanfriendly
@@ -12,10 +13,8 @@ from celery import current_app
 from django.db.models import Q, Sum, Count
 from sentry_sdk import capture_exception, capture_message
 
-from apps.api.v1.utils.api_helpers import aws_s3_upload_log_file
 from apps.console.account.models import CoreAccount
 from backupsheep.celery import app
-import subprocess
 
 from apps.console.connection.models import CoreAuthBasecamp
 from apps.console.member.models import CoreMember
@@ -82,75 +81,175 @@ def digitalocean_refresh_tokens(self):
     name="delete_from_disk",
     track_started=True,
     bind=True,
+    max_retries=3,
+    default_retry_delay=60,
 )
 def delete_from_disk(self, backup_uuid, path_type):
+    """Remove a backup's local working files from _storage once uploads have settled.
+
+    path_type selects what to remove (everything lives under <BASE_DIR>/_storage/):
+        "dir"  -> the working directory  <uuid>/      (uncompressed dump tree)
+        "zip"  -> the archive            <uuid>.zip
+        "both" -> the working directory and the archive
+
+    The run log (<uuid>.log) is intentionally kept on disk and pruned later by
+    delete_old_logs; it is never removed here.
+
+    Uses plain Python file operations -- no shell, no sudo, no hardcoded host paths --
+    and is idempotent: a missing file is success, not an error. Only unexpected failures
+    retry (bounded), so cleanup can never wedge a backup or leak disk silently.
+    """
+    storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
+
+    def _remove(name, is_dir):
+        # Resolve and confine to _storage so a malformed uuid can't escape the directory
+        # (and never delete _storage itself).
+        target = os.path.realpath(os.path.join(storage_dir, name))
+        if target == storage_dir or os.path.commonpath([storage_dir, target]) != storage_dir:
+            return
+        if is_dir:
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            try:
+                os.remove(target)
+            except FileNotFoundError:
+                pass
+
     try:
-        if path_type == "dir" or path_type == "both":
-            local_dir = f"_storage/{backup_uuid}"
+        if path_type in ("dir", "both"):
+            _remove(backup_uuid, is_dir=True)
 
-            if "_storage" in local_dir:
-                execstr = f"sudo rsync -a --delete empty_dir/ {local_dir}"
+        if path_type in ("zip", "both"):
+            _remove(f"{backup_uuid}.zip", is_dir=False)
+    except Exception as e:
+        capture_exception(e)
+        raise self.retry()
 
+
+@current_app.task(name="delete_old_logs", bind=True, ignore_result=True)
+def delete_old_logs(self, max_age_days=None):
+    """Prune backup run logs from local _storage once they pass the retention window.
+
+    Self-hosted builds keep run logs (and the .files/.md5 artefacts) on the container
+    instead of uploading them anywhere, so this task is what bounds their disk usage.
+    It is scheduled daily by Celery beat (see CELERY_BEAT_SCHEDULE). max_age_days
+    defaults to settings.LOG_RETENTION_DAYS (30).
+    """
+    if max_age_days is None:
+        max_age_days = getattr(settings, "LOG_RETENTION_DAYS", 30)
+    storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
+    cutoff = time.time() - (max_age_days * 86400)
+    suffixes = (".log", ".files", ".md5")
+    try:
+        with os.scandir(storage_dir) as entries:
+            for entry in entries:
+                if not entry.is_file() or not entry.name.endswith(suffixes):
+                    continue
                 try:
-                    subprocess.run(
-                        execstr,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        timeout=14 * 60,
-                        universal_newlines=True,
-                        encoding="utf-8",
-                        errors="ignore",
-                        shell=True,
-                    )
-                except Exception:
-                    pass
-
-                # Now remove directory
-                execstr = f"sudo rm -rf {local_dir}"
-                try:
-                    subprocess.run(
-                        execstr,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        timeout=14 * 60,
-                        universal_newlines=True,
-                        encoding="utf-8",
-                        errors="ignore",
-                        shell=True,
-                    )
-                except Exception:
-                    pass
-        if path_type == "zip" or path_type == "both":
-            local_zip = f"_storage/{backup_uuid}.zip"
-
-            # Now we need to upload log file. Doing it here because we need logs from storage uploads.
-            # Only delete log when we delete zip because we delete dir before zip file is uploaded.
-            log_file_path = f"/home/ubuntu/backupsheep/_storage/{backup_uuid}.log"
-            if os.path.exists(log_file_path):
-                aws_s3_upload_log_file(log_file_path, f"{backup_uuid}.log")
-                os.remove(log_file_path)
-
-            if "_storage" in local_zip:
-                execstr = f"sudo rm -rf {local_zip}"
-                try:
-                    subprocess.run(
-                        execstr,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        timeout=14 * 60,
-                        universal_newlines=True,
-                        encoding="utf-8",
-                        errors="ignore",
-                        shell=True,
-                    )
-                except Exception:
+                    if entry.stat().st_mtime < cutoff:
+                        os.remove(entry.path)
+                except FileNotFoundError:
                     pass
     except FileNotFoundError:
         pass
-    except OSError:
-        pass
     except Exception as e:
-        raise self.retry()
+        capture_exception(e)
+
+
+@current_app.task(name="poll_cloud_backup", bind=True, ignore_result=True)
+def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, timeout=86400):
+    """Asynchronously wait for a cloud / volume snapshot to finish.
+
+    Runs ONE status check per invocation and re-queues itself between checks, so the
+    worker is never blocked for the whole (potentially hours-long) snapshot -- replacing
+    the old blocking `while ...: time.sleep(60)` poll inside each backup model.
+
+    Resilience: a single failed or transient status check never fails the backup --
+    backup.poll_status() returns IN_PROGRESS and we simply poll again. The backup is
+    marked FAILED only when the provider itself reports the snapshot errored, and TIMEOUT
+    only after `timeout` seconds of polling.
+    """
+    import time as _time
+    from apps.console.node.models import CoreNode
+    from apps._tasks.exceptions import (
+        NodeBackupFailedError,
+        NodeBackupStatusCheckTimeOutError,
+    )
+
+    try:
+        node = CoreNode.objects.get(id=node_id)
+    except CoreNode.DoesNotExist:
+        return
+
+    backup = node.get_cloud_backup(backup_id)
+    if backup is None:
+        return
+
+    # Stop polling once the backup has reached any terminal state (completed elsewhere,
+    # cancelled, or queued/processed for deletion).
+    terminal = (
+        UtilBackup.Status.COMPLETE,
+        UtilBackup.Status.FAILED,
+        UtilBackup.Status.TIMEOUT,
+        UtilBackup.Status.CANCELLED,
+        UtilBackup.Status.DELETE_REQUESTED,
+        UtilBackup.Status.DELETE_IN_PROGRESS,
+        UtilBackup.Status.DELETE_COMPLETED,
+    )
+    if backup.status in terminal:
+        return
+
+    if started_at is None:
+        started_at = _time.time()
+
+    try:
+        status = backup.poll_status()
+    except Exception as e:
+        # poll_status is meant to swallow transient errors itself; if an unexpected one
+        # escapes, treat it as "still in progress" rather than failing the backup.
+        capture_exception(e)
+        status = UtilBackup.Status.IN_PROGRESS
+
+    if status == UtilBackup.Status.COMPLETE:
+        node.backup_complete_reset(backup.celery_task_id)
+        # Retention: keep only the newest keep_last completed backups for the schedule.
+        if backup.schedule and (backup.schedule.keep_last or 0) > 0:
+            keep_last = backup.schedule.keep_last
+            completed = list(
+                backup.__class__.objects.filter(
+                    schedule=backup.schedule, status=UtilBackup.Status.COMPLETE
+                ).order_by("created")
+            )
+            for old_backup in completed[:-keep_last]:
+                old_backup.soft_delete()
+        node.notify_backup_success(backup)
+        return
+
+    if status == UtilBackup.Status.FAILED:
+        backup.status = UtilBackup.Status.FAILED
+        backup.save()
+        node.backup_complete_reset()  # return node to ACTIVE (no celery id -> node only)
+        node.notify_backup_fail(
+            NodeBackupFailedError(
+                node, backup.uuid_str, backup.attempt_no, backup.type,
+                "Cloud provider reported the snapshot as errored.",
+            ),
+            backup.type,
+        )
+        return
+
+    # Still in progress (or a transient check failure). Give up only past the hard
+    # timeout; otherwise re-queue another check and free the worker until then.
+    if (_time.time() - started_at) > timeout:
+        node.backup_timeout_reset(backup.celery_task_id)
+        node.notify_backup_fail(
+            NodeBackupStatusCheckTimeOutError(node, backup.uuid_str), backup.type
+        )
+        return
+
+    poll_cloud_backup.apply_async(
+        args=[node_id, backup_id, started_at, interval, timeout], countdown=interval
+    )
 
 
 @current_app.task(
@@ -159,7 +258,6 @@ def delete_from_disk(self, backup_uuid, path_type):
     default_retry_delay=15 * 60,
     max_retries=16,
     bind=True,
-    queue="terminate_backup",
 )
 def terminate_backup(self, data):
     try:
@@ -168,7 +266,7 @@ def terminate_backup(self, data):
         raise self.retry()
 
 
-@current_app.task(name="send_to_firebase", track_started=True, bind=True, queue="send_to_firebase")
+@current_app.task(name="send_to_firebase", track_started=True, bind=True)
 def send_to_firebase(self, data):
     try:
         if data.get("notes") == "completed" or data.get("notes") == "failed":
@@ -191,7 +289,6 @@ def send_to_firebase(self, data):
     ignore_result=True,
     acks_late=False,
     send_events=False,
-    queue="send_log_to_db",
 )
 def send_log_to_db(self, data):
     from apps.console.log.models import CoreLog
@@ -225,7 +322,6 @@ def send_log_to_db(self, data):
     name="send_log_to_slack",
     bind=True,
     ignore_result=True,
-    queue="send_log_to_slack",
 )
 def send_log_to_slack(self, url, message):
     try:
@@ -245,7 +341,6 @@ def send_log_to_slack(self, url, message):
     name="send_log_to_telegram",
     bind=True,
     ignore_result=True,
-    queue="send_log_to_telegram",
 )
 def send_log_to_telegram(self, chat_id, message):
     try:
@@ -306,7 +401,6 @@ def account_delete(self):
     ignore_result=True,
     default_retry_delay=1 * 60,
     max_retries=16,
-    queue="send_postmark_email",
 )
 def send_postmark_email(self, to_email, template, context):
     try:

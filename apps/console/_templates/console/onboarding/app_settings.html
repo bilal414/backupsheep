@@ -1,0 +1,18 @@
+{% extends "console/onboarding/_base.html" %}
+{% block step %}
+    <h2 class="text-lg font-semibold mb-1">Application settings</h2>
+    <p class="text-sm text-gray-500 mb-5">How this install identifies itself in the UI and in email links.</p>
+    <form method="post" novalidate>
+        {% csrf_token %}
+        {% include "console/onboarding/_field.html" with field=form.app_name %}
+        <div class="grid grid-cols-3 gap-3">
+            <div class="col-span-1">{% include "console/onboarding/_field.html" with field=form.app_protocol %}</div>
+            <div class="col-span-2">{% include "console/onboarding/_field.html" with field=form.app_domain %}</div>
+        </div>
+        {% include "console/onboarding/_field.html" with field=form.default_timezone %}
+        <p class="text-xs text-gray-500 -mt-2 mb-2">Note: the host(s) Django accepts requests on and CSRF origins are set via <code>DJANGO_ALLOWED_HOSTS</code> / <code>APP_DOMAIN</code> in your environment, before launch.</p>
+        <div class="flex justify-end mt-6">
+            <button type="submit" class="bg-indigo-600 text-white text-sm font-medium px-5 py-2 rounded-md hover:bg-indigo-700">Continue &rarr;</button>
+        </div>
+    </form>
+{% endblock %}

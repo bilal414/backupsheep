@@ -1,14 +1,9 @@
 #!/bin/bash
-
-# Configure NGINX
-#systemctl enable nginx
-service nginx start
+# Entrypoint for the web (app) service: collect static assets (served by WhiteNoise),
+# then run gunicorn in the foreground. Schema migrations run in the one-shot `migrate`
+# service; the Celery worker and beat run as their own services (see docker-compose.yml).
+set -e
 
 python manage.py collectstatic --noinput
-python manage.py migrate
 
-# Run the web server, the Celery worker (executes backups) and the Celery beat
-# scheduler (fires scheduled backups) under supervisor. Requires CELERY_BROKER_URL
-# (e.g. a Redis service) to be reachable.
-supervisord -c /code/_supervisor/supervisord.conf
-
+exec gunicorn backupsheep.wsgi:application --workers=4 --timeout=3600 --bind 0.0.0.0:8000
