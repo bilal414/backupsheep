@@ -74,16 +74,20 @@ class CoreNotificationLogEmail(TimeStampedModel):
         from apps.console.setting.models import CoreSiteSettings
         import json
 
-        self.html_body = render_to_string(f"console/emails/{self.template}.html", self.context)
-        self.text_body = render_to_string(f"console/emails/{self.template}.txt.html", self.context)
-        self.subject = render_to_string(f"console/emails/{self.template}.subject.html", self.context)
+        # Provider + credentials and branding come from the DB-backed site settings
+        # (configured in the onboarding wizard), falling back to the matching .env values.
+        site = CoreSiteSettings.load()
+        app_name = site.get_app_name()
+        app_url = f"{site.get_app_protocol()}{site.get_app_domain()}"
+
+        # render_to_string does not run context processors, so inject branding explicitly.
+        email_context = {**(self.context or {}), "site_app_name": app_name, "site_app_url": app_url}
+        self.html_body = render_to_string(f"console/emails/{self.template}.html", email_context)
+        self.text_body = render_to_string(f"console/emails/{self.template}.txt.html", email_context)
+        self.subject = render_to_string(f"console/emails/{self.template}.subject.html", email_context)
         self.save()
 
-        # Provider + credentials come from the DB-backed site settings (configured in the
-        # onboarding wizard), falling back to the matching .env values.
-        site = CoreSiteSettings.load()
         email_provider = site.get_email_provider()
-        app_name = site.get_app_name()
 
         if email_provider == "mailgun":
             api_url = site.email_cred("api_url", "MAILGUN_API_URL")
