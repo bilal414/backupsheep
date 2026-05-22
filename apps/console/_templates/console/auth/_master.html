@@ -13,7 +13,7 @@
 
         gtag('config', 'G-CTFWTRZC93');
     </script>
-    <title>{% block title %}BackupSheep{% endblock %}</title>
+    <title>{% block title %}{{ site.app_name }}{% endblock %}</title>
     {% if server_type == 'dev' %}
         <meta name="robots" content="noindex,nofollow">
     {% endif %}
@@ -22,14 +22,14 @@
     <meta name="description"
           content="{% block description %}{% endblock %}">
     <meta name="author" content="{% block author %}{% endblock %}">
-    <meta name="og:site_name" content="BackupSheep">
+    <meta name="og:site_name" content="{{ site.app_name }}">
     <meta name="og:image" content="{{ STATIC_URL }}images/home.png">
     <meta property="og:image:width" content="4284"/>
     <meta property="og:image:height" content="2874"/>
     <meta name="og:description"
           content="{% block og_description %} {% endblock %}">
     <meta name="og:title"
-          content="{% block og_title %}BackupSheep{% endblock %}">
+          content="{% block og_title %}{{ site.app_name }}{% endblock %}">
     <meta name="keywords"
           content="{% block keywords %}automate cloud backups, cloud backups, website backups, database backups{% endblock %}">
     <link rel="shortcuticon" href="{{ STATIC_URL }}images/favicon.ico" type="image/x-icon">

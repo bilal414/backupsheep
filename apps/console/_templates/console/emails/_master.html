@@ -444,8 +444,8 @@
           <table class="email-content" width="100%" cellpadding="0" cellspacing="0" role="presentation">
             <tr>
               <td class="email-masthead">
-                <a href="https://backupsheep.com" class="f-fallback email-masthead_name">
-                BackupSheep Notifications
+                <a href="{{ site_app_url|default:'#' }}" class="f-fallback email-masthead_name">
+                {{ site_app_name|default:"BackupSheep" }} Notifications
               </a>
               </td>
             </tr>
@@ -469,7 +469,7 @@
                 <table class="email-footer" align="center" width="570" cellpadding="0" cellspacing="0" role="presentation">
                   <tr>
                     <td class="content-cell" align="center">
-                      <p class="f-fallback sub align-center">&copy; 2023 BackupSheep Inc. All rights reserved.</p>
+                      <p class="f-fallback sub align-center">&copy; {{ site_app_name|default:"BackupSheep" }}</p>
 
                     </td>
                   </tr>
