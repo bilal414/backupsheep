@@ -71,6 +71,7 @@ class CoreNotificationLogEmail(TimeStampedModel):
 
     def send(self):
         from django.template.loader import render_to_string
+        from apps.console.setting.models import CoreSiteSettings
         import json
 
         self.html_body = render_to_string(f"console/emails/{self.template}.html", self.context)
@@ -78,13 +79,19 @@ class CoreNotificationLogEmail(TimeStampedModel):
         self.subject = render_to_string(f"console/emails/{self.template}.subject.html", self.context)
         self.save()
 
-        email_provider = settings.EMAIL_PROVIDER
+        # Provider + credentials come from the DB-backed site settings (configured in the
+        # onboarding wizard), falling back to the matching .env values.
+        site = CoreSiteSettings.load()
+        email_provider = site.get_email_provider()
+        app_name = site.get_app_name()
 
         if email_provider == "mailgun":
+            api_url = site.email_cred("api_url", "MAILGUN_API_URL")
+            domain = site.email_cred("domain", "MAILGUN_DOMAIN")
             response = requests.post(
-                url=f"{settings.MAILGUN_API_URL}/{settings.MAILGUN_DOMAIN}/messages",
-                auth=("api", settings.MAILGUN_API_KEY),
-                data={"from": f"{settings.APP_NAME} <{settings.MAILGUN_EMAIL}>",
+                url=f"{api_url}/{domain}/messages",
+                auth=("api", site.email_cred("api_key", "MAILGUN_API_KEY")),
+                data={"from": f"{app_name} <{site.email_cred('email', 'MAILGUN_EMAIL')}>",
                       "to": [self.email],
                       "subject": self.subject,
                       "text": self.text_body,
@@ -94,7 +101,7 @@ class CoreNotificationLogEmail(TimeStampedModel):
             self.message_id = response.json().get("message_id")
             self.save()
         elif email_provider == "postmark":
-            parameters = {"From": f"{settings.APP_NAME} <{settings.POSTMARK_EMAIL}>",
+            parameters = {"From": f"{app_name} <{site.email_cred('email', 'POSTMARK_EMAIL')}>",
                           "To": self.email,
                           "Subject": self.subject,
                           "TextBody": self.text_body,
@@ -104,9 +111,9 @@ class CoreNotificationLogEmail(TimeStampedModel):
             data = json.dumps(parameters)
 
             response = requests.post(
-                url=f"{settings.POSTMARK_API_URL}/email",
+                url=f"{site.email_cred('api_url', 'POSTMARK_API_URL')}/email",
                 headers={"Content-Type": "application/json", "Accept": "application/json",
-                         "X-Postmark-Server-Token": settings.POSTMARK_API_KEY},
+                         "X-Postmark-Server-Token": site.email_cred("api_key", "POSTMARK_API_KEY")},
                 data=data
             )
             self.message_id = response.json().get("MessageID")
@@ -117,13 +124,14 @@ class CoreNotificationLogEmail(TimeStampedModel):
 
             ses_client = boto3.client(
                 "ses",
-                aws_access_key_id=settings.AWS_SES_ACCESS_KEY_ID,
-                aws_secret_access_key=settings.AWS_SES_SECRET_ACCESS_KEY,
-                region_name=settings.AWS_SES_REGION_NAME,
+                aws_access_key_id=site.email_cred("access_key_id", "AWS_SES_ACCESS_KEY_ID"),
+                aws_secret_access_key=site.email_cred("secret_access_key", "AWS_SES_SECRET_ACCESS_KEY"),
+                region_name=site.email_cred("region_name", "AWS_SES_REGION_NAME"),
             )
 
             ses_mail_sender = SesMailSender(ses_client)
-            source = f"{settings.APP_NAME} <notifications@backupsheep.com>"
+            from_email = site.email_cred("from_email") or f"notifications@{site.get_app_domain()}"
+            source = f"{app_name} <{from_email}>"
 
             # Send Email
             message_id = ses_mail_sender.send_email(

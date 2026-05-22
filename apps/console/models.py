@@ -11,3 +11,4 @@ from apps.console.notification.models import *
 from apps.console.download.models import *
 from apps.console.usage.models import *
 from apps.console.utils.models import *
+from apps.console.setting.models import *
