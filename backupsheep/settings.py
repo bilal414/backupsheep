@@ -66,6 +66,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Serve static files directly from gunicorn (no nginx in the container).
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -194,6 +196,18 @@ STATIC_ROOT = BASE_DIR + "/static/"
 STATICFILES_DIRS = (
     ("console", BASE_DIR + "/apps/console/_static/console"),
 )
+
+# WhiteNoise serves collected static files from gunicorn (no nginx in the container).
+# CompressedStaticFilesStorage gzips assets but does not hash filenames, so it never
+# errors on a {% static %} reference whose file is missing from STATIC_ROOT.
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+    },
+}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
@@ -363,3 +377,64 @@ CELERY_IMPORTS = (
 # Local scheduled backups are driven by django-celery-beat's database scheduler
 # (replaces the SaaS AWS EventBridge Scheduler).
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+# Backup run logs are kept on the container's local _storage volume (never uploaded to
+# any external bucket) and pruned by the delete_old_logs task after this many days.
+LOG_RETENTION_DAYS = int(config.get("LOG_RETENTION_DAYS", 30))
+
+# Periodic maintenance fired by Celery beat. The DatabaseScheduler syncs these entries
+# into django-celery-beat's PeriodicTask table on startup.
+from celery.schedules import crontab
+
+CELERY_BEAT_SCHEDULE = {
+    "delete-old-logs": {
+        "task": "delete_old_logs",
+        "schedule": crontab(minute=0, hour=3),  # daily at 03:00 (worker timezone)
+    },
+}
+
+# Task routing across the worker types (see docker-compose.yml):
+#   cloud ..... API-only provider snapshots + general/misc tasks; scales horizontally
+#   database .. database dumps (heavy CPU/disk); isolated so a big dump can't starve
+#               file backups
+#   files ..... website / wordpress / basecamp dumps (heavy CPU/disk); isolated
+#   storage ... uploads each dump to the storage backends + local cleanup; scalable pool
+#               (worker-storage) sharing the _storage volume with the dump workers
+#   logs ...... DB log entries, Slack/Telegram/Firebase notifications, and on-disk
+#               run-log retention (worker-logs)
+#
+# storage_upload/finalize_backup/delete_from_disk go to "storage" so they always run on a
+# worker that can see the files the dump produced. Anything not listed here falls to the
+# default queue, drained by the cloud worker.
+CELERY_TASK_DEFAULT_QUEUE = "default"
+CELERY_TASK_ROUTES = {
+    # Local-disk dumps — isolated per type.
+    "backup_database": {"queue": "database"},
+    "backup_website": {"queue": "files"},
+    "backup_wordpress": {"queue": "files"},
+    "backup_basecamp": {"queue": "files"},
+    # Local-disk upload + cleanup — handled by the scalable worker-storage pool.
+    "storage_upload": {"queue": "storage"},
+    "finalize_backup": {"queue": "storage"},
+    "delete_from_disk": {"queue": "storage"},
+    # Cloud/volume provider snapshots — API-only, no local disk.
+    "backup_digitalocean": {"queue": "cloud"},
+    "backup_hetzner": {"queue": "cloud"},
+    "backup_vultr": {"queue": "cloud"},
+    "backup_aws": {"queue": "cloud"},
+    "backup_aws_rds": {"queue": "cloud"},
+    "backup_lightsail": {"queue": "cloud"},
+    "backup_google_cloud": {"queue": "cloud"},
+    "backup_oracle": {"queue": "cloud"},
+    "backup_upcloud": {"queue": "cloud"},
+    "backup_ovh_ca": {"queue": "cloud"},
+    "backup_ovh_eu": {"queue": "cloud"},
+    "backup_ovh_us": {"queue": "cloud"},
+    # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram/Firebase
+    # fan-out, and on-disk run-log retention.
+    "send_log_to_db": {"queue": "logs"},
+    "send_log_to_slack": {"queue": "logs"},
+    "send_log_to_telegram": {"queue": "logs"},
+    "send_to_firebase": {"queue": "logs"},
+    "delete_old_logs": {"queue": "logs"},
+}

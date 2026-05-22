@@ -745,45 +745,15 @@ def upload_snar_file(file_path, object_name, replace=None):
         capture_exception(e)
 
 
-def aws_s3_upload_log_file(file_path, object_name):
-    try:
-        if object_name is None:
-            object_name = os.path.basename(file_path)
-        #
-        # s3_endpoint = f"https://{settings.AWS_S3_LOGS_ENDPOINT}"
-        # bucket_name = settings.AWS_S3_LOGS_BUCKET
-        #
-        # if "fra.idrivee" in s3_endpoint:
-        #     access_key = settings.IDRIVE_FRA_ACCESS_KEY
-        #     secret_key = settings.IDRIVE_FRA_SECRET_ACCESS_KEY
-        # else:
-        #     access_key = settings.AWS_S3_ACCESS_KEY
-        #     secret_key = settings.AWS_S3_SECRET_ACCESS_KEY
-        #
-        # s3_client = boto3.client(
-        #     "s3",
-        #     endpoint_url=s3_endpoint,
-        #     aws_access_key_id=access_key,
-        #     aws_secret_access_key=secret_key,
-        # )
+def aws_s3_upload_log_file(file_path, object_name=None):
+    """No-op in the self-hosted build.
 
-        service_key_json = json.loads(settings.BS_GOOGLE_CLOUD_SERVICE_KEY)
-        credentials = service_account.Credentials.from_service_account_info(service_key_json)
-        storage_client = gc_storage.Client(credentials=credentials)
-        bucket = storage_client.bucket(settings.AWS_S3_LOGS_BUCKET)
-
-        # Only upload if file exists
-        if os.path.exists(file_path):
-            # s3_client.upload_file(
-            #     file_path,
-            #     bucket_name,
-            #     object_name,
-            # )
-
-            blob = bucket.blob(object_name)
-            blob.upload_from_filename(file_path)
-    except Exception as e:
-        capture_exception(e)
+    Backup run logs and artefacts stay on the container's local _storage volume and are
+    pruned by the `delete_old_logs` task after LOG_RETENTION_DAYS; they are never uploaded
+    to any external (AWS/GCS) bucket. Kept as a no-op so the ~dozen backup helpers that
+    call it fire-and-forget need no changes.
+    """
+    return
 
 
 def aws_s3_create_presigned_url(bucket_name, object_name, expiration=3600):

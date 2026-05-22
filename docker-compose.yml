@@ -1,9 +1,28 @@
-# Self-hosted BackupSheep stack: app (web + celery worker + celery beat),
-# PostgreSQL, and Redis (the Celery broker for background and scheduled backups).
+# Self-hosted BackupSheep stack. One image (built once from Dockerfile) runs as several
+# services so heavy backups can't starve the web UI and each workload scales on its own.
+# Queue routing lives in settings.py (CELERY_TASK_ROUTES).
 #
-# The app image builds FROM the `backupsheep-base` image, so build that once first:
-#     docker build -f DockerfileBase -t backupsheep-base .
-# then:
+#   migrate ......... one-shot: applies DB migrations, then exits
+#   app ............. gunicorn web server (port 8000, static via WhiteNoise)
+#   worker-cloud .... API-only provider snapshots (DigitalOcean, Hetzner, AWS, …) plus
+#                     general default-queue tasks. Stateless.
+#   worker-database . database dumps (pg_dump/mysqldump). Heavy CPU/disk.
+#   worker-files .... website/wordpress/basecamp dumps. Heavy CPU/disk.
+#   worker-storage .. uploads each finished dump to the storage backends + cleanup.
+#                     Scale this out for upload throughput:
+#                         docker compose up -d --scale worker-storage=4
+#   worker-logs ..... DB log entries, Slack/Telegram/Firebase notifications, and pruning
+#                     old run logs from disk (delete_old_logs).
+#   beat ............ Celery beat scheduler. MUST stay exactly one instance or scheduled
+#                     backups fire twice (also fires the daily log-pruning task).
+#
+# All disk-touching workers (database, files, storage) share the backup_workdir volume,
+# so any of them can see any backup's in-progress files. On a SINGLE host you can scale
+# any of them with `--scale` (each replica handles distinct backups / upload tasks);
+# beat is the only hard singleton. Across MULTIPLE hosts, backup_workdir must be a shared
+# network filesystem (NFS/EFS) so replicas see each other's files.
+#
+# Plus PostgreSQL and Redis (the Celery broker). Build and start everything with:
 #     docker compose up --build
 #
 # Configure .env (see .env_sample). For this stack use the service names below:
@@ -20,24 +39,159 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
 
   redis:
     image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
+
+  # One-shot: apply DB migrations once, then exit. Every app-image service below waits
+  # for this to complete successfully so nothing serves/works against an unmigrated DB.
+  migrate:
+    image: backupsheep:latest
+    env_file: .env
+    entrypoint: ["python", "manage.py", "migrate", "--noinput"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
 
   app:
     build:
       context: .
       dockerfile: Dockerfile
+    image: backupsheep:latest
     env_file: .env
+    # Uses the image ENTRYPOINT (init.sh): collectstatic, then gunicorn on :8000.
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
-      # nginx (inside the container) serves the app on port 80
-      - "8000:80"
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # API-only provider snapshots + general/notification tasks. Stateless (no _storage
+  # volume), so this is the only worker safe to scale horizontally. Cloud tasks just
+  # wait on provider HTTP, so concurrency can run high.
+  worker-cloud:
+    image: backupsheep:latest
+    env_file: .env
+    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=8"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Database dumps (pg_dump/mysqldump). Heavy CPU/disk, low concurrency. Writes the dump
+  # to the shared backup_workdir volume; worker-storage handles the upload.
+  worker-database:
+    image: backupsheep:latest
+    env_file: .env
+    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=database@%h", "-Q", "database", "--concurrency=4"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - backup_workdir:/code/_storage
+    restart: unless-stopped
+
+  # Website / WordPress / Basecamp file dumps. Heavy CPU/disk, low concurrency. Writes the
+  # dump to the shared backup_workdir volume; worker-storage handles the upload.
+  worker-files:
+    image: backupsheep:latest
+    env_file: .env
+    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=files@%h", "-Q", "files", "--concurrency=4"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - backup_workdir:/code/_storage
+    restart: unless-stopped
+
+  # Dedicated upload pool: takes each finished dump from the shared backup_workdir volume,
+  # uploads it to every configured storage backend (storage_upload), finalizes the backup
+  # and cleans up local files. Reads the same volume the dump workers write, so scale it
+  # out freely for more upload throughput:
+  #     docker compose up -d --scale worker-storage=4
+  worker-storage:
+    image: backupsheep:latest
+    env_file: .env
+    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=storage@%h", "-Q", "storage", "--concurrency=4"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - backup_workdir:/code/_storage
+    restart: unless-stopped
+
+  # Log pipeline: writes log entries to the DB (send_log_to_db), fans out Slack/Telegram/
+  # Firebase notifications, and prunes old run logs (delete_old_logs). Mounts the shared
+  # backup_workdir volume so it can see and prune the run logs the dump workers leave in
+  # _storage. Stateless otherwise -> scale out if log/notification volume is high.
+  worker-logs:
+    image: backupsheep:latest
+    env_file: .env
+    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=logs@%h", "-Q", "logs", "--concurrency=4"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - backup_workdir:/code/_storage
+    restart: unless-stopped
+
+  beat:
+    image: backupsheep:latest
+    env_file: .env
+    entrypoint: ["celery", "-A", "backupsheep", "beat", "--loglevel=info", "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:
   pgdata:
+  backup_workdir:

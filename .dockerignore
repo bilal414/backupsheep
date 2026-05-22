@@ -1,0 +1,33 @@
+# Keep secrets, local environments, and build cruft out of the image.
+# Runtime config is injected at runtime via docker-compose `env_file`.
+.env
+.env.*
+*.env
+!.env_sample
+
+# Local Python virtualenvs (host-built, ~1GB, platform-specific)
+.venv
+venv
+env/
+*.egg-info
+__pycache__/
+*.py[cod]
+
+# VCS / tooling
+.git
+.gitignore
+.claude
+.idea
+.vscode
+.DS_Store
+
+# Frontend build deps (compiled CSS is committed under apps/console/_static)
+node_modules
+
+# Collected/generated static and runtime working dirs (regenerated in-container)
+/static
+_storage
+
+# Test artifacts and local notes
+_upload_test_files
+NOTES.md
