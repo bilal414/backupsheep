@@ -1291,8 +1291,6 @@ class CoreGoogleCloud(UtilCloud):
 class CoreWebsite(TimeStampedModel):
     class BackupType(models.IntegerChoices):
         FULL = 1, "Full v1"
-        INCREMENTAL = 2, "Incremental"
-        DIFFERENTIAL = 3, "Differential"
         FULL_V2 = 4, "Full v2"
 
     node = models.OneToOneField(
