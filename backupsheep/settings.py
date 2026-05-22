@@ -430,6 +430,8 @@ CELERY_TASK_ROUTES = {
     "backup_ovh_ca": {"queue": "cloud"},
     "backup_ovh_eu": {"queue": "cloud"},
     "backup_ovh_us": {"queue": "cloud"},
+    # Async snapshot status polling (re-queues itself); API-only, no local disk.
+    "poll_cloud_backup": {"queue": "cloud"},
     # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram/Firebase
     # fan-out, and on-disk run-log retention.
     "send_log_to_db": {"queue": "logs"},

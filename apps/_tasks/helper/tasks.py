@@ -156,6 +156,102 @@ def delete_old_logs(self, max_age_days=None):
         capture_exception(e)
 
 
+@current_app.task(name="poll_cloud_backup", bind=True, ignore_result=True)
+def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, timeout=86400):
+    """Asynchronously wait for a cloud / volume snapshot to finish.
+
+    Runs ONE status check per invocation and re-queues itself between checks, so the
+    worker is never blocked for the whole (potentially hours-long) snapshot -- replacing
+    the old blocking `while ...: time.sleep(60)` poll inside each backup model.
+
+    Resilience: a single failed or transient status check never fails the backup --
+    backup.poll_status() returns IN_PROGRESS and we simply poll again. The backup is
+    marked FAILED only when the provider itself reports the snapshot errored, and TIMEOUT
+    only after `timeout` seconds of polling.
+    """
+    import time as _time
+    from apps.console.node.models import CoreNode
+    from apps._tasks.exceptions import (
+        NodeBackupFailedError,
+        NodeBackupStatusCheckTimeOutError,
+    )
+
+    try:
+        node = CoreNode.objects.get(id=node_id)
+    except CoreNode.DoesNotExist:
+        return
+
+    backup = node.get_cloud_backup(backup_id)
+    if backup is None:
+        return
+
+    # Stop polling once the backup has reached any terminal state (completed elsewhere,
+    # cancelled, or queued/processed for deletion).
+    terminal = (
+        UtilBackup.Status.COMPLETE,
+        UtilBackup.Status.FAILED,
+        UtilBackup.Status.TIMEOUT,
+        UtilBackup.Status.CANCELLED,
+        UtilBackup.Status.DELETE_REQUESTED,
+        UtilBackup.Status.DELETE_IN_PROGRESS,
+        UtilBackup.Status.DELETE_COMPLETED,
+    )
+    if backup.status in terminal:
+        return
+
+    if started_at is None:
+        started_at = _time.time()
+
+    try:
+        status = backup.poll_status()
+    except Exception as e:
+        # poll_status is meant to swallow transient errors itself; if an unexpected one
+        # escapes, treat it as "still in progress" rather than failing the backup.
+        capture_exception(e)
+        status = UtilBackup.Status.IN_PROGRESS
+
+    if status == UtilBackup.Status.COMPLETE:
+        node.backup_complete_reset(backup.celery_task_id)
+        # Retention: keep only the newest keep_last completed backups for the schedule.
+        if backup.schedule and (backup.schedule.keep_last or 0) > 0:
+            keep_last = backup.schedule.keep_last
+            completed = list(
+                backup.__class__.objects.filter(
+                    schedule=backup.schedule, status=UtilBackup.Status.COMPLETE
+                ).order_by("created")
+            )
+            for old_backup in completed[:-keep_last]:
+                old_backup.soft_delete()
+        node.notify_backup_success(backup)
+        return
+
+    if status == UtilBackup.Status.FAILED:
+        backup.status = UtilBackup.Status.FAILED
+        backup.save()
+        node.backup_complete_reset()  # return node to ACTIVE (no celery id -> node only)
+        node.notify_backup_fail(
+            NodeBackupFailedError(
+                node, backup.uuid_str, backup.attempt_no, backup.type,
+                "Cloud provider reported the snapshot as errored.",
+            ),
+            backup.type,
+        )
+        return
+
+    # Still in progress (or a transient check failure). Give up only past the hard
+    # timeout; otherwise re-queue another check and free the worker until then.
+    if (_time.time() - started_at) > timeout:
+        node.backup_timeout_reset(backup.celery_task_id)
+        node.notify_backup_fail(
+            NodeBackupStatusCheckTimeOutError(node, backup.uuid_str), backup.type
+        )
+        return
+
+    poll_cloud_backup.apply_async(
+        args=[node_id, backup_id, started_at, interval, timeout], countdown=interval
+    )
+
+
 @current_app.task(
     name="terminate_backup",
     track_started=True,

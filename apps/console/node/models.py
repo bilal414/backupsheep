@@ -1881,6 +1881,12 @@ class CoreNode(TimeStampedModel):
         if node_type_object.backups.filter(celery_task_id=celery_task_id).exists() and celery_task_id:
             return node_type_object.backups.get(celery_task_id=celery_task_id)
 
+    def get_cloud_backup(self, backup_id):
+        """Return this node's provider-specific backup by id (used by the async
+        poll_cloud_backup task to re-load a snapshot it is waiting on)."""
+        node_type_object = getattr(self, self.connection.integration.code)
+        return node_type_object.backups.filter(id=backup_id).first()
+
     @property
     def get_node_url(self):
         node_type_object = getattr(self, self.connection.integration.code)
