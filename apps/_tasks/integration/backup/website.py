@@ -12,9 +12,8 @@ Differences from the old SaaS implementation:
     passphrase-protected keys are normalized to an unencrypted temp key so ssh never
     prompts.
 
-NOTE: TLS certificate verification is disabled (`ssl:verify-certificate no`) because
-managed hosting commonly uses self-signed/mismatched certs. Add a per-connection verify
-flag to CoreAuthWebsite to tighten this.
+FTPS TLS certificate verification follows the connection's `verify_ssl` flag (default
+on); turn it off per-connection for hosts with self-signed/mismatched certs.
 """
 import os
 import shlex
@@ -33,7 +32,6 @@ from apps.console.utils.models import UtilBackup
 COMMAND_TIMEOUT = 12 * 3600
 
 _LFTP_BASE_SETTINGS = (
-    "set ssl:verify-certificate no",
     "set net:reconnect-interval-base 5",
     "set net:reconnect-interval-multiplier 1",
     "set net:max-retries 5",
@@ -85,6 +83,9 @@ def _build_lftp_script(*, auth, host_url, port, username, password, ssh_key_path
     """Compose the full lftp command script for one transfer (settings + connect + auth
     + the get/mirror line). Returned as text to feed lftp on stdin."""
     lines = [f"set net:connection-limit {parallel}", *_LFTP_BASE_SETTINGS]
+
+    # FTPS TLS certificate verification, per the connection's verify_ssl flag.
+    lines.append(f"set ssl:verify-certificate {'yes' if getattr(auth, 'verify_ssl', True) else 'no'}")
 
     if auth.protocol == CoreAuthWebsite.Protocol.FTP:
         lines += ["set ftp:ssl-allow false", "set ftp:ssl-protect-data false"]

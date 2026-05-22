@@ -1198,6 +1198,9 @@ class CoreAuthWebsite(TimeStampedModel):
     info_name = models.CharField(max_length=64, null=True)
     use_public_key = models.BooleanField(null=True)
     ftps_use_explicit_ssl = models.BooleanField(null=True)
+    # Verify the server's TLS certificate for FTPS (default on). Turn off for hosts with
+    # self-signed/mismatched certs.
+    verify_ssl = models.BooleanField(default=True)
     encryption_updated = models.BooleanField(default=False)
     # https://xtresoft.atlassian.net/browse/BS-12
     flag_use_sha1_key_verification = models.BooleanField(default=False, null=True)
