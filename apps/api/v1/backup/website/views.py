@@ -109,6 +109,14 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
     @action(detail=True)
     def download_transfer_log(self, request, pk=None):
         backup = self.get_object()
+        # Self-hosted builds keep run logs on the local _storage volume (pruned by
+        # delete_old_logs); the historical remote-log-bucket retrieval below is dead SaaS
+        # infrastructure referencing settings that no longer exist. Return a clean message
+        # instead of crashing. (See docs/troubleshooting.md.)
+        return Response(
+            {"detail": "Transfer log download is not available in the self-hosted build."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
         # NEW
         date = parse_datetime("2023-01-01 19:0:0.000 -0000")
@@ -192,6 +200,12 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
     @action(detail=True)
     def download_dir_tree(self, request, pk=None):
         backup = self.get_object()
+        # Dead SaaS remote-log-bucket retrieval (see download_transfer_log). Not available
+        # in the self-hosted build; return a clean message instead of crashing.
+        return Response(
+            {"detail": "Directory-tree log download is not available in the self-hosted build."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
         # NEW
         date = parse_datetime("2023-01-01 19:0:0.000 -0000")

@@ -902,7 +902,7 @@ class CoreAuthOracle(TimeStampedModel):
             encryption_key = self.connection.account.get_encryption_key()
             private_key = bs_decrypt(self.private_key, encryption_key)
 
-        fd, ssh_key_path = tempfile.mkstemp(dir="/home/ubuntu/backupsheep/_storage")
+        fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
         with os.fdopen(fd, "w") as tmp:
             tmp.write(private_key)
 
@@ -1198,6 +1198,9 @@ class CoreAuthWebsite(TimeStampedModel):
     info_name = models.CharField(max_length=64, null=True)
     use_public_key = models.BooleanField(null=True)
     ftps_use_explicit_ssl = models.BooleanField(null=True)
+    # Verify the server's TLS certificate for FTPS (default on). Turn off for hosts with
+    # self-signed/mismatched certs.
+    verify_ssl = models.BooleanField(default=True)
     encryption_updated = models.BooleanField(default=False)
     # https://xtresoft.atlassian.net/browse/BS-12
     flag_use_sha1_key_verification = models.BooleanField(default=False, null=True)
@@ -1318,7 +1321,7 @@ class CoreAuthWebsite(TimeStampedModel):
         elif use_private_key:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            fd, ssh_key_path = tempfile.mkstemp(dir="/home/ubuntu/backupsheep/_storage")
+            fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
             with os.fdopen(fd, "w") as tmp:
                 tmp.write(private_key)
             if password:
@@ -2088,7 +2091,7 @@ class CoreAuthDatabase(TimeStampedModel):
         elif use_private_key:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            fd, ssh_key_path = tempfile.mkstemp(dir="/home/ubuntu/backupsheep/_storage")
+            fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
             with os.fdopen(fd, "w") as tmp:
                 tmp.write(private_key)
 
@@ -2152,7 +2155,7 @@ class CoreAuthDatabase(TimeStampedModel):
             p.stdin.write("ls\n")
             print(p.stdout.read())
         elif use_private_key:
-            fd, ssh_key_path = tempfile.mkstemp(dir="/home/ubuntu/backupsheep/_storage")
+            fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
             with os.fdopen(fd, "w") as tmp:
                 tmp.write(private_key)
 

@@ -1,89 +1,102 @@
+# BackupSheep
 
-# BackupSheep  
-Automating backups is costly and takes time. With BackupSheep, you can quickly automate server snapshots and offsite backups - without writing code.  
- 
+**Self-hosted backup automation.** Schedule offsite backups of your databases, servers,
+and websites, and take snapshots of your cloud instances — across 20+ sources and 25+
+storage destinations, with daily/weekly/monthly retention, all from one web console. No
+code, no SaaS account.
 
-## Databases (offsite backups):
-Automate the backup process for your various databases like MySQL, PostgreSQL,  
-MongoDB, and more. Our sophisticated retention policies enable you to retain any  
-number of daily, weekly, or monthly backups as required.
+> **Status: self-hostable (beta).** BackupSheep was a paid SaaS from 2017–2023 serving
+> 6,500+ users. It has been rewritten and open-sourced as a self-hosted application: all
+> SaaS/billing machinery has been removed so you can run it for yourself. Licensed under
+> the GNU GPLv3 (see [LICENSE](LICENSE)).
 
- 1. MySQL
- 2. MariaDB
- 3. PostgreSQL  
+---
 
-  
-## Websites/Servers (offsite backups):  
-Set up automatic backups of your files from any Linux-based operating system. With  
-our sophisticated retention policies, you can maintain as many daily, weekly, or  
-monthly backups as necessary.
+## Quick start (Docker Compose)
 
- 1. FTP
- 2. FTPS
- 3. sFTP
- 4. SSH  
+You need [Docker](https://docs.docker.com/get-docker/) with the Compose plugin, and `git`.
 
-  
-## Cloud Services (server snapshots):  
-Automate periodic snapshots of your servers. Maintain any number of daily, weekly,  
-or monthly backups you need with our rotation retention policies. We are compatible  
-with all major cloud service providers.
+```bash
+git clone <your-fork-or-this-repo-url> backupsheep
+cd backupsheep
 
- 1. AWS
- 2. DigitalOcean
- 3. Google Cloud
- 4. Hetzner
- 5. Linode
- 6. Oracle
- 7. UpCloud
- 8. Vultr
+cp .env_sample .env
+# Edit .env and set at least:
+#   DJANGO_SECRET_KEY  -> a long random string (python -c "import secrets; print(secrets.token_urlsafe(64))")
+#   DB_PASSWORD        -> a database password of your choice
+# The other defaults already target the bundled db/redis services.
 
-  
-## SaaS Backups  (offsite backups):  
-BackupSheep provides plugins and API integrations to secure your CMS and SaaS  
-applications. This allows for the effortless safeguarding of your critical data.  
-These tools are designed to seamlessly integrate with your existing systems,  
-enabling easy and regular backups. Hence, you can rest easy knowing your valuable  
-data is well-protected.
+docker compose up --build
+```
 
- 1. Basecamp
- 2. WordPress  
-  
-## Storage Integrations (for offsite backups):  
-Connect your cloud storage providers and store backups in multiple storage accounts simultaneously.
+Then open **http://localhost:8000/** — you'll be guided through the first-run setup
+wizard (create your admin account, configure email + storage, connect your first source).
 
- 1. AWS S3
- 2. Alibaba Cloud
- 3. Azure
- 4. BackBlaze B2
- 5. Cloudflare R2
- 6. DigitalOcean Spaces
- 7. Dropbox
- 8. ExoScale
- 9. Filebase
- 10. Google Cloud
- 11. Google Drive
- 12. IBM Cloud
- 13. iDrive
- 14. IONOS
- 15. Levila
- 16. Linode
- 17. OneDrive
- 18. Oracle
- 19. pCloud
- 20. RackCorp
- 21. Scaleway
- 22. Tencent
- 23. UpCloud
- 24. Vultr
- 25. Wasabi  
-  
-## Notice  
-This is a complete rewrite of the BackupSheep application. I have started pushing code to the repository,  but it is not functional yet. Please follow the repository to stay updated.  
-  
-## Technology Stack  
-Django, PostgreSQL, AlpineJS and TailwindCSS.   
-  
-## Background   
-BackupSheep was a paid SaaS application from 2017 to 2023, serving over 6,500 users at its peak. Unfortunately, a poor decision to offer a lifetime deal (LTD) through AppSumo without proper due diligence led to a decline. 
-As a result, BackupSheep was shut down in 2023. Rather than letting years of development go to waste, I have decided to open source BackupSheep.
+That's the whole happy path. See **[docs/installation.md](docs/installation.md)** for
+details and **[docs/first-run.md](docs/first-run.md)** for a walkthrough of the wizard.
+
+> The web app serves plain HTTP on port 8000 and is meant to sit behind your own
+> TLS-terminating reverse proxy in production. Before exposing it to the internet, read
+> **[docs/deployment.md](docs/deployment.md)** (TLS, `DJANGO_HTTPS`, `ALLOWED_HOSTS`,
+> secrets).
+
+---
+
+## What it backs up
+
+**Databases (offsite dumps)** — MySQL, MariaDB, PostgreSQL.
+
+**Websites / servers (offsite file backups)** — over FTP, FTPS, SFTP, or SSH.
+
+**Cloud server & volume snapshots** — DigitalOcean, AWS (EC2, RDS, Lightsail), Hetzner,
+Linode, Vultr, UpCloud, Oracle Cloud, Google Cloud, OVH (CA/EU/US).
+
+**SaaS apps** — WordPress, Basecamp.
+
+**Store backups in** — Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, DigitalOcean
+Spaces, Google Cloud Storage, Google Drive, Azure Blob, Dropbox, OneDrive, pCloud,
+IDrive e2, IBM COS, Oracle, Scaleway, Linode, Vultr, UpCloud, Exoscale, Filebase, IONOS,
+Leviia, RackCorp, Tencent COS, Alibaba OSS. (Connect multiple destinations at once.)
+
+Full provider details: **[docs/providers.md](docs/providers.md)**.
+
+---
+
+## Documentation
+
+| Guide | What's in it |
+|-------|--------------|
+| [Installation](docs/installation.md) | Prerequisites, Docker Compose setup, the `.env` you must edit |
+| [Configuration](docs/configuration.md) | Full environment-variable reference (required vs optional) |
+| [First-run wizard](docs/first-run.md) | The 5 setup steps; admin accounts & `/django-admin` |
+| [Usage](docs/usage.md) | Connect a source, add storage, schedule backups, retention, restore |
+| [Providers](docs/providers.md) | Every backup source & storage destination, and what each needs |
+| [Production deployment](docs/deployment.md) | HTTPS/reverse proxy, hardening, secrets, backups of BackupSheep |
+| [Scaling & operations](docs/scaling.md) | Worker queues, scaling uploads, the beat singleton, multi-host |
+| [Troubleshooting](docs/troubleshooting.md) | Common failures, FAQ, known limitations |
+
+Also: [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md)
+
+---
+
+## Architecture
+
+One Docker image runs as several services so a heavy backup can't starve the web UI:
+
+- **app** — the Django web console (gunicorn + WhiteNoise) on port 8000
+- **migrate** — one-shot: applies DB migrations + seeds reference data, then exits
+- **worker-cloud / worker-database / worker-files / worker-storage / worker-logs** —
+  specialized Celery workers (provider snapshots, DB dumps, file dumps, uploads, logs)
+- **beat** — the Celery scheduler that fires scheduled backups (keep exactly one)
+- **db** (PostgreSQL) and **redis** (the Celery broker)
+
+Technology: Django 6, PostgreSQL, Redis + Celery, gunicorn, Alpine.js + Tailwind CSS.
+See [docs/scaling.md](docs/scaling.md) for how the workers fit together.
+
+---
+
+## License
+
+BackupSheep is free software under the **GNU General Public License v3.0**. It comes with
+**no warranty** — see [LICENSE](LICENSE). You may run, study, modify, and redistribute it
+under the terms of the GPLv3.

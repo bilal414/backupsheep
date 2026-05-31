@@ -1256,6 +1256,24 @@
                             <p x-show="connectionErrors.auth?.protocol" class="mt-2 text-sm text-red-600"
                                id="region-error" x-text="connectionErrors.auth?.protocol"></p>
                         </div>
+                        <div class="sm:col-span-3"
+                             x-show="integrationCode === 'website' && selectedAuth.protocol?.name === 'FTPS'">
+                            <label class="block text-sm font-medium text-gray-700">
+                                Verify SSL certificate
+                            </label>
+                            <div class="relative mt-3">
+                                <button type="button"
+                                        @click="selectedAuth.verify_ssl = !(selectedAuth.verify_ssl !== false)"
+                                        :class="{ 'bg-indigo-600': selectedAuth.verify_ssl !== false, 'bg-gray-200': selectedAuth.verify_ssl === false }"
+                                        class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                        role="switch" aria-checked="false">
+                                            <span :class="{ 'translate-x-5': selectedAuth.verify_ssl !== false, 'translate-x-0': selectedAuth.verify_ssl === false }"
+                                                  aria-hidden="true"
+                                                  class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
+                                </button>
+                            </div>
+                            <p class="mt-2 text-xs text-gray-500">Turn off for self-signed or mismatched certificates.</p>
+                        </div>
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'website' && selectedAuth.protocol?.name === 'FTPS'">
                             <div class="rounded-md bg-blue-50 p-4">

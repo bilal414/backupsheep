@@ -112,6 +112,14 @@ class CoreDatabaseBackupView(viewsets.ModelViewSet):
     @action(detail=True)
     def download_transfer_log(self, request, pk=None):
         backup = self.get_object()
+        # Self-hosted builds keep run logs on the local _storage volume (pruned by
+        # delete_old_logs); the historical remote-log-bucket retrieval below is dead SaaS
+        # infrastructure referencing settings that no longer exist. Return a clean message
+        # instead of crashing. (See docs/troubleshooting.md.)
+        return Response(
+            {"detail": "Transfer log download is not available in the self-hosted build."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
         date = parse_datetime("2023-01-01 19:0:0.000 -0000")
         date_aws_s3 = parse_datetime("2023-01-28 20:00:0.000 -0000")

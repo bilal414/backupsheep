@@ -23,7 +23,6 @@ from apps._tasks.exceptions import (
 )
 import humanize
 
-from apps._tasks.integration.backup.dfferential import snapshot_dfferential
 from apps.api.v1.utils.api_helpers import get_error, mkdir_p
 from ..backup.models import CoreDatabaseBackupStoragePoints
 from ..connection.models import CoreConnection
@@ -1292,8 +1291,6 @@ class CoreGoogleCloud(UtilCloud):
 class CoreWebsite(TimeStampedModel):
     class BackupType(models.IntegerChoices):
         FULL = 1, "Full v1"
-        INCREMENTAL = 2, "Incremental"
-        DIFFERENTIAL = 3, "Differential"
         FULL_V2 = 4, "Full v2"
 
     node = models.OneToOneField(
@@ -1322,7 +1319,6 @@ class CoreWebsite(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from apps._tasks.integration.backup.website import snapshot_website
-        from apps._tasks.integration.backup.incremental import snapshot_incremental
         from apps._tasks.integration.backup.full_v2 import snapshot_full_v2
         from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreWebsiteBackupStoragePoints
@@ -1331,17 +1327,11 @@ class CoreWebsite(TimeStampedModel):
         backup.save()
 
         """
-        Run Website Backup
+        Run a full website backup. Key-based sources can use the server-side tar path
+        (full_v2); everything else mirrors the files over FTP/FTPS/SFTP with lftp.
+        (Incremental/differential were never released and have been removed.)
         """
-        if self.backup_type == self.BackupType.INCREMENTAL and (
-            self.node.connection.auth_website.use_private_key or self.node.connection.auth_website.use_public_key
-        ):
-            snapshot_incremental(backup)
-        elif self.backup_type == self.BackupType.DIFFERENTIAL and (
-            self.node.connection.auth_website.use_private_key or self.node.connection.auth_website.use_public_key
-        ):
-            snapshot_dfferential(backup)
-        elif self.backup_type == self.BackupType.FULL_V2 and (
+        if self.backup_type == self.BackupType.FULL_V2 and (
                 self.node.connection.auth_website.use_private_key or self.node.connection.auth_website.use_public_key
         ):
             snapshot_full_v2(backup)

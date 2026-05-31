@@ -36,13 +36,38 @@ else:
         **os.environ,  # override loaded values with environment variables
     }
 
-# # environ.Env.read_env(".env")
+# Coerce env strings to real booleans: dotenv/docker env_file always yield strings, and
+# a bare bool("false") is True, so a raw string can never be turned off. Treat only the
+# obvious truthy spellings as on.
+def _as_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 SECRET_KEY = config["DJANGO_SECRET_KEY"]
-DEBUG = config["DJANGO_DEBUG"]
+DEBUG = _as_bool(config.get("DJANGO_DEBUG", "false"))
 DJANGO_SERVER = config["DJANGO_SERVER"]
-ALLOWED_HOSTS = [config["DJANGO_ALLOWED_HOSTS"]]
-HTTPS_ENABLED = False
+# Accepts one host or a comma-separated list, e.g. "backup.example.com,www.example.com".
+ALLOWED_HOSTS = [h.strip() for h in str(config["DJANGO_ALLOWED_HOSTS"]).split(",") if h.strip()]
 CSRF_TRUSTED_ORIGINS = [f"{config['APP_PROTOCOL']}{config['APP_DOMAIN']}"]
+
+# HTTPS / production hardening. Set DJANGO_HTTPS=true once this install is served over TLS
+# (typically a reverse proxy that terminates HTTPS and forwards X-Forwarded-Proto). Left
+# off by default so a plain-HTTP localhost/dev install isn't locked out by Secure cookies
+# or an HTTP->HTTPS redirect loop.
+HTTPS_ENABLED = _as_bool(config.get("DJANGO_HTTPS", "false"))
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_CONTENT_TYPE_NOSNIFF = True
+if HTTPS_ENABLED:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
 # Application definition
 
 INSTALLED_APPS = [
@@ -93,7 +118,7 @@ TEMPLATES = [
         ],
         "APP_DIRS": True,
         "OPTIONS": {
-            "debug": config["DJANGO_DEBUG"],
+            "debug": DEBUG,
             "context_processors": [
                 "django.template.context_processors.debug",
                 "django.template.context_processors.request",
@@ -310,6 +335,28 @@ MS_GRAPH_ENDPOINT = config["MS_GRAPH_ENDPOINT"]
 # GOOGLE Storage
 GOOGLE_CLIENT_ID = config["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = config["GOOGLE_CLIENT_SECRET"]
+
+# pCloud storage OAuth (only needed to connect pCloud as a storage destination). Defaults
+# are pCloud's public OAuth hosts; leave client id/secret empty until you register an app.
+PCLOUD_CLIENT_ID = config.get("PCLOUD_CLIENT_ID", "")
+PCLOUD_CLIENT_SECRET = config.get("PCLOUD_CLIENT_SECRET", "")
+PCLOUD_AUTH_URL = config.get("PCLOUD_AUTH_URL", "https://my.pcloud.com/oauth2/authorize")
+PCLOUD_OAUTH_TOKEN_URL = config.get("PCLOUD_OAUTH_TOKEN_URL", "https://api.pcloud.com/oauth2_token")
+PCLOUD_RESPONSE_TYPE = config.get("PCLOUD_RESPONSE_TYPE", "code")
+PCLOUD_REDIRECT_URL = config.get("PCLOUD_REDIRECT_URL", "/api/v1/callback/pcloud")
+
+# Basecamp source OAuth (only needed to back up Basecamp; register an app at
+# https://launchpad.37signals.com/integrations). Defaults are Basecamp's public hosts.
+BASECAMP_CLIENT_ID = config.get("BASECAMP_CLIENT_ID", "")
+BASECAMP_CLIENT_SECRET = config.get("BASECAMP_CLIENT_SECRET", "")
+BASECAMP_OAUTH_ENDPOINT = config.get(
+    "BASECAMP_OAUTH_ENDPOINT", "https://launchpad.37signals.com/authorization/new"
+)
+BASECAMP_TOKEN_ENDPOINT = config.get(
+    "BASECAMP_TOKEN_ENDPOINT", "https://launchpad.37signals.com/authorization/token"
+)
+BASECAMP_REDIRECT_URL = config.get("BASECAMP_REDIRECT_URL", "/api/v1/callback/basecamp")
+GOOGLE_RESPONSE_TYPE = config.get("GOOGLE_RESPONSE_TYPE", "code")
 
 # Cloud provider API endpoints (used by the server/volume snapshot integrations).
 # These are public, stable API hosts with sensible defaults so cloud backups work
