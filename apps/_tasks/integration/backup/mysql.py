@@ -6,6 +6,7 @@ from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.helper.tasks import delete_from_disk
 from apps.api.v1.utils.api_helpers import bs_decrypt, aws_s3_upload_log_file
 from apps.api.v1.utils.api_helpers import zipdir, mkdir_p
+from apps._tasks.integration.backup._sanitize import safe_token, safe_password
 
 
 from django.core.cache import cache
@@ -77,6 +78,18 @@ def snapshot_mysql(backup):
 
         database_version_path = node.connection.auth_database.bin_path()
 
+        # Reject command-injection / path-traversal payloads in the user-supplied
+        # connection fields before they are interpolated into the dump commands below.
+        safe_token(node.connection.auth_database.host, "host")
+        safe_token(node.connection.auth_database.port, "port")
+        safe_token(node.connection.auth_database.database_name, "database_name")
+        safe_token(bs_decrypt(node.connection.auth_database.username, encryption_key), "username")
+        safe_password(bs_decrypt(node.connection.auth_database.password, encryption_key), "password")
+        for _name in (node.database.databases or []):
+            safe_token(_name, "databases")
+        for _name in (node.database.tables or []):
+            safe_token(_name, "tables")
+
         if (
             node.connection.auth_database.use_public_key
             or node.connection.auth_database.use_private_key
@@ -121,6 +134,7 @@ def snapshot_mysql(backup):
                         databases.append(database_name)
 
                 for database in databases:
+                    safe_token(database, "database")
                     db_file = f"{local_dir}{database}.sql"
 
                     username = bs_decrypt(node.connection.auth_database.username, encryption_key)

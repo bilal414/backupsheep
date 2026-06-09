@@ -5,9 +5,22 @@ from django.utils import timezone
 from django.utils.translation import gettext as _
 
 
-class CsrfExemptSessionAuthentication(SessionAuthentication):
-    def enforce_csrf(self, request):
-        return
+class ConsoleSessionAuthentication(SessionAuthentication):
+    """Standard DRF SessionAuthentication.
+
+    Cookie-authenticated requests are CSRF-protected (the previous
+    ``CsrfExemptSessionAuthentication`` disabled this, leaving every state-changing API
+    endpoint open to cross-site request forgery). The console front-end sends the CSRF
+    token via the ``X-CSRFToken`` header (see the global fetch wrapper in the base
+    template); token-authenticated API clients are unaffected because CSRF is only
+    enforced for the session authenticator.
+    """
+    pass
+
+
+# Backwards-compatible alias for any external import; this name no longer implies a CSRF
+# exemption.
+CsrfExemptSessionAuthentication = ConsoleSessionAuthentication
 
 
 class CustomTokenAuthentication(TokenAuthentication):

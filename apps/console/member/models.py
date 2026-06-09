@@ -12,6 +12,7 @@ class CoreMember(TimeStampedModel):
     accounts = models.ManyToManyField(CoreAccount, related_name='members', through='CoreMemberAccount')
     timezone = models.CharField(max_length=64, default="UTC")
     password_reset_token = models.CharField(null=True, max_length=255, blank=True)
+    password_reset_token_created = models.DateTimeField(null=True, blank=True, editable=False)
 
     class Meta:
         db_table = 'core_member'
@@ -104,12 +105,39 @@ class CoreMember(TimeStampedModel):
     def is_primary_account(self):
         return self.memberships.filter(primary=True, account=self.get_current_account()).exists()
 
+    # Password reset tokens expire this many hours after they are issued.
+    PASSWORD_RESET_TOKEN_TTL_HOURS = 1
+
+    @staticmethod
+    def generate_password_reset_token():
+        # Cryptographically strong, single-use, ~256-bit token (replaces the old
+        # 32-bit uuid4()[:8] token which was brute-forceable).
+        import secrets
+
+        return secrets.token_urlsafe(32)
+
+    def password_reset_token_is_valid(self, token):
+        """A token matches only if it is non-empty, equal (constant-time) and unexpired."""
+        import secrets
+        from django.utils import timezone
+        from datetime import timedelta
+
+        if not token or not self.password_reset_token:
+            return False
+        if not secrets.compare_digest(str(self.password_reset_token), str(token)):
+            return False
+        if not self.password_reset_token_created:
+            return False
+        expires_at = self.password_reset_token_created + timedelta(hours=self.PASSWORD_RESET_TOKEN_TTL_HOURS)
+        return timezone.now() <= expires_at
+
     @property
     def get_password_reset_link(self):
-        password_reset_token = str(uuid.uuid4()).split("-")[0]
+        from django.utils import timezone
 
         if not self.password_reset_token:
-            self.password_reset_token = password_reset_token
+            self.password_reset_token = self.generate_password_reset_token()
+            self.password_reset_token_created = timezone.now()
             self.save()
 
         return f"{settings.APP_URL}/reset/{self.password_reset_token}/"
@@ -119,10 +147,10 @@ class CoreMember(TimeStampedModel):
 
     def send_password_reset(self, next_url=None):
         from apps.console.notification.models import CoreNotificationLogEmail
+        from django.utils import timezone
 
-        password_reset_token = str(uuid.uuid4()).split("-")[0]
-
-        self.password_reset_token = password_reset_token
+        self.password_reset_token = self.generate_password_reset_token()
+        self.password_reset_token_created = timezone.now()
         self.save()
 
         email_notification = CoreNotificationLogEmail()

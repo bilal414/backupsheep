@@ -13,6 +13,34 @@
     <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet"/>
 </head>
 <body class="h-full{% block page_class %}{% endblock %}">
+{% csrf_token %}
+<script>
+    // Attach Django's CSRF token to every same-origin state-changing fetch() so the
+    // session-authenticated API (now CSRF-protected) accepts console requests.
+    (function () {
+        function getCookie(name) {
+            const value = "; " + document.cookie;
+            const parts = value.split("; " + name + "=");
+            if (parts.length === 2) return parts.pop().split(";").shift();
+            return null;
+        }
+        const unsafe = /^(POST|PUT|PATCH|DELETE)$/i;
+        const origFetch = window.fetch;
+        window.fetch = function (input, init) {
+            init = init || {};
+            const method = (init.method || (typeof input !== "string" && input && input.method) || "GET");
+            if (unsafe.test(method)) {
+                const token = getCookie("csrftoken");
+                if (token) {
+                    const headers = new Headers(init.headers || (typeof input !== "string" && input && input.headers) || {});
+                    if (!headers.has("X-CSRFToken")) headers.set("X-CSRFToken", token);
+                    init.headers = headers;
+                }
+            }
+            return origFetch.call(this, input, init);
+        };
+    })();
+</script>
 <div x-data="{ sideBar: false }">
     {% include "_sidebar.html" %}
     <div class="lg:pl-72">

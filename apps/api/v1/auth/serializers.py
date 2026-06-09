@@ -12,28 +12,24 @@ class APIAuthLoginSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True, allow_blank=False)
     password = serializers.CharField(max_length=128, required=True)
 
-    @staticmethod
-    def validate_email(value):
-        if not CoreMember.objects.filter(user__email__iexact=value).exists():
-            raise serializers.ValidationError("Email not found")
-        return value
-
     def validate_password(self, value):
+        # Use a single generic error for both unknown-email and wrong-password so the
+        # endpoint does not let an attacker enumerate which emails are registered.
         initial_values = self.get_initial()
+        email = initial_values.get("email")
 
-        email = initial_values["email"]
+        generic_error = serializers.ValidationError("wrong email & password combination")
 
-        if CoreMember.objects.filter(user__email__iexact=email).exists():
-            member = CoreMember.objects.get(user__email__iexact=email)
-            user = member.user
+        member = CoreMember.objects.filter(user__email__iexact=email).first()
+        if not member:
+            raise generic_error
 
-            if not authenticate(username=user.username, password=value):
-                raise serializers.ValidationError("wrong email & password combination")
-            else:
-                user = authenticate(username=user.username, password=value)
-                self.member = user.member
+        user = authenticate(username=member.user.username, password=value)
+        if not user:
+            raise generic_error
 
-            return value
+        self.member = user.member
+        return value
 
 
 class APIAuthResetSerializer(serializers.Serializer):
@@ -47,10 +43,10 @@ class APIAuthResetSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True, allow_blank=False)
 
     def validate_email(self, value):
-        if CoreMember.objects.filter(user__email__iexact=value).exists() is False:
-            raise serializers.ValidationError("email doesn't exists")
-        elif CoreMember.objects.filter(user__email__iexact=value).exists() is True:
-            self.member = CoreMember.objects.get(user__email__iexact=value)
+        # Always validate successfully; whether a reset email is actually sent depends on
+        # whether the address exists, but the response must not reveal that (account
+        # enumeration). The view only sends when self.member is set.
+        self.member = CoreMember.objects.filter(user__email__iexact=value).first()
         return value
 
 
@@ -62,18 +58,27 @@ class APIAuthResetPatchSerializer(serializers.Serializer):
     def update(self, instance, validated_data):
         pass
 
-    password = serializers.CharField(min_length=4, required=True, allow_blank=False)
+    password = serializers.CharField(min_length=8, required=True, allow_blank=False)
     password_confirm = serializers.CharField(
-        min_length=4, required=True, allow_blank=False
+        min_length=8, required=True, allow_blank=False
     )
     password_token = serializers.CharField(required=True, allow_blank=False)
 
     def validate_password(self, value):
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError as DjangoValidationError
 
         initial_values = self.get_initial()
 
         if value != initial_values["password_confirm"]:
             raise serializers.ValidationError("password do not match")
+
+        # Apply Django's configured AUTH_PASSWORD_VALIDATORS (length, common, numeric, ...);
+        # set_password() does not enforce these on its own.
+        try:
+            validate_password(value)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
         return value
 
     def validate_password_confirm(self, value):
@@ -85,8 +90,10 @@ class APIAuthResetPatchSerializer(serializers.Serializer):
         return value
 
     def validate_password_token(self, value):
-        if CoreMember.objects.filter(password_reset_token=value).exists() is False:
-            raise serializers.ValidationError("wrong password reset token")
-        elif CoreMember.objects.filter(password_reset_token=value).exists() is True:
-            self.member = CoreMember.objects.get(password_reset_token=value)
-        return value
+        # Resolve the token without leaking which tokens exist, then enforce
+        # constant-time match + expiry via the model helper.
+        for member in CoreMember.objects.filter(password_reset_token=value):
+            if member.password_reset_token_is_valid(value):
+                self.member = member
+                return value
+        raise serializers.ValidationError("Invalid or expired password reset token")

@@ -7,6 +7,11 @@ from apps._tasks.helper.tasks import delete_from_disk
 from apps.api.v1.utils.api_helpers import bs_decrypt, aws_s3_upload_log_file, check_error
 from apps.api.v1.utils.api_helpers import zipdir, mkdir_p
 from apps.console.utils.models import UtilBackup
+from apps._tasks.integration.backup._sanitize import (
+    safe_token,
+    safe_password,
+    safe_options,
+)
 from os import path
 
 
@@ -34,7 +39,7 @@ def snapshot_postgresql(backup):
 
     try:
         if node.database.option_postgres:
-            option_postgres = f"-w {node.database.option_postgres}"
+            option_postgres = f"-w {safe_options(node.database.option_postgres, 'option_postgres')}"
         else:
             option_postgres = "-w --clean"
 
@@ -51,6 +56,18 @@ def snapshot_postgresql(backup):
         log_file.write(f"Integration Validation: Passed \n")
 
         database_version_path = node.connection.auth_database.bin_path()
+
+        # Reject command-injection / path-traversal payloads in the user-supplied
+        # connection fields before they are interpolated into the dump commands below.
+        safe_token(node.connection.auth_database.host, "host")
+        safe_token(node.connection.auth_database.port, "port")
+        safe_token(node.connection.auth_database.database_name, "database_name")
+        safe_token(bs_decrypt(node.connection.auth_database.username, encryption_key), "username")
+        safe_password(bs_decrypt(node.connection.auth_database.password, encryption_key), "password")
+        for _name in (node.database.databases or []):
+            safe_token(_name, "databases")
+        for _name in (node.database.tables or []):
+            safe_token(_name, "tables")
 
         if (
                 node.connection.auth_database.use_public_key
@@ -106,6 +123,7 @@ def snapshot_postgresql(backup):
                         databases.append(database_name)
 
                 for database in databases:
+                    safe_token(database, "database")
                     log_file.write(f"Found Database: {database} \n")
 
                     db_file = f"{local_dir}{database}.sql"

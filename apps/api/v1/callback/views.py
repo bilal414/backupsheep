@@ -583,7 +583,17 @@ class APICallbackDigitalOcean(APIView):
                 # if account_req.status_code == 200:
                 #     do_account = account_req.json()
 
-                member = CoreMember.objects.get(id=state)
+                # The OAuth `state` is attacker-controllable, so never trust it to select
+                # the member/account the new credentials are attached to. Bind the result
+                # to the authenticated session and reject a state that doesn't match it.
+                member = request.user.member
+                if state and str(state) != str(member.id):
+                    messages.add_message(
+                        request,
+                        messages.ERROR,
+                        "Unable to connect account due to a verification mismatch. Please try again.",
+                    )
+                    return redirect("console:setup:integration_open", integration_code="digitalocean")
                 account = member.get_current_account()
                 encryption_key = account.get_encryption_key()
 

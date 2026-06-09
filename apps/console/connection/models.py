@@ -2458,6 +2458,11 @@ class CoreAuthWordPress(TimeStampedModel):
             url = self.url
             key = self.key
 
+        # Block SSRF to cloud metadata / loopback / link-local before any request is made.
+        from apps.api.v1.utils.api_helpers import assert_url_not_metadata
+
+        assert_url_not_metadata(url, "WordPress url")
+
         client = self.get_client()
 
         # adapter = SSLAdapter(ssl.PROTOCOL_TLSv1_2)

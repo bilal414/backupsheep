@@ -155,12 +155,14 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
     ),
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "apps.api.v1.utils.api_authentication.CsrfExemptSessionAuthentication",
+        "apps.api.v1.utils.api_authentication.ConsoleSessionAuthentication",
         "apps.api.v1.utils.api_authentication.CustomTokenAuthentication",
     ),
+    # The browsable API UI is handy in development but exposes a self-documenting,
+    # form-driven interface in production, so only enable it when DEBUG is on.
     "DEFAULT_RENDERER_CLASSES": (
-        "rest_framework.renderers.JSONRenderer",
-        "rest_framework.renderers.BrowsableAPIRenderer",
+        ("rest_framework.renderers.JSONRenderer",)
+        + (("rest_framework.renderers.BrowsableAPIRenderer",) if DEBUG else tuple())
     ),
     "EXCEPTION_HANDLER": "rest_framework.views.exception_handler",
     "DEFAULT_FILTER_BACKENDS": (
