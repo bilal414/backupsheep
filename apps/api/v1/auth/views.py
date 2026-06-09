@@ -70,7 +70,10 @@ class APIAuthReset(APIView):
         serializer = APIAuthResetSerializer(data=self.request.data, context={"request": request})
         if serializer.is_valid():
             member = serializer.member
-            member.send_password_reset()
+            # member is None when the email is not registered; respond identically either
+            # way so the endpoint cannot be used to enumerate accounts.
+            if member:
+                member.send_password_reset()
             content = {"password_reset_email": True}
         else:
             raise ExceptionDefault(detail=serializer.errors)
@@ -85,6 +88,7 @@ class APIAuthReset(APIView):
             member.user.set_password(password)
             member.user.save()
             member.password_reset_token = None
+            member.password_reset_token_created = None
             member.save()
             content = {"password_reset": True}
         else:

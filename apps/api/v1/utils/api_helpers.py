@@ -247,31 +247,6 @@ def sizify(value):
     return f"{str(round(value, 2))} {ext}"
 
 
-def get_coordinates(query, from_sensor=False):
-    import urllib
-    import json
-
-    googleGeocodeUrl = "https://maps.googleapis.com/maps/api/geocode/json?"
-
-    query = query.encode("utf-8")
-    params = {
-        "address": query,
-        "key": "AIzaSyBvj20P6aP-DowWicCrp3ON-ZzSyXYPOOM",
-        "sensor": "true" if from_sensor else "false",
-    }
-    url = googleGeocodeUrl + urllib.urlencode(params)
-    json_response = urllib.urlopen(url)
-    response = json.loads(json_response.read())
-    if response["results"]:
-        location = response["results"][0]["geometry"]["location"]
-        latitude, longitude = location["lat"], location["lng"]
-        print(query, latitude, longitude)
-    else:
-        latitude, longitude = None, None
-        print(query, "<no results>")
-    return latitude, longitude
-
-
 def color_variant(hex_color, brightness_offset=1):
     """takes a color like #87c95f and produces a lighter or darker variant"""
     if len(hex_color) != 7:
@@ -798,6 +773,58 @@ def make_digest(message, key):
     # print(signature2)
 
     return str(signature2, "UTF-8")
+
+
+def assert_url_not_metadata(url, field="url"):
+    """Block SSRF to cloud metadata / loopback / link-local from a user-supplied URL.
+
+    This is intentionally narrow: a self-hosted install may legitimately back up a
+    WordPress site on a private LAN (RFC1918), so private ranges are allowed. What is
+    never a legitimate backup target is the loopback interface or the link-local range
+    (169.254.0.0/16 / fe80::/10) that fronts the cloud instance metadata service
+    (169.254.169.254, the GCP metadata host, etc.), so those are refused.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").strip()
+    if not host:
+        raise ValueError(f"Invalid {field}: no host.")
+
+    # Block the well-known metadata hostname directly (it may not resolve to a literal).
+    if host.lower() in ("metadata.google.internal", "metadata"):
+        raise ValueError(f"Refusing to connect to metadata host in {field}.")
+
+    addresses = set()
+    try:
+        addresses.add(ipaddress.ip_address(host))  # url used a literal IP
+    except ValueError:
+        try:
+            for res in socket.getaddrinfo(host, None):
+                addresses.add(ipaddress.ip_address(res[4][0]))
+        except Exception:
+            # If it cannot be resolved here, let the actual request fail normally.
+            return url
+
+    for ip in addresses:
+        if ip.is_loopback or ip.is_link_local:
+            raise ValueError(
+                f"Refusing to connect to a loopback/link-local address in {field}."
+            )
+    return url
+
+
+def safe_basename(name, fallback="file"):
+    """Return a path-traversal-safe filename component from an untrusted value.
+
+    Strips any directory component so a value like ``../../etc/passwd`` returned by a
+    remote server cannot be used to write outside the intended directory.
+    """
+    base = os.path.basename(str(name or "").replace("\\", "/").strip())
+    if base in ("", ".", ".."):
+        return fallback
+    return base
 
 
 def check_error(error_text):

@@ -5,7 +5,7 @@ from sentry_sdk import capture_exception
 import hashlib
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps.api.v1.utils.api_helpers import check_string_in_file, aws_s3_upload_log_file
-from apps.api.v1.utils.api_helpers import mkdir_p
+from apps.api.v1.utils.api_helpers import mkdir_p, safe_basename
 from apps._tasks.helper.tasks import delete_from_disk
 from apps.console.utils.models import UtilBackup
 import time
@@ -86,7 +86,9 @@ def snapshot_wordpress(backup):
                     verify=False,
                     timeout=180,
                 )
-                updraft_log_file = result.json().get("log_file")
+                # Strip any directory component the remote site may include so it cannot
+                # be used to write/read outside the backup's _storage directory.
+                updraft_log_file = safe_basename(result.json().get("log_file"))
                 status = result.json().get("status")
 
                 msg = f"Check counter no {check_counter}. Backup status: {status} Logfile: {updraft_log_file}."
@@ -191,8 +193,9 @@ def snapshot_wordpress(backup):
                     allow_redirects=True,
                     stream=True,
                 )
-                # save downloaded file
-                backup_file_alt = backup_file.replace(backup.uuid_str, md5_code)
+                # save downloaded file (strip any directory component the remote site may
+                # include so the write stays inside the backup's _storage directory)
+                backup_file_alt = safe_basename(backup_file.replace(backup.uuid_str, md5_code))
 
                 '''
                 Sometime .gz files are sent by server as text. So we will add .zip so we can download it.
