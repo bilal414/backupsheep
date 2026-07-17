@@ -714,7 +714,6 @@ class CoreAuthOVHEU(TimeStampedModel):
             for project in projects:
                 project_details = client.get(f"/cloud/project/{project}")
                 servers = client.get(f"/cloud/project/{project}/instance")
-
                 for cloud_server in servers:
                     cloud_server["project"] = project_details
                     cloud_server["_bs_unique_id"] = cloud_server.get("id", None)
@@ -780,7 +779,6 @@ class CoreAuthOVHUS(TimeStampedModel):
             for project in projects:
                 project_details = client.get(f"/cloud/project/{project}")
                 servers = client.get(f"/cloud/project/{project}/instance")
-
                 for cloud_server in servers:
                     cloud_server["project"] = project_details
                     cloud_server["_bs_unique_id"] = cloud_server.get("id", None)
