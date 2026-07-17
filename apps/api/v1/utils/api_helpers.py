@@ -827,6 +827,43 @@ def safe_basename(name, fallback="file"):
     return base
 
 
+def ssrf_safe_get(url, max_redirects=5, **kwargs):
+    """requests.get() that re-validates every redirect target with assert_url_not_metadata.
+
+    requests follows redirects automatically WITHOUT re-checking the destination, so a
+    compromised or malicious backup source could bounce the worker at the cloud metadata
+    service (169.254.169.254), loopback, or other internal addresses — and the response
+    body would be saved into the backup archive, exfiltrating internal data to whoever
+    downloads that backup (verified end-to-end against the WordPress download flow:
+    instance-role credentials landed in the attacker-owned backup archive).
+
+    Redirects are followed manually here; each Location is validated before use, and
+    credentials are not forwarded across hosts.
+    """
+    import requests
+    from urllib.parse import urljoin, urlparse
+
+    kwargs["allow_redirects"] = False
+    current_url = url
+    for _ in range(max_redirects + 1):
+        response = requests.get(current_url, **kwargs)
+        if not (response.is_redirect or response.is_permanent_redirect):
+            return response
+        location = response.headers.get("Location")
+        if not location:
+            return response
+        next_url = urljoin(current_url, location)
+        assert_url_not_metadata(next_url, field="redirect target")
+        if urlparse(next_url).netloc.lower() != urlparse(current_url).netloc.lower():
+            # Never forward credentials to a different host.
+            kwargs.pop("auth", None)
+            headers = dict(kwargs.get("headers") or {})
+            headers.pop("Authorization", None)
+            kwargs["headers"] = headers
+        current_url = next_url
+    raise ValueError(f"Too many redirects while fetching {url!r}.")
+
+
 def check_error(error_text):
     valid_error = None
     try:
