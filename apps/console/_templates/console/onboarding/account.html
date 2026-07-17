@@ -7,6 +7,12 @@
         {% if form.non_field_errors %}
             <div class="rounded-md bg-red-50 ring-1 ring-red-200 text-red-700 text-sm px-4 py-3 mb-4">{{ form.non_field_errors }}</div>
         {% endif %}
+        <div class="rounded-md bg-amber-50 ring-1 ring-amber-200 text-amber-800 text-sm px-4 py-3 mb-4">
+            The install token proves you have access to this server before the first admin
+            is created. Find it with:
+            <code class="font-mono text-xs">docker compose exec web cat /code/_storage/install_token</code>
+        </div>
+        {% include "console/onboarding/_field.html" with field=form.install_token %}
         {% include "console/onboarding/_field.html" with field=form.full_name %}
         {% include "console/onboarding/_field.html" with field=form.organization %}
         {% include "console/onboarding/_field.html" with field=form.email %}

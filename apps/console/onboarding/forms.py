@@ -21,6 +21,15 @@ _EMAIL_PROVIDER_CHOICES = [
 class AccountForm(forms.Form):
     """Creates the first admin (account owner). Email is also the login username."""
 
+    install_token = forms.CharField(
+        label="Install token",
+        help_text=(
+            "Proves you have access to this server. Read it with: "
+            "docker compose exec web cat /code/_storage/install_token "
+            "(or set ONBOARDING_INSTALL_TOKEN in .env)."
+        ),
+        widget=forms.TextInput(attrs={"class": INPUT, "autocomplete": "off"}),
+    )
     full_name = forms.CharField(max_length=150, widget=forms.TextInput(attrs={"class": INPUT}))
     organization = forms.CharField(
         max_length=255, required=False, widget=forms.TextInput(attrs={"class": INPUT})

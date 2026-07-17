@@ -1,5 +1,5 @@
 from django.contrib.auth import get_user_model
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 
 from apps.console.account.models import CoreAccount
 from apps.console.member.models import CoreMember, CoreMemberAccount
@@ -9,8 +9,10 @@ from utils.middleware import OnboardingMiddleware
 User = get_user_model()
 
 PW = "Sup3r-Secret-Pw!"
+INSTALL_TOKEN = "test-install-token"
 
 
+@override_settings(ONBOARDING_INSTALL_TOKEN=INSTALL_TOKEN)
 class OnboardingFlowTests(TestCase):
     def setUp(self):
         # OnboardingMiddleware caches "setup completed" in a process-global latch; reset it
@@ -21,17 +23,24 @@ class OnboardingFlowTests(TestCase):
     def tearDown(self):
         OnboardingMiddleware._completed = False
 
-    def _create_admin(self, email="ada@example.com"):
+    def _create_admin(self, email="ada@example.com", install_token=INSTALL_TOKEN):
         return self.client.post(
             "/onboarding/account/",
             {"full_name": "Ada Admin", "organization": "Acme", "email": email,
-             "password1": PW, "password2": PW},
+             "password1": PW, "password2": PW, "install_token": install_token},
         )
 
     def test_anonymous_is_forced_into_wizard(self):
         r = self.client.get("/")
         self.assertEqual(r.status_code, 302)
         self.assertTrue(r.headers["Location"].startswith("/onboarding"))
+
+    def test_account_creation_rejects_missing_or_wrong_install_token(self):
+        for bad_token in ("", "wrong-token"):
+            r = self._create_admin(install_token=bad_token)
+            self.assertEqual(r.status_code, 200)  # re-rendered with an error
+            self.assertIn("Invalid install token", r.content.decode())
+            self.assertEqual(User.objects.count(), 0)
 
     def test_account_creation_builds_chain_and_logs_in(self):
         r = self._create_admin()

@@ -6,6 +6,9 @@ from django.db import transaction
 from django.shortcuts import redirect, render
 from django.utils import timezone
 
+import os
+import secrets
+
 from apps.console.account.models import CoreAccount
 from apps.console.member.models import CoreMember, CoreMemberAccount
 from apps.console.setting.models import CoreSiteSettings
@@ -28,6 +31,41 @@ def _require_admin(request):
     return request.user.is_authenticated and hasattr(request.user, "member")
 
 
+def _expected_install_token():
+    """Token the installer must present to create the first admin account.
+
+    Priority: the ONBOARDING_INSTALL_TOKEN environment setting; otherwise a random
+    per-install token written to a file that is only readable with host/container
+    access (generated on first request). Either way, completing the wizard over the
+    network requires proving access to the machine it runs on.
+    """
+    if dj_settings.ONBOARDING_INSTALL_TOKEN:
+        return dj_settings.ONBOARDING_INSTALL_TOKEN
+    path = dj_settings.ONBOARDING_INSTALL_TOKEN_FILE
+    try:
+        with open(path) as fh:
+            token = fh.read().strip()
+            if token:
+                return token
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(24)
+    try:
+        with open(path, "w") as fh:
+            fh.write(token)
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return token
+
+
+def _install_token_ok(request, expected):
+    presented = request.POST.get("install_token", "").strip()
+    if not presented or not expected:
+        return False
+    return secrets.compare_digest(presented, expected)
+
+
 def index(request):
     if not User.objects.exists():
         return redirect("console:onboarding:account")
@@ -45,7 +83,14 @@ def account(request):
 
     if request.method == "POST":
         form = AccountForm(request.POST)
-        if form.is_valid():
+        token_ok = _install_token_ok(request, _expected_install_token())
+        if not token_ok:
+            form.add_error(
+                "install_token",
+                "Invalid install token. Read it from the server with: "
+                "docker compose exec web cat /code/_storage/install_token",
+            )
+        if token_ok and form.is_valid():
             with transaction.atomic():
                 user = User.objects.create_user(
                     username=form.cleaned_data["email"],
