@@ -1,4 +1,5 @@
 import os
+import shlex
 from sentry_sdk import capture_exception
 import subprocess
 from apps._tasks.exceptions import NodeBackupFailedError, NodeBackupTimeoutError
@@ -40,6 +41,8 @@ def snapshot_full_v2(backup):
         for path in node.website.paths:
             sources.append(path["path"])
 
+        # NOTE: exclude_rules is assembled but not currently used by the tar command
+        # below; keep it shell-quoted anyway so a future caller stays safe.
         exclude_rules = '--exclude=="*.sock"'
 
         if node.website.tar_exclude_vcs_ignores:
@@ -56,7 +59,7 @@ def snapshot_full_v2(backup):
 
         if node.website.excludes_glob:
             for glob in node.website.excludes_glob:
-                exclude_rules += f' --exclude="{glob}"'
+                exclude_rules += f" --exclude={shlex.quote(glob)}"
 
         """
         Checking for connection
@@ -65,25 +68,29 @@ def snapshot_full_v2(backup):
 
         sftp, ssh, ssh_key_path = auth_website.get_sftp_client()
 
-        # BackupSheep directory path on user server
+        # BackupSheep directory path on user server. tar_temp_backup_dir and the
+        # backup paths are user-controlled: every value interpolated into a remote
+        # shell command MUST be shlex-quoted. The previous naive double-quote
+        # wrapping ('"{0}"') allowed metacharacters (", $, `, ;) to break out and
+        # execute arbitrary commands on the target server as the SSH user.
         bs_backup_directory = f"{node.website.tar_temp_backup_dir}/{node.uuid_str}"
         bs_backup_tar = f"{bs_backup_directory}/{backup.uuid_str}.tar"
         bs_backup_snar = f"{node.website.tar_temp_backup_dir}/{node.uuid_str}.snar"
-        bs_backup_sources = " ".join('"{0}"'.format(x).strip() for x in sources)
+        bs_backup_sources = " ".join(shlex.quote(x) for x in sources)
 
         # sftp.mkdir(bs_backup_directory)
 
         # Create backup directory
-        _stdin, _stdout, _stderr = ssh.exec_command(f"mkdir -p {bs_backup_directory}")
+        _stdin, _stdout, _stderr = ssh.exec_command(f"mkdir -p {shlex.quote(bs_backup_directory)}")
         _stdout.channel.set_combine_stderr(True)
         output = _stdout.readlines()
 
         # Remove any existing backup tar
-        _stdin, _stdout, _stderr = ssh.exec_command(f"rm -rf {bs_backup_tar}")
+        _stdin, _stdout, _stderr = ssh.exec_command(f"rm -rf {shlex.quote(bs_backup_tar)}")
         _stdout.channel.set_combine_stderr(True)
         output = _stdout.readlines()
 
-        command = f'tar --create --no-check-device --file="{bs_backup_tar}" {bs_backup_sources}'
+        command = f"tar --create --no-check-device --file={shlex.quote(bs_backup_tar)} {bs_backup_sources}"
         _stdin, _stdout, _stderr = ssh.exec_command(command, timeout=command_timeout)
         _stdout.channel.set_combine_stderr(True)
         output = _stdout.readlines()
