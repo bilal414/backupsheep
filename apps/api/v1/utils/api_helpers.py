@@ -870,3 +870,4 @@ def check_error(error_text):
         valid_error = len(error_text.strip()) > 0
     except Exception:
         pass
+    return valid_error
