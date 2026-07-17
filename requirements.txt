@@ -51,7 +51,7 @@ requests==2.34.2
 # Pinned <2: connection/models.py uses urllib3 Retry(method_whitelist=...),
 # which urllib3 2.x removed; with 2.x WordPress connection validation fails
 # silently (broad except) and WordPress backups never run.
-urllib3==1.26.20
+urllib3==2.7.0
 requests-toolbelt==1.0.0
 gunicorn==26.0.0
 whitenoise==6.12.0
