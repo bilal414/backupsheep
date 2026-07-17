@@ -29,8 +29,7 @@ RUN apt-get update \
     && apt-get -y install libncurses-dev libgnutls28-dev libexpat1-dev  pkg-config libreadline-dev  zlib1g-dev libssl-dev \
     && apt-get -y install software-properties-common tree libfreetype6-dev \
     && apt-get -y install tzdata \
-    && wget http://lftp.yar.ru/ftp/lftp-4.9.2.tar.gz \
-    && tar -xvf lftp-4.9.2.tar.gz && cd lftp-4.9.2 && ./configure && make install \
+    && apt-get -y install lftp \
     && pip install psycopg2
 
 # PostgreSQL client tools (pg_dump / psql / pg_restore) for versions 14-18 from the
