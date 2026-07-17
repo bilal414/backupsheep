@@ -277,6 +277,16 @@ API_PATH = "/api/"
 CONSOLE_URL = "/console"
 ONBOARDING_URL = "/onboarding"
 
+# First-run onboarding gate. Whoever completes the wizard becomes the instance admin,
+# so creating the first account requires proof of infrastructure access: either this
+# fixed token from the environment, or a per-install random token the app writes to
+# ONBOARDING_INSTALL_TOKEN_FILE (read it with:
+#   docker compose exec web cat /code/_storage/install_token
+# ). Without the gate, anyone who reaches an unconfigured install over the network
+# could claim the admin account before the real operator does.
+ONBOARDING_INSTALL_TOKEN = config.get("ONBOARDING_INSTALL_TOKEN", "")
+ONBOARDING_INSTALL_TOKEN_FILE = os.path.join(BASE_DIR, "_storage", "install_token")
+
 LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/login',
     r'/reset',
