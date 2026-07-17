@@ -5,7 +5,7 @@ from sentry_sdk import capture_exception
 import hashlib
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps.api.v1.utils.api_helpers import check_string_in_file, aws_s3_upload_log_file
-from apps.api.v1.utils.api_helpers import mkdir_p, safe_basename
+from apps.api.v1.utils.api_helpers import mkdir_p, safe_basename, ssrf_safe_get
 from apps._tasks.helper.tasks import delete_from_disk
 from apps.console.utils.models import UtilBackup
 import time
@@ -56,7 +56,7 @@ def snapshot_wordpress(backup):
             log_file.write(f"Tigger Backup: {url} \n")
 
             # We don't need to wait for this
-            requests.get(
+            ssrf_safe_get(
                 url,
                 auth=auth,
                 headers=client,
@@ -79,7 +79,7 @@ def snapshot_wordpress(backup):
                       f"&key={node.connection.auth_wordpress.key}" \
                       f"&t={time.time()}"
                 log_file.write(f"Check backup status: {url} \n")
-                result = requests.get(
+                result = ssrf_safe_get(
                     url,
                     auth=auth,
                     headers=client,
@@ -106,12 +106,11 @@ def snapshot_wordpress(backup):
                           f"&key={node.connection.auth_wordpress.key}" \
                           f"&t={time.time()}"
                     log_file.write(f"Download updraft backup log: {url} \n")
-                    r = requests.get(
+                    r = ssrf_safe_get(
                         url,
                         auth=auth,
                         headers=client,
                         verify=False,
-                        allow_redirects=True,
                         stream=True,
                     )
                     # save downloaded log file
@@ -160,7 +159,7 @@ def snapshot_wordpress(backup):
 
         log_file.write(f"Get list of backup files: {url} \n")
 
-        result = requests.get(
+        result = ssrf_safe_get(
             url,
             auth=auth,
             headers=client,
@@ -185,12 +184,11 @@ def snapshot_wordpress(backup):
                 msg = f"Downloading file: {backup_file} using URL {url}"
                 log_file.write(f"Downloading file: {backup_file} using URL {url} \n")
 
-                r = requests.get(
+                r = ssrf_safe_get(
                     url,
                     auth=auth,
                     headers=client,
                     verify=False,
-                    allow_redirects=True,
                     stream=True,
                 )
                 # save downloaded file (strip any directory component the remote site may
@@ -224,13 +222,12 @@ def snapshot_wordpress(backup):
 
                 log_file.write(f"Delete file: {url} \n")
 
-                r_delete = requests.get(
+                r_delete = ssrf_safe_get(
                     url,
                     auth=auth,
                     headers=client,
                     verify=False,
-                    allow_redirects=True,
-                )
+                    )
 
                 if r_delete.status_code == 200:
                     if r_delete.json().get("deleted"):
@@ -259,7 +256,7 @@ def snapshot_wordpress(backup):
         f"/?rest_route=/backupsheep/updraftplus/rebuild_history"
         f"&t={time.time()}"
         f"&key={node.connection.auth_wordpress.key}"
-        requests.get(
+        ssrf_safe_get(
             url,
             auth=auth,
             headers=client,
