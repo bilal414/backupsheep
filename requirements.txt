@@ -1,9 +1,9 @@
 # Core Python packages
-setuptools==82.0.1
-pip==26.1.1
+setuptools==83.0.0
+pip==26.1.2
 
 # Django and REST Framework
-Django==6.0.5
+Django==6.0.7
 djangorestframework==3.17.1
 djangorestframework-datatables==0.7.2
 django-filter==25.2
@@ -48,6 +48,10 @@ ovh==1.2.0
 paramiko==5.0.0
 ftputil==5.2.0
 requests==2.34.2
+# Pinned <2: connection/models.py uses urllib3 Retry(method_whitelist=...),
+# which urllib3 2.x removed; with 2.x WordPress connection validation fails
+# silently (broad except) and WordPress backups never run.
+urllib3==1.26.20
 requests-toolbelt==1.0.0
 gunicorn==26.0.0
 whitenoise==6.12.0
@@ -66,7 +70,7 @@ humanize==4.15.0
 shortuuid==1.0.13
 phonenumbers==9.0.30
 twilio==9.10.9
-Pillow==12.2.0
+Pillow==12.3.0
 beautifulsoup4==4.14.3
 slack-sdk==3.42.0
 fake-useragent==2.2.0
