@@ -60,7 +60,7 @@ ipaddress==1.0.23
 # Security & Authentication
 python-dotenv==1.2.2
 # Capped <47 by oci 2.175.0 (Oracle Cloud SDK); 46.0.7 is the newest it allows.
-cryptography==46.0.7
+cryptography==48.0.1
 sentry-sdk==2.60.0
 firebase-admin==7.4.0
 
