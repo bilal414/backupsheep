@@ -2115,63 +2115,6 @@ class CoreAuthDatabase(TimeStampedModel):
             raise NodeConnectionErrorSSH()
         return ssh, ssh_key_path
 
-    def get_ssh_process(self, data=None):
-        import paramiko
-        import tempfile
-        import os
-        import subprocess
-
-        if data:
-            ssh_username = data.get("ssh_username")
-            ssh_password = data.get("ssh_password")
-            ssh_port = data.get("ssh_port")
-            ssh_host = data.get("ssh_host")
-            private_key = data.get("private_key")
-            use_public_key = data.get("use_public_key")
-            use_private_key = data.get("use_private_key")
-            flag_use_sha1_key_verification = data.get("flag_use_sha1_key_verification")
-        else:
-            encryption_key = self.connection.account.get_encryption_key()
-            ssh_username = bs_decrypt(self.ssh_username, encryption_key)
-            ssh_password = bs_decrypt(self.ssh_password, encryption_key)
-            ssh_port = self.ssh_port
-            ssh_host = self.ssh_host
-            private_key = bs_decrypt(self.private_key, encryption_key)
-            use_public_key = self.use_public_key
-            use_private_key = self.use_private_key
-            flag_use_sha1_key_verification = self.flag_use_sha1_key_verification
-
-        ssh = None
-        ssh_key_path = None
-
-        if use_public_key:
-            p = subprocess.Popen(
-                f"ssh {ssh_username}@{ssh_host} -p {int(ssh_port)} -i {settings.SSH_KEY_PATH}",
-                shell=True,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            p.stdin.write("ls\n")
-            print(p.stdout.read())
-        elif use_private_key:
-            fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
-            with os.fdopen(fd, "w") as tmp:
-                tmp.write(private_key)
-
-            p = subprocess.Popen(
-                f"ssh {ssh_username}@{ssh_host} -p {int(ssh_port)} -i {ssh_key_path}",
-                shell=True,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            p.stdin.write("ls\n")
-            print(p.stdout.read())
-        if not ssh:
-            raise NodeConnectionErrorSSH()
-        return ssh, ssh_key_path
-
     def get_eligible_objects(self):
         import mysql.connector
         import psycopg2
