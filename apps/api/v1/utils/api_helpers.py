@@ -110,18 +110,6 @@ def email_present_exclude_own(email, id):
     return False
 
 
-def get_random_password():
-    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    pw_length = 14
-    mypw = ""
-
-    for i in range(pw_length):
-        next_index = random.randrange(len(alphabet))
-        mypw = mypw + alphabet[next_index]
-
-    return mypw
-
-
 def generate_random_email_verification(length=16, chars=ascii_lowercase + digits, split=4, delimiter="-"):
     code = "".join([choice(chars) for i in range(length)])
     if split:
