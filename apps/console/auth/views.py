@@ -1,6 +1,7 @@
 from django.contrib.auth.views import *
 from django.shortcuts import redirect
 from django.urls import reverse
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.generic import TemplateView
 
 from apps.console.member.models import CoreMember
@@ -16,7 +17,16 @@ class LoginView(TemplateView):
 
     def get(self, request, *args, **kwargs):
         context = self.get_context_data(**kwargs)
-        request.session["next"] = request.GET.get("next", None)
+        # Only honor same-host redirect targets. After login the browser is sent
+        # to this value verbatim (window.location = json.next), so accepting an
+        # arbitrary absolute URL here turns the login page into an open redirect
+        # for phishing.
+        next_url = request.GET.get("next", None)
+        if next_url and not url_has_allowed_host_and_scheme(
+            next_url, allowed_hosts={request.get_host()}, require_https=False
+        ):
+            next_url = None
+        request.session["next"] = next_url
         return self.render_to_response(context)
 
 
