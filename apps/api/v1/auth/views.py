@@ -4,10 +4,12 @@ from rest_framework.views import APIView
 from .serializers import *
 from django.contrib.auth import login, logout
 from ..utils.api_exceptions import ExceptionDefault
+from ..utils.api_throttles import LoginRateThrottle, PasswordResetRateThrottle
 
 
 class APIAuthLogin(APIView):
     permission_classes = ()
+    throttle_classes = [LoginRateThrottle]
 
     def post(self, request):
         serializer = APIAuthLoginSerializer(data=self.request.data, context={"request": request})
@@ -65,6 +67,7 @@ class APIAuthLogout(APIView):
 
 class APIAuthReset(APIView):
     permission_classes = ()
+    throttle_classes = [PasswordResetRateThrottle]
 
     def post(self, request):
         serializer = APIAuthResetSerializer(data=self.request.data, context={"request": request})
