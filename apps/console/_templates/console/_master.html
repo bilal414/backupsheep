@@ -1,24 +1,27 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full bg-white">
+<html lang="en" class="h-full bg-slate-50">
 <head>
     <title>{% block title %}Dashboard{% endblock %}</title>
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <meta name="author" content="{% block author %}MonetizeNow{% endblock %}">
+    <meta name="author" content="{% block author %}BackupSheep{% endblock %}">
     <!-- Fonts -->
-    <link rel="shortcuticon" href="{{ STATIC_URL }}images/favicon.png" type="image/x-icon">
-    <link rel="icon" href="{{ STATIC_URL }}images/favicon.png" type="image/x-icon">
+    <link rel="shortcuticon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
+    <link rel="icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flowbite@4.0.2/dist/flowbite.min.css"/>
     <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet"/>
 </head>
-<body class="h-full{% block page_class %}{% endblock %}">
+<body class="h-full antialiased{% block page_class %}{% endblock %}">
 <div x-data="{ sideBar: false }">
     {% include "_sidebar.html" %}
     <div class="lg:pl-72">
         {% include "_header.html" %}
-        <main class="py-10  flex flex-col h-screen justify-between">
-            <div class="px-4 sm:px-6 lg:px-8 mb-auto">
+        <main class="py-8 flex flex-col min-h-screen justify-between">
+            <div class="px-4 sm:px-6 lg:px-10 mb-auto w-full">
                 {% block content %}{% endblock %}
             </div>
             {% include "_footer.html" %}

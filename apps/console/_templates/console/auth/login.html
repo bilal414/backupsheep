@@ -8,33 +8,35 @@
 {% block content %}
     <div class="flex min-h-full flex-col justify-center py-12 sm:px-6 lg:px-8" x-data="loginPage()">
         <div class="sm:mx-auto sm:w-full sm:max-w-md">
-            <img class="mx-auto h-12 w-auto" src="{{ STATIC_URL }}console/images/logo.svg"
+            <img class="mx-auto h-11 w-auto" src="{{ STATIC_URL }}console/images/logo.webp"
                  alt="BackupSheep">
-            <h2 class="mt-6 text-center text-3xl font-bold tracking-tight text-gray-900">Log into Dashboard</h2>
+            <h2 class="mt-8 text-center text-2xl font-bold tracking-tight text-slate-900">Welcome back</h2>
+            <p class="mt-2 text-center text-sm text-slate-500">Log in to your BackupSheep dashboard</p>
         </div>
 
         <div class="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-            <div class="bg-white py-8 px-4 shadow-sm sm:rounded-lg sm:px-10">
+            <div class="bg-white py-8 px-6 shadow-lifted ring-1 ring-slate-900/5 sm:rounded-2xl sm:px-10">
                 <form class="space-y-6" action="javascript:void(0);" method="POST">
 
                     <div>
-                        <label for="email" class="block text-sm font-medium text-gray-700">Email address</label>
-                        <div class="mt-1">
+                        <label for="email" class="block text-sm font-medium leading-6 text-slate-700">Email
+                            address</label>
+                        <div class="mt-2">
                             <input x-model="auth.email" id="email" name="email" type="email" autocomplete="email"
                                    required
-                                   class="block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 placeholder-gray-400 shadow-xs focus:border-teal-500 focus:outline-hidden focus:ring-teal-500 sm:text-sm">
+                                   class="block w-full rounded-lg border-0 px-3.5 py-2.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
                             <p x-show="loginErrors?.email" class="mt-2 text-sm text-red-600" id="name-error"
                                x-text="loginErrors?.email"></p>
                         </div>
                     </div>
 
                     <div>
-                        <label for="password" class="block text-sm font-medium text-gray-700">Password</label>
-                        <div class="mt-1">
+                        <label for="password" class="block text-sm font-medium leading-6 text-slate-700">Password</label>
+                        <div class="mt-2">
                             <input x-model="auth.password" id="password" name="password" type="password"
                                    autocomplete="password"
                                    required
-                                   class="block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 placeholder-gray-400 shadow-xs focus:border-teal-500 focus:outline-hidden focus:ring-teal-500 sm:text-sm">
+                                   class="block w-full rounded-lg border-0 px-3.5 py-2.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6">
                             <p x-show="loginErrors?.password" class="mt-2 text-sm text-red-600" id="name-error"
                                x-text="loginErrors?.password"></p>
                         </div>
@@ -42,13 +44,19 @@
                     <div class="flex items-center justify-between">
                         <div class="text-sm">
                             <a href="{% url 'console:auth:reset' %}"
-                               class="font-medium text-teal-600 hover:text-teal-500">Forgot your
+                               class="font-medium text-indigo-600 hover:text-indigo-500">Forgot your
                                 password?</a>
                         </div>
                     </div>
                     <div class="flex items-center justify-between">
+                        <div class="text-sm">
+                            <a href="{% url 'console:auth:setup' %}"
+                               class="font-medium text-indigo-600 hover:text-indigo-500">Set up your account</a>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-between">
                         <template x-for="non_field_error in loginErrors.non_field_errors">
-                            <div class="rounded-md bg-red-50 p-2 w-full">
+                            <div class="rounded-lg bg-red-50 ring-1 ring-red-100 px-3 py-2 w-full">
                                 <div class="flex">
                                     <div class="text-sm text-red-700">
                                         <p x-text="non_field_error"></p>
@@ -60,12 +68,14 @@
 
                     <div>
                         <button @click="emailPasswordLogin()"
-                                class="flex w-full justify-center rounded-md border border-transparent bg-teal-600 py-2 px-4 text-sm font-medium text-white shadow-xs hover:bg-teal-700 focus:outline-hidden focus:ring-2 focus:ring-teal-500 focus:ring-offset-2">
+                                class="flex w-full justify-center rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 transition-colors">
                             Sign in
                         </button>
                     </div>
                 </form>
             </div>
+            <p class="mt-8 text-center text-xs text-slate-400">BackupSheep &mdash; automated backups for your
+                infrastructure</p>
         </div>
     </div>
 {% endblock %}
