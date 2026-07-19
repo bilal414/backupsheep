@@ -281,7 +281,7 @@ ONBOARDING_URL = "/onboarding"
 # so creating the first account requires proof of infrastructure access: either this
 # fixed token from the environment, or a per-install random token the app writes to
 # ONBOARDING_INSTALL_TOKEN_FILE (read it with:
-#   docker compose exec web cat /code/_storage/install_token
+#   docker compose exec app cat /code/_storage/install_token
 # ). Without the gate, anyone who reaches an unconfigured install over the network
 # could claim the admin account before the real operator does.
 ONBOARDING_INSTALL_TOKEN = config.get("ONBOARDING_INSTALL_TOKEN", "")
@@ -406,8 +406,9 @@ OVH_US_APP_KEY = config.get("OVH_US_APP_KEY", "")
 OVH_US_APP_SECRET = config.get("OVH_US_APP_SECRET", "")
 
 # Celery (task queue + scheduled backups)
-# Broker is Redis by default; override CELERY_BROKER_URL in .env for another broker.
-CELERY_BROKER_URL = config.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+# Broker is RabbitMQ by default (the docker-compose stack includes it); override
+# CELERY_BROKER_URL in .env for another broker.
+CELERY_BROKER_URL = config.get("CELERY_BROKER_URL", "amqp://guest:guest@rabbitmq:5672//")
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE

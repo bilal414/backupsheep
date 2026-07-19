@@ -48,10 +48,10 @@ ovh==1.2.0
 paramiko==5.0.0
 ftputil==5.2.0
 requests==2.34.2
-# Pinned <2: connection/models.py uses urllib3 Retry(method_whitelist=...),
-# which urllib3 2.x removed; with 2.x WordPress connection validation fails
-# silently (broad except) and WordPress backups never run.
-urllib3==1.26.20
+# >=2.6.3: required by oci. Retry(method_whitelist=...) was migrated to
+# Retry(allowed_methods=...) in connection/models.py, which works on both
+# urllib3 1.26 and 2.x, so the old <2 pin is no longer needed.
+urllib3>=2.6.3,<3
 requests-toolbelt==1.0.0
 gunicorn==26.0.0
 whitenoise==6.12.0

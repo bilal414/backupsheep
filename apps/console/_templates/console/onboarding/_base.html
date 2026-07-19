@@ -1,47 +1,75 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="h-full">
 <head>
     <title>{% block title %}Set up {{ app_name }}{% endblock %}</title>
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <link rel="icon" href="{{ STATIC_URL }}images/favicon.png" type="image/x-icon">
+    <link rel="shortcuticon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
+    <link rel="icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
-    <style>[x-cloak]{display:none !important;}</style>
+    <style>
+        [x-cloak] { display: none !important; }
+        /* Widget classes live in onboarding/forms.py; round them to match the auth pages. */
+        #onboarding-card input, #onboarding-card select, #onboarding-card textarea { border-radius: 0.5rem; }
+    </style>
 </head>
-<body class="bg-gray-50 min-h-screen text-gray-900">
-<div class="max-w-2xl mx-auto px-4 py-10">
-    <div class="mb-8">
-        <p class="text-xs font-medium uppercase tracking-wide text-indigo-600 mb-1">Step {{ step }} of {{ steps|length }}</p>
-        <h1 class="text-2xl font-semibold">Set up {{ app_name|default:"BackupSheep" }}</h1>
-        <p class="text-sm text-gray-500 mt-1">A few steps to get your self-hosted install ready.</p>
+<body class="h-full bg-slate-50 text-slate-900 antialiased">
+<div class="relative min-h-full isolate">
+    <!-- Decorative background -->
+    <div class="absolute inset-0 -z-10 overflow-hidden" aria-hidden="true">
+        <div class="absolute inset-0 bg-gradient-to-br from-slate-50 via-indigo-50/60 to-slate-100"></div>
+        <svg class="absolute left-[max(50%,25rem)] top-0 h-[64rem] w-[128rem] -translate-x-1/2 stroke-slate-200 [mask-image:radial-gradient(64rem_64rem_at_top,white,transparent)]"
+             aria-hidden="true">
+            <defs>
+                <pattern id="bs-onboarding-grid" width="160" height="160" x="50%" y="-1" patternUnits="userSpaceOnUse">
+                    <path d="M.5 160V.5H160" fill="none"/>
+                </pattern>
+            </defs>
+            <rect width="100%" height="100%" stroke-width="0" fill="url(#bs-onboarding-grid)"/>
+        </svg>
+        <div class="absolute -top-40 right-0 h-96 w-96 rounded-full bg-indigo-200/40 blur-3xl"></div>
+        <div class="absolute -bottom-40 -left-20 h-96 w-96 rounded-full bg-sky-200/40 blur-3xl"></div>
     </div>
 
-    <ol class="flex items-center w-full mb-8">
-        {% for s in steps %}
-            <li class="flex items-center {% if not forloop.last %}flex-1{% endif %}">
-                <span class="flex items-center justify-center w-7 h-7 rounded-full text-xs font-semibold
-                    {% if forloop.counter < step %}bg-green-600 text-white
-                    {% elif forloop.counter == step %}bg-indigo-600 text-white
-                    {% else %}bg-gray-200 text-gray-500{% endif %}">{{ forloop.counter }}</span>
-                <span class="ml-2 text-sm hidden sm:inline {% if forloop.counter == step %}text-indigo-700 font-medium{% else %}text-gray-500{% endif %}">{{ s }}</span>
-                {% if not forloop.last %}<span class="flex-1 h-px bg-gray-200 mx-3"></span>{% endif %}
-            </li>
-        {% endfor %}
-    </ol>
-
-    {% if messages %}
-        <div class="mb-4 space-y-2">
-            {% for m in messages %}
-                <div class="rounded-md px-4 py-3 text-sm
-                    {% if m.tags == 'success' %}bg-green-50 text-green-800 ring-1 ring-green-200
-                    {% elif m.tags == 'error' %}bg-red-50 text-red-800 ring-1 ring-red-200
-                    {% else %}bg-yellow-50 text-yellow-800 ring-1 ring-yellow-200{% endif %}">{{ m }}</div>
-            {% endfor %}
+    <div class="max-w-2xl mx-auto px-4 py-10 sm:py-14">
+        <div class="text-center mb-8">
+            <img class="mx-auto h-10 w-auto" src="{{ STATIC_URL }}console/images/logo.webp"
+                 alt="{{ app_name|default:'BackupSheep' }}">
+            <p class="mt-6 text-xs font-semibold uppercase tracking-wider text-indigo-600">Step {{ step }} of {{ steps|length }}</p>
+            <h1 class="mt-2 text-2xl font-bold tracking-tight text-slate-900">Set up {{ app_name|default:"BackupSheep" }}</h1>
+            <p class="mt-2 text-sm text-slate-500">A few steps to get your self-hosted install ready.</p>
         </div>
-    {% endif %}
 
-    <div class="bg-white shadow-sm ring-1 ring-gray-200 rounded-lg p-6">
-        {% block step %}{% endblock %}
+        <ol class="flex items-center w-full mb-8">
+            {% for s in steps %}
+                <li class="flex items-center {% if not forloop.last %}flex-1{% endif %}">
+                    <span class="flex items-center justify-center w-8 h-8 rounded-full text-xs font-semibold shadow-sm ring-1 ring-inset
+                        {% if forloop.counter < step %}bg-indigo-600 text-white ring-indigo-600
+                        {% elif forloop.counter == step %}bg-white text-indigo-700 ring-indigo-600
+                        {% else %}bg-white text-slate-400 ring-slate-200{% endif %}">{% if forloop.counter < step %}<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>{% else %}{{ forloop.counter }}{% endif %}</span>
+                    <span class="ml-2 text-sm hidden sm:inline {% if forloop.counter == step %}text-indigo-700 font-medium{% else %}text-slate-500{% endif %}">{{ s }}</span>
+                    {% if not forloop.last %}<span class="flex-1 h-px {% if forloop.counter < step %}bg-indigo-300{% else %}bg-slate-200{% endif %} mx-3"></span>{% endif %}
+                </li>
+            {% endfor %}
+        </ol>
+
+        {% if messages %}
+            <div class="mb-4 space-y-2">
+                {% for m in messages %}
+                    <div class="rounded-lg px-4 py-3 text-sm shadow-soft
+                        {% if m.tags == 'success' %}bg-green-50 text-green-800 ring-1 ring-green-200
+                        {% elif m.tags == 'error' %}bg-red-50 text-red-800 ring-1 ring-red-200
+                        {% else %}bg-yellow-50 text-yellow-800 ring-1 ring-yellow-200{% endif %}">{{ m }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+
+        <div id="onboarding-card" class="bg-white shadow-lifted ring-1 ring-slate-900/5 rounded-2xl p-6 sm:p-8">
+            {% block step %}{% endblock %}
+        </div>
     </div>
 </div>
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js"></script>

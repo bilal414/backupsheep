@@ -2,6 +2,86 @@
 
 @config '../tailwind.config.js';
 
+@theme {
+  /* Typography */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --default-font-family: var(--font-sans);
+
+  /* Slate palette (modern neutral) */
+  --color-slate-50: #f8fafc;
+  --color-slate-100: #f1f5f9;
+  --color-slate-200: #e2e8f0;
+  --color-slate-300: #cbd5e1;
+  --color-slate-400: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-600: #475569;
+  --color-slate-700: #334155;
+  --color-slate-800: #1e293b;
+  --color-slate-900: #0f172a;
+  --color-slate-950: #020617;
+
+  /* Remap legacy gray -> slate tints for a cleaner look everywhere */
+  --color-gray-50: #f8fafc;
+  --color-gray-100: #f1f5f9;
+  --color-gray-200: #e2e8f0;
+  --color-gray-300: #cbd5e1;
+  --color-gray-400: #94a3b8;
+  --color-gray-500: #64748b;
+  --color-gray-600: #475569;
+  --color-gray-700: #334155;
+  --color-gray-800: #1e293b;
+  --color-gray-900: #0f172a;
+  --color-gray-950: #020617;
+
+  /* Remap legacy teal -> indigo so the whole console shares one brand accent */
+  --color-teal-50: #eef2ff;
+  --color-teal-100: #e0e7ff;
+  --color-teal-200: #c7d2fe;
+  --color-teal-300: #a5b4fc;
+  --color-teal-400: #818cf8;
+  --color-teal-500: #6366f1;
+  --color-teal-600: #4f46e5;
+  --color-teal-700: #4338ca;
+  --color-teal-800: #3730a3;
+  --color-teal-900: #312e81;
+  --color-teal-950: #1e1b4b;
+
+  /* Extra accents for integration provider chips */
+  --color-blue-50: #eff6ff;
+  --color-blue-100: #dbeafe;
+  --color-blue-200: #bfdbfe;
+  --color-blue-500: #3b82f6;
+  --color-blue-600: #2563eb;
+  --color-blue-700: #1d4ed8;
+  --color-blue-800: #1e40af;
+  --color-orange-500: #f97316;
+  --color-orange-600: #ea580c;
+  --color-violet-500: #8b5cf6;
+  --color-violet-600: #7c3aed;
+  --color-cyan-500: #06b6d4;
+  --color-cyan-600: #0891b2;
+  --color-pink-500: #ec4899;
+  --color-amber-500: #f59e0b;
+  --color-purple-50: #faf5ff;
+  --color-purple-100: #f3e8ff;
+  --color-purple-200: #e9d5ff;
+  --color-purple-500: #a855f7;
+  --color-purple-600: #9333ea;
+  --color-purple-700: #7e22ce;
+  --color-purple-800: #6b21a8;
+  --color-green-50: #f0fdf4;
+  --color-green-200: #bbf7d0;
+  --color-yellow-50: #fefce8;
+  --color-yellow-200: #fef08a;
+  --color-red-50: #fef2f2;
+  --color-red-200: #fecaca;
+
+  /* Soft modern shadows */
+  --shadow-soft: 0 1px 2px 0 rgb(15 23 42 / 0.04), 0 1px 6px -1px rgb(15 23 42 / 0.06);
+  --shadow-card: 0 4px 12px -2px rgb(15 23 42 / 0.08), 0 2px 4px -2px rgb(15 23 42 / 0.04);
+  --shadow-lifted: 0 12px 32px -8px rgb(15 23 42 / 0.15), 0 4px 8px -4px rgb(15 23 42 / 0.06);
+}
+
 /*
   The default border color has changed to `currentcolor` in Tailwind CSS v4,
   so we've added these compatibility styles to make sure everything still

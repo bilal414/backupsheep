@@ -25,7 +25,7 @@ class AccountForm(forms.Form):
         label="Install token",
         help_text=(
             "Proves you have access to this server. Read it with: "
-            "docker compose exec web cat /code/_storage/install_token "
+            "docker compose exec app cat /code/_storage/install_token "
             "(or set ONBOARDING_INSTALL_TOKEN in .env)."
         ),
         widget=forms.TextInput(attrs={"class": INPUT, "autocomplete": "off"}),

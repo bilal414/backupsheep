@@ -88,7 +88,7 @@ def account(request):
             form.add_error(
                 "install_token",
                 "Invalid install token. Read it from the server with: "
-                "docker compose exec web cat /code/_storage/install_token",
+                "docker compose exec app cat /code/_storage/install_token",
             )
         if token_ok and form.is_valid():
             with transaction.atomic():

@@ -7,7 +7,7 @@
       "description": "Linode",
       "position": 6,
       "url": "https://www.linode.com/",
-      "image": null,
+      "image": "console/images/storage/linode.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -18,7 +18,7 @@
       "description": "Amazon Web Services - RDS",
       "position": 9,
       "url": "https://aws.amazon.com/",
-      "image": "website/images/clouds/aws.svg",
+      "image": "console/images/storage/aws.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -29,7 +29,7 @@
       "description": "OVH Public Cloud",
       "position": 4,
       "url": "https://www.ovh.com/ca/en/public-cloud/instances/",
-      "image": "website/images/clouds/ovhcloud.svg",
+      "image": "console/images/storage/ovhcloud.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -40,7 +40,7 @@
       "description": "Amazon Lightsail",
       "position": 2,
       "url": "https://aws.amazon.com/lightsail/",
-      "image": "website/images/clouds/lightsail.webp",
+      "image": "console/images/storage/lightsail.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -51,7 +51,7 @@
       "description": "Amazon Web Services - EC2",
       "position": 2,
       "url": "https://aws.amazon.com/",
-      "image": "website/images/clouds/aws.svg",
+      "image": "console/images/storage/aws.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -62,7 +62,7 @@
       "description": "Hetzner Cloud",
       "position": 3,
       "url": "https://www.hetzner.com/cloud",
-      "image": "website/images/clouds/hetzner.svg",
+      "image": "console/images/storage/hetzner.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -73,7 +73,7 @@
       "description": "OVH Public Cloud US",
       "position": 3,
       "url": "https://us.ovhcloud.com/public-cloud/",
-      "image": "website/images/clouds/ovhcloud.svg",
+      "image": "console/images/storage/ovhcloud.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -84,7 +84,7 @@
       "description": "Vultr",
       "position": 3,
       "url": "https://www.vultr.com/",
-      "image": "website/images/clouds/vultr.svg",
+      "image": "console/images/storage/vultr.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -95,7 +95,7 @@
       "description": "OVH Public Cloud EU",
       "position": 5,
       "url": "https://www.ovh.com/eu/en/public-cloud/instances/",
-      "image": "website/images/clouds/ovhcloud.svg",
+      "image": "console/images/storage/ovhcloud.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -106,7 +106,7 @@
       "description": "Website",
       "position": 7,
       "url": "#",
-      "image": "website/images/website/all.jpg",
+      "image": "console/images/integrations/website.jpg",
       "enabled": true,
       "type": "website"
     },
@@ -117,7 +117,7 @@
       "description": "Database",
       "position": 8,
       "url": "#",
-      "image": "website/images/database/all.png",
+      "image": "console/images/integrations/database.png",
       "enabled": true,
       "type": "database"
     },
@@ -128,7 +128,7 @@
       "description": "WordPress",
       "position": 2,
       "url": "https://wordpress.org",
-      "image": "website/images/wordpress.svg",
+      "image": "console/images/storage/wordpress.svg",
       "enabled": true,
       "type": "saas"
     },
@@ -139,7 +139,7 @@
       "description": "UpCloud",
       "position": 3,
       "url": "https://upcloud.com",
-      "image": "website/images/clouds/upcloud.svg",
+      "image": "console/images/storage/upcloud.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -150,7 +150,7 @@
       "description": "DigitalOcean",
       "position": 1,
       "url": "https://www.digitalocean.com/",
-      "image": "website/images/clouds/digitalocean-horizontal.svg",
+      "image": "console/images/storage/digitalocean.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -161,7 +161,7 @@
       "description": "Oracle Cloud",
       "position": 10,
       "url": "https://www.oracle.com/cloud/",
-      "image": "website/images/oracle.svg",
+      "image": "console/images/storage/oracle.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -172,7 +172,7 @@
       "description": "Google Cloud",
       "position": 11,
       "url": "https://cloud.google.com/",
-      "image": "website/images/google_cloud.svg",
+      "image": "console/images/storage/google_cloud.svg",
       "enabled": true,
       "type": "cloud"
     },
@@ -183,7 +183,7 @@
       "description": "Basecamp",
       "position": 13,
       "url": "https://basecamp.com/",
-      "image": "website/images/basecamp.svg",
+      "image": "console/images/storage/basecamp.svg",
       "enabled": true,
       "type": "saas"
     },
@@ -194,7 +194,7 @@
       "description": "Intercom",
       "position": 14,
       "url": "https://www.intercom.com/",
-      "image": "website/images/Intercom.svg",
+      "image": "console/images/storage/intercom.svg",
       "enabled": true,
       "type": "saas"
     },
@@ -205,7 +205,7 @@
       "description": "Zendesk",
       "position": 14,
       "url": "https://www.zendesk.com/",
-      "image": "website/images/zendesk.svg",
+      "image": "console/images/storage/zendesk.svg",
       "enabled": true,
       "type": "saas"
     },
@@ -216,7 +216,7 @@
       "description": "Slack",
       "position": 14,
       "url": "https://www.slack.com/",
-      "image": "website/images/slack.svg",
+      "image": "console/images/storage/slack.svg",
       "enabled": true,
       "type": "saas"
     }
@@ -228,7 +228,7 @@
       "is_enabled": true,
       "position": 1,
       "description": null,
-      "image": null
+      "image": "console/images/storage/amazon-s3.svg"
     },
     {
       "code": "backblaze_b2",
@@ -236,7 +236,7 @@
       "is_enabled": true,
       "position": 2,
       "description": null,
-      "image": null
+      "image": "console/images/storage/backblaze.svg"
     },
     {
       "code": "wasabi",
@@ -244,7 +244,7 @@
       "is_enabled": true,
       "position": 3,
       "description": null,
-      "image": null
+      "image": "console/images/storage/wasabi.svg"
     },
     {
       "code": "do_spaces",
@@ -252,7 +252,7 @@
       "is_enabled": true,
       "position": 4,
       "description": null,
-      "image": null
+      "image": "console/images/storage/digitalocean.svg"
     },
     {
       "code": "cloudflare",
@@ -260,7 +260,7 @@
       "is_enabled": true,
       "position": 5,
       "description": null,
-      "image": null
+      "image": "console/images/storage/cloudflare.svg"
     },
     {
       "code": "google_cloud",
@@ -268,7 +268,7 @@
       "is_enabled": true,
       "position": 6,
       "description": null,
-      "image": null
+      "image": "console/images/storage/google_cloud.svg"
     },
     {
       "code": "azure",
@@ -276,7 +276,7 @@
       "is_enabled": true,
       "position": 7,
       "description": null,
-      "image": null
+      "image": "console/images/storage/azure.svg"
     },
     {
       "code": "dropbox",
@@ -284,7 +284,7 @@
       "is_enabled": true,
       "position": 8,
       "description": null,
-      "image": null
+      "image": "console/images/storage/dropbox.svg"
     },
     {
       "code": "google_drive",
@@ -292,7 +292,7 @@
       "is_enabled": true,
       "position": 9,
       "description": null,
-      "image": null
+      "image": "console/images/storage/google_drive.svg"
     },
     {
       "code": "onedrive",
@@ -300,7 +300,7 @@
       "is_enabled": true,
       "position": 10,
       "description": null,
-      "image": null
+      "image": "console/images/storage/onedrive.svg"
     },
     {
       "code": "pcloud",
@@ -308,7 +308,7 @@
       "is_enabled": true,
       "position": 11,
       "description": null,
-      "image": null
+      "image": "console/images/storage/pcloud.svg"
     },
     {
       "code": "idrive",
@@ -316,7 +316,7 @@
       "is_enabled": true,
       "position": 12,
       "description": null,
-      "image": null
+      "image": "console/images/storage/idrive.svg"
     },
     {
       "code": "ibm",
@@ -324,7 +324,7 @@
       "is_enabled": true,
       "position": 13,
       "description": null,
-      "image": null
+      "image": "console/images/storage/ibm.svg"
     },
     {
       "code": "oracle",
@@ -332,7 +332,7 @@
       "is_enabled": true,
       "position": 14,
       "description": null,
-      "image": null
+      "image": "console/images/storage/oracle.svg"
     },
     {
       "code": "scaleway",
@@ -340,7 +340,7 @@
       "is_enabled": true,
       "position": 15,
       "description": null,
-      "image": null
+      "image": "console/images/storage/scaleway.svg"
     },
     {
       "code": "linode",
@@ -348,7 +348,7 @@
       "is_enabled": true,
       "position": 16,
       "description": null,
-      "image": null
+      "image": "console/images/storage/linode.svg"
     },
     {
       "code": "vultr",
@@ -356,7 +356,7 @@
       "is_enabled": true,
       "position": 17,
       "description": null,
-      "image": null
+      "image": "console/images/storage/vultr.svg"
     },
     {
       "code": "upcloud",
@@ -364,7 +364,7 @@
       "is_enabled": true,
       "position": 18,
       "description": null,
-      "image": null
+      "image": "console/images/storage/upcloud.svg"
     },
     {
       "code": "exoscale",
@@ -372,7 +372,7 @@
       "is_enabled": true,
       "position": 19,
       "description": null,
-      "image": null
+      "image": "console/images/storage/exoscale.svg"
     },
     {
       "code": "filebase",
@@ -380,7 +380,7 @@
       "is_enabled": true,
       "position": 20,
       "description": null,
-      "image": null
+      "image": "console/images/storage/filebase.svg"
     },
     {
       "code": "ionos",
@@ -388,7 +388,7 @@
       "is_enabled": true,
       "position": 21,
       "description": null,
-      "image": null
+      "image": "console/images/storage/ionos.svg"
     },
     {
       "code": "leviia",
@@ -396,7 +396,7 @@
       "is_enabled": true,
       "position": 22,
       "description": null,
-      "image": null
+      "image": "console/images/storage/leviia.svg"
     },
     {
       "code": "rackcorp",
@@ -404,7 +404,7 @@
       "is_enabled": true,
       "position": 23,
       "description": null,
-      "image": null
+      "image": "console/images/storage/rackcorp.svg"
     },
     {
       "code": "tencent",
@@ -412,7 +412,7 @@
       "is_enabled": true,
       "position": 24,
       "description": null,
-      "image": null
+      "image": "console/images/storage/tencent.svg"
     },
     {
       "code": "alibaba",
@@ -420,7 +420,629 @@
       "is_enabled": true,
       "position": 25,
       "description": null,
-      "image": null
+      "image": "console/images/storage/alibaba.svg"
+    }
+  ],
+  "lookups": {
+    "CoreAWSBackupStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "success",
+          "name": "Success",
+          "description": "Success"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "failed",
+          "name": "Failed",
+          "description": "Failed"
+        },
+        {
+          "code": "retry",
+          "name": "Retry",
+          "description": "Retry"
+        }
+      ]
+    },
+    "CoreAWSRDSBackupStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "success",
+          "name": "Success",
+          "description": "Success"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "failed",
+          "name": "Failed",
+          "description": "Failed"
+        },
+        {
+          "code": "retry",
+          "name": "Retry",
+          "description": "Retry"
+        }
+      ]
+    },
+    "CoreDatabaseBackupStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "success",
+          "name": "Success",
+          "description": "Success"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "failed",
+          "name": "Failed",
+          "description": "Failed"
+        },
+        {
+          "code": "retry",
+          "name": "Retry",
+          "description": "Retry"
+        }
+      ]
+    },
+    "CoreLightsailBackupStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "success",
+          "name": "Success",
+          "description": "Success"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "failed",
+          "name": "Failed",
+          "description": "Failed"
+        },
+        {
+          "code": "retry",
+          "name": "Retry",
+          "description": "Retry"
+        }
+      ]
+    },
+    "CoreLinodeBackupStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "success",
+          "name": "Success",
+          "description": "Success"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "failed",
+          "name": "Failed",
+          "description": "Failed"
+        },
+        {
+          "code": "retry",
+          "name": "Retry",
+          "description": "Retry"
+        }
+      ]
+    },
+    "CoreOVHCABackupStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "success",
+          "name": "Success",
+          "description": "Success"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "failed",
+          "name": "Failed",
+          "description": "Failed"
+        },
+        {
+          "code": "retry",
+          "name": "Retry",
+          "description": "Retry"
+        }
+      ]
+    },
+    "CoreOVHEUBackupStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "success",
+          "name": "Success",
+          "description": "Success"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "failed",
+          "name": "Failed",
+          "description": "Failed"
+        },
+        {
+          "code": "retry",
+          "name": "Retry",
+          "description": "Retry"
+        }
+      ]
+    },
+    "CoreVultrBackupStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "success",
+          "name": "Success",
+          "description": "Success"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "failed",
+          "name": "Failed",
+          "description": "Failed"
+        },
+        {
+          "code": "retry",
+          "name": "Retry",
+          "description": "Retry"
+        }
+      ]
+    },
+    "CoreWebsiteBackupStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "success",
+          "name": "Success",
+          "description": "Success"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "failed",
+          "name": "Failed",
+          "description": "Failed"
+        },
+        {
+          "code": "retry",
+          "name": "Retry",
+          "description": "Retry"
+        }
+      ]
+    },
+    "CoreDOBackupStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "success",
+          "name": "Success",
+          "description": "Success"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "failed",
+          "name": "Failed",
+          "description": "Failed"
+        },
+        {
+          "code": "retry",
+          "name": "Retry",
+          "description": "Retry"
+        },
+        {
+          "code": "in-progress",
+          "name": "In-Progress",
+          "description": "in-progress"
+        },
+        {
+          "code": "completed",
+          "name": "Completed",
+          "description": "completed"
+        },
+        {
+          "code": "errored",
+          "name": "Errored",
+          "description": "errored"
+        }
+      ]
+    },
+    "CoreServerStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "active",
+          "name": "Active",
+          "description": "Active"
+        },
+        {
+          "code": "pending",
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "suspended",
+          "name": "Suspended",
+          "description": "Suspended"
+        },
+        {
+          "code": "paused",
+          "name": "Paused",
+          "description": "Paused"
+        },
+        {
+          "code": "retry-backup",
+          "name": "Retrying Backup",
+          "description": "Retrying Backup"
+        }
+      ]
+    },
+    "CoreServerType": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "server",
+          "name": "Server",
+          "description": "Server"
+        },
+        {
+          "code": "volume",
+          "name": "Volume",
+          "description": "Volume"
+        },
+        {
+          "code": "database",
+          "name": "Database",
+          "description": "Database"
+        },
+        {
+          "code": "website",
+          "name": "Website",
+          "description": "Website"
+        }
+      ]
+    },
+    "CoreBackupType": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "ondemand",
+          "name": "on-demand",
+          "description": "ondemand"
+        },
+        {
+          "code": "scheduled",
+          "name": "scheduled",
+          "description": "scheduled"
+        }
+      ]
+    },
+    "CoreConnectionStatus": {
+      "lookup": [
+        "code"
+      ],
+      "rows": [
+        {
+          "code": "active",
+          "private": false,
+          "name": "Active",
+          "description": "Active"
+        },
+        {
+          "code": "pending",
+          "private": true,
+          "name": "Pending",
+          "description": "Pending"
+        },
+        {
+          "code": "suspended",
+          "private": true,
+          "name": "Suspended",
+          "description": "Suspended"
+        },
+        {
+          "code": "paused",
+          "private": false,
+          "name": "Paused",
+          "description": "Paused"
+        }
+      ]
+    },
+    "UtilPostgreSQLOptions": {
+      "lookup": [
+        "name",
+        "type"
+      ],
+      "rows": [
+        {
+          "name": "--data-only",
+          "type": 1
+        },
+        {
+          "name": "--if-exists",
+          "type": 1
+        },
+        {
+          "name": "--blobs",
+          "type": 1
+        },
+        {
+          "name": "--inserts",
+          "type": 1
+        },
+        {
+          "name": "--no-blobs",
+          "type": 1
+        },
+        {
+          "name": "--lock-wait-timeout=timeout",
+          "type": 2
+        },
+        {
+          "name": "--clean",
+          "type": 1
+        },
+        {
+          "name": "--no-comments",
+          "type": 1
+        },
+        {
+          "name": "--create",
+          "type": 1
+        },
+        {
+          "name": "--no-publications",
+          "type": 1
+        },
+        {
+          "name": "--encoding=encoding",
+          "type": 2
+        },
+        {
+          "name": "--no-security-labels",
+          "type": 1
+        },
+        {
+          "name": "--format=format",
+          "type": 2
+        },
+        {
+          "name": "--no-subscriptions",
+          "type": 1
+        },
+        {
+          "name": "--jobs=njobs",
+          "type": 2
+        },
+        {
+          "name": "--no-sync",
+          "type": 1
+        },
+        {
+          "name": "--no-owner",
+          "type": 1
+        },
+        {
+          "name": "--no-table-access-method",
+          "type": 1
+        },
+        {
+          "name": "--schema-only",
+          "type": 1
+        },
+        {
+          "name": "--no-tablespaces",
+          "type": 1
+        },
+        {
+          "name": "--verbose",
+          "type": 1
+        },
+        {
+          "name": "--no-toast-compression",
+          "type": 1
+        },
+        {
+          "name": "--no-privileges",
+          "type": 1
+        },
+        {
+          "name": "--no-unlogged-table-data",
+          "type": 1
+        },
+        {
+          "name": "--compress=0..9",
+          "type": 2
+        },
+        {
+          "name": "--on-conflict-do-nothing",
+          "type": 1
+        },
+        {
+          "name": "--column-inserts",
+          "type": 1
+        },
+        {
+          "name": "--quote-all-identifiers",
+          "type": 1
+        },
+        {
+          "name": "--attribute-inserts",
+          "type": 1
+        },
+        {
+          "name": "--rows-per-insert=nrows",
+          "type": 2
+        },
+        {
+          "name": "--disable-dollar-quoting",
+          "type": 1
+        },
+        {
+          "name": "--section=sectionname",
+          "type": 2
+        },
+        {
+          "name": "--disable-triggers",
+          "type": 1
+        },
+        {
+          "name": "--serializable-deferrable",
+          "type": 1
+        },
+        {
+          "name": "--enable-row-security",
+          "type": 1
+        },
+        {
+          "name": "--snapshot=snapshotname",
+          "type": 2
+        },
+        {
+          "name": "--extra-float-digits=ndigits",
+          "type": 2
+        },
+        {
+          "name": "--strict-names",
+          "type": 1
+        },
+        {
+          "name": "--exclude-table-data=pattern",
+          "type": 3
+        },
+        {
+          "name": "--exclude-schema=pattern",
+          "type": 3
+        },
+        {
+          "name": "--exclude-table=pattern",
+          "type": 3
+        }
+      ]
+    },
+    "UtilSetting": {
+      "lookup": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": 1,
+          "running_storage_billing": null,
+          "running_storage_calculation": null,
+          "total_backups": null
+        }
+      ]
+    }
+  },
+  "connection_locations": [
+    {
+      "code": "local",
+      "name": "Local",
+      "location": "Self-hosted",
+      "queue": "celery",
+      "task_list": [
+        {
+          "task": "backup_download_request"
+        },
+        {
+          "task": "delete_from_disk"
+        },
+        {
+          "task": "on_demand_backup"
+        },
+        {
+          "task": "scheduled_backup_ftp"
+        },
+        {
+          "task": "scheduled_backup_ftps"
+        },
+        {
+          "task": "scheduled_backup_mariadb"
+        },
+        {
+          "task": "scheduled_backup_mysql"
+        },
+        {
+          "task": "scheduled_backup_postgresql"
+        },
+        {
+          "task": "scheduled_backup_sftp"
+        },
+        {
+          "task": "scheduled_backup_wordpress"
+        },
+        {
+          "task": "storage_upload"
+        }
+      ]
     }
   ],
   "regions": {

@@ -1,20 +1,20 @@
 {% extends "console/onboarding/_base.html" %}
 {% block step %}
-    <h2 class="text-lg font-semibold mb-1">Add a storage destination</h2>
-    <p class="text-sm text-gray-500 mb-5">Pick where backups are stored. A provider opens in a new tab; come back here when you're done. You can add more later.</p>
+    <h2 class="text-lg font-semibold text-slate-900 mb-1">Add a storage destination</h2>
+    <p class="text-sm text-slate-500 mb-5">Pick where backups are stored. A provider opens in a new tab; come back here when you're done. You can add more later.</p>
 
     <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-80 overflow-y-auto pr-1">
         {% for p in providers %}
             <a href="{% url 'console:setup:integration_storage_open' p.code %}" target="_blank" rel="noopener"
-               class="block rounded-md ring-1 ring-gray-200 px-3 py-3 text-sm text-gray-700 hover:ring-indigo-400 hover:text-indigo-700">
+               class="block rounded-xl bg-white ring-1 ring-slate-200 px-3 py-3 text-sm font-medium text-slate-700 shadow-soft hover:ring-indigo-400 hover:text-indigo-700 transition-colors">
                 {{ p.name }}
             </a>
         {% endfor %}
     </div>
 
     <div class="flex items-center justify-between mt-6">
-        <a href="{% url 'console:onboarding:app_settings' %}" class="text-sm text-gray-500 hover:text-gray-700">&larr; Back</a>
+        <a href="{% url 'console:onboarding:app_settings' %}" class="text-sm font-medium text-slate-500 hover:text-slate-700">&larr; Back</a>
         <a href="{% url 'console:onboarding:source' %}"
-           class="bg-indigo-600 text-white text-sm font-medium px-5 py-2 rounded-md hover:bg-indigo-700">Continue &rarr;</a>
+           class="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Continue &rarr;</a>
     </div>
 {% endblock %}
