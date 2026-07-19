@@ -10,9 +10,9 @@
 {% block content %}
     <div>
         <dl class="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-5">
-            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-sm rounded-lg overflow-hidden">
+            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-soft ring-1 ring-slate-900/5 rounded-2xl overflow-hidden">
                 <dt>
-                    <div class="absolute bg-indigo-500 rounded-md p-3">
+                    <div class="absolute bg-indigo-600 rounded-xl p-3 shadow-sm">
                         <!-- Heroicon name: outline/users -->
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
                              viewBox="0 0 24 24" stroke="currentColor">
@@ -42,9 +42,9 @@
                 </dd>
             </div>
 
-            <div class="relative bg-white pt-5 px-4  sm:pt-6 sm:px-6 shadow-sm rounded-lg overflow-hidden">
+            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-soft ring-1 ring-slate-900/5 rounded-2xl overflow-hidden">
                 <dt>
-                    <div class="absolute bg-indigo-500 rounded-md p-3">
+                    <div class="absolute bg-indigo-600 rounded-xl p-3 shadow-sm">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
                              viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -72,9 +72,9 @@
                 </dd>
             </div>
 
-            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-sm rounded-lg overflow-hidden">
+            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-soft ring-1 ring-slate-900/5 rounded-2xl overflow-hidden">
                 <dt>
-                    <div class="absolute bg-indigo-500 rounded-md p-3">
+                    <div class="absolute bg-indigo-600 rounded-xl p-3 shadow-sm">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
                              viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -102,9 +102,9 @@
 {#                    </div>#}
                 </dd>
             </div>
-            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-sm rounded-lg overflow-hidden">
+            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-soft ring-1 ring-slate-900/5 rounded-2xl overflow-hidden">
                 <dt>
-                    <div class="absolute bg-indigo-500 rounded-md p-3">
+                    <div class="absolute bg-indigo-600 rounded-xl p-3 shadow-sm">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
                              viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -132,9 +132,9 @@
 {#                    </div>#}
                 </dd>
             </div>
-            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-sm rounded-lg overflow-hidden">
+            <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-soft ring-1 ring-slate-900/5 rounded-2xl overflow-hidden">
                 <dt>
-                    <div class="absolute bg-indigo-500 rounded-md p-3">
+                    <div class="absolute bg-indigo-600 rounded-xl p-3 shadow-sm">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
                              viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                             <path stroke-linecap="round" stroke-linejoin="round"
@@ -167,9 +167,9 @@
 
     {% if node_count > 0 %}
         <div x-data="nodeListPage">
-            <div class="pb-5 border-b border-gray-200 mt-16">
+            <div class="pb-6 mt-10 rounded-2xl bg-white p-6 shadow-soft ring-1 ring-slate-900/5">
                 <div class="-ml-2 -mt-2 flex flex-wrap items-baseline">
-                    <h3 class="ml-2 mt-2 text-lg leading-6 font-medium text-gray-700">
+                    <h3 class="ml-2 mt-2 text-lg leading-6 font-semibold text-slate-900">
                         {{ node_type|default:'Total'|title }} Nodes {% if not node_type %}({{ total_clouds|add:total_volumes|add:total_websites|add:total_database }}){% endif %}
                     </h3>
                     {% if node_type == "server" or node_type == "volume" %}
@@ -221,21 +221,21 @@
                     </div>
                 </div>
 
-                <span class="mt-4 isolate inline-flex rounded-md shadow-xs">
+                <span class="mt-4 isolate inline-flex rounded-lg shadow-sm">
                   <a @click="executeSearch()"
-                     class="relative cursor-pointer inline-flex items-center rounded-l-md border border-gray-300 bg-indigo-500 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-600 focus:z-10 focus:border-indigo-600 focus:outline-hidden focus:ring-1 focus:ring-indigo-600">Search Nodes</a>
+                     class="relative cursor-pointer inline-flex items-center rounded-l-lg border border-transparent bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 focus:z-10 focus:outline-hidden focus:ring-2 focus:ring-indigo-600 transition-colors">Search Nodes</a>
                   <a @click="resetSearch()"
-                     class="relative cursor-pointer -ml-px inline-flex items-center rounded-r-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:border-indigo-500 focus:outline-hidden focus:ring-1 focus:ring-indigo-500">Reset Filters</a>
+                     class="relative cursor-pointer -ml-px inline-flex items-center rounded-r-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:z-10 focus:outline-hidden focus:ring-2 focus:ring-indigo-600 transition-colors">Reset Filters</a>
                 </span>
             </div>
             {% if page.object_list.count > 0 %}
                 <div class="flex flex-col mt-6">
                     <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
                         <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
-                            <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg">
+                            <div class="shadow-soft overflow-hidden ring-1 ring-slate-900/5 sm:rounded-2xl">
                                 <div class="overflow-x-auto">
-                                    <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
-                                        <thead class="bg-gray-50">
+                                    <table id="section-nodes" class="min-w-full divide-y divide-slate-200">
+                                        <thead class="bg-slate-50">
                                         <tr>
                                             <th scope="col"
                                                 class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
@@ -322,23 +322,23 @@
                                                 </td>
                                                 <td class="px-4 py-4 whitespace-nowrap">
                                                     {% if node.status == 1 or node.status == 2 %}
-                                                        <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-100 text-green-800">
+                                                        <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-green-50 text-green-700 ring-1 ring-inset ring-green-200">
                                                                 {{ node.get_status_display }}
                                                         </span>
                                                     {% elif node.status == 3 %}
-                                                        <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-blue-100 text-blue-800">
+                                                        <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-200">
                                                             {{ node.get_status_display }}
                                                         </span>
                                                     {% elif node.status == 4 %}
-                                                        <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-100 text-purple-800">
+                                                        <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-purple-50 text-purple-700 ring-1 ring-inset ring-purple-200">
                                                             {{ node.get_status_display }}
                                                         </span>
                                                     {% elif node.status == 6 or node.status == 8 %}
-                                                        <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-yellow-100 text-yellow-800">
+                                                        <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-yellow-50 text-yellow-800 ring-1 ring-inset ring-yellow-200">
                                                             {{ node.get_status_display }}
                                                         </span>
                                                     {% else %}
-                                                        <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-100 text-red-800">
+                                                        <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-red-50 text-red-700 ring-1 ring-inset ring-red-200">
                                                             {{ node.get_status_display }}
                                                         </span>
                                                     {% endif %}
@@ -361,17 +361,17 @@
                                                     <a target="_blank"
                                                        href="{% url 'console:log:index' %}?node={{ node.id }}"
                                                        type="button"
-                                                       class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                       class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-slate-300 shadow-sm text-sm leading-4 font-medium rounded-lg text-slate-700 bg-white hover:bg-slate-50 hover:text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors">
                                                         Logs
                                                     </a>
                                                     <a href="{% url 'console:node:detail' node.id %}" type="button"
-                                                       class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                       class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-slate-300 shadow-sm text-sm leading-4 font-medium rounded-lg text-slate-700 bg-white hover:bg-slate-50 hover:text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors">
 
                                                         Open
                                                     </a>
                                                     <button @click="openModal('{{ node.id }}','{{ node.name }}','{{ node.connection.location.id }}','{{ node.connection.integration.code }}','{{ node.type }}')"
                                                             type="button"
-                                                            class="inline-flex items-center mx-auto px-2.5 py-1.5  border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                            class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-slate-300 shadow-sm text-sm leading-4 font-medium rounded-lg text-slate-700 bg-white hover:bg-slate-50 hover:text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors">
                                                         {% if node.type == 3 or node.type == 4 or node.type == 5 %}
                                                             Backup{% else %}Snapshot{% endif %}
                                                     </button>
@@ -442,7 +442,7 @@
                              x-transition:leave="ease-in duration-200"
                              x-transition:leave-start="opacity-100"
                              x-transition:leave-end="opacity-0"
-                             class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity"
+                             class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity"
                              aria-hidden="true"></div>
 
                         <span class="hidden sm:inline-block sm:align-middle sm:h-screen"
@@ -455,9 +455,9 @@
                              x-transition:leave="ease-in duration-200"
                              x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                              x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                             class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
+                             class="inline-block align-bottom bg-white rounded-2xl px-4 pt-5 pb-4 text-left overflow-hidden shadow-lifted transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
                             <div>
-                                <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
+                                <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-600 shadow-sm">
                                     <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                          xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
@@ -528,7 +528,7 @@
                                                             <label for="ondemand-storage-{{ storage.id }}"
                                                                    class="font-medium text-gray-700">{{ storage.name }}
                                                                 {% if storage.type.code == "bs" %}
-                                                                    <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-100 text-purple-800"> Default </span>
+                                                                    <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-purple-50 text-purple-700 ring-1 ring-inset ring-purple-200"> Default </span>
                                                                 {% endif %}
                                                             </label>
                                                             <p id="comments-description"
@@ -564,13 +564,13 @@
                             <div x-show="!loading"
                                  class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                                 <button @click="createBackup()" type="button"
-                                        class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                                        class="w-full inline-flex justify-center rounded-lg border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-semibold text-white hover:bg-indigo-500 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-600 sm:col-start-2 sm:text-sm transition-colors">
                                     Create <span
                                         x-show="node_type==='3'||node_type==='4'||node_type==='5'">Backup</span><span
                                         x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">Snapshot</span>
                                 </button>
                                 <button @click="closeModal()" type="button"
-                                        class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                                        class="mt-3 w-full inline-flex justify-center rounded-lg border border-slate-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-slate-700 hover:bg-slate-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-600 sm:mt-0 sm:col-start-1 sm:text-sm transition-colors">
                                     Cancel
                                 </button>
                             </div>
@@ -578,11 +578,17 @@
                     </div>
                 </div>
             {% else %}
-                <div class="text-center">
-                    <h2 class="mt-2 text-gray-900">No nodes found with search filters</h2>
+                <div class="text-center rounded-2xl bg-white py-16 px-6 shadow-soft ring-1 ring-slate-900/5 mt-6">
+                    <svg class="mx-auto h-12 w-12 text-slate-300" xmlns="http://www.w3.org/2000/svg" fill="none"
+                         viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                              d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/>
+                    </svg>
+                    <h2 class="mt-4 text-base font-semibold text-slate-900">No nodes found</h2>
+                    <p class="mt-1 text-sm text-slate-500">No nodes match the current search filters.</p>
                     <div class="mt-6">
                         <button type="button"
-                                class="inline-flex items-center px-4 py-2 border border-transparent shadow-xs text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                class="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-semibold rounded-lg text-white bg-indigo-600 hover:bg-indigo-500 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-600 transition-colors"
                                 @click="resetSearch()">Reset Filters
                         </button>
                     </div>

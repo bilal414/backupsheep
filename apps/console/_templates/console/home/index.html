@@ -8,10 +8,132 @@
 {% load humanize %}
 {% load tz %}
 {% block content %}
+    <!-- Page header -->
     <div class="md:flex md:items-center md:justify-between">
         <div class="min-w-0 flex-1">
-            <h2 class="text-2xl font-bold leading-7 text-gray-900 sm:truncate sm:text-3xl sm:tracking-tight">
-                Welcome, {{ request.user.member.full_name }} to BackupSheep!</h2>
+            <p class="text-sm font-medium text-indigo-600">Dashboard</p>
+            <h1 class="mt-1 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
+                Welcome back, {{ request.user.member.full_name }}
+            </h1>
+            <p class="mt-2 text-sm text-slate-500">Here's an overview of your BackupSheep workspace.</p>
+        </div>
+        <div class="mt-4 flex md:ml-4 md:mt-0">
+            <a href="{% url 'console:setup:integration_select' %}"
+               class="inline-flex items-center gap-x-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                     stroke-width="2" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>
+                </svg>
+                Connect Integration
+            </a>
+        </div>
+    </div>
+
+    <!-- Quick actions -->
+    <div class="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+        <a href="{% url 'console:setup:integration_select' %}"
+           class="group relative rounded-2xl bg-white p-6 shadow-soft ring-1 ring-slate-900/5 hover:shadow-card hover:ring-indigo-100 transition-all">
+            <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                     stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                          d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z"/>
+                </svg>
+            </div>
+            <h3 class="mt-4 text-sm font-semibold text-slate-900">Connect Integration</h3>
+            <p class="mt-1 text-sm text-slate-500">Link your cloud, database, website or storage accounts.</p>
+            <span class="mt-4 inline-flex items-center text-sm font-medium text-indigo-600">
+                Get started
+                <svg class="ml-1 h-4 w-4 transition-transform group-hover:translate-x-0.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/>
+                </svg>
+            </span>
+        </a>
+
+        <a href="{% url 'console:node:index' %}"
+           class="group relative rounded-2xl bg-white p-6 shadow-soft ring-1 ring-slate-900/5 hover:shadow-card hover:ring-indigo-100 transition-all">
+            <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-sky-50 text-sky-600 group-hover:bg-sky-600 group-hover:text-white transition-colors">
+                <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                     stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                          d="M5.25 14.25h13.5m-13.5 0a3 3 0 0 1-3-3m3 3a3 3 0 1 0 0 6h13.5a3 3 0 1 0 0-6m-16.5-3a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3m-19.5 0a4.5 4.5 0 0 1 .9-2.7L5.737 5.1a3.375 3.375 0 0 1 2.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 0 1 .9 2.7m0 0a3 3 0 0 1-3 3m0 3h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Zm-3 6h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Z"/>
+                </svg>
+            </div>
+            <h3 class="mt-4 text-sm font-semibold text-slate-900">Manage Nodes</h3>
+            <p class="mt-1 text-sm text-slate-500">View servers, volumes, websites and databases under protection.</p>
+            <span class="mt-4 inline-flex items-center text-sm font-medium text-indigo-600">
+                View nodes
+                <svg class="ml-1 h-4 w-4 transition-transform group-hover:translate-x-0.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/>
+                </svg>
+            </span>
+        </a>
+
+        <a href="{% url 'console:log:index' %}"
+           class="group relative rounded-2xl bg-white p-6 shadow-soft ring-1 ring-slate-900/5 hover:shadow-card hover:ring-indigo-100 transition-all">
+            <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                     stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                          d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z"/>
+                </svg>
+            </div>
+            <h3 class="mt-4 text-sm font-semibold text-slate-900">Activity Logs</h3>
+            <p class="mt-1 text-sm text-slate-500">Track backup, snapshot and restore activity across nodes.</p>
+            <span class="mt-4 inline-flex items-center text-sm font-medium text-indigo-600">
+                View logs
+                <svg class="ml-1 h-4 w-4 transition-transform group-hover:translate-x-0.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/>
+                </svg>
+            </span>
+        </a>
+
+        <a href="{% url 'console:settings:profile' %}"
+           class="group relative rounded-2xl bg-white p-6 shadow-soft ring-1 ring-slate-900/5 hover:shadow-card hover:ring-indigo-100 transition-all">
+            <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-rose-50 text-rose-600 group-hover:bg-rose-600 group-hover:text-white transition-colors">
+                <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                     stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                          d="M17.982 18.725A7.488 7.488 0 0 0 12 15.75a7.488 7.488 0 0 0-5.982 2.975m11.963 0a9 9 0 1 0-11.963 0m11.963 0A8.966 8.966 0 0 1 12 21a8.966 8.966 0 0 1-5.982-2.275M15 9.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/>
+                </svg>
+            </div>
+            <h3 class="mt-4 text-sm font-semibold text-slate-900">Account Settings</h3>
+            <p class="mt-1 text-sm text-slate-500">Manage your profile, security and team preferences.</p>
+            <span class="mt-4 inline-flex items-center text-sm font-medium text-indigo-600">
+                Open settings
+                <svg class="ml-1 h-4 w-4 transition-transform group-hover:translate-x-0.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/>
+                </svg>
+            </span>
+        </a>
+    </div>
+
+    <!-- Getting started banner -->
+    <div class="mt-8 relative overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-600 via-indigo-700 to-indigo-800 shadow-card">
+        <svg class="absolute right-0 top-0 h-full w-1/2 text-white/10" viewBox="0 0 200 200" fill="currentColor"
+             preserveAspectRatio="xMaxYMid slice" aria-hidden="true">
+            <circle cx="150" cy="40" r="70"></circle>
+            <circle cx="190" cy="150" r="90"></circle>
+        </svg>
+        <div class="relative px-6 py-10 sm:px-10 sm:py-12 lg:flex lg:items-center lg:justify-between">
+            <div class="max-w-xl">
+                <h2 class="text-xl font-bold tracking-tight text-white sm:text-2xl">Protect your infrastructure in
+                    minutes</h2>
+                <p class="mt-2 text-sm leading-6 text-indigo-100">
+                    Connect an integration, add your first node, set a schedule, and optionally bring your own
+                    storage. BackupSheep handles the rest — automated, on time, every time.
+                </p>
+            </div>
+            <div class="mt-6 flex items-center gap-x-3 lg:mt-0 lg:shrink-0">
+                <a href="{% url 'console:setup:integration_select' %}"
+                   class="rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-indigo-700 shadow-sm hover:bg-indigo-50 transition-colors">
+                    Start setup
+                </a>
+                <a href="{% url 'console:node:index' %}"
+                   class="rounded-lg px-4 py-2.5 text-sm font-semibold text-white ring-1 ring-inset ring-white/40 hover:bg-white/10 transition-colors">
+                    View nodes
+                </a>
+            </div>
         </div>
     </div>
 {% endblock %}

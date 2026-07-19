@@ -1,6 +1,6 @@
 <div class="mb-4">
-    <label class="block text-sm font-medium text-gray-700 mb-1" for="{{ field.id_for_label }}">{{ field.label }}</label>
+    <label class="block text-sm font-medium leading-6 text-slate-700 mb-1.5" for="{{ field.id_for_label }}">{{ field.label }}</label>
     {{ field }}
-    {% if field.help_text %}<p class="text-xs text-gray-500 mt-1">{{ field.help_text }}</p>{% endif %}
-    {% for error in field.errors %}<p class="text-xs text-red-600 mt-1">{{ error }}</p>{% endfor %}
+    {% if field.help_text %}<p class="text-xs text-slate-500 mt-1.5">{{ field.help_text }}</p>{% endif %}
+    {% for error in field.errors %}<p class="text-xs text-red-600 mt-1.5">{{ error }}</p>{% endfor %}
 </div>

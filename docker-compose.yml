@@ -22,13 +22,13 @@
 # beat is the only hard singleton. Across MULTIPLE hosts, backup_workdir must be a shared
 # network filesystem (NFS/EFS) so replicas see each other's files.
 #
-# Plus PostgreSQL and Redis (the Celery broker). Build and start everything with:
+# Plus PostgreSQL and RabbitMQ (the Celery broker). Build and start everything with:
 #     docker compose up --build
 #
 # Configure .env (see .env_sample). For this stack use the service names below:
 #     DB_HOST=db
 #     DB_PORT=5432
-#     CELERY_BROKER_URL=redis://redis:6379/0
+#     CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
 
 services:
   db:
@@ -38,7 +38,9 @@ services:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # postgres:18+ images keep data in a versioned subdir of /var/lib/postgresql
+      # and refuse to start when the mount is at the old .../data path.
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -46,10 +48,10 @@ services:
       retries: 10
     restart: unless-stopped
 
-  redis:
-    image: redis:7
+  rabbitmq:
+    image: rabbitmq:3-management
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -76,7 +78,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
+      rabbitmq:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -100,7 +102,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
+      rabbitmq:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -115,7 +117,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
+      rabbitmq:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -132,7 +134,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
+      rabbitmq:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -152,7 +154,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
+      rabbitmq:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -171,7 +173,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
+      rabbitmq:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -186,7 +188,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
+      rabbitmq:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully

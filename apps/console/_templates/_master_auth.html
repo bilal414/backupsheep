@@ -1,18 +1,38 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="h-full">
 <head>
     <title>{% block title %}Dashboard{% endblock %}</title>
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <meta name="author" content="{% block author %}MonetizeNow{% endblock %}">
+    <meta name="author" content="{% block author %}BackupSheep{% endblock %}">
     <!-- Fonts -->
-    <link rel="shortcuticon" href="{{ STATIC_URL }}images/favicon.png" type="image/x-icon">
-    <link rel="icon" href="{{ STATIC_URL }}images/favicon.png" type="image/x-icon">
+    <link rel="shortcuticon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
+    <link rel="icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flowbite@4.0.2/dist/flowbite.min.css"/>
 </head>
-<body class="{% block page_class %}{% endblock %}">
-    {% block content %}{% endblock %}
+<body class="h-full bg-slate-50 antialiased {% block page_class %}{% endblock %}">
+    <div class="relative min-h-full isolate">
+        <!-- Decorative background -->
+        <div class="absolute inset-0 -z-10 overflow-hidden" aria-hidden="true">
+            <div class="absolute inset-0 bg-gradient-to-br from-slate-50 via-indigo-50/60 to-slate-100"></div>
+            <svg class="absolute left-[max(50%,25rem)] top-0 h-[64rem] w-[128rem] -translate-x-1/2 stroke-slate-200 [mask-image:radial-gradient(64rem_64rem_at_top,white,transparent)]"
+                 aria-hidden="true">
+                <defs>
+                    <pattern id="bs-auth-grid" width="160" height="160" x="50%" y="-1" patternUnits="userSpaceOnUse">
+                        <path d="M.5 160V.5H160" fill="none"/>
+                    </pattern>
+                </defs>
+                <rect width="100%" height="100%" stroke-width="0" fill="url(#bs-auth-grid)"/>
+            </svg>
+            <div class="absolute -top-40 right-0 h-96 w-96 rounded-full bg-indigo-200/40 blur-3xl"></div>
+            <div class="absolute -bottom-40 -left-20 h-96 w-96 rounded-full bg-sky-200/40 blur-3xl"></div>
+        </div>
+        {% block content %}{% endblock %}
+    </div>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js"></script>
     {% include "_notifications.html" %}
     {% include "_loading.html" %}

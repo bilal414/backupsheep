@@ -1,71 +1,105 @@
-<div class="bg-gray-50 mt-10">
-    <div class="max-w-2xl mx-auto py-12 px-4 sm:px-6 sm:py-12 lg:max-w-7xl lg:px-8 rounded-full">
-        <div class="max-w-4xl">
-                <h2 class="text-4xl font-extrabold tracking-tight text-gray-700">Thank you for choosing BackupSheep!</h2>
+<div class="mt-10">
+    <div class="mx-auto max-w-5xl">
+        <!-- Welcome header -->
+        <div class="text-center">
+            <img class="mx-auto h-12 w-auto" src="{{ STATIC_URL }}console/images/logo.webp" alt="BackupSheep">
+            <h2 class="mt-6 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">Thank you for choosing
+                BackupSheep!</h2>
+            <p class="mt-2 text-sm text-slate-500 max-w-xl mx-auto">You're a few steps away from automated,
+                reliable backups. Follow this checklist to protect your first workload.</p>
         </div>
 
-        <h2 class="text-4xl font-extrabold tracking-tight text-indigo-600 mt-10">Getting Started</h2>
-
-        <div class="grid grid-cols-1 gap-y-12 sm:grid-cols-2 sm:gap-x-6 lg:grid-cols-2 lg:gap-x-8 mt-6">
-
-            <div>
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-indigo-500" fill="none"
-                     viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
-                </svg>
-                <h3 class="mt-6 text-lg font-semibold text-gray-700">
-                    <a href="{% url 'console:setup:integration_select' %}">1. Setup Integration</a>
-                </h3>
-                <p class="mt-2 text-lg text-gray-700">
-                    Setup integration to connect with your cloud hosting account, websites, database and storage
-                    accounts.
-                </p>
+        <!-- Steps -->
+        <div class="mt-10 rounded-2xl bg-white shadow-soft ring-1 ring-slate-900/5 overflow-hidden">
+            <div class="border-b border-slate-100 px-6 py-5 sm:px-8 flex items-center justify-between">
+                <h3 class="text-base font-semibold text-slate-900">Getting started</h3>
+                <span class="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-100">4 steps</span>
             </div>
-
-            <div>
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-indigo-500" fill="none"
-                     viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
-                </svg>
-                <h3 class="mt-6 text-lg font-semibold text-gray-700">
-                    2. Setup Node
-                </h3>
-                <p class="mt-2 text-lg text-gray-700">
-                    Using the integration, create a backup node which can be a cloud server, volume, database or
-                    files/folders.
-                </p>
-            </div>
-
-            <div>
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-indigo-500" fill="none"
-                     viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                </svg>
-                <h3 class="mt-6 text-lg font-semibold text-gray-700">
-                    3. Setup Schedule
-                </h3>
-                <p class="mt-2 text-lg text-gray-700">
-                    You can configure schedule(s) for each node and choose when and where to store your backups.
-                </p>
-            </div>
-
-            <div>
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-indigo-500" fill="none"
-                     viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
-                </svg>
-                <h3 class="mt-6 text-lg font-semibold text-gray-700">
-                    4. Setup Storage (optional)
-                </h3>
-                <p class="mt-2 text-lg text-gray-700">
-                    Bring your storage accounts for website and database backups. Cloud server snapshots are not
-                    downloadable.
-                </p>
-            </div>
+            <ul role="list" class="divide-y divide-slate-100">
+                <li class="px-6 py-6 sm:px-8">
+                    <div class="flex items-start gap-x-5">
+                        <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm">
+                            <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                 stroke-width="1.5" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z"/>
+                            </svg>
+                        </div>
+                        <div class="min-w-0 flex-1">
+                            <div class="flex items-center gap-x-3">
+                                <span class="text-xs font-semibold uppercase tracking-wider text-indigo-600">Step 1</span>
+                            </div>
+                            <h4 class="mt-1 text-sm font-semibold text-slate-900">
+                                <a href="{% url 'console:setup:integration_select' %}" class="hover:text-indigo-600 transition-colors">Set up an integration</a>
+                            </h4>
+                            <p class="mt-1 text-sm text-slate-500">Connect your cloud hosting account, websites,
+                                databases and storage accounts.</p>
+                        </div>
+                        <a href="{% url 'console:setup:integration_select' %}"
+                           class="hidden sm:inline-flex shrink-0 items-center gap-x-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                            Connect
+                            <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                 stroke-width="2" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/>
+                            </svg>
+                        </a>
+                    </div>
+                </li>
+                <li class="px-6 py-6 sm:px-8">
+                    <div class="flex items-start gap-x-5">
+                        <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
+                            <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                 stroke-width="1.5" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M2.25 15a4.5 4.5 0 0 0 4.5 4.5H18a3.75 3.75 0 0 0 1.332-7.257 3 3 0 0 0-3.758-3.848 5.25 5.25 0 0 0-10.233 2.33A4.502 4.502 0 0 0 2.25 15Z"/>
+                            </svg>
+                        </div>
+                        <div class="min-w-0 flex-1">
+                            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Step 2</span>
+                            <h4 class="mt-1 text-sm font-semibold text-slate-900">Set up a node</h4>
+                            <p class="mt-1 text-sm text-slate-500">Using the integration, create a backup node — a
+                                cloud server, volume, database or files/folders.</p>
+                        </div>
+                    </div>
+                </li>
+                <li class="px-6 py-6 sm:px-8">
+                    <div class="flex items-start gap-x-5">
+                        <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
+                            <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                 stroke-width="1.5" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5"/>
+                            </svg>
+                        </div>
+                        <div class="min-w-0 flex-1">
+                            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Step 3</span>
+                            <h4 class="mt-1 text-sm font-semibold text-slate-900">Set up a schedule</h4>
+                            <p class="mt-1 text-sm text-slate-500">Configure schedule(s) for each node and choose when
+                                and where to store your backups.</p>
+                        </div>
+                    </div>
+                </li>
+                <li class="px-6 py-6 sm:px-8">
+                    <div class="flex items-start gap-x-5">
+                        <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
+                            <svg class="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                 stroke-width="1.5" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
+                            </svg>
+                        </div>
+                        <div class="min-w-0 flex-1">
+                            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Step 4</span>
+                            <h4 class="mt-1 text-sm font-semibold text-slate-900">Set up storage
+                                <span class="ml-1 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">optional</span>
+                            </h4>
+                            <p class="mt-1 text-sm text-slate-500">Bring your own storage accounts for website and
+                                database backups. Cloud server snapshots are not downloadable.</p>
+                        </div>
+                    </div>
+                </li>
+            </ul>
         </div>
     </div>
 </div>
