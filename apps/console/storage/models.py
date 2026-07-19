@@ -1750,9 +1750,12 @@ class CoreStorageIDrive(TimeStampedModel):
             prefix = self.prefix
             bucket_name = self.bucket_name
 
+        # Allow a full URL (e.g. http://minio:9000) for S3-compatible/self-hosted
+        # endpoints; bare hostnames keep the original https:// default.
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
-            endpoint_url=f"https://{endpoint}", config=Config(signature_version='s3v4')
+            endpoint_url=endpoint if "://" in endpoint else f"https://{endpoint}",
+            config=Config(signature_version='s3v4')
         )
 
         if prefix:
@@ -2051,7 +2054,6 @@ class CoreStorage(TimeStampedModel):
     class Meta:
         db_table = "core_storage"
 
-    # Todo: If Storage is deleted then switch to default storage.
     def delete_requested(self):
         self.status = self.Status.DELETE_REQUESTED
         self.save()

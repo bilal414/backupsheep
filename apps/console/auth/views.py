@@ -20,6 +20,20 @@ class LoginView(TemplateView):
         return self.render_to_response(context)
 
 
+class SetupView(TemplateView):
+    template_name = "console/auth/setup.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        if CoreMember.objects.exists():
+            return redirect("console:auth:login")
+        return super(SetupView, self).dispatch(request, *args, **kwargs)
+
+    def get(self, request, *args, **kwargs):
+        context = self.get_context_data(**kwargs)
+        context["heading"] = "Setup"
+        return self.render_to_response(context)
+
+
 class LogoutView(TemplateView):
     template_name = None
 

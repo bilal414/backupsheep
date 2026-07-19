@@ -8,6 +8,7 @@ urlpatterns = [
         include(
             [
                 re_path(r"login/?$", APIAuthLogin.as_view()),
+                re_path(r"setup/?$", APIAuthSetup.as_view()),
                 re_path(r"logout/?$", APIAuthLogout.as_view()),
                 re_path(r"reset/?$", APIAuthReset.as_view()),
 

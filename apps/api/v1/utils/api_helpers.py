@@ -1,7 +1,9 @@
 from __future__ import print_function
 import random
 from cryptography.fernet import Fernet
+from django.conf import settings
 from django.contrib.sessions.middleware import SessionMiddleware
+from sentry_sdk import capture_exception
 from random import choice
 from string import ascii_lowercase, digits
 from ....models import *

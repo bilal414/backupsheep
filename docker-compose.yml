@@ -1,5 +1,5 @@
 # Self-hosted BackupSheep stack: app (web + celery worker + celery beat),
-# PostgreSQL, and Redis (the Celery broker for background and scheduled backups).
+# PostgreSQL, and RabbitMQ (the Celery broker for background and scheduled backups).
 #
 # The app image builds FROM the `backupsheep-base` image, so build that once first:
 #     docker build -f DockerfileBase -t backupsheep-base .
@@ -9,7 +9,7 @@
 # Configure .env (see .env_sample). For this stack use the service names below:
 #     DB_HOST=db
 #     DB_PORT=5432
-#     CELERY_BROKER_URL=redis://redis:6379/0
+#     CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
 
 services:
   db:
@@ -19,11 +19,13 @@ services:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # postgres:18+ images keep data in a versioned subdir of /var/lib/postgresql
+      # and refuse to start when the mount is at the old .../data path.
+      - pgdata:/var/lib/postgresql
     restart: unless-stopped
 
-  redis:
-    image: redis:7
+  rabbitmq:
+    image: rabbitmq:3-management
     restart: unless-stopped
 
   app:
@@ -33,7 +35,7 @@ services:
     env_file: .env
     depends_on:
       - db
-      - redis
+      - rabbitmq
     ports:
       # nginx (inside the container) serves the app on port 80
       - "8000:80"

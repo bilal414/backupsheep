@@ -233,6 +233,7 @@ CONSOLE_URL = "/console"
 
 LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/login',
+    r'/setup',
     r'/reset',
     r'/django-admin/',
     r'/api/',
@@ -327,8 +328,9 @@ OVH_US_APP_KEY = config.get("OVH_US_APP_KEY", "")
 OVH_US_APP_SECRET = config.get("OVH_US_APP_SECRET", "")
 
 # Celery (task queue + scheduled backups)
-# Broker is Redis by default; override CELERY_BROKER_URL in .env for another broker.
-CELERY_BROKER_URL = config.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+# Broker is RabbitMQ by default (the docker-compose stack includes it); override
+# CELERY_BROKER_URL in .env for another broker.
+CELERY_BROKER_URL = config.get("CELERY_BROKER_URL", "amqp://guest:guest@rabbitmq:5672//")
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE

@@ -4,12 +4,17 @@ import pytz
 from django.utils import timezone
 from django.utils.deprecation import MiddlewareMixin
 
+from apps.console.member.models import CoreMember
+
 
 class RedirectMiddleware(object):
     def __init__(self, get_response):
         self.get_response = get_response
 
     def __call__(self, request):
+        if not request.get_full_path().startswith(tuple(settings.LOGIN_REQUIRED_IGNORE_PATHS)):
+            if not CoreMember.objects.exists():
+                return HttpResponseRedirect("/setup/")
         if request.user.is_authenticated and not request.user.is_superuser:
             if request.get_full_path() == "/":
                 if (

@@ -1,4 +1,5 @@
 from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
 from rest_framework import serializers
 
 from apps.console.member.models import CoreMember
@@ -89,4 +90,31 @@ class APIAuthResetPatchSerializer(serializers.Serializer):
             raise serializers.ValidationError("wrong password reset token")
         elif CoreMember.objects.filter(password_reset_token=value).exists() is True:
             self.member = CoreMember.objects.get(password_reset_token=value)
+        return value
+
+
+class APIAuthSetupSerializer(serializers.Serializer):
+    first_name = serializers.CharField(max_length=150, required=True, allow_blank=False)
+    last_name = serializers.CharField(max_length=150, required=True, allow_blank=False)
+    email = serializers.EmailField(required=True, allow_blank=False)
+    password = serializers.CharField(min_length=8, max_length=128, required=True, allow_blank=False)
+    password_confirm = serializers.CharField(min_length=8, max_length=128, required=True, allow_blank=False)
+
+    def validate_email(self, value):
+        if User.objects.filter(email__iexact=value).exists() or User.objects.filter(username__iexact=value).exists():
+            raise serializers.ValidationError("email already taken")
+        return value
+
+    def validate_password(self, value):
+        initial_values = self.get_initial()
+
+        if value != initial_values["password_confirm"]:
+            raise serializers.ValidationError("password do not match")
+        return value
+
+    def validate_password_confirm(self, value):
+        initial_values = self.get_initial()
+
+        if value != initial_values["password"]:
+            raise serializers.ValidationError("password do not match")
         return value

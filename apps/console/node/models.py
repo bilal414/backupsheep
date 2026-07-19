@@ -1406,6 +1406,14 @@ class CoreDatabase(TimeStampedModel):
     class Meta:
         db_table = "core_database"
 
+    def validate(self):
+        """A database node is valid when its connection can still reach the server."""
+        try:
+            self.node.connection.auth_database.check_connection(check_errors=True)
+            return True
+        except Exception:
+            return False
+
     def create_snapshot(self, backup):
         from ..connection.models import CoreAuthDatabase
         from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup

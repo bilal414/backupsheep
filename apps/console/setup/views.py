@@ -88,7 +88,7 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
         i_name = self.request.GET.get("i_name")
         member = self.request.user.member
 
-        if CoreStorageType.objects.filter(code=integration_code).exists() and integration_code != "bs":
+        if CoreStorageType.objects.filter(code=integration_code).exists():
             storage_type = CoreStorageType.objects.get(code=integration_code)
 
             query = Q(

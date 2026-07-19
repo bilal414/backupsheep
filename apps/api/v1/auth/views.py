@@ -1,9 +1,66 @@
+from cryptography.fernet import Fernet
 from rest_framework.authtoken.models import Token
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .serializers import *
 from django.contrib.auth import login, logout
+from django.contrib.auth.models import User
 from ..utils.api_exceptions import ExceptionDefault
+from apps.console.account.models import CoreAccount
+from apps.console.member.models import CoreMember, CoreMemberAccount
+
+
+class APIAuthSetup(APIView):
+    permission_classes = ()
+
+    def post(self, request):
+        if CoreMember.objects.exists():
+            raise PermissionDenied(detail="Setup has already been completed")
+
+        serializer = APIAuthSetupSerializer(data=self.request.data, context={"request": request})
+        if serializer.is_valid():
+            first_name = serializer.validated_data.get("first_name")
+            last_name = serializer.validated_data.get("last_name")
+            email = serializer.validated_data.get("email")
+            password = serializer.validated_data.get("password")
+
+            """
+            Create User, Member, Account & Membership
+            """
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                password=password,
+                first_name=first_name,
+                last_name=last_name,
+            )
+            member = CoreMember.objects.create(user=user)
+            account = CoreAccount.objects.create(
+                name=f"{first_name}'s Account",
+                encryption_key=Fernet.generate_key(),
+            )
+            CoreMemberAccount.objects.create(
+                member=member,
+                account=account,
+                current=True,
+                primary=True,
+            )
+
+            """
+            Login
+            """
+            login(request, user)
+
+            token, created = Token.objects.get_or_create(user=user)
+
+            content = {
+                "api_key": token.key,
+                "next": "/console",
+            }
+        else:
+            raise ExceptionDefault(detail=serializer.errors)
+        return Response(content)
 
 
 class APIAuthLogin(APIView):

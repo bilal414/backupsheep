@@ -109,9 +109,6 @@ class CoreAccount(TimeStampedModel):
         if storage_type_code:
             query &= Q(storage__type__code=storage_type_code)
 
-        elif only_byo_storage:
-            query &= ~Q(storage__type__code="bs")
-
         # Website Storage
         query_web = query & Q(
             status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE
