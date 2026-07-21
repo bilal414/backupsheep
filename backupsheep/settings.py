@@ -434,6 +434,7 @@ CELERY_IMPORTS = (
     "apps._tasks.integration.ovh_ca",
     "apps._tasks.integration.ovh_eu",
     "apps._tasks.integration.ovh_us",
+    "apps._tasks.integration.restore",
     "apps._tasks.integration.upcloud",
     "apps._tasks.integration.vultr",
     "apps._tasks.integration.website",

@@ -11,12 +11,16 @@ from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.api.v1.utils.api_permissions import MemberPermissions
 from apps.console.node.models import CoreNode
 from .filters import CoreNodeFilter
-from .serializers import CoreNodeSerializer
+from .serializers import CoreCloudRestoreSerializer, CoreNodeSerializer
 from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
     SnapshotCreateError,
     SnapshotCreateNodeValidationFailed,
     SnapshotCreateNodeNotActive, NodeValidationFailed,
+    RestoreMissingParams,
+    RestoreBackupNotFound,
+    RestoreUnsupportedNode,
+    RestoreCreateError,
 )
 from apps._tasks.integration.basecamp import backup_basecamp
 from apps._tasks.integration.website import backup_website
@@ -107,6 +111,54 @@ class CoreNodeView(viewsets.ModelViewSet):
             return Response({"detail": "Backup will start in few seconds."}, status=status.HTTP_201_CREATED)
         except Exception as e:
             raise SnapshotCreateError(e.__str__())
+
+    @action(detail=True, methods=["post"])
+    def restore_backup(self, request, pk=None):
+        from apps.console.backup.models import CoreCloudRestore
+        from apps.console.utils.models import UtilBackup
+        from apps._tasks.integration.restore import restore_cloud_backup
+
+        node = self.get_object()
+        backup_id = self.request.data.get("backup_id")
+        name = self.request.data.get("name")
+        params = self.request.data.get("params") or {}
+
+        if not backup_id or not name:
+            raise RestoreMissingParams()
+
+        if node.type not in (CoreNode.Type.CLOUD, CoreNode.Type.VOLUME):
+            raise RestoreUnsupportedNode()
+
+        backup = node.get_cloud_backup(backup_id)
+        if backup is None or backup.status != UtilBackup.Status.COMPLETE:
+            raise RestoreBackupNotFound()
+
+        restore = CoreCloudRestore.objects.create(
+            node=node, backup_id=backup.id, name=name, params=params
+        )
+
+        try:
+            restore_cloud_backup.apply_async(
+                kwargs={
+                    "node_id": node.id,
+                    "backup_id": backup.id,
+                    "restore_id": restore.id,
+                }
+            )
+            return Response(
+                CoreCloudRestoreSerializer(restore).data,
+                status=status.HTTP_201_CREATED,
+            )
+        except Exception as e:
+            raise RestoreCreateError(e.__str__())
+
+    @action(detail=True, methods=["get"])
+    def restores(self, request, pk=None):
+        from apps.console.backup.models import CoreCloudRestore
+
+        node = self.get_object()
+        restores = CoreCloudRestore.objects.filter(node=node).order_by("-created")
+        return Response(CoreCloudRestoreSerializer(restores, many=True).data)
 
     @action(detail=True, methods=["post"])
     def pause(self, request, pk=None):

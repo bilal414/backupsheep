@@ -85,7 +85,7 @@ def storage_google_drive(stored_backup):
             if result.status_code == 200:
                 files = result.json().get("files")
 
-                node_folder_list = [d['id'] for d in files if d['name'] == 'BackupSheep' and d['trashed'] is False]
+                node_folder_list = [d['id'] for d in files if d['name'] == backup.node.name_slug and d['trashed'] is False]
 
                 if len(node_folder_list) > 0:
                     node_folder = node_folder_list[0]

@@ -131,15 +131,14 @@ def storage_dropbox_delete(node, backup_name):
 
         if backup:
             dbx = dropbox.Dropbox(
-                bs_decrypt(
+                oauth2_access_token=bs_decrypt(
                     backup.storage_byo.storage_dropbox.access_token, encryption_key
-                )
-            )
-
-            dbx = dropbox.Dropbox(
-                bs_decrypt(
-                    backup.storage_byo.storage_dropbox.access_token, encryption_key
-                )
+                ),
+                oauth2_refresh_token=bs_decrypt(
+                    backup.storage_byo.storage_dropbox.refresh_token, encryption_key
+                ),
+                app_key=settings.DROPBOX_APP_KEY,
+                app_secret=settings.DROPBOX_APP_SECRET,
             )
 
             file_path = dbx.files_get_metadata(backup.storage_file_id).path_lower

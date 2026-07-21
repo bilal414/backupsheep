@@ -178,6 +178,109 @@ class CoreDigitalOcean(UtilCloud):
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
             )
 
+    def restore_snapshot(self, backup, restore):
+        client = self.node.connection.auth_digitalocean.get_client()
+        params = restore.params or {}
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            size = params.get("size")
+            if not size:
+                result = requests.get(
+                    f"{settings.DIGITALOCEAN_API}/v2/droplets/{self.unique_id}",
+                    headers=client,
+                    verify=True,
+                )
+                if result.status_code == 200:
+                    size = result.json()["droplet"]["size_slug"]
+                else:
+                    raise Exception(
+                        f"Unable to determine source droplet size. API call returned with status {result.status_code}"
+                    )
+            droplet_data = {
+                "name": restore.name,
+                "size": size,
+                "image": int(backup.unique_id),
+            }
+            if params.get("region"):
+                droplet_data["region"] = params.get("region")
+            if params.get("ssh_keys"):
+                droplet_data["ssh_keys"] = params.get("ssh_keys")
+            result = requests.post(
+                f"{settings.DIGITALOCEAN_API}/v2/droplets",
+                headers=client,
+                json=droplet_data,
+                verify=True,
+            )
+            if result.status_code == 202:
+                droplet = result.json()["droplet"]
+                restore.resource_id = droplet["id"]
+                restore.save()
+            else:
+                raise Exception(
+                    f"API call returned with status {result.status_code}: {get_error(result.text)}"
+                )
+
+        elif self.node.type == CoreNode.Type.VOLUME:
+            region = params.get("region")
+            if not region:
+                result = requests.get(
+                    f"{settings.DIGITALOCEAN_API}/v2/volumes/{self.unique_id}",
+                    headers=client,
+                    verify=True,
+                )
+                if result.status_code == 200:
+                    region = result.json()["volume"]["region"]["slug"]
+                else:
+                    raise Exception(
+                        f"Unable to determine source volume region. API call returned with status {result.status_code}"
+                    )
+            volume_data = {
+                "name": restore.name,
+                "region": region,
+                "snapshot_id": backup.unique_id,
+            }
+            result = requests.post(
+                f"{settings.DIGITALOCEAN_API}/v2/volumes",
+                headers=client,
+                json=volume_data,
+                verify=True,
+            )
+            if result.status_code == 201:
+                volume = result.json()["volume"]
+                restore.resource_id = volume["id"]
+                restore.save()
+            else:
+                raise Exception(
+                    f"API call returned with status {result.status_code}: {get_error(result.text)}"
+                )
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+
+        client = self.node.connection.auth_digitalocean.get_client()
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            result = requests.get(
+                f"{settings.DIGITALOCEAN_API}/v2/droplets/{restore.resource_id}",
+                headers=client,
+                verify=True,
+            )
+            if result.status_code == 200:
+                droplet = result.json()["droplet"]
+                if droplet.get("status") == "active":
+                    return CoreCloudRestore.Status.COMPLETE
+            return CoreCloudRestore.Status.IN_PROGRESS
+
+        elif self.node.type == CoreNode.Type.VOLUME:
+            result = requests.get(
+                f"{settings.DIGITALOCEAN_API}/v2/volumes/{restore.resource_id}",
+                headers=client,
+                verify=True,
+            )
+            if result.status_code == 200 and result.json().get("volume", {}).get("id"):
+                return CoreCloudRestore.Status.COMPLETE
+            return CoreCloudRestore.Status.IN_PROGRESS
+
 
 class CoreContabo(UtilCloud):
     node = models.OneToOneField(
@@ -383,6 +486,77 @@ class CoreHetzner(UtilCloud):
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
             )
 
+    def restore_snapshot(self, backup, restore):
+        try:
+            client = self.node.connection.auth_hetzner.get_client()
+            params = restore.params or {}
+
+            server_data = {
+                "name": restore.name,
+                "image": int(backup.unique_id),
+            }
+
+            server_type = params.get("server_type")
+            if not server_type:
+                # Fall back to the source server's server type
+                result = requests.get(
+                    f"{settings.HETZNER_API}/v1/servers/{self.unique_id}",
+                    headers=client,
+                    verify=True,
+                )
+                if result.status_code == 200:
+                    server_type = result.json()["server"]["server_type"]["name"]
+                else:
+                    raise Exception(
+                        f"Unable to determine server type from source server. "
+                        f"API status code was: {result.status_code}"
+                    )
+            server_data["server_type"] = server_type
+
+            if params.get("location"):
+                server_data["location"] = params.get("location")
+            if params.get("ssh_keys"):
+                server_data["ssh_keys"] = params.get("ssh_keys")
+            if params.get("labels"):
+                server_data["labels"] = params.get("labels")
+
+            result = requests.post(
+                f"{settings.HETZNER_API}/v1/servers",
+                data=json.dumps(server_data),
+                headers=client,
+                verify=True,
+            )
+            if result.status_code == 201:
+                server = result.json()["server"]
+                action = result.json()["action"]
+                restore.resource_id = server["id"]
+                params["action_id"] = action["id"]
+                restore.params = params
+                restore.save()
+            elif result.status_code == 429:
+                raise Exception("API rate limit exceeded. We will try again shortly.")
+            else:
+                raise Exception(f"API status code was: {result.status_code}")
+        except Exception as e:
+            raise Exception(f"Hetzner restore failed: {get_error(e)}")
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+
+        client = self.node.connection.auth_hetzner.get_client()
+        result = requests.get(
+            f"{settings.HETZNER_API}/v1/servers/{restore.resource_id}",
+            headers=client,
+            verify=True,
+        )
+        if result.status_code == 200:
+            server = result.json()["server"]
+            if server.get("status") == "running":
+                return CoreCloudRestore.Status.COMPLETE
+        # Hetzner servers have no definitive error state; anything else
+        # (initializing, non-200 response) is treated as still in progress
+        return CoreCloudRestore.Status.IN_PROGRESS
+
 
 class CoreUpCloud(UtilCloud):
     node = models.OneToOneField(
@@ -452,6 +626,72 @@ class CoreUpCloud(UtilCloud):
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
             )
 
+    def restore_snapshot(self, backup, restore):
+        client = self.node.connection.auth_upcloud.get_client()
+
+        if self.node.type == CoreNode.Type.VOLUME:
+            params = restore.params or {}
+            zone = params.get("zone")
+            tier = params.get("tier")
+            if not zone:
+                # Fall back to the zone of the backup storage
+                result = requests.get(
+                    f"{settings.UPCLOUD_API}/storage/{backup.unique_id}",
+                    auth=client,
+                    verify=True,
+                    headers={"content-type": "application/json"}
+                )
+                if result.status_code == 200:
+                    zone = result.json()["storage"]["zone"]
+                else:
+                    raise Exception(
+                        f"Unable to fetch backup storage details. "
+                        f"API call returned with status {result.status_code}"
+                    )
+            # Restore clones the backup storage into a NEW normal storage (non-destructive)
+            storage_data = {"storage": {"zone": zone, "title": restore.name}}
+            if tier:
+                storage_data["storage"]["tier"] = tier
+            result = requests.post(
+                f"{settings.UPCLOUD_API}/storage/{backup.unique_id}/clone",
+                data=json.dumps(storage_data),
+                auth=client,
+                verify=True,
+                headers={"content-type": "application/json"}
+            )
+            if result.status_code == 201:
+                storage = result.json()["storage"]
+                restore.resource_id = storage["uuid"]
+                params["zone"] = storage.get("zone", zone)
+                restore.params = params
+                restore.save()
+            else:
+                try:
+                    error_message = result.json()["error"]["error_message"]
+                except Exception:
+                    error_message = f"API call returned with status {result.status_code}"
+                raise Exception(f"Unable to clone backup storage: {error_message}")
+        else:
+            raise Exception("Snapshot restore is only supported for UpCloud volumes")
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+
+        client = self.node.connection.auth_upcloud.get_client()
+        result = requests.get(
+            f"{settings.UPCLOUD_API}/storage/{restore.resource_id}",
+            auth=client,
+            verify=True,
+            headers={"content-type": "application/json"}
+        )
+        if result.status_code == 200:
+            state = result.json()["storage"]["state"]
+            if state == "online":
+                return CoreCloudRestore.Status.COMPLETE
+            elif state == "error":
+                return CoreCloudRestore.Status.FAILED
+        return CoreCloudRestore.Status.IN_PROGRESS
+
 
 class CoreOVHCA(UtilCloud):
     node = models.OneToOneField(
@@ -489,7 +729,7 @@ class CoreOVHCA(UtilCloud):
                     f"/cloud/project/{self.project_id}/instance/{self.unique_id}/snapshot",
                     snapshotName=backup.uuid_str,
                 )
-                # This unique_id will be updated in validate() method with actual ID from OVH
+                # This unique_id will be updated in poll_status() with actual ID from OVH
                 backup.unique_id = backup.uuid_str
                 backup.save()
             except InvalidCredential:
@@ -550,6 +790,105 @@ class CoreOVHCA(UtilCloud):
                     backup.type,
                     message=get_error(e)
                 )
+
+    def restore_snapshot(self, backup, restore):
+        import math
+
+        from apps._tasks.exceptions import RestoreCreateError
+
+        client = self.node.connection.auth_ovh_ca.get_client()
+        params = restore.params or {}
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            try:
+                flavor_id = params.get("flavor_id")
+                region = params.get("region")
+                # Fall back to the source instance when options are not supplied;
+                # the snapshot can only be restored in the region it was taken in
+                if not flavor_id or not region:
+                    ovh_instance = client.get(
+                        f"/cloud/project/{self.project_id}/instance/{self.unique_id}"
+                    )
+                    flavor_id = flavor_id or ovh_instance.get("flavorId")
+                    region = region or ovh_instance.get("region")
+                ovh_response = client.post(
+                    f"/cloud/project/{self.project_id}/instance",
+                    flavorId=flavor_id,
+                    name=restore.name,
+                    region=region,
+                    imageId=backup.unique_id,
+                )
+                restore.resource_id = ovh_response["id"]
+                restore.save()
+            except InvalidCredential:
+                raise RestoreCreateError(
+                    message="We are unable to connect to your OVH account. "
+                            "Please reconnect your account to refresh authentication token.",
+                )
+            except ResourceConflictError as e:
+                raise RestoreCreateError(message=get_error(e))
+            except Exception as e:
+                raise RestoreCreateError(message=get_error(e))
+        elif self.node.type == CoreNode.Type.VOLUME:
+            try:
+                region = params.get("region")
+                size = params.get("size")
+                volume_type = params.get("type")
+                # Fall back to the source volume when options are not supplied
+                if not region or not size or not volume_type:
+                    ovh_volume = client.get(
+                        f"/cloud/project/{self.project_id}/volume/{self.unique_id}"
+                    )
+                    region = region or ovh_volume.get("region")
+                    size = size or ovh_volume.get("size")
+                    volume_type = volume_type or ovh_volume.get("type")
+                # The new volume must be at least the size of the snapshot
+                if backup.size_gigabytes:
+                    size = max(int(size), math.ceil(backup.size_gigabytes))
+                ovh_response = client.post(
+                    f"/cloud/project/{self.project_id}/volume",
+                    region=region,
+                    size=size,
+                    type=volume_type,
+                    snapshotId=backup.unique_id,
+                    name=restore.name,
+                )
+                restore.resource_id = ovh_response["id"]
+                restore.save()
+            except InvalidCredential:
+                raise RestoreCreateError(
+                    message="We are unable to connect to your OVH account. "
+                            "Please reconnect your account to refresh authentication token.",
+                )
+            except ResourceConflictError as e:
+                raise RestoreCreateError(message=get_error(e))
+            except Exception as e:
+                raise RestoreCreateError(message=get_error(e))
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+
+        client = self.node.connection.auth_ovh_ca.get_client()
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            ovh_instance = client.get(
+                f"/cloud/project/{self.project_id}/instance/{restore.resource_id}"
+            )
+            status = ovh_instance.get("status")
+            if status == "ACTIVE":
+                return CoreCloudRestore.Status.COMPLETE
+            elif status == "ERROR":
+                return CoreCloudRestore.Status.FAILED
+        elif self.node.type == CoreNode.Type.VOLUME:
+            ovh_volume = client.get(
+                f"/cloud/project/{self.project_id}/volume/{restore.resource_id}"
+            )
+            status = ovh_volume.get("status")
+            if status == "available":
+                return CoreCloudRestore.Status.COMPLETE
+            elif status == "error":
+                return CoreCloudRestore.Status.FAILED
+        return CoreCloudRestore.Status.IN_PROGRESS
 
 
 class CoreOVHEU(UtilCloud):
@@ -588,7 +927,7 @@ class CoreOVHEU(UtilCloud):
                     f"/cloud/project/{self.project_id}/instance/{self.unique_id}/snapshot",
                     snapshotName=backup.uuid_str,
                 )
-                # This unique_id will be updated in validate() method with actual ID from OVH
+                # This unique_id will be updated in poll_status() with actual ID from OVH
                 backup.unique_id = backup.uuid_str
                 backup.save()
             except InvalidCredential:
@@ -649,6 +988,105 @@ class CoreOVHEU(UtilCloud):
                     backup.type,
                     message=get_error(e)
                 )
+
+    def restore_snapshot(self, backup, restore):
+        import math
+
+        from apps._tasks.exceptions import RestoreCreateError
+
+        client = self.node.connection.auth_ovh_eu.get_client()
+        params = restore.params or {}
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            try:
+                flavor_id = params.get("flavor_id")
+                region = params.get("region")
+                # Fall back to the source instance when options are not supplied;
+                # the snapshot can only be restored in the region it was taken in
+                if not flavor_id or not region:
+                    ovh_instance = client.get(
+                        f"/cloud/project/{self.project_id}/instance/{self.unique_id}"
+                    )
+                    flavor_id = flavor_id or ovh_instance.get("flavorId")
+                    region = region or ovh_instance.get("region")
+                ovh_response = client.post(
+                    f"/cloud/project/{self.project_id}/instance",
+                    flavorId=flavor_id,
+                    name=restore.name,
+                    region=region,
+                    imageId=backup.unique_id,
+                )
+                restore.resource_id = ovh_response["id"]
+                restore.save()
+            except InvalidCredential:
+                raise RestoreCreateError(
+                    message="We are unable to connect to your OVH account. "
+                            "Please reconnect your account to refresh authentication token.",
+                )
+            except ResourceConflictError as e:
+                raise RestoreCreateError(message=get_error(e))
+            except Exception as e:
+                raise RestoreCreateError(message=get_error(e))
+        elif self.node.type == CoreNode.Type.VOLUME:
+            try:
+                region = params.get("region")
+                size = params.get("size")
+                volume_type = params.get("type")
+                # Fall back to the source volume when options are not supplied
+                if not region or not size or not volume_type:
+                    ovh_volume = client.get(
+                        f"/cloud/project/{self.project_id}/volume/{self.unique_id}"
+                    )
+                    region = region or ovh_volume.get("region")
+                    size = size or ovh_volume.get("size")
+                    volume_type = volume_type or ovh_volume.get("type")
+                # The new volume must be at least the size of the snapshot
+                if backup.size_gigabytes:
+                    size = max(int(size), math.ceil(backup.size_gigabytes))
+                ovh_response = client.post(
+                    f"/cloud/project/{self.project_id}/volume",
+                    region=region,
+                    size=size,
+                    type=volume_type,
+                    snapshotId=backup.unique_id,
+                    name=restore.name,
+                )
+                restore.resource_id = ovh_response["id"]
+                restore.save()
+            except InvalidCredential:
+                raise RestoreCreateError(
+                    message="We are unable to connect to your OVH account. "
+                            "Please reconnect your account to refresh authentication token.",
+                )
+            except ResourceConflictError as e:
+                raise RestoreCreateError(message=get_error(e))
+            except Exception as e:
+                raise RestoreCreateError(message=get_error(e))
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+
+        client = self.node.connection.auth_ovh_eu.get_client()
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            ovh_instance = client.get(
+                f"/cloud/project/{self.project_id}/instance/{restore.resource_id}"
+            )
+            status = ovh_instance.get("status")
+            if status == "ACTIVE":
+                return CoreCloudRestore.Status.COMPLETE
+            elif status == "ERROR":
+                return CoreCloudRestore.Status.FAILED
+        elif self.node.type == CoreNode.Type.VOLUME:
+            ovh_volume = client.get(
+                f"/cloud/project/{self.project_id}/volume/{restore.resource_id}"
+            )
+            status = ovh_volume.get("status")
+            if status == "available":
+                return CoreCloudRestore.Status.COMPLETE
+            elif status == "error":
+                return CoreCloudRestore.Status.FAILED
+        return CoreCloudRestore.Status.IN_PROGRESS
 
 
 class CoreOVHUS(UtilCloud):
@@ -687,7 +1125,7 @@ class CoreOVHUS(UtilCloud):
                     f"/cloud/project/{self.project_id}/instance/{self.unique_id}/snapshot",
                     snapshotName=backup.uuid_str,
                 )
-                # This unique_id will be updated in validate() method with actual ID from OVH
+                # This unique_id will be updated in poll_status() with actual ID from OVH
                 backup.unique_id = backup.uuid_str
                 backup.save()
             except InvalidCredential:
@@ -748,6 +1186,105 @@ class CoreOVHUS(UtilCloud):
                     backup.type,
                     message=get_error(e)
                 )
+
+    def restore_snapshot(self, backup, restore):
+        import math
+
+        from apps._tasks.exceptions import RestoreCreateError
+
+        client = self.node.connection.auth_ovh_us.get_client()
+        params = restore.params or {}
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            try:
+                flavor_id = params.get("flavor_id")
+                region = params.get("region")
+                # Fall back to the source instance when options are not supplied;
+                # the snapshot can only be restored in the region it was taken in
+                if not flavor_id or not region:
+                    ovh_instance = client.get(
+                        f"/cloud/project/{self.project_id}/instance/{self.unique_id}"
+                    )
+                    flavor_id = flavor_id or ovh_instance.get("flavorId")
+                    region = region or ovh_instance.get("region")
+                ovh_response = client.post(
+                    f"/cloud/project/{self.project_id}/instance",
+                    flavorId=flavor_id,
+                    name=restore.name,
+                    region=region,
+                    imageId=backup.unique_id,
+                )
+                restore.resource_id = ovh_response["id"]
+                restore.save()
+            except InvalidCredential:
+                raise RestoreCreateError(
+                    message="We are unable to connect to your OVH account. "
+                            "Please reconnect your account to refresh authentication token.",
+                )
+            except ResourceConflictError as e:
+                raise RestoreCreateError(message=get_error(e))
+            except Exception as e:
+                raise RestoreCreateError(message=get_error(e))
+        elif self.node.type == CoreNode.Type.VOLUME:
+            try:
+                region = params.get("region")
+                size = params.get("size")
+                volume_type = params.get("type")
+                # Fall back to the source volume when options are not supplied
+                if not region or not size or not volume_type:
+                    ovh_volume = client.get(
+                        f"/cloud/project/{self.project_id}/volume/{self.unique_id}"
+                    )
+                    region = region or ovh_volume.get("region")
+                    size = size or ovh_volume.get("size")
+                    volume_type = volume_type or ovh_volume.get("type")
+                # The new volume must be at least the size of the snapshot
+                if backup.size_gigabytes:
+                    size = max(int(size), math.ceil(backup.size_gigabytes))
+                ovh_response = client.post(
+                    f"/cloud/project/{self.project_id}/volume",
+                    region=region,
+                    size=size,
+                    type=volume_type,
+                    snapshotId=backup.unique_id,
+                    name=restore.name,
+                )
+                restore.resource_id = ovh_response["id"]
+                restore.save()
+            except InvalidCredential:
+                raise RestoreCreateError(
+                    message="We are unable to connect to your OVH account. "
+                            "Please reconnect your account to refresh authentication token.",
+                )
+            except ResourceConflictError as e:
+                raise RestoreCreateError(message=get_error(e))
+            except Exception as e:
+                raise RestoreCreateError(message=get_error(e))
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+
+        client = self.node.connection.auth_ovh_us.get_client()
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            ovh_instance = client.get(
+                f"/cloud/project/{self.project_id}/instance/{restore.resource_id}"
+            )
+            status = ovh_instance.get("status")
+            if status == "ACTIVE":
+                return CoreCloudRestore.Status.COMPLETE
+            elif status == "ERROR":
+                return CoreCloudRestore.Status.FAILED
+        elif self.node.type == CoreNode.Type.VOLUME:
+            ovh_volume = client.get(
+                f"/cloud/project/{self.project_id}/volume/{restore.resource_id}"
+            )
+            status = ovh_volume.get("status")
+            if status == "available":
+                return CoreCloudRestore.Status.COMPLETE
+            elif status == "error":
+                return CoreCloudRestore.Status.FAILED
+        return CoreCloudRestore.Status.IN_PROGRESS
 
 
 class CoreAWS(UtilCloud):
@@ -833,6 +1370,98 @@ class CoreAWS(UtilCloud):
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
             )
 
+    def restore_snapshot(self, backup, restore):
+        client = self.node.connection.auth_aws.get_client()
+        params = restore.params or {}
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            instance_type = params.get("instance_type")
+            if not instance_type:
+                response = client.describe_instances(
+                    InstanceIds=[self.unique_id],
+                )
+                if response.get("Reservations"):
+                    instance = response.get("Reservations")[0]["Instances"][0]
+                    instance_type = instance.get("InstanceType")
+            if not instance_type:
+                raise Exception(
+                    "Unable to determine instance type. Please provide instance_type in params."
+                )
+            instance_data = {
+                "ImageId": backup.unique_id,
+                "MinCount": 1,
+                "MaxCount": 1,
+                "InstanceType": instance_type,
+                "TagSpecifications": [
+                    {
+                        "ResourceType": "instance",
+                        "Tags": [{"Key": "Name", "Value": restore.name}],
+                    }
+                ],
+            }
+            if params.get("key_name"):
+                instance_data["KeyName"] = params.get("key_name")
+            if params.get("subnet_id"):
+                instance_data["SubnetId"] = params.get("subnet_id")
+            if params.get("security_group_ids"):
+                instance_data["SecurityGroupIds"] = params.get("security_group_ids")
+            response = client.run_instances(**instance_data)
+            if not response.get("Instances"):
+                raise Exception("InstanceId not present in run_instances response.")
+            restore.resource_id = response.get("Instances")[0]["InstanceId"]
+            restore.save()
+
+        elif self.node.type == CoreNode.Type.VOLUME:
+            availability_zone = params.get("availability_zone")
+            if not availability_zone:
+                response = client.describe_volumes(
+                    VolumeIds=[self.unique_id],
+                )
+                if response.get("Volumes"):
+                    availability_zone = response.get("Volumes")[0].get("AvailabilityZone")
+            if not availability_zone:
+                raise Exception(
+                    "Unable to determine availability zone. Please provide availability_zone in params."
+                )
+            response = client.create_volume(
+                AvailabilityZone=availability_zone,
+                SnapshotId=backup.unique_id,
+            )
+            if not response.get("VolumeId"):
+                raise Exception("VolumeId not present in create_volume response.")
+            restore.resource_id = response.get("VolumeId")
+            restore.save()
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+
+        client = self.node.connection.auth_aws.get_client()
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            response = client.describe_instances(
+                InstanceIds=[restore.resource_id],
+            )
+            if response.get("Reservations"):
+                instance = response.get("Reservations")[0]["Instances"][0]
+                state = instance.get("State", {}).get("Name")
+                if state == "running":
+                    return CoreCloudRestore.Status.COMPLETE
+                elif state == "terminated" or state == "shutting-down":
+                    return CoreCloudRestore.Status.FAILED
+            return CoreCloudRestore.Status.IN_PROGRESS
+
+        elif self.node.type == CoreNode.Type.VOLUME:
+            response = client.describe_volumes(
+                VolumeIds=[restore.resource_id],
+            )
+            if response.get("Volumes"):
+                state = response.get("Volumes")[0].get("State")
+                if state == "available":
+                    return CoreCloudRestore.Status.COMPLETE
+                elif state == "error":
+                    return CoreCloudRestore.Status.FAILED
+            return CoreCloudRestore.Status.IN_PROGRESS
+
 
 class CoreLightsail(UtilCloud):
     node = models.OneToOneField(
@@ -903,6 +1532,80 @@ class CoreLightsail(UtilCloud):
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
             )
 
+    def restore_snapshot(self, backup, restore):
+        try:
+            client = self.node.connection.auth_lightsail.get_client()
+            params = restore.params or {}
+
+            if self.node.type == CoreNode.Type.CLOUD:
+                availability_zone = params.get("availability_zone")
+                if not availability_zone:
+                    response = client.get_instance_snapshot(
+                        instanceSnapshotName=backup.unique_id
+                    )
+                    availability_zone = response.get("instanceSnapshot", {}).get("location", {}).get(
+                        "availabilityZone")
+
+                bundle_id = params.get("bundle_id")
+                if not bundle_id:
+                    response = client.get_instance(
+                        instanceName=self.unique_id
+                    )
+                    bundle_id = response.get("instance", {}).get("bundleId")
+
+                client.create_instances_from_snapshot(
+                    instanceNames=[restore.name],
+                    instanceSnapshotName=backup.unique_id,
+                    availabilityZone=availability_zone,
+                    bundleId=bundle_id,
+                )
+                restore.resource_id = restore.name
+                restore.save()
+            elif self.node.type == CoreNode.Type.VOLUME:
+                availability_zone = params.get("availability_zone")
+                if not availability_zone:
+                    response = client.get_disk_snapshot(
+                        diskSnapshotName=backup.unique_id
+                    )
+                    availability_zone = response.get("diskSnapshot", {}).get("location", {}).get("availabilityZone")
+
+                client.create_disk_from_snapshot(
+                    diskName=restore.name,
+                    diskSnapshotName=backup.unique_id,
+                    availabilityZone=availability_zone,
+                    sizeInGb=int(backup.size_gigabytes),
+                )
+                restore.resource_id = restore.name
+                restore.save()
+        except Exception as e:
+            raise Exception(get_error(e))
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+
+        client = self.node.connection.auth_lightsail.get_client()
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            response = client.get_instance(
+                instanceName=restore.resource_id
+            )
+            instance = response.get("instance", {})
+            state = instance.get("state", {}).get("name")
+            if state == "running":
+                return CoreCloudRestore.Status.COMPLETE
+            return CoreCloudRestore.Status.IN_PROGRESS
+        elif self.node.type == CoreNode.Type.VOLUME:
+            response = client.get_disk(
+                diskName=restore.resource_id
+            )
+            disk = response.get("disk", {})
+            state = disk.get("state")
+            if state == "available":
+                return CoreCloudRestore.Status.COMPLETE
+            elif state == "error":
+                return CoreCloudRestore.Status.FAILED
+            return CoreCloudRestore.Status.IN_PROGRESS
+
 
 class CoreAWSRDS(UtilCloud):
     node = models.OneToOneField(
@@ -942,6 +1645,72 @@ class CoreAWSRDS(UtilCloud):
         backup.unique_id = snapshot["DBSnapshot"]["DBSnapshotIdentifier"]
         backup.size_gigabytes = snapshot["DBSnapshot"]["AllocatedStorage"]
         backup.save()
+
+    def restore_snapshot(self, backup, restore):
+        import re
+
+        client = self.node.connection.auth_aws_rds.get_client()
+
+        # RDS identifiers must be 1-63 chars, start with a letter, contain
+        # only letters/digits/hyphens with no consecutive or trailing hyphens
+        identifier = re.sub(r"[^a-zA-Z0-9-]", "-", restore.name)
+        identifier = re.sub(r"-+", "-", identifier)
+        identifier = re.sub(r"^[^a-zA-Z]+", "", identifier)
+        identifier = identifier[:63].rstrip("-")
+        if not identifier:
+            raise Exception(
+                f"Unable to build a valid RDS instance identifier from '{restore.name}'. "
+                "The name must contain at least one letter."
+            )
+
+        request = {
+            "DBInstanceIdentifier": identifier,
+            "DBSnapshotIdentifier": backup.unique_id,
+        }
+        params = restore.params or {}
+        if params.get("db_instance_class"):
+            request["DBInstanceClass"] = params["db_instance_class"]
+        if params.get("db_subnet_group_name"):
+            request["DBSubnetGroupName"] = params["db_subnet_group_name"]
+        if params.get("multi_az") is not None:
+            request["MultiAZ"] = params["multi_az"]
+        if params.get("publicly_accessible") is not None:
+            request["PubliclyAccessible"] = params["publicly_accessible"]
+        if params.get("storage_type"):
+            request["StorageType"] = params["storage_type"]
+
+        try:
+            client.restore_db_instance_from_db_snapshot(**request)
+        except ClientError as e:
+            raise Exception(
+                f"Unable to restore RDS snapshot {backup.unique_id}: {get_error(e)}"
+            )
+
+        restore.resource_id = identifier
+        restore.save()
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+
+        client = self.node.connection.auth_aws_rds.get_client()
+        try:
+            response = client.describe_db_instances(
+                DBInstanceIdentifier=restore.resource_id
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "DBInstanceNotFound":
+                # the new instance can take a moment to appear after restore starts
+                return CoreCloudRestore.Status.IN_PROGRESS
+            raise
+
+        db_instance = response.get("DBInstances")[0]
+        status = db_instance.get("DBInstanceStatus")
+
+        if status == "available":
+            return CoreCloudRestore.Status.COMPLETE
+        elif status in ("failed", "incompatible-restore", "incompatible-network", "incompatible-parameters"):
+            return CoreCloudRestore.Status.FAILED
+        return CoreCloudRestore.Status.IN_PROGRESS
 
 
 class CoreVultr(UtilCloud):
@@ -1027,6 +1796,72 @@ class CoreVultr(UtilCloud):
         elif self.node.type == CoreNode.Type.VOLUME:
             pass
 
+    def restore_snapshot(self, backup, restore):
+        client = self.node.connection.auth_vultr.get_client()
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            params = restore.params or {}
+            region = params.get("region")
+            plan = params.get("plan")
+
+            if not region or not plan:
+                result = requests.get(
+                    f"{settings.VULTR_API}/v2/instances/{self.unique_id}",
+                    headers=client,
+                    verify=True,
+                )
+                if result.status_code == 200:
+                    instance = result.json()["instance"]
+                    region = region or instance["region"]
+                    plan = plan or instance["plan"]
+                else:
+                    raise Exception(
+                        f"Unable to get instance details. API call returned with status {result.status_code}"
+                    )
+
+            result = requests.post(
+                f"{settings.VULTR_API}/v2/instances",
+                headers=client,
+                json={
+                    "region": region,
+                    "plan": plan,
+                    "snapshot_id": backup.unique_id,
+                    "label": restore.name,
+                    "hostname": restore.name,
+                },
+                verify=True,
+            )
+            if result.status_code == 201:
+                instance = result.json()["instance"]
+                restore.resource_id = instance["id"]
+                restore.save()
+            elif result.status_code == 401:
+                raise Exception(
+                    "Unable to connect to your Vultr account. Please reconnect your account to refresh authentication token."
+                )
+            elif result.status_code == 429:
+                raise Exception("API rate limit exceeded. Please try again shortly.")
+            else:
+                raise Exception(f"API call returned with status {result.status_code}")
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+
+        client = self.node.connection.auth_vultr.get_client()
+
+        result = requests.get(
+            f"{settings.VULTR_API}/v2/instances/{restore.resource_id}",
+            headers=client,
+            verify=True,
+        )
+        if result.status_code == 200:
+            instance = result.json()["instance"]
+            if instance["status"] == "active":
+                return CoreCloudRestore.Status.COMPLETE
+            elif instance["status"] == "suspended":
+                return CoreCloudRestore.Status.FAILED
+        return CoreCloudRestore.Status.IN_PROGRESS
+
 
 class CoreOracle(UtilCloud):
     node = models.OneToOneField(
@@ -1042,7 +1877,7 @@ class CoreOracle(UtilCloud):
 
     def validate(self):
         import oci
-        from oci.core.models import BootVolumeBackup, VolumeBackup
+        from oci.core.models import BootVolume, Volume
 
         node_ok = False
 
@@ -1055,7 +1890,7 @@ class CoreOracle(UtilCloud):
                 if request.status == 200:
                     if (
                         request.data.id == self.unique_id
-                        and request.data.lifecycle_state == BootVolumeBackup.LIFECYCLE_STATE_AVAILABLE
+                        and request.data.lifecycle_state == BootVolume.LIFECYCLE_STATE_AVAILABLE
                     ):
                         node_ok = True
             elif self.metadata.get("_bs_vol_type") == "block":
@@ -1063,7 +1898,7 @@ class CoreOracle(UtilCloud):
                 if request.status == 200:
                     if (
                         request.data.id == self.unique_id
-                        and request.data.lifecycle_state == VolumeBackup.LIFECYCLE_STATE_AVAILABLE
+                        and request.data.lifecycle_state == Volume.LIFECYCLE_STATE_AVAILABLE
                     ):
                         node_ok = True
         return node_ok
@@ -1127,6 +1962,91 @@ class CoreOracle(UtilCloud):
                     self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
                 )
 
+    def restore_snapshot(self, backup, restore):
+        import oci
+        from oci.core.models import (
+            BootVolumeSourceFromBootVolumeBackupDetails,
+            CreateBootVolumeDetails,
+            CreateVolumeDetails,
+        )
+
+        if self.node.type == CoreNode.Type.VOLUME:
+            try:
+                config = self.node.connection.auth_oracle.get_client()
+                block_storage_client = oci.core.BlockstorageClient(config)
+                params = restore.params or {}
+
+                if self.metadata.get("_bs_vol_type") == "boot":
+                    compartment_id = params.get("compartment_id")
+                    availability_domain = params.get("availability_domain")
+                    if not compartment_id or not availability_domain:
+                        source_volume = block_storage_client.get_boot_volume(self.unique_id).data
+                        compartment_id = compartment_id or source_volume.compartment_id
+                        availability_domain = availability_domain or source_volume.availability_domain
+
+                    request = block_storage_client.create_boot_volume(
+                        create_boot_volume_details=CreateBootVolumeDetails(
+                            compartment_id=compartment_id,
+                            availability_domain=availability_domain,
+                            display_name=restore.name,
+                            source_details=BootVolumeSourceFromBootVolumeBackupDetails(
+                                id=backup.unique_id
+                            ),
+                        )
+                    )
+                    if request.status == 200:
+                        restore.resource_id = request.data.id
+                        restore.save()
+                    else:
+                        raise Exception(f"API call returned with status {request.status}")
+                elif self.metadata.get("_bs_vol_type") == "block":
+                    compartment_id = params.get("compartment_id")
+                    availability_domain = params.get("availability_domain")
+                    if not compartment_id or not availability_domain:
+                        source_volume = block_storage_client.get_volume(self.unique_id).data
+                        compartment_id = compartment_id or source_volume.compartment_id
+                        availability_domain = availability_domain or source_volume.availability_domain
+
+                    request = block_storage_client.create_volume(
+                        create_volume_details=CreateVolumeDetails(
+                            compartment_id=compartment_id,
+                            availability_domain=availability_domain,
+                            volume_backup_id=backup.unique_id,
+                            display_name=restore.name,
+                        )
+                    )
+                    if request.status == 200:
+                        restore.resource_id = request.data.id
+                        restore.save()
+                    else:
+                        raise Exception(f"API call returned with status {request.status}")
+            except Exception as e:
+                raise Exception(f"Unable to restore snapshot: {get_error(e)}")
+
+    def check_restore(self, restore):
+        from apps.console.backup.models import CoreCloudRestore
+        import oci
+        from oci.core.models import BootVolume, Volume
+
+        config = self.node.connection.auth_oracle.get_client()
+        block_storage_client = oci.core.BlockstorageClient(config)
+
+        if self.metadata.get("_bs_vol_type") == "boot":
+            request = block_storage_client.get_boot_volume(restore.resource_id)
+            if request.status == 200:
+                if request.data.lifecycle_state == BootVolume.LIFECYCLE_STATE_AVAILABLE:
+                    return CoreCloudRestore.Status.COMPLETE
+                elif request.data.lifecycle_state == BootVolume.LIFECYCLE_STATE_FAULTY:
+                    return CoreCloudRestore.Status.FAILED
+        elif self.metadata.get("_bs_vol_type") == "block":
+            request = block_storage_client.get_volume(restore.resource_id)
+            if request.status == 200:
+                if request.data.lifecycle_state == Volume.LIFECYCLE_STATE_AVAILABLE:
+                    return CoreCloudRestore.Status.COMPLETE
+                elif request.data.lifecycle_state == Volume.LIFECYCLE_STATE_FAULTY:
+                    return CoreCloudRestore.Status.FAILED
+        return CoreCloudRestore.Status.IN_PROGRESS
+
 
 class CoreLinode(UtilCloud):
     node = models.OneToOneField(
@@ -1162,11 +2082,11 @@ class CoreGoogleCloud(UtilCloud):
         if self.node.type == CoreNode.Type.CLOUD:
             client = self.node.connection.auth_google_cloud.get_client()
 
-            result = requests.get(
+            result = client.get(
                 f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
                 f"/projects/{self.node.google_cloud.project_id}"
                 f"/zones/{self.node.google_cloud.zone}"
-                f"/instances/{self.node.google_cloud.unique_id}", headers=client
+                f"/instances/{self.node.google_cloud.unique_id}"
             )
             if result.status_code == 200:
                 instance = result.json()
@@ -1181,11 +2101,11 @@ class CoreGoogleCloud(UtilCloud):
         elif self.node.type == CoreNode.Type.VOLUME:
             client = self.node.connection.auth_google_cloud.get_client()
 
-            result = requests.get(
+            result = client.get(
                 f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
                 f"/projects/{self.node.google_cloud.project_id}"
                 f"/zones/{self.node.google_cloud.zone}"
-                f"/disks/{self.node.google_cloud.unique_id}", headers=client
+                f"/disks/{self.node.google_cloud.unique_id}"
             )
             if result.status_code == 200:
                 instance = result.json()
@@ -1200,27 +2120,25 @@ class CoreGoogleCloud(UtilCloud):
             try:
                 client = self.node.connection.auth_google_cloud.get_client()
 
-                result = requests.get(
+                result = client.get(
                     f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
                     f"/projects/{self.node.google_cloud.project_id}"
                     f"/zones/{self.node.google_cloud.zone}"
-                    f"/instances/{self.node.google_cloud.unique_id}",
-                    headers=client
+                    f"/instances/{self.node.google_cloud.unique_id}"
                 )
                 if result.status_code == 200:
                     instance = result.json()
 
-                    result = requests.post(
+                    result = client.post(
                         f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
                         f"/projects/{self.node.google_cloud.project_id}"
                         f"/global/machineImages",
-                        headers=client,
-                        data=json.dumps(
-                            {"name": backup.uuid_str,
-                             "sourceInstance": f"projects/{self.node.google_cloud.project_id}"
-                                               f"/zones/{self.node.google_cloud.zone}"
-                                               f"/instances/{instance['name']}"}
-                        ),
+                        json={
+                            "name": backup.uuid_str,
+                            "sourceInstance": f"projects/{self.node.google_cloud.project_id}"
+                                              f"/zones/{self.node.google_cloud.zone}"
+                                              f"/instances/{instance['name']}"
+                        },
                     )
                     if result.status_code == 200:
                         image = result.json()
@@ -1251,22 +2169,20 @@ class CoreGoogleCloud(UtilCloud):
         elif self.node.type == CoreNode.Type.VOLUME:
             try:
                 client = self.node.connection.auth_google_cloud.get_client()
-                result = requests.get(
+                result = client.get(
                     f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
                     f"/projects/{self.node.google_cloud.project_id}"
                     f"/zones/{self.node.google_cloud.zone}"
-                    f"/disks/{self.node.google_cloud.unique_id}",
-                    headers=client
+                    f"/disks/{self.node.google_cloud.unique_id}"
                 )
                 if result.status_code == 200:
                     disk = result.json()
-                    result = requests.post(
+                    result = client.post(
                         f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
                         f"/projects/{self.node.google_cloud.project_id}"
                         f"/zones/{self.node.google_cloud.zone}"
                         f"/disks/{disk['name']}/createSnapshot",
-                        headers=client,
-                        data=json.dumps({"name": backup.uuid_str}),
+                        json={"name": backup.uuid_str},
                     )
                     if result.status_code == 200:
                         snapshot = result.json()
@@ -1274,18 +2190,186 @@ class CoreGoogleCloud(UtilCloud):
                         backup.size_gigabytes = int(snapshot.get("storageBytes", 0)) / (1000 ** 3)
                         backup.metadata = snapshot
                         backup.save()
+                    else:
+                        raise NodeBackupFailedError(
+                            self.node,
+                            backup.uuid_str,
+                            backup.attempt_no,
+                            backup.type,
+                            f"Unable to create disk snapshot. API call returned with status {result.status_code}",
+                        )
                 else:
                     raise NodeBackupFailedError(
                         self.node,
                         backup.uuid_str,
                         backup.attempt_no,
                         backup.type,
-                        f"Unable to create instance image. API call returned with status {result.status_code}",
+                        f"Unable to get disk details. API call returned with status {result.status_code}",
                     )
             except Exception as e:
                 raise NodeBackupFailedError(
                     self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
                 )
+
+    def restore_snapshot(self, backup, restore):
+        """Initiate a restore of a snapshot to a NEW instance/disk (never in-place).
+        Sets restore.resource_id on success and saves; raises with a clear message on failure."""
+        params = restore.params or {}
+        client = self.node.connection.auth_google_cloud.get_client()
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            zone = params.get("zone")
+            if not zone:
+                # Default to the source instance's zone (last segment of its zone URL);
+                # fall back to the node's configured zone if the instance no longer exists.
+                result = client.get(
+                    f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
+                    f"/projects/{self.project_id}"
+                    f"/zones/{self.zone}"
+                    f"/instances/{self.unique_id}"
+                )
+                if result.status_code == 200:
+                    zone = result.json()["zone"].split("/")[-1]
+                else:
+                    zone = self.zone
+
+            result = client.post(
+                f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
+                f"/projects/{self.project_id}"
+                f"/zones/{zone}"
+                f"/instances",
+                json={
+                    "name": restore.name,
+                    # Machine images are addressed by name (= backup.uuid_str);
+                    # backup.unique_id holds the id of the insert Operation.
+                    "sourceMachineImage": f"global/machineImages/{backup.uuid_str}",
+                },
+            )
+            if result.status_code == 200:
+                operation = result.json()
+                restore.resource_id = restore.name
+                params["zone"] = zone
+                params["operation_id"] = operation.get("name")
+                restore.params = params
+                restore.save()
+            else:
+                raise Exception(
+                    f"Unable to restore instance from machine image. API call returned with status {result.status_code}"
+                )
+        elif self.node.type == CoreNode.Type.VOLUME:
+            import math
+
+            zone = params.get("zone")
+            size_gb = params.get("sizeGb")
+            if not zone or not size_gb:
+                # Default to the source disk's zone and size.
+                result = client.get(
+                    f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
+                    f"/projects/{self.project_id}"
+                    f"/zones/{self.zone}"
+                    f"/disks/{self.unique_id}"
+                )
+                if result.status_code == 200:
+                    disk = result.json()
+                    if not zone:
+                        zone = disk["zone"].split("/")[-1]
+                    if not size_gb:
+                        size_gb = disk.get("sizeGb")
+            if not zone:
+                zone = self.zone
+            if not size_gb and backup.size_gigabytes:
+                size_gb = math.ceil(backup.size_gigabytes)
+            if not size_gb:
+                raise Exception(
+                    "Unable to determine the restored disk size. Provide sizeGb in the restore params."
+                )
+
+            result = client.post(
+                f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
+                f"/projects/{self.project_id}"
+                f"/zones/{zone}"
+                f"/disks",
+                json={
+                    "name": restore.name,
+                    # Snapshots are addressed by name (= backup.uuid_str);
+                    # backup.unique_id holds the id of the insert Operation.
+                    "sourceSnapshot": f"global/snapshots/{backup.uuid_str}",
+                    "sizeGb": str(size_gb),
+                    "type": f"zones/{zone}/diskTypes/pd-balanced",
+                },
+            )
+            if result.status_code == 200:
+                operation = result.json()
+                restore.resource_id = restore.name
+                params["zone"] = zone
+                params["operation_id"] = operation.get("name")
+                restore.params = params
+                restore.save()
+            else:
+                raise Exception(
+                    f"Unable to restore disk from snapshot. API call returned with status {result.status_code}"
+                )
+
+    def check_restore(self, restore):
+        """Single non-blocking restore status check: COMPLETE / FAILED / IN_PROGRESS."""
+        from apps.console.backup.models import CoreCloudRestore
+
+        params = restore.params or {}
+        zone = params.get("zone")
+        client = self.node.connection.auth_google_cloud.get_client()
+
+        if self.node.type == CoreNode.Type.CLOUD:
+            if not zone:
+                # Fall back to the source instance's zone, then the node's configured zone.
+                result = client.get(
+                    f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
+                    f"/projects/{self.project_id}"
+                    f"/zones/{self.zone}"
+                    f"/instances/{self.unique_id}"
+                )
+                if result.status_code == 200:
+                    zone = result.json()["zone"].split("/")[-1]
+                else:
+                    zone = self.zone
+
+            result = client.get(
+                f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
+                f"/projects/{self.project_id}"
+                f"/zones/{zone}"
+                f"/instances/{restore.resource_id or restore.name}"
+            )
+            if result.status_code == 200:
+                instance = result.json()
+                if instance.get("status") == "RUNNING":
+                    return CoreCloudRestore.Status.COMPLETE
+            return CoreCloudRestore.Status.IN_PROGRESS
+        elif self.node.type == CoreNode.Type.VOLUME:
+            if not zone:
+                # Fall back to the source disk's zone, then the node's configured zone.
+                result = client.get(
+                    f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
+                    f"/projects/{self.project_id}"
+                    f"/zones/{self.zone}"
+                    f"/disks/{self.unique_id}"
+                )
+                if result.status_code == 200:
+                    zone = result.json()["zone"].split("/")[-1]
+                else:
+                    zone = self.zone
+
+            result = client.get(
+                f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
+                f"/projects/{self.project_id}"
+                f"/zones/{zone}"
+                f"/disks/{restore.resource_id or restore.name}"
+            )
+            if result.status_code == 200:
+                disk = result.json()
+                if disk.get("status") == "READY":
+                    return CoreCloudRestore.Status.COMPLETE
+                elif disk.get("status") == "FAILED":
+                    return CoreCloudRestore.Status.FAILED
+            return CoreCloudRestore.Status.IN_PROGRESS
 
 
 class CoreWebsite(TimeStampedModel):

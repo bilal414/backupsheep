@@ -272,7 +272,7 @@ class CoreStorageOneDrive(TimeStampedModel):
         import requests
         from django.conf import settings
 
-        url = f"{settings.MS_GRAPH_ENDPOINT}/drives/{self.user_id}"
+        url = f"{settings.MS_GRAPH_ENDPOINT}/drives/{self.drive_id}"
 
         drive_request = requests.request("GET", url, headers=self.get_client(data))
 
@@ -806,6 +806,7 @@ class CoreStorageBackBlazeB2(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -826,6 +827,10 @@ class CoreStorageBackBlazeB2(TimeStampedModel):
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -871,6 +876,7 @@ class CoreStorageLinode(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -891,6 +897,10 @@ class CoreStorageLinode(TimeStampedModel):
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -1001,6 +1011,7 @@ class CoreStorageUpCloud(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -1020,7 +1031,11 @@ class CoreStorageUpCloud(TimeStampedModel):
 
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
-            endpoint_url=f"https://{endpoint}", region_name=endpoint.split('.')[1]
+            endpoint_url=f"https://{endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -1488,9 +1503,12 @@ class CoreStorageAliBaba(TimeStampedModel):
 
         endpoint = region.endpoint
 
-        auth = oss2.Auth(access_key, secret_key)
+        auth = oss2.AuthV4(access_key, secret_key)
 
-        bucket = oss2.Bucket(auth, f"https://{endpoint}", bucket_name)
+        # Signature V4 requires the region ID, e.g. "us-east-1" from endpoint "oss-us-east-1.aliyuncs.com".
+        region_id = endpoint.split(".")[0].removeprefix("oss-").removesuffix("-internal")
+
+        bucket = oss2.Bucket(auth, f"https://{endpoint}", bucket_name, region=region_id)
 
         if prefix:
             if (prefix != "") and (prefix.endswith("/") is False):
@@ -1830,9 +1848,16 @@ class CoreStorageIonos(TimeStampedModel):
 
         endpoint = region.endpoint
 
+        # boto3 >= 1.36 sends checksums IONOS rejects (InvalidTrailer) unless
+        # checksum calculation/validation is set to "when_required".
+        # https://docs.ionos.com/cloud/managed-services/s3-object-storage/s3-tools/boto3-python-sdk
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name=region.code,
-            endpoint_url=f"https://{endpoint}", config=Config(signature_version='s3v4')
+            endpoint_url=f"https://{endpoint}", config=Config(
+                signature_version='s3v4',
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            )
         )
 
         if prefix:

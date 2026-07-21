@@ -421,7 +421,7 @@ class CoreAuthUpCloud(TimeStampedModel):
                     server["_bs_size"] = server.get("size", None)
                     eligible_objects.append(server)
             else:
-                raise APIException(detail=result.json()["error"]["message"])
+                raise APIException(detail=result.json()["error"]["error_message"])
             result.close()
         return eligible_objects
 
@@ -1007,26 +1007,6 @@ class CoreAuthGoogleCloud(TimeStampedModel):
     class Meta:
         db_table = "core_auth_google_cloud"
 
-    def refresh_auth_token(self):
-        from datetime import datetime
-
-        encryption_key = self.connection.account.get_encryption_key()
-
-        params = {
-            "grant_type": "refresh_token",
-            "refresh_token": bs_decrypt(self.refresh_token, encryption_key),
-            "client_id": settings.GOOGLE_CLIENT_ID,
-            "client_secret": settings.GOOGLE_CLIENT_SECRET,
-        }
-
-        token_request = requests.post(settings.GOOGLE_OAUTH_TOKEN_URL, data=params)
-
-        if token_request.status_code == 200:
-            token_data = token_request.json()
-            self.access_token = bs_encrypt(token_data["access_token"], encryption_key)
-            self.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])))
-            self.save()
-
     def get_client(self, data=None):
         import json
         from google.auth.transport.requests import AuthorizedSession
@@ -1046,7 +1026,7 @@ class CoreAuthGoogleCloud(TimeStampedModel):
         eligible_objects = []
         active_projects = []
         client = self.get_client()
-        params = {"per_page": 500}
+        params = {"maxResults": 500}
 
         if object_type == "cloud":
             result = client.get(f"{settings.GOOGLE_RESOURCE_API}/v1/projects", params={"pageSize": 100})

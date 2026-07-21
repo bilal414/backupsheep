@@ -1562,3 +1562,67 @@ class SnapshotCreateError(APIException):
 
     def __str__(self):
         return f"{self.message}"
+
+
+class RestoreMissingParams(APIException):
+    status_code = 503
+    default_detail = "Looks like backup_id or name is missing from your request. Please try again."
+    default_code = "restore_missing_params"
+
+    def __init__(
+        self,
+        message="Looks like backup_id or name is missing from your request. Please try again.",
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class RestoreBackupNotFound(APIException):
+    status_code = 404
+    default_detail = "The backup you want to restore was not found or is not complete yet."
+    default_code = "restore_backup_not_found"
+
+    def __init__(
+        self,
+        message="The backup you want to restore was not found or is not complete yet.",
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class RestoreUnsupportedNode(APIException):
+    status_code = 503
+    default_detail = "Only cloud server and volume backups can be restored."
+    default_code = "restore_unsupported_node"
+
+    def __init__(
+        self,
+        message="Only cloud server and volume backups can be restored.",
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class RestoreCreateError(APIException):
+    status_code = 503
+    default_detail = "Unable to start restore. Please contact support."
+    default_code = "restore_create_failed"
+
+    def __init__(
+        self,
+        message="",
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"

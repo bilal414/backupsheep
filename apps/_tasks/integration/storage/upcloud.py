@@ -1,4 +1,6 @@
 import boto3
+from botocore.client import Config
+
 from apps._tasks.exceptions import StorageUpCloudUploadFailedError
 from apps.api.v1.utils.api_helpers import bs_decrypt
 
@@ -15,8 +17,13 @@ def storage_upcloud(stored_backup):
             aws_access_key_id=bs_decrypt(storage.storage_upcloud.access_key, encryption_key),
             aws_secret_access_key=bs_decrypt(storage.storage_upcloud.secret_key, encryption_key),
         )
+        config = Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
         s3 = session.resource(
-            "s3", endpoint_url=f"https://{storage.storage_upcloud.endpoint}", region_name=storage.storage_upcloud.endpoint.split('.')[1]
+            "s3", endpoint_url=f"https://{storage.storage_upcloud.endpoint}",
+            config=config,
         )
 
         if prefix:
