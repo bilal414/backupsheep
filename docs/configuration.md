@@ -66,6 +66,32 @@ and Cloudflare R2). Optional; backup *run* logs are kept on local disk regardles
 `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_STORAGE_BUCKET_NAME`, `S3_ENDPOINT_URL`,
 `S3_SIGNATURE_VERSION` (`s3v4`).
 
+## Local Storage backup destination (optional)
+
+The **Local Storage** provider keeps backup zips as plain files on this server (no
+external bucket). It needs no credentials — only the root directory the files live under.
+
+| Variable | Required | Default | Purpose |
+|----------|:--------:|---------|---------|
+| `BS_LOCAL_STORAGE_PATH` | optional | `/backups` | Root directory for 'Local Storage' backups. In the Compose stack `/backups` is the `backup_storage` volume, mounted into `app` and the workers. |
+
+To keep backups on a bigger disk or an NFS share, either point
+`BS_LOCAL_STORAGE_PATH` at that mount, or bind-mount over `/backups` via
+`docker-compose.override.yml`:
+
+```yaml
+volumes:
+  backup_storage:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/storage/backupsheep
+```
+
+Each Local Storage destination can optionally scope itself to a subdirectory of this
+root (the *Path* field in the UI).
+
 ## Storage-provider OAuth (only for the providers you use)
 
 Object-storage providers (S3, B2, Wasabi, R2, Spaces, …) need **no** environment config —

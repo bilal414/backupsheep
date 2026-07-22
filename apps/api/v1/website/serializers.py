@@ -39,42 +39,54 @@ class CoreWebsiteWriteSerializer(serializers.ModelSerializer):
         tar_temp_backup_dir = data.get("tar_temp_backup_dir")
         backup_type = data.get("backup_type")
 
-        if data["node"]["connection"].incremental_backup_available:
-            if backup_type == 2 or backup_type == 3 or backup_type == 4:
-                if tar_temp_backup_dir:
-                    sources = []
+        if backup_type is None and self.instance:
+            backup_type = self.instance.backup_type
 
-                    for path in data["paths"]:
-                        sources.append(path["path"])
+        node = data.get("node") or {}
+        connection = node.get("connection")
+        if connection is None and self.instance:
+            connection = self.instance.node.connection
 
-                    if tar_temp_backup_dir.endswith('/'):
-                        raise serializers.ValidationError(
-                            {
-                                "tar_temp_backup_dir": "Directory path must not end with /"
-                            }
-                        )
-                    for source in sources:
-                        if not source.endswith('/'):
-                            temp_source = source.replace("//", "/") + "/"
-                        if f"{tar_temp_backup_dir}/".startswith(temp_source):
-                            raise serializers.ValidationError(
-                                {
-                                    "tar_temp_backup_dir": f"Your backup directory cannot be inside the directory you"
-                                                           f" want to backup {temp_source}"
-                                    # "tar_temp_backup_dir": f"Your temporary backup path is overlapping with backup path {source}"
-                                }
-                            )
-                else:
-                    # return Response(
-                    #     {"detail": "Validation failed. Backups will fail. Check integration details immediately."},
-                    #     status=status.HTTP_400_BAD_REQUEST)
+        # Temporary backup directory is only used by legacy FULL_V2 (server-side tar) nodes.
+        if (
+                backup_type == CoreWebsite.BackupType.FULL_V2
+                and connection
+                and connection.incremental_backup_available
+        ):
+            if tar_temp_backup_dir:
+                paths = data.get("paths")
+                if paths is None and self.instance:
+                    paths = self.instance.paths
+                sources = []
 
+                for path in paths or []:
+                    sources.append(path["path"])
+
+                if tar_temp_backup_dir.endswith('/'):
                     raise serializers.ValidationError(
                         {
-                            "tar_temp_backup_dir": "Specify a directory where we can store the temporary backup archive."
-                            " It must be outside any paths you wish to include in the backup."
+                            "tar_temp_backup_dir": "Directory path must not end with /"
                         }
                     )
+                for source in sources:
+                    if not source.endswith('/'):
+                        temp_source = source.replace("//", "/") + "/"
+                    else:
+                        temp_source = source
+                    if f"{tar_temp_backup_dir}/".startswith(temp_source):
+                        raise serializers.ValidationError(
+                            {
+                                "tar_temp_backup_dir": f"Your backup directory cannot be inside the directory you"
+                                                       f" want to backup {temp_source}"
+                            }
+                        )
+            else:
+                raise serializers.ValidationError(
+                    {
+                        "tar_temp_backup_dir": "Specify a directory where we can store the temporary backup archive."
+                        " It must be outside any paths you wish to include in the backup."
+                    }
+                )
         return data
 
     def create(self, validated_data):

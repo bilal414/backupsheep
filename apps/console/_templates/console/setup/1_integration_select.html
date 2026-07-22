@@ -271,6 +271,18 @@
                 </p>
             </div>
             <div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <a id="storage-local" href="{% url 'console:setup:integration_storage_open' 'local' %}"
+                   class="group relative rounded-2xl bg-white p-5 shadow-soft ring-1 ring-slate-900/5 hover:shadow-card hover:ring-indigo-200 transition-all">
+                    <div class="flex items-center gap-x-4">
+                        <svg class="h-10 w-10 shrink-0 text-slate-400 group-hover:text-indigo-500 transition-colors" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+                        </svg>
+                        <h3 class="text-sm font-semibold text-slate-900 group-hover:text-indigo-600 transition-colors">Local
+                            Storage</h3>
+                    </div>
+                    <p class="mt-3 text-sm leading-6 text-slate-500">Store unlimited file and database backups on a
+                        local disk path on this BackupSheep server.</p>
+                </a>
                 <a id="storage-cloudflare" href="{% url 'console:setup:integration_storage_open' 'cloudflare' %}"
                    class="group relative rounded-2xl bg-white p-5 shadow-soft ring-1 ring-slate-900/5 hover:shadow-card hover:ring-indigo-200 transition-all">
                     <div class="flex items-center gap-x-4">

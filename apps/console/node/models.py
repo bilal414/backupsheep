@@ -2374,8 +2374,8 @@ class CoreGoogleCloud(UtilCloud):
 
 class CoreWebsite(TimeStampedModel):
     class BackupType(models.IntegerChoices):
-        FULL = 1, "Full v1"
-        FULL_V2 = 4, "Full v2"
+        FULL = 1, "Full"
+        FULL_V2 = 4, "Full (Server-Side Tar)"
 
     node = models.OneToOneField(
         "CoreNode", related_name="website", on_delete=models.CASCADE
@@ -2392,6 +2392,7 @@ class CoreWebsite(TimeStampedModel):
     all_paths = models.BooleanField(null=True)
     notes = models.TextField(null=True, blank=True)
     backup_type = models.IntegerField(choices=BackupType.choices, default=BackupType.FULL)
+    incremental = models.BooleanField(default=False)
     tar_temp_backup_dir = models.TextField(null=True, blank=True)
     tar_exclude_vcs_ignores = models.BooleanField(default=False, null=True)
     tar_exclude_vcs = models.BooleanField(default=False, null=True)
@@ -2403,7 +2404,6 @@ class CoreWebsite(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from apps._tasks.integration.backup.website import snapshot_website
-        from apps._tasks.integration.backup.full_v2 import snapshot_full_v2
         from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreWebsiteBackupStoragePoints
 
@@ -2411,16 +2411,12 @@ class CoreWebsite(TimeStampedModel):
         backup.save()
 
         """
-        Run a full website backup. Key-based sources can use the server-side tar path
-        (full_v2); everything else mirrors the files over FTP/FTPS/SFTP with lftp.
-        (Incremental/differential were never released and have been removed.)
+        Run a website backup. snapshot_website dispatches internally: incremental
+        mode mirrors into the per-node persistent cache, key-based FULL_V2 sources
+        use the server-side tar transport, and everything else is a full lftp
+        re-download.
         """
-        if self.backup_type == self.BackupType.FULL_V2 and (
-                self.node.connection.auth_website.use_private_key or self.node.connection.auth_website.use_public_key
-        ):
-            snapshot_full_v2(backup)
-        else:
-            snapshot_website(backup)
+        snapshot_website(backup)
 
         backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
         backup.save()
@@ -2506,16 +2502,27 @@ class CoreDatabase(TimeStampedModel):
                 == CoreAuthDatabase.DatabaseType.MYSQL
         ):
             snapshot_mysql(backup)
-        if (
+        elif (
                 self.node.connection.auth_database.type
                 == CoreAuthDatabase.DatabaseType.MARIADB
         ):
             snapshot_mariadb(backup)
-        if (
+        elif (
                 self.node.connection.auth_database.type
                 == CoreAuthDatabase.DatabaseType.POSTGRESQL
         ):
             snapshot_postgresql(backup)
+        else:
+            # Unknown/unsupported engine type: fail loudly instead of silently
+            # uploading an empty zip.
+            raise NodeBackupFailedError(
+                self.node,
+                backup.uuid_str,
+                backup.attempt_no,
+                backup.type,
+                message=f"Unsupported database engine type: "
+                        f"{self.node.connection.auth_database.type}",
+            )
 
         backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
         backup.save()

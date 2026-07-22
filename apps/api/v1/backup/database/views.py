@@ -23,15 +23,25 @@ from apps._tasks.exceptions import (
     DownloadMissingParams,
     DownloadStoragePointNotFound,
     DownloadStoragePointError, StoragePointError,
+    RestoreBackupNotFound,
+    RestoreConfirmationRequired,
+    RestoreCreateError,
+    RestoreStoragePointNotFound,
+    RestoreStoragePointRequired,
 )
 from apps.api.v1.backup.database.filters import CoreDatabaseBackupFilter
 from apps.api.v1.backup.database.permissions import (
     CoreDatabaseBackupViewPermissions,
 )
-from apps.api.v1.backup.database.serializers import CoreDatabaseBackupSerializer, CoreDatabaseBackupStoragePointsSerializer
+from apps.api.v1.backup.database.serializers import CoreDatabaseBackupSerializer, CoreDatabaseBackupStoragePointsSerializer, \
+    CoreDatabaseRestoreSerializer
 from apps.api.v1.utils.api_filters import DateRangeFilter
 from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
-from apps.console.backup.models import CoreDatabaseBackup
+from apps.console.backup.models import (
+    CoreDatabaseBackup,
+    CoreDatabaseBackupStoragePoints,
+    CoreDatabaseRestore,
+)
 from apps.console.node.models import CoreNode
 from rest_framework import status
 
@@ -108,6 +118,59 @@ class CoreDatabaseBackupView(viewsets.ModelViewSet):
             return Response(storage_points, status=status.HTTP_200_OK)
         except Exception as e:
             raise StoragePointError(e.__str__())
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        from apps._tasks.integration.restore import restore_database_backup
+
+        backup = self.get_object()
+
+        if request.data.get("confirm") is not True:
+            raise RestoreConfirmationRequired()
+        if backup.status != CoreDatabaseBackup.Status.COMPLETE:
+            raise RestoreBackupNotFound()
+
+        stored_backups = backup.stored_database_backups.filter(
+            status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id__isnull=False,
+        )
+        storage_point_id = request.data.get("storage_point_id")
+        if storage_point_id is not None:
+            stored_backup = stored_backups.filter(id=storage_point_id).first()
+            if stored_backup is None:
+                raise RestoreStoragePointNotFound()
+        else:
+            if stored_backups.count() != 1:
+                raise RestoreStoragePointRequired()
+            stored_backup = stored_backups.first()
+
+        restore = CoreDatabaseRestore.objects.create(
+            backup=backup,
+            storage_point=stored_backup,
+            name=f"Restore of {backup.uuid}",
+        )
+
+        try:
+            restore_database_backup.apply_async(
+                kwargs={
+                    "node_id": backup.database.node.id,
+                    "backup_id": backup.id,
+                    "restore_id": restore.id,
+                }
+            )
+        except Exception as e:
+            raise RestoreCreateError(e.__str__())
+
+        return Response(
+            CoreDatabaseRestoreSerializer(restore).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["get"])
+    def restores(self, request, pk=None):
+        backup = self.get_object()
+        restores = backup.restores.order_by("-created")
+        return Response(CoreDatabaseRestoreSerializer(restores, many=True).data)
 
     @action(detail=True)
     def download_transfer_log(self, request, pk=None):

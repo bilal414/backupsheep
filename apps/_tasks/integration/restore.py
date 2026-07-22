@@ -1,7 +1,11 @@
 from celery import current_app
 from sentry_sdk import capture_exception
 
-from apps.console.backup.models import CoreCloudRestore
+from apps.console.backup.models import (
+    CoreCloudRestore,
+    CoreDatabaseRestore,
+    CoreWebsiteRestore,
+)
 from apps.console.node.models import CoreNode
 
 
@@ -96,3 +100,77 @@ def poll_cloud_restore(self, node_id, restore_id, started_at=None, interval=120,
     poll_cloud_restore.apply_async(
         args=[node_id, restore_id, started_at, interval, timeout], countdown=interval
     )
+
+
+@current_app.task(
+    name="restore_website_backup",
+    track_started=True,
+    bind=True,
+    max_retries=0,
+    soft_time_limit=(24 * 3600),
+)
+def restore_website_backup(self, node_id=None, backup_id=None, restore_id=None):
+    """Restore a completed website backup zip back onto its source server.
+
+    No automatic retries: a restore pushes data to the user's server, so a lost
+    response must not silently re-run it -- a failure marks the restore FAILED
+    and the user can request a new one.
+    """
+    from apps._tasks.integration.restore_website import restore_website
+
+    node = CoreNode.objects.get(id=node_id)
+    backup = node.website.backups.get(id=backup_id)
+    restore = CoreWebsiteRestore.objects.get(id=restore_id, backup=backup)
+
+    restore.status = CoreWebsiteRestore.Status.IN_PROGRESS
+    restore.celery_task_id = self.request.id
+    restore.save()
+
+    try:
+        restore_website(backup, restore)
+    except Exception as error:
+        capture_exception(error)
+        restore.status = CoreWebsiteRestore.Status.FAILED
+        restore.error = error.__str__()
+        restore.save()
+        return
+
+    restore.status = CoreWebsiteRestore.Status.COMPLETE
+    restore.save()
+
+
+@current_app.task(
+    name="restore_database_backup",
+    track_started=True,
+    bind=True,
+    max_retries=0,
+    soft_time_limit=(24 * 3600),
+)
+def restore_database_backup(self, node_id=None, backup_id=None, restore_id=None):
+    """Restore a completed database backup zip back into its source server.
+
+    No automatic retries: a restore pushes data to the user's server, so a lost
+    response must not silently re-run it -- a failure marks the restore FAILED
+    and the user can request a new one.
+    """
+    from apps._tasks.integration.restore_database import restore_database
+
+    node = CoreNode.objects.get(id=node_id)
+    backup = node.database.backups.get(id=backup_id)
+    restore = CoreDatabaseRestore.objects.get(id=restore_id, backup=backup)
+
+    restore.status = CoreDatabaseRestore.Status.IN_PROGRESS
+    restore.celery_task_id = self.request.id
+    restore.save()
+
+    try:
+        restore_database(backup, restore)
+    except Exception as error:
+        capture_exception(error)
+        restore.status = CoreDatabaseRestore.Status.FAILED
+        restore.error = error.__str__()
+        restore.save()
+        return
+
+    restore.status = CoreDatabaseRestore.Status.COMPLETE
+    restore.save()

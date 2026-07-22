@@ -432,6 +432,33 @@
                             </div>
                         {% endif %}
 
+                        {% if storage.code == "local" %}
+                            <div class="sm:col-span-6">
+                                <label for="path" class="block text-sm font-medium text-gray-700">
+                                    Path (optional)
+                                </label>
+                                <div class="mt-1">
+                                    <input x-model="selectedStorage.path" type="text" name="path" id="path"
+                                           autocomplete="path"
+                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                    <p x-show="storageErrors.auth?.path" class="mt-2 text-sm text-red-600"
+                                       id="path-error" x-text="storageErrors.auth?.path"></p>
+                                </div>
+                                <p class="mt-2 text-sm text-gray-700">Subdirectory under the server's local storage
+                                    root (leave empty to store at the root).</p>
+                            </div>
+                            <div class="sm:col-span-6">
+                                <label for="no_delete" class="inline-flex items-center gap-x-2 text-sm font-medium text-gray-700">
+                                    <input x-model="selectedStorage.no_delete" type="checkbox" name="no_delete"
+                                           id="no_delete"
+                                           class="rounded border-gray-300 text-indigo-600 shadow-xs focus:ring-indigo-500">
+                                    Keep backups on delete
+                                </label>
+                                <p class="mt-2 text-sm text-gray-700">When enabled, deleting a backup in BackupSheep
+                                    leaves the zip file on disk.</p>
+                            </div>
+                        {% endif %}
+
                         <div class="sm:col-span-6" x-show="showS3Fields && storage_code=='backblaze_b2'">
                             <div class="rounded-md bg-blue-50 p-4">
                                 <div class="flex">
@@ -827,6 +854,13 @@
                     region: this.selectedStorage.region?.id,
                     endpoint: this.selectedStorage.endpoint,
                 };
+
+                if (this.storageTypeCode === "local") {
+                    data["storage_local"] = {
+                        path: this.selectedStorage.path || '',
+                        no_delete: this.selectedStorage.no_delete || false,
+                    };
+                }
 
                 let response = await fetch(url, {
                     headers: {

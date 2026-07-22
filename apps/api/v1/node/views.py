@@ -1,3 +1,7 @@
+import os
+import shutil
+
+from django.conf import settings
 from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, mixins
@@ -26,7 +30,6 @@ from apps._tasks.integration.basecamp import backup_basecamp
 from apps._tasks.integration.website import backup_website
 from ..utils.api_filters import DateRangeFilter
 from apps._tasks.helper.tasks import node_delete_requested
-from ..utils.api_helpers import delete_snar_file
 
 
 class CoreNodeView(viewsets.ModelViewSet):
@@ -225,8 +228,16 @@ class CoreNodeView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def reset_incremental(self, request, pk=None):
         node = self.get_object()
-        snar_file = f"{node.uuid_str}.snar"
-        delete_snar_file(snar_file)
+        # Wipe the per-node local mirror cache (and its fingerprint) so the next
+        # incremental backup re-downloads everything. Confined to _storage.
+        storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
+        cache_base = os.path.realpath(os.path.join(storage_dir, "website_cache", node.uuid_str))
+        if cache_base != storage_dir and os.path.commonpath([storage_dir, cache_base]) == storage_dir:
+            shutil.rmtree(cache_base, ignore_errors=True)
+            try:
+                os.remove(cache_base + ".meta.json")
+            except FileNotFoundError:
+                pass
         return Response({"detail": "We have reset the incremental backups. Your next backup will be a full backup."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"])

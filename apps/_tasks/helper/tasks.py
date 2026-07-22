@@ -494,6 +494,19 @@ def node_delete_requested(self, node_id):
                     for schedule in node.schedules.all():
                         schedule.delete()
 
+                # Remove the per-node website mirror cache used by incremental
+                # backups, confined to _storage like delete_from_disk.
+                if getattr(node, "website", None) is not None:
+                    storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
+                    cache_base = os.path.realpath(os.path.join(storage_dir, "website_cache", node.uuid_str))
+                    if cache_base != storage_dir and os.path.commonpath([storage_dir, cache_base]) == storage_dir:
+                        shutil.rmtree(cache_base, ignore_errors=True)
+                        for suffix in (".meta.json", ".lock"):
+                            try:
+                                os.remove(cache_base + suffix)
+                            except FileNotFoundError:
+                                pass
+
                 node.delete()
     except Exception as e:
         capture_exception(e)

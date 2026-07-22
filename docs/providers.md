@@ -28,11 +28,16 @@ credentials in `.env` (see [Configuration](configuration.md)).
 The **Database** source (`database`) dumps and stores your databases offsite:
 
 - **PostgreSQL** — via version-matched `pg_dump` (clients for PG 14–18 ship in the image).
-- **MySQL / MariaDB** — via `mariadb-dump` / `mysqldump`.
+- **MySQL / MariaDB** — MySQL targets use the bundled Oracle MySQL 8.4 client
+  (`/opt/mysql/bin`); MariaDB targets use `mariadb-dump` / `mysqldump`.
 
 ### Websites / servers (offsite file backups)
 The **Website** source (`website`) backs up files from any Linux host over **FTP, FTPS,
 SFTP, or SSH** (transfers use `lftp`). Per-connection FTPS TLS verification is supported.
+Backups can run in **incremental** mode (after the first run only new/changed files are
+downloaded, into a per-node local cache — every backup is still a complete zip) or
+**full** mode (re-download everything every run); see
+[Usage → Website backup modes](usage.md#website-backup-modes).
 
 ### SaaS apps
 - **WordPress** (`wordpress`)
@@ -46,10 +51,13 @@ SFTP, or SSH** (transfers use `lftp`). Per-connection FTPS TLS verification is s
 Connect one or more; a backup can be copied to several at once. **Object-storage**
 providers just need an access key, secret, bucket, and (for non-AWS) an endpoint/region,
 all entered in the UI. **OAuth** providers (Dropbox, Google Drive, OneDrive, pCloud) need
-an app registered with the provider and its credentials in `.env` first.
+an app registered with the provider and its credentials in `.env` first. **Local
+Storage** needs neither — backups stay on a disk path of the BackupSheep server itself
+(`/backups`, overridable via `BS_LOCAL_STORAGE_PATH`).
 
 | Storage | Code | Type |
 |---------|------|------|
+| Local Storage | `local` | local disk (`BS_LOCAL_STORAGE_PATH`) |
 | Amazon S3 | `aws_s3` | object (keys in UI) |
 | Backblaze B2 | `backblaze_b2` | object |
 | Wasabi | `wasabi` | object |

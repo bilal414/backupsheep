@@ -2063,6 +2063,10 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 ExpiresIn=24 * 3600,
             )
             return response
+        elif self.storage.type.code == "local":
+            # Local Storage files never leave this server; the download view streams
+            # them through the app (session-authenticated, account-scoped).
+            return f"/api/v1/storage/local/file/{self.id}/"
 
 
     def delete_requested(self):
@@ -2361,6 +2365,20 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         Bucket=self.storage.storage_ibm.bucket_name,
                         Key=f"{self.storage_file_id}",
                     )
+                elif self.storage.type.code == "local":
+                    import os
+                    if not self.storage.storage_local.no_delete:
+                        # storage_file_id is the absolute path written by the local
+                        # upload backend; only ever unlink inside the storage root.
+                        local_root = os.path.realpath(settings.LOCAL_STORAGE_ROOT)
+                        target = os.path.realpath(self.storage_file_id)
+                        if target != local_root and not target.startswith(local_root + os.sep):
+                            raise ValueError(
+                                f"Refusing to delete '{self.storage_file_id}': "
+                                f"outside the local storage root."
+                            )
+                        if os.path.exists(target):
+                            os.remove(target)
 
                 self.status = self.Status.DELETE_COMPLETED
                 self.save()
@@ -3350,3 +3368,71 @@ class CoreCloudRestore(TimeStampedModel):
         except Exception as e:
             capture_exception(e)
             return self.Status.IN_PROGRESS
+
+
+class CoreWebsiteRestore(TimeStampedModel):
+    """Tracks a restore of a website/files backup zip back onto its source server.
+
+    `storage_point` is the concrete stored-backup row (one uploaded copy of the
+    backup zip on a storage backend) the restore is fetched from; nullable so
+    deleting that copy later does not cascade-delete the restore history.
+    Restore options go in `params` (e.g. {"delete": true} -- remove remote files
+    that are not present in the backup).
+    """
+
+    class Status(models.IntegerChoices):
+        PENDING = 1, "Pending"
+        IN_PROGRESS = 2, "In-Progress"
+        COMPLETE = 3, "Complete"
+        FAILED = 4, "Failed"
+
+    backup = models.ForeignKey(
+        "CoreWebsiteBackup", related_name="restores", on_delete=models.CASCADE
+    )
+    storage_point = models.ForeignKey(
+        "CoreWebsiteBackupStoragePoints",
+        related_name="restores",
+        null=True,
+        on_delete=models.SET_NULL,
+    )
+    name = models.CharField(max_length=255)
+    params = models.JSONField(null=True)
+    status = models.IntegerField(choices=Status.choices, default=Status.PENDING)
+    error = models.TextField(null=True, blank=True)
+    celery_task_id = models.CharField(max_length=255, null=True, blank=True)
+
+    class Meta:
+        db_table = "core_website_restore"
+
+
+class CoreDatabaseRestore(TimeStampedModel):
+    """Tracks a restore of a database backup zip back into its source server.
+
+    `storage_point` is the concrete stored-backup row (one uploaded copy of the
+    backup zip on a storage backend) the restore is fetched from; nullable so
+    deleting that copy later does not cascade-delete the restore history.
+    """
+
+    class Status(models.IntegerChoices):
+        PENDING = 1, "Pending"
+        IN_PROGRESS = 2, "In-Progress"
+        COMPLETE = 3, "Complete"
+        FAILED = 4, "Failed"
+
+    backup = models.ForeignKey(
+        "CoreDatabaseBackup", related_name="restores", on_delete=models.CASCADE
+    )
+    storage_point = models.ForeignKey(
+        "CoreDatabaseBackupStoragePoints",
+        related_name="restores",
+        null=True,
+        on_delete=models.SET_NULL,
+    )
+    name = models.CharField(max_length=255)
+    params = models.JSONField(null=True)
+    status = models.IntegerField(choices=Status.choices, default=Status.PENDING)
+    error = models.TextField(null=True, blank=True)
+    celery_task_id = models.CharField(max_length=255, null=True, blank=True)
+
+    class Meta:
+        db_table = "core_database_restore"

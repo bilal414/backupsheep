@@ -1302,23 +1302,36 @@ class CoreAuthWebsite(TimeStampedModel):
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
-            with os.fdopen(fd, "w") as tmp:
-                tmp.write(private_key)
-            if password:
-                pkey = paramiko.RSAKey.from_private_key_file(ssh_key_path, password=password)
-            else:
-                pkey = paramiko.RSAKey.from_private_key_file(ssh_key_path)
-            ssh.connect(
-                host,
-                auth_timeout=180,
-                banner_timeout=180,
-                timeout=180,
-                port=int(port),
-                username=username,
-                pkey=pkey,
-                disabled_algorithms=disabled_algorithms,
-            )
-            sftp = ssh.open_sftp()
+            try:
+                with os.fdopen(fd, "w") as tmp:
+                    tmp.write(private_key)
+                # The user's key can be Ed25519, RSA or ECDSA -- try each class with
+                # the passphrase (or None) until one parses it.
+                pkey = None
+                for key_cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+                    try:
+                        pkey = key_cls.from_private_key_file(ssh_key_path, password=password or None)
+                        break
+                    except Exception:
+                        continue
+                if not pkey:
+                    raise NodeConnectionErrorSFTP()
+                ssh.connect(
+                    host,
+                    auth_timeout=180,
+                    banner_timeout=180,
+                    timeout=180,
+                    port=int(port),
+                    username=username,
+                    pkey=pkey,
+                    disabled_algorithms=disabled_algorithms,
+                )
+                sftp = ssh.open_sftp()
+            except Exception:
+                # Never leave the decrypted private key on disk when connecting fails.
+                if os.path.exists(ssh_key_path):
+                    os.remove(ssh_key_path)
+                raise
         else:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -1594,6 +1607,68 @@ class CoreAuthDatabase(TimeStampedModel):
             return "/usr/bin/"
         return "/usr/bin/"
 
+    def _direct_mysql_connect(self, host, port, username, password, database_name, use_ssl):
+        """Direct-mode MySQL/MariaDB connect, with an SSL hint.
+
+        MySQL 8.4 dropped mysql_native_password, so servers default to
+        caching_sha2_password, which refuses to exchange credentials over a
+        plain connection (errno 2061). When that happens with SSL disabled,
+        retry once with SSL on: if that connects, the credentials are fine
+        and the server simply requires TLS, so raise a clear message instead
+        of the cryptic 2061. If the retry also fails, the original error
+        stands.
+        """
+        import mysql.connector
+
+        try:
+            return mysql.connector.connect(
+                host=host,
+                port=int(port),
+                user=username,
+                passwd=password,
+                db=database_name,
+                connect_timeout=60,
+                ssl_disabled=(not use_ssl),
+            )
+        except Exception as e:
+            if use_ssl or getattr(e, "errno", None) != 2061:
+                raise
+            try:
+                retry_con = mysql.connector.connect(
+                    host=host,
+                    port=int(port),
+                    user=username,
+                    passwd=password,
+                    db=database_name,
+                    connect_timeout=60,
+                    ssl_disabled=False,
+                )
+            except Exception:
+                raise e
+            retry_con.close()
+            raise IntegrationValidationError(
+                "The database server requires an SSL/TLS connection"
+                " (the default on MySQL 8.4). Enable \"Use SSL/TLS\" on"
+                " this connection and validate again."
+            )
+
+    @staticmethod
+    def _mysql_version_slug(result):
+        """Build the "<type>_<major>_<minor>" slug from a SELECT version() string.
+
+        MariaDB (and vendor-suffixed MySQL builds) include the vendor name after
+        a dash ("10.11.6-MariaDB-1:...") -- keep the historical slug for those so
+        detected values stay identical. Stock MySQL returns a bare version
+        ("8.0.36" or "8.0.36-0ubuntu0.22.04.1"): take the first token before any
+        space and strip anything after a dash instead of assuming one exists.
+        """
+        if ("mariadb" in result.lower() or "mysql" in result.lower()) and "-" in result:
+            return slugify(f"{result.split('-')[1]}_{result.split('-')[0]}".replace(".", "_")).replace("-", "_")
+        version = result.split(" ")[0].split("-")[0]
+        if version and version[0].isdigit():
+            return slugify(f"mysql_{version}".replace(".", "_")).replace("-", "_")
+        return None
+
     def check_connection(self, data=None, check_errors=None):
         import mysql.connector
         import psycopg2
@@ -1625,165 +1700,173 @@ class CoreAuthDatabase(TimeStampedModel):
 
         if use_public_key or use_private_key:
             ssh, ssh_key_path = self.get_ssh_client(data=data)
+            try:
+                option_ssl_mode = ""
+                if use_ssl:
+                    # The MariaDB client rejects the MySQL-style --ssl-mode flag.
+                    option_ssl_mode = "--ssl" if type == self.DatabaseType.MARIADB else "--ssl-mode=PREFERRED"
 
-            option_ssl_mode = ""
-            if use_ssl:
-                option_ssl_mode = "--ssl-mode=PREFERRED"
-
-            if type == self.DatabaseType.MYSQL:
-                execstr = (
-                    f"mysql"
-                    f" {option_ssl_mode}"
-                    f" --disable-column-names"
-                    f" -h'{host}'"
-                    f" -u'{username}'"
-                    f" -p'{password}'"
-                    f" --port='{port}'"
-                    f' -e"STATUS;"'
-                )
-                stdin, stdout, stderr = ssh.exec_command(execstr)
-
-                """
-                Check output. 
-                """
-                output_lines = stdout.readlines()
-
-                """
-                Check for any errors. 
-                """
-                error_lines = stderr.readlines()
-
-                output = " ".join(map(str, output_lines or "")).strip("\n").strip()
-                error = " ".join(map(str, error_lines or "")).strip("\n").strip()
-                combined = f"{output}\n{error}"
-
-                if "server:" in combined.lower() or "server version:" in combined.lower():
-                    pass
-                else:
-                    combined = combined.replace(
-                        "[Warning] Using a password on the command line interface can be insecure", ""
+                if type == self.DatabaseType.MYSQL:
+                    execstr = (
+                        f"mysql"
+                        f" {option_ssl_mode}"
+                        f" --disable-column-names"
+                        f" -h'{host}'"
+                        f" -u'{username}'"
+                        f" -p'{password}'"
+                        f" --port='{port}'"
+                        f' -e"STATUS;"'
                     )
-                    raise IntegrationValidationError(combined)
+                    stdin, stdout, stderr = ssh.exec_command(execstr)
 
-            elif type == self.DatabaseType.MARIADB:
-                execstr = (
-                    f"mysql"
-                    f" {option_ssl_mode}"
-                    f" --disable-column-names"
-                    f" -h'{host}'"
-                    f" -u'{username}'"
-                    f" -p'{password}'"
-                    f" --port='{port}'"
-                    f' -e"STATUS;"'
-                )
-                stdin, stdout, stderr = ssh.exec_command(execstr)
-                """
-                Check output. 
-                """
-                output_lines = stdout.readlines()
+                    """
+                    Check output. 
+                    """
+                    output_lines = stdout.readlines()
 
-                """
-                Check for any errors. 
-                """
-                error_lines = stderr.readlines()
+                    """
+                    Check for any errors. 
+                    """
+                    error_lines = stderr.readlines()
 
-                output = " ".join(map(str, output_lines or "")).strip("\n").strip()
-                error = " ".join(map(str, error_lines or "")).strip("\n").strip()
-                combined = f"{output}\n{error}"
+                    output = " ".join(map(str, output_lines or "")).strip("\n").strip()
+                    error = " ".join(map(str, error_lines or "")).strip("\n").strip()
+                    combined = f"{output}\n{error}"
 
-                if "server:" in combined.lower() or "server version:" in combined.lower():
-                    pass
-                else:
-                    combined = combined.replace(
-                        "[Warning] Using a password on the command line interface can be insecure", ""
+                    if "server:" in combined.lower() or "server version:" in combined.lower():
+                        pass
+                    else:
+                        combined = combined.replace(
+                            "[Warning] Using a password on the command line interface can be insecure", ""
+                        )
+                        raise IntegrationValidationError(combined)
+
+                elif type == self.DatabaseType.MARIADB:
+                    execstr = (
+                        f"mysql"
+                        f" {option_ssl_mode}"
+                        f" --disable-column-names"
+                        f" -h'{host}'"
+                        f" -u'{username}'"
+                        f" -p'{password}'"
+                        f" --port='{port}'"
+                        f' -e"STATUS;"'
                     )
-                    raise IntegrationValidationError(combined)
+                    stdin, stdout, stderr = ssh.exec_command(execstr)
+                    """
+                    Check output. 
+                    """
+                    output_lines = stdout.readlines()
 
-            elif type == self.DatabaseType.POSTGRESQL:
-                if all_databases:
-                    dbname = f"dbname='postgres'"
-                else:
-                    dbname = f"dbname='{database_name}'"
-                # execstr = (
-                #     f'psql'
-                #     f' "host={host}'
-                #     f" user='{username}'"
-                #     f" password='{password}'"
-                #     f" port='{port}'"
-                #     f" {dbname}"
-                #     fr' sslmode=prefer" -lqt | cut -d \| -f 1'
-                # )
+                    """
+                    Check for any errors. 
+                    """
+                    error_lines = stderr.readlines()
 
-                # PostgreSQL 14.5 on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 7.5.0-3ubuntu1~18.04) 7.5.0, 64-bit
-                execstr = (
-                    f"psql"
-                    f' "host={host}'
-                    f" user='{username}'"
-                    f" password='{password}'"
-                    f" port={port}"
-                    f" {dbname}"
-                    f' sslmode=prefer" -c "SELECT version();"'
-                )
+                    output = " ".join(map(str, output_lines or "")).strip("\n").strip()
+                    error = " ".join(map(str, error_lines or "")).strip("\n").strip()
+                    combined = f"{output}\n{error}"
 
-                stdin, stdout, stderr = ssh.exec_command(execstr)
+                    if "server:" in combined.lower() or "server version:" in combined.lower():
+                        pass
+                    else:
+                        combined = combined.replace(
+                            "[Warning] Using a password on the command line interface can be insecure", ""
+                        )
+                        raise IntegrationValidationError(combined)
+
+                elif type == self.DatabaseType.POSTGRESQL:
+                    if all_databases:
+                        dbname = f"dbname='postgres'"
+                    else:
+                        dbname = f"dbname='{database_name}'"
+                    # execstr = (
+                    #     f'psql'
+                    #     f' "host={host}'
+                    #     f" user='{username}'"
+                    #     f" password='{password}'"
+                    #     f" port='{port}'"
+                    #     f" {dbname}"
+                    #     fr' sslmode=prefer" -lqt | cut -d \| -f 1'
+                    # )
+
+                    # PostgreSQL 14.5 on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 7.5.0-3ubuntu1~18.04) 7.5.0, 64-bit
+                    execstr = (
+                        f"psql"
+                        f' "host={host}'
+                        f" user='{username}'"
+                        f" password='{password}'"
+                        f" port={port}"
+                        f" {dbname}"
+                        f' sslmode=prefer" -c "SELECT version();"'
+                    )
+
+                    stdin, stdout, stderr = ssh.exec_command(execstr)
+                    """
+                    Check output. 
+                    """
+                    output_lines = stdout.readlines()
+
+                    """
+                    Check for any errors. 
+                    """
+                    error_lines = stderr.readlines()
+
+                    output = " ".join(map(str, output_lines or "")).strip("\n").strip()
+                    error = " ".join(map(str, error_lines or "")).strip("\n").strip()
+                    combined = f"{output}\n{error}"
+
+                    if "postgresql" in combined.lower() and "compiled by" in combined.lower():
+                        output_list = output.lower().strip().split(" ")
+
+                        if len(output_list) > 0:
+                            find_index = lambda l, e: l.index(e) if e in l else None
+
+                            if find_index(output_list, "postgresql"):
+
+                                db_server_version = output_list[find_index(output_list, "postgresql") + 1]
+
+                                # Now get pg_dump version
+                                execstr = f"pg_dump --version"
+
+                                stdin, stdout, stderr = ssh.exec_command(execstr)
+                                output_lines = stdout.readlines()
+                                output_lines = " ".join(map(str, output_lines or "")).strip("\n").strip()
+
+                                # Server/pg_dump versions do not always parse as a single
+                                # number (e.g. '9.6.24', or extra distro suffixes) -- skip
+                                # the comparison with a warning instead of crashing validation.
+                                try:
+                                    ssh_pg_dump_version = output_lines.strip().split(" ")[2]
+                                    db_server_version_num = float(db_server_version)
+                                    ssh_pg_dump_version_num = float(ssh_pg_dump_version)
+                                except (IndexError, ValueError):
+                                    capture_message(
+                                        f"Skipping pg_dump version check: could not parse"
+                                        f" server version '{db_server_version}' or"
+                                        f" pg_dump version output '{output_lines}'",
+                                        level="warning",
+                                    )
+                                else:
+                                    if db_server_version_num > ssh_pg_dump_version_num:
+                                        raise IntegrationValidationError(
+                                            f"The pg_dump version ({ssh_pg_dump_version})"
+                                            f" on SSH server must be equal or higher"
+                                            f" than your PostgreSQL version ({db_server_version})"
+                                        )
+                    else:
+                        raise IntegrationValidationError(combined)
+            finally:
                 """
-                Check output. 
+                Delete temp SSH Key
                 """
-                output_lines = stdout.readlines()
-
-                """
-                Check for any errors. 
-                """
-                error_lines = stderr.readlines()
-
-                output = " ".join(map(str, output_lines or "")).strip("\n").strip()
-                error = " ".join(map(str, error_lines or "")).strip("\n").strip()
-                combined = f"{output}\n{error}"
-
-                if "postgresql" in combined.lower() and "compiled by" in combined.lower():
-                    output_list = output.lower().strip().split(" ")
-
-                    if len(output_list) > 0:
-                        find_index = lambda l, e: l.index(e) if e in l else None
-
-                        if find_index(output_list, "postgresql"):
-
-                            db_server_version = output_list[find_index(output_list, "postgresql") + 1]
-
-                            # Now get pg_dump version
-                            execstr = f"pg_dump --version"
-
-                            stdin, stdout, stderr = ssh.exec_command(execstr)
-                            output_lines = stdout.readlines()
-                            output_lines = " ".join(map(str, output_lines or "")).strip("\n").strip()
-                            ssh_pg_dump_version = output_lines.strip().split(" ")[2]
-
-                            if float(db_server_version) > float(ssh_pg_dump_version):
-                                raise IntegrationValidationError(
-                                    f"The pg_dump version ({ssh_pg_dump_version})"
-                                    f" on SSH server must be equal or higher"
-                                    f" than your PostgreSQL version ({db_server_version})"
-                                )
-                else:
-                    raise IntegrationValidationError(combined)
-            """
-            Delete temp SSH Key
-            """
-            ssh.close()
-            if ssh_key_path:
-                os.remove(ssh_key_path)
+                ssh.close()
+                if ssh_key_path:
+                    os.remove(ssh_key_path)
         else:
             if type == self.DatabaseType.MYSQL:
                 try:
-                    db_con = mysql.connector.connect(
-                        host=host,
-                        port=int(port),
-                        user=username,
-                        passwd=password,
-                        db=database_name,
-                        connect_timeout=60,
-                        ssl_disabled=(not use_ssl),
-                    )
+                    db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
                     cursor = db_con.cursor()
                     cursor.execute("SHOW TABLES")
                     cursor.fetchall()
@@ -1793,15 +1876,7 @@ class CoreAuthDatabase(TimeStampedModel):
                     raise IntegrationValidationError(e.__str__())
             elif type == self.DatabaseType.MARIADB:
                 try:
-                    db_con = mysql.connector.connect(
-                        host=host,
-                        port=int(port),
-                        user=username,
-                        passwd=password,
-                        db=database_name,
-                        connect_timeout=60,
-                        ssl_disabled=(not use_ssl),
-                    )
+                    db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
                     cursor = db_con.cursor()
                     cursor.execute("SHOW TABLES")
                     cursor.fetchall()
@@ -1859,123 +1934,103 @@ class CoreAuthDatabase(TimeStampedModel):
 
         if use_public_key or use_private_key:
             ssh, ssh_key_path = self.get_ssh_client(data=data)
+            try:
+                option_ssl_mode = ""
+                if use_ssl:
+                    # The MariaDB client rejects the MySQL-style --ssl-mode flag.
+                    option_ssl_mode = "--ssl" if type == self.DatabaseType.MARIADB else "--ssl-mode=PREFERRED"
 
-            option_ssl_mode = ""
-            if use_ssl:
-                option_ssl_mode = "--ssl-mode=PREFERRED"
-
-            if type == self.DatabaseType.MYSQL:
-                execstr = (
-                    f"mysql"
-                    f" {option_ssl_mode}"
-                    f" --disable-column-names"
-                    f" -h'{host}'"
-                    f" -u'{username}'"
-                    f" -p'{password}'"
-                    f" --port='{port}'"
-                    f' -e"SELECT version();"'
-                )
-                stdin, stdout, stderr = ssh.exec_command(execstr)
-                output_lines = stdout.readlines()
-                db_type_version = None
-                if output_lines:
-                    result = " ".join(map(str, output_lines)).strip("\n").strip()
-                    version = int(result.split(".")[0])
-                    if version >= 10:
-                        db_type = "mariadb"
-                    else:
-                        db_type = "mysql"
-                    db_version = result.split(".")[0] + "_" + result.split(".")[1]
-                    db_type_version = f"{db_type}_{db_version}"
-                return db_type_version
-            elif type == self.DatabaseType.MARIADB:
-                execstr = (
-                    f"mysql"
-                    f" {option_ssl_mode}"
-                    f" --disable-column-names"
-                    f" -h'{host}'"
-                    f" -u'{username}'"
-                    f" -p'{password}'"
-                    f" --port='{port}'"
-                    f' -e"SELECT version();"'
-                )
-                stdin, stdout, stderr = ssh.exec_command(execstr)
-                output_lines = stdout.readlines()
-                db_type_version = None
-                if output_lines:
-                    result = " ".join(map(str, output_lines)).strip("\n").strip()
-                    version = int(result.split(".")[0])
-                    if version >= 10:
-                        db_type = "mariadb"
-                    else:
-                        db_type = "mysql"
-                    db_version = result.split(".")[0] + "_" + result.split(".")[1]
-                    db_type_version = f"{db_type}_{db_version}"
-                return db_type_version
-            elif type == self.DatabaseType.POSTGRESQL:
-                execstr = (
-                    f"psql"
-                    f' "host={host}'
-                    f" user='{username}'"
-                    f" password='{password}'"
-                    f" port={port}"
-                    f' sslmode=prefer" -c "SELECT version();"'
-                )
-                stdin, stdout, stderr = ssh.exec_command(execstr)
-                output_lines = stdout.readlines()
-                db_type_version = None
-                if output_lines:
-                    result = " ".join(map(str, output_lines)).strip("\n").strip()
-                    if "postgresql" in result.lower():
-                        db_type = slugify(result.replace(".", "_")).split("-")[1].replace("postgresql", "postgres")
-                        db_version = slugify(result.replace(".", "_")).split("-")[2]
+                if type == self.DatabaseType.MYSQL:
+                    execstr = (
+                        f"mysql"
+                        f" {option_ssl_mode}"
+                        f" --disable-column-names"
+                        f" -h'{host}'"
+                        f" -u'{username}'"
+                        f" -p'{password}'"
+                        f" --port='{port}'"
+                        f' -e"SELECT version();"'
+                    )
+                    stdin, stdout, stderr = ssh.exec_command(execstr)
+                    output_lines = stdout.readlines()
+                    db_type_version = None
+                    if output_lines:
+                        result = " ".join(map(str, output_lines)).strip("\n").strip()
+                        version = int(result.split(".")[0])
+                        if version >= 10:
+                            db_type = "mariadb"
+                        else:
+                            db_type = "mysql"
+                        db_version = result.split(".")[0] + "_" + result.split(".")[1]
                         db_type_version = f"{db_type}_{db_version}"
-                return db_type_version
-            """
-            Delete temp SSH Key
-            """
-            ssh.close()
-            if ssh_key_path:
-                os.remove(ssh_key_path)
+                    return db_type_version
+                elif type == self.DatabaseType.MARIADB:
+                    execstr = (
+                        f"mysql"
+                        f" {option_ssl_mode}"
+                        f" --disable-column-names"
+                        f" -h'{host}'"
+                        f" -u'{username}'"
+                        f" -p'{password}'"
+                        f" --port='{port}'"
+                        f' -e"SELECT version();"'
+                    )
+                    stdin, stdout, stderr = ssh.exec_command(execstr)
+                    output_lines = stdout.readlines()
+                    db_type_version = None
+                    if output_lines:
+                        result = " ".join(map(str, output_lines)).strip("\n").strip()
+                        version = int(result.split(".")[0])
+                        if version >= 10:
+                            db_type = "mariadb"
+                        else:
+                            db_type = "mysql"
+                        db_version = result.split(".")[0] + "_" + result.split(".")[1]
+                        db_type_version = f"{db_type}_{db_version}"
+                    return db_type_version
+                elif type == self.DatabaseType.POSTGRESQL:
+                    execstr = (
+                        f"psql"
+                        f' "host={host}'
+                        f" user='{username}'"
+                        f" password='{password}'"
+                        f" port={port}"
+                        f' sslmode=prefer" -c "SELECT version();"'
+                    )
+                    stdin, stdout, stderr = ssh.exec_command(execstr)
+                    output_lines = stdout.readlines()
+                    db_type_version = None
+                    if output_lines:
+                        result = " ".join(map(str, output_lines)).strip("\n").strip()
+                        if "postgresql" in result.lower():
+                            db_type = slugify(result.replace(".", "_")).split("-")[1].replace("postgresql", "postgres")
+                            db_version = slugify(result.replace(".", "_")).split("-")[2]
+                            db_type_version = f"{db_type}_{db_version}"
+                    return db_type_version
+            finally:
+                """
+                Delete temp SSH Key
+                """
+                ssh.close()
+                if ssh_key_path:
+                    os.remove(ssh_key_path)
         else:
             if type == self.DatabaseType.MYSQL:
-                db_con = mysql.connector.connect(
-                    host=host,
-                    port=int(port),
-                    user=username,
-                    passwd=password,
-                    db=database_name,
-                    connect_timeout=60,
-                    ssl_disabled=(not use_ssl),
-                )
+                db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
                 cursor = db_con.cursor()
                 cursor.execute("select version();")
                 result = cursor.fetchone()[0]
                 cursor.close()
                 db_con.close()
-                if "mariadb" in result.lower() or "mysql" in result.lower():
-                    return slugify(f"{result.split('-')[1]}_{result.split('-')[0]}".replace(".", "_")).replace("-", "_")
-                else:
-                    return None
+                return self._mysql_version_slug(result)
             elif type == self.DatabaseType.MARIADB:
-                db_con = mysql.connector.connect(
-                    host=host,
-                    port=int(port),
-                    user=username,
-                    passwd=password,
-                    db=database_name,
-                    connect_timeout=60,
-                    ssl_disabled=(not use_ssl),
-                )
+                db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
                 cursor = db_con.cursor()
                 cursor.execute("select version();")
                 result = cursor.fetchone()[0]
                 cursor.close()
                 db_con.close()
-                if "mariadb" in result.lower() or "mysql" in result.lower():
-                    return slugify(f"{result.split('-')[1]}_{result.split('-')[0]}".replace(".", "_")).replace("-", "_")
-                else:
-                    return None
+                return self._mysql_version_slug(result)
             elif type == self.DatabaseType.POSTGRESQL:
                 db_con = psycopg2.connect(
                     dbname=database_name,
@@ -2072,25 +2127,39 @@ class CoreAuthDatabase(TimeStampedModel):
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
-            with os.fdopen(fd, "w") as tmp:
-                tmp.write(private_key)
-
-            pkey = paramiko.RSAKey.from_private_key_file(ssh_key_path, password=ssh_password)
-            ssh.connect(
-                ssh_host,
-                auth_timeout=180,
-                banner_timeout=180,
-                timeout=180,
-                look_for_keys=False,
-                port=int(ssh_port),
-                username=ssh_username,
-                pkey=pkey,
-                disabled_algorithms=disabled_algorithms,
-            )
-
-            sftp = ssh.open_sftp()
-            sftp.listdir(".")
-            sftp.close()
+            try:
+                with os.fdopen(fd, "w") as tmp:
+                    tmp.write(private_key)
+                # The user's key can be Ed25519, RSA or ECDSA -- try each class with
+                # the passphrase (or None) until one parses it.
+                pkey = None
+                for key_cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+                    try:
+                        pkey = key_cls.from_private_key_file(ssh_key_path, password=ssh_password or None)
+                        break
+                    except Exception:
+                        continue
+                if not pkey:
+                    raise NodeConnectionErrorSSH()
+                ssh.connect(
+                    ssh_host,
+                    auth_timeout=180,
+                    banner_timeout=180,
+                    timeout=180,
+                    look_for_keys=False,
+                    port=int(ssh_port),
+                    username=ssh_username,
+                    pkey=pkey,
+                    disabled_algorithms=disabled_algorithms,
+                )
+                sftp = ssh.open_sftp()
+                sftp.listdir(".")
+                sftp.close()
+            except Exception:
+                # Never leave the decrypted private key on disk when connecting fails.
+                if os.path.exists(ssh_key_path):
+                    os.remove(ssh_key_path)
+                raise
         if not ssh:
             raise NodeConnectionErrorSSH()
         return ssh, ssh_key_path
@@ -2107,7 +2176,8 @@ class CoreAuthDatabase(TimeStampedModel):
         try:
             option_ssl_mode = ""
             if self.use_ssl:
-                option_ssl_mode = "--ssl-mode=PREFERRED"
+                # The MariaDB client rejects the MySQL-style --ssl-mode flag.
+                option_ssl_mode = "--ssl" if self.type == self.DatabaseType.MARIADB else "--ssl-mode=PREFERRED"
 
             if self.type == self.DatabaseType.MYSQL:
                 if self.use_public_key or self.use_private_key:
@@ -2157,14 +2227,13 @@ class CoreAuthDatabase(TimeStampedModel):
                         os.remove(ssh_key_path)
                     eligible_objects = sorted(eligible_objects, key=lambda k: k["name"])
                 else:
-                    db_con = mysql.connector.connect(
-                        host=self.host,
-                        port=int(self.port),
-                        user=bs_decrypt(self.username, encryption_key),
-                        passwd=bs_decrypt(self.password, encryption_key),
-                        db=self.database_name,
-                        connect_timeout=60,
-                        ssl_disabled=(not self.use_ssl),
+                    db_con = self._direct_mysql_connect(
+                        self.host,
+                        self.port,
+                        bs_decrypt(self.username, encryption_key),
+                        bs_decrypt(self.password, encryption_key),
+                        self.database_name,
+                        self.use_ssl,
                     )
                     cursor = db_con.cursor()
                     cursor.execute("SHOW TABLES")
@@ -2221,14 +2290,13 @@ class CoreAuthDatabase(TimeStampedModel):
 
                     eligible_objects = sorted(eligible_objects, key=lambda k: k["name"])
                 else:
-                    db_con = mysql.connector.connect(
-                        host=self.host,
-                        port=int(self.port),
-                        user=bs_decrypt(self.username, encryption_key),
-                        passwd=bs_decrypt(self.password, encryption_key),
-                        db=self.database_name,
-                        connect_timeout=60,
-                        ssl_disabled=(not self.use_ssl),
+                    db_con = self._direct_mysql_connect(
+                        self.host,
+                        self.port,
+                        bs_decrypt(self.username, encryption_key),
+                        bs_decrypt(self.password, encryption_key),
+                        self.database_name,
+                        self.use_ssl,
                     )
                     cursor = db_con.cursor()
                     cursor.execute("SHOW TABLES")

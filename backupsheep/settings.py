@@ -317,6 +317,12 @@ MAILGUN_API_URL = config["MAILGUN_API_URL"]
 # Options are postmark, mailgun and ses
 EMAIL_PROVIDER = config["EMAIL_PROVIDER"]
 
+# 'Local Storage' backup destination: root directory on this server under which the
+# `local` storage backend keeps backup zips. In the Compose stack this is the
+# `backup_storage` volume mounted at /backups; point BS_LOCAL_STORAGE_PATH at a bigger
+# disk/NFS mount (or bind-mount over /backups) to move where backups land.
+LOCAL_STORAGE_ROOT = config.get("BS_LOCAL_STORAGE_PATH", "/backups")
+
 # Storage to be used for application logs etc. Tested with AWS S3 and Cloudflare R2
 S3_ACCESS_KEY_ID = config["S3_ACCESS_KEY_ID"]
 S3_SECRET_ACCESS_KEY = config["S3_SECRET_ACCESS_KEY"]
@@ -480,6 +486,9 @@ CELERY_TASK_ROUTES = {
     "backup_website": {"queue": "files"},
     "backup_wordpress": {"queue": "files"},
     "backup_basecamp": {"queue": "files"},
+    # Restores push data back to the source server — same per-type isolation.
+    "restore_website_backup": {"queue": "files"},
+    "restore_database_backup": {"queue": "database"},
     # Local-disk upload + cleanup — handled by the scalable worker-storage pool.
     "storage_upload": {"queue": "storage"},
     "finalize_backup": {"queue": "storage"},

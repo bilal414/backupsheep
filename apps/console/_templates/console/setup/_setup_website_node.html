@@ -32,194 +32,93 @@
                         </div>
 
                         <div class="sm:col-span-2">
-                            <label for="include" class="block text-sm font-medium text-gray-700">
-                                Backup Type <span class="text-indigo-600">(Cannot modify Backup Type settings after node creation.)</span>
-                            </label>
-                            {% if not node.id %}
+                            {% if node.id %}
+                                <label class="block text-sm font-medium text-gray-700">
+                                    Backup Type <span class="text-indigo-600">(Cannot modify Backup Type settings after node creation.)</span>
+                                </label>
                                 <div class="relative mt-2">
-                                    <button @click="toggleBackupDropdown()"
-                                            type="button"
-                                            class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                                            aria-haspopup="listbox" aria-expanded="true"
-                                            aria-labelledby="listbox-label">
-                                    <span class="block truncate"
-                                          x-text="website.backup_type?.name||'--Select--'"></span>
-                                        <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
-                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
-                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                              <path fill-rule="evenodd"
-                                                    d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
-                                                    clip-rule="evenodd"></path>
-                                            </svg>
-                                          </span>
-                                    </button>
+                                    <span x-text="website.backup_type?.id===4 ? 'Full (Server-Side Tar)' : 'Full'"></span>
+                                </div>
+                                <p x-show="websiteErrors?.backup_type" class="mt-2 text-sm text-red-600"
+                                   id="region-error" x-text="websiteErrors?.backup_type"></p>
 
-                                    <ul
-                                            x-show="openBackupType"
-                                            @click.self="toggleBackupDropdown()"
-                                            x-transition:enter=""
-                                            x-transition:enter-start=""
-                                            x-transition:enter-end=""
-                                            x-transition:leave="transition ease-in duration-100"
-                                            x-transition:leave-start="opacity-100"
-                                            x-transition:leave-end="opacity-0"
-                                            class="absolute z-20 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
-                                            tabindex="-1"
-                                            role="listbox"
-                                            aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
-
-                                        <template x-for="(backup_type, index) in backupTypes">
-                                            <li
-                                                    @click="website.backup_type = backup_type;toggleBackupDropdown()"
-                                                    @mouseenter="backupTypeActiveIndex = backup_type.id"
-                                                    @mouseleave="backupTypeActiveIndex = null"
-                                                    :class="{ 'text-white bg-indigo-600': backupTypeActiveIndex === backup_type.id, 'text-gray-700': !(backupTypeActiveIndex === backup_type.id) }"
-                                                    class="cursor-default select-none relative py-2 pl-8 pr-4"
-                                                    id="listbox-option-0" role="option">
-                                                <span class="font-normal block truncate">
-                                                    <span x-text="backup_type.name"></span>
-                                                </span>
-
-                                                <span
-                                                        x-show="website.backup_type?.id === backup_type.id"
-                                                        :class="{ 'text-indigo-600': (website.backup_type?.id === backup_type.id) && (backupTypeActiveIndex !== backup_type.id), 'text-white': (!(website.backup_type?.id === backup_type.id) || (backupTypeActiveIndex === backup_type.id)) }"
-                                                        class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
-                                                  <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
-                                                       viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                                    <path fill-rule="evenodd"
-                                                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                                                          clip-rule="evenodd"></path>
-                                                  </svg>
-                                                </span>
-                                            </li>
-                                        </template>
+                                <div class="overflow-hidden rounded-md bg-white shadow-sm mt-4"
+                                     x-show="website?.backup_type?.id===4">
+                                    <ul role="list" class="divide-y divide-gray-200">
+                                        <li class="px-2 py-2">
+                                            1. Full backup is generated on <strong>your server</strong> using <strong>Tar</strong>
+                                        </li>
+                                        <li class="px-2 py-2">
+                                            2. The backup file is downloaded to BackupSheep server.
+                                        </li>
+                                        <li class="px-2 py-2">
+                                            3. BackupSheep server upload backup to your storage accounts
+                                        </li>
                                     </ul>
                                 </div>
-                            {% else %}
-                                <div class="relative mt-2">
-                                    <span x-text="website.backup_type?.name"></span>
+                                <div class="rounded-md bg-blue-50 p-4 mt-4" x-show="website?.backup_type?.id===4">
+                                    <div class="flex">
+                                        <div class="shrink-0">
+                                            <svg class="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor"
+                                                 aria-hidden="true">
+                                                <path fill-rule="evenodd"
+                                                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a.75.75 0 000 1.5h.253a.25.25 0 01.244.304l-.459 2.066A1.75 1.75 0 0010.747 15H11a.75.75 0 000-1.5h-.253a.25.25 0 01-.244-.304l.459-2.066A1.75 1.75 0 009.253 9H9z"
+                                                      clip-rule="evenodd"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="ml-3">
+                                            <p class="text-sm text-blue-700">
+                                                This node uses the legacy <strong>Full (Server-Side Tar)</strong>
+                                                backup type. Your server must have enough disk space to create a
+                                                temporary backup and the ability to create tar archives.
+                                            </p>
+                                        </div>
+                                    </div>
                                 </div>
                             {% endif %}
-                            <p x-show="websiteErrors?.backup_type" class="mt-2 text-sm text-red-600"
-                               id="region-error" x-text="websiteErrors?.backup_type"></p>
 
-
-                            <div class="overflow-hidden rounded-md bg-white shadow-sm  mt-4"  x-show="website?.backup_type?.id && website?.backup_type?.id===1">
-                                <ul role="list" class="divide-y divide-gray-200">
-                                    <li class="px-2 py-2">
-                                        1. Files are downloaded from your server to BackupSheep server
-                                    </li>
-                                    <li class="px-2 py-2">
-                                        2. Files are compressed (zip) On BackupSheep server
-                                    </li>
-                                    <li class="px-2 py-2">
-                                        3. BackupSheep server upload backup to your storage accounts
-                                    </li>
-                                </ul>
-                            </div>
-
-                            <div class="overflow-hidden rounded-md bg-white shadow-sm  mt-4"  x-show="website?.backup_type?.id && website?.backup_type?.id===4">
-                                <ul role="list" class="divide-y divide-gray-200">
-                                    <li class="px-2 py-2">
-                                        1. Full backup is generated on <strong>your server</strong> using <strong>Tar</strong>
-                                    </li>
-                                    <li class="px-2 py-2">
-                                        2. The backup file is downloaded to BackupSheep server.
-                                    </li>
-                                    <li class="px-2 py-2">
-                                        3. BackupSheep server upload backup to your storage accounts
-                                    </li>
-                                </ul>
-                            </div>
-                            <div class="overflow-hidden rounded-md bg-white shadow-sm  mt-4"  x-show="website?.backup_type?.id && website?.backup_type?.id===2">
-                                <ul role="list" class="divide-y divide-gray-200">
-                                    <li class="px-2 py-2">
-                                        1. Incremental backup is generated on <strong>your server</strong> using <strong>Tar</strong>
-                                    </li>
-                                    <li class="px-2 py-2">
-                                        2. The backup file is downloaded to BackupSheep server.
-                                    </li>
-                                    <li class="px-2 py-2">
-                                        3. BackupSheep server upload backup to your storage accounts
-                                    </li>
-                                </ul>
-                            </div>
-                            <div class="overflow-hidden rounded-md bg-white shadow-sm  mt-4"  x-show="website?.backup_type?.id && website?.backup_type?.id===3">
-                                <ul role="list" class="divide-y divide-gray-200">
-                                    <li class="px-2 py-2">
-                                        1. Differential backup is generated on <strong>your server</strong> using <strong>Tar</strong>
-                                    </li>
-                                    <li class="px-2 py-2">
-                                        2. The backup file is downloaded to BackupSheep server.
-                                    </li>
-                                    <li class="px-2 py-2">
-                                        3. BackupSheep server upload backup to your storage accounts
-                                    </li>
-                                </ul>
-                            </div>
-
-
-                            <div class="rounded-md bg-blue-50 p-4 mt-4" x-show="website?.backup_type?.id">
-                                <div class="flex">
-                                    <div class="shrink-0">
-                                        <svg class="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor"
-                                             aria-hidden="true">
-                                            <path fill-rule="evenodd"
-                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a.75.75 0 000 1.5h.253a.25.25 0 01.244.304l-.459 2.066A1.75 1.75 0 0010.747 15H11a.75.75 0 000-1.5h-.253a.25.25 0 01-.244-.304l.459-2.066A1.75 1.75 0 009.253 9H9z"
-                                                  clip-rule="evenodd"></path>
-                                        </svg>
-                                    </div>
-                                    <div class="ml-3">
-                                        {% if connection.incremental_backup_available %}
-                                            <p class="text-blue-700" x-show="website?.backup_type?.id===1">
-                                                Only use <strong>Full v1</strong> when you don't have enough
-                                                temporary space on your server for backup.<br/>Your backup speed will
-                                                depend on size of your backup and number of files because we download
-                                                all files to BackupSheep server first and then create archive.
-
-                                            </p>
-                                            <p class="text-blue-700" x-show="website?.backup_type?.id===4">
-                                                For <strong>Full v2</strong> backups your server must have enough disk
-                                                space to create temporary backup and ability to create tar archive.
-                                            </p>
-                                            <p class="text-blue-700" x-show="website?.backup_type?.id===2">
-                                                For incremental backups your server must have enough disk space and
-                                                ability to create tar archive.
-                                            </p>
-                                            <p class="text-blue-700" x-show="website?.backup_type?.id===3">
-                                                For differential backups your server must have enough disk space and
-                                                ability to create tar archive.
-                                            </p>
-                                        {% else %}
-                                            <p class="text-sm text-blue-700" x-show="website?.backup_type?.id===1">
-                                                <strong>Incremental</strong> and <strong>Differential</strong> backup
-                                                type are available when you setup integration <strong>using SSH(use
-                                                public or private key)</strong> and your
-                                                server support <strong>tar</strong>.
-                                            </p>
-
-                                        {% endif %}
-
-                                    </div>
+                            <div class="{% if node.id %}mt-8{% endif %}">
+                                <label class="block text-sm font-medium text-gray-700">
+                                    Backup Mode
+                                </label>
+                                <div class="mt-2 space-y-4">
+                                    <label class="flex items-start">
+                                        <input x-model="website.incremental" :value="true" type="radio"
+                                               name="backup_mode"
+                                               class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                        <span class="ml-3">
+                                            <span class="block text-sm font-medium text-gray-700">Incremental (Recommended)</span>
+                                            <span class="block text-sm text-gray-700">After the first backup, only new and changed files are downloaded. Each backup is still a complete snapshot.</span>
+                                        </span>
+                                    </label>
+                                    <label class="flex items-start">
+                                        <input x-model="website.incremental" :value="false" type="radio"
+                                               name="backup_mode"
+                                               class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                        <span class="ml-3">
+                                            <span class="block text-sm font-medium text-gray-700">Full</span>
+                                            <span class="block text-sm text-gray-700">Downloads all files on every backup.</span>
+                                        </span>
+                                    </label>
                                 </div>
+                                <p x-show="websiteErrors?.incremental" class="mt-2 text-sm text-red-600"
+                                   id="incremental-error" x-text="websiteErrors?.incremental"></p>
                             </div>
                         </div>
-                        {% if connection.incremental_backup_available %}
-                            <div class="sm:col-span-2"  x-show="website?.backup_type && website?.backup_type?.id!==1">
-                                <label for="custom_directory" class="block text-sm font-medium text-gray-700">
-                                    Temporary Backup Directory<br/>
-                                    <span class="text-indigo-600">(It must be outside any paths you wish to include in the backup)</span>
-                                </label>
-                                <div class="mt-1">
-                                    <input x-model="website.tar_temp_backup_dir" type="text" name="custom_directory"
-                                           id="custom_directory" placeholder="example: /var/log/backupsheep"
-                                           autocomplete="custom_directory"
-                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                    <p x-show="websiteErrors?.tar_temp_backup_dir" class="mt-2 text-sm text-red-600"
-                                       id="name-error" x-text="websiteErrors?.tar_temp_backup_dir"></p>
-                                </div>
+                        <div class="sm:col-span-2" x-show="website?.backup_type?.id===4">
+                            <label for="custom_directory" class="block text-sm font-medium text-gray-700">
+                                Temporary Backup Directory<br/>
+                                <span class="text-indigo-600">(It must be outside any paths you wish to include in the backup)</span>
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="website.tar_temp_backup_dir" type="text" name="custom_directory"
+                                       id="custom_directory" placeholder="example: /var/log/backupsheep"
+                                       autocomplete="custom_directory"
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p x-show="websiteErrors?.tar_temp_backup_dir" class="mt-2 text-sm text-red-600"
+                                   id="name-error" x-text="websiteErrors?.tar_temp_backup_dir"></p>
                             </div>
-                        {% endif %}
+                        </div>
                         {#                        <div class="sm:col-span-2">#}
                         {#                            <div class="rounded-md bg-blue-50 p-4 mb-3" x-show="website.all_paths">#}
                         {#                                <div class="flex">#}
@@ -820,8 +719,7 @@
                 </div>
             </div>
 
-             {% if connection.incremental_backup_available %}
-                <div x-show="website?.backup_type && website?.backup_type?.id!==1" class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6">
+            <div x-show="website?.backup_type?.id===4" class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6">
                 <div class="px-2 py-3 sm:px-2  bg-indigo-600">
                     <h3 class="text-md leading-6  text-white">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
@@ -926,7 +824,6 @@
                     </dl>
                 </div>
             </div>
-            {% endif %}
 
             <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6">
                 <div class="px-2 py-3 sm:px-2  bg-indigo-600">
@@ -1218,6 +1115,8 @@
             websiteParallels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             website: {
                 parallel: {{node.website.parallel|default:3}},
+                backup_type: {id: 1},
+                incremental: true,
                 paths: [],
                 excludes: [],
                 excludes_regex: [],
@@ -1235,21 +1134,6 @@
             connection_id: "{{connection.id}}",
             location_id: "{{connection.location.id}}",
             object_type: "{{object_code}}",
-            backupTypeActiveIndex: false,
-            openBackupType: false,
-            {% if connection.incremental_backup_available %}
-                backupTypes: [
-                    {id: 1, name: "Full v1"},
-                    {id: 4, name: "Full v2"},
-                    {id: 2, name: "Incremental"},
-                    {id: 3, name: "Differential"},
-
-                ],
-            {% else %}
-                backupTypes: [
-                    {id: 1, name: "Full"},
-                ],
-            {% endif %}
             init() {
                 this.loading = true;
                 //this.parallelActiveIndex = this.websiteParallels.filter(obj => {
@@ -1356,10 +1240,6 @@
             removeIncludeGlob(object) {
                 this.website.includes_glob = this.website.includes_glob.filter(el => el !== object);
             },
-            toggleBackupDropdown() {
-                this.openBackupType = !this.openBackupType;
-                this.backupTypeActiveIndex = null;
-            },
 
             async getObjects(path) {
                 this.loading = true;
@@ -1449,17 +1329,13 @@
                     if (this.website.paths === null) {
                         this.website.paths = [];
                     }
-                    if (this.website.backup_type) {
-                        this.website.backup_type = this.backupTypes.find(({id}) => id === this.website.backup_type);
-                    } else {
-                        this.website.backup_type = this.backupTypes.find(({id}) => id === 1);
-                    }
+                    this.website.backup_type = {id: this.website.backup_type || 1};
                 }).catch((error) => {
                     this.error = error;
                 });
             },
             async saveWebsite() {
-                if (this.website?.backup_type?.id!==1 && this.website?.tar_temp_backup_dir===null){
+                if (this.website.id && this.website?.backup_type?.id===4 && !this.website?.tar_temp_backup_dir){
                      Alpine.store('notifications').items.push({
                         show: true,
                         error: true,
@@ -1483,7 +1359,8 @@
                             name: this.website.name,
                         },
                         location: this.location_id,
-                        backup_type: this.website.backup_type?.id,
+                        backup_type: this.website.id ? this.website.backup_type?.id : 1,
+                        incremental: this.website.incremental,
                         all_paths: this.website.all_paths,
                         paths: this.website.paths,
                         excludes: this.website.excludes,

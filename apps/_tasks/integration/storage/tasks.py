@@ -50,6 +50,7 @@ from apps._tasks.integration.storage.google_drive import (
     storage_google_drive_delete,
 )
 from apps._tasks.integration.storage.linode import storage_linode
+from apps._tasks.integration.storage.local import storage_local
 from apps._tasks.integration.storage.pcloud import storage_pcloud
 from apps._tasks.integration.storage.rackcorp import storage_rackcorp
 from apps._tasks.integration.storage.scaleway import storage_scaleway
@@ -165,6 +166,8 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
             storage_rackcorp(stored_backup)
         elif stored_backup.storage.type.code == "ibm":
             storage_ibm(stored_backup)
+        elif stored_backup.storage.type.code == "local":
+            storage_local(stored_backup)
         else:
             stored_backup.status = stored_backup.Status.UPLOAD_FAILED
             stored_backup.save()

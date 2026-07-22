@@ -2192,9 +2192,70 @@ class CoreStorage(TimeStampedModel):
             elif hasattr(self, 'storage_ibm'):
                 storage = getattr(self, 'storage_ibm')
                 return storage.validate()
+            elif hasattr(self, 'storage_local'):
+                storage = getattr(self, 'storage_local')
+                return storage.validate()
         except Exception as e:
             capture_exception(e)
             if show_error:
                 raise ValueError(e.__str__())
             else:
                 return False
+
+
+class CoreStorageLocal(TimeStampedModel):
+    """'Local Storage' backend: backups are kept as plain zip files on a disk path of
+    this BackupSheep server. `path` is an optional subdirectory under
+    settings.LOCAL_STORAGE_ROOT (''/None = the root itself)."""
+
+    storage = models.OneToOneField(
+        "CoreStorage", related_name="storage_local", on_delete=models.CASCADE
+    )
+    path = models.CharField(max_length=1024, null=True, blank=True)
+    no_delete = models.BooleanField(null=True)
+
+    class Meta:
+        db_table = "core_storage_local"
+
+    @staticmethod
+    def storage_root():
+        from django.conf import settings
+
+        return os.path.realpath(settings.LOCAL_STORAGE_ROOT)
+
+    def resolve_path(self, subpath=None):
+        """Resolve `subpath` (defaults to this storage's `path`) to an absolute
+        directory inside the local storage root. Rejects absolute paths and any
+        '..' traversal escaping the root."""
+        root = self.storage_root()
+        subpath = (subpath if subpath is not None else self.path) or ""
+        if os.path.isabs(subpath):
+            raise ValueError("Path must be relative to the local storage root.")
+        target = os.path.realpath(os.path.join(root, subpath))
+        if target != root and not target.startswith(root + os.sep):
+            raise ValueError("Path must stay inside the local storage root.")
+        return target
+
+    def validate(self, data=None, raise_exp=None):
+        import time
+
+        if data is not None:
+            path = data.get("path")
+        else:
+            path = self.path
+
+        target_dir = self.resolve_path(path)
+        os.makedirs(target_dir, exist_ok=True)
+
+        filename = f"backupsheep_test_{int(time.time())}.txt"
+        test_file = os.path.join(target_dir, filename)
+
+        with open(test_file, "w") as fh:
+            fh.write(filename)
+
+        with open(test_file, "r") as fh:
+            if fh.read() != filename:
+                return False
+
+        os.remove(test_file)
+        return True

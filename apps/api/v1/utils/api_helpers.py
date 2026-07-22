@@ -9,6 +9,7 @@ from string import ascii_lowercase, digits
 from ....models import *
 import socket
 import os
+import shutil
 from stat import S_ISDIR, ST_SIZE, S_ISLNK, S_ISREG
 import errno
 import re
@@ -306,15 +307,14 @@ class FtpTlsSession(ftplib.FTP_TLS):
 
 def zipdir(path, ziph):
     # ziph is zipfile handle
+    # Per-file errors are intentionally NOT swallowed: a dump file that cannot
+    # be zipped must fail the backup instead of producing a silent empty zip.
     for root, dirs, files in os.walk(path, onerror=None, followlinks=False):
         for file in files:
-            try:
-                ziph.write(
-                    os.path.join(root, file),
-                    os.path.relpath(os.path.join(root, file), os.path.join(path, ".")),
-                )
-            except:
-                pass
+            ziph.write(
+                os.path.join(root, file),
+                os.path.relpath(os.path.join(root, file), os.path.join(path, ".")),
+            )
 
 
 def isdir(path, sftp):
@@ -418,6 +418,23 @@ def get_all_files_in_directory(directory):
                 # for dir in dirs:
                 #     all_files.append(os.path.join(root, dir))
     return all_files
+
+
+def ensure_disk_space(needed_bytes, *, path="_storage", what="backup"):
+    """Preflight free-space check before a backup/restore materializes large files.
+
+    Raises RuntimeError naming the need/have amounts (GB, 2dp) when the filesystem
+    holding ``path`` has less than ``needed_bytes`` free, so a run on a very large
+    site/database fails fast with a clear message instead of filling the shared
+    _storage volume mid-transfer (and confusing every other concurrent backup).
+    """
+    free = shutil.disk_usage(path).free
+    if free < needed_bytes:
+        raise RuntimeError(
+            f"Not enough free disk space for {what}: "
+            f"need ~{needed_bytes / (1024 ** 3):.2f} GB, "
+            f"have ~{free / (1024 ** 3):.2f} GB free"
+        )
 
 
 def get_directory_size(start_path="."):
