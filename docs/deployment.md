@@ -60,10 +60,23 @@ add `backup.example.com` to `DJANGO_ALLOWED_HOSTS`, and `docker compose up -d`.
 
 ## Resource & disk planning
 
+Named volumes in the Compose stack:
+
+| Volume | Mounted at | Holds |
+|--------|-----------|-------|
+| `pgdata` | `/var/lib/postgresql` (db) | The PostgreSQL database |
+| `backup_workdir` | `/code/_storage` (workers) | In-progress dumps, run logs, website incremental cache |
+| `backup_storage` | `/backups` (app + workers) | Backups stored via the **Local Storage** destination |
+
 Database and website backups are dumped to the shared `backup_workdir` volume before
 upload. Size the host disk for your largest backup's working copy. The
 `worker-database` / `worker-files` workers are CPU/disk heavy; isolate or scale them per
 [scaling.md](scaling.md).
+
+If you use the Local Storage destination, size `backup_storage` for your full backup
+history (every retained backup of every schedule that targets it), and consider
+bind-mounting it to dedicated storage — see
+[Configuration → Local Storage](configuration.md#local-storage-backup-destination-optional).
 
 ## Back up BackupSheep itself
 

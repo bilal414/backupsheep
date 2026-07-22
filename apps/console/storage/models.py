@@ -272,7 +272,7 @@ class CoreStorageOneDrive(TimeStampedModel):
         import requests
         from django.conf import settings
 
-        url = f"{settings.MS_GRAPH_ENDPOINT}/drives/{self.user_id}"
+        url = f"{settings.MS_GRAPH_ENDPOINT}/drives/{self.drive_id}"
 
         drive_request = requests.request("GET", url, headers=self.get_client(data))
 
@@ -806,6 +806,7 @@ class CoreStorageBackBlazeB2(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -826,6 +827,10 @@ class CoreStorageBackBlazeB2(TimeStampedModel):
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -871,6 +876,7 @@ class CoreStorageLinode(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -891,6 +897,10 @@ class CoreStorageLinode(TimeStampedModel):
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -1001,6 +1011,7 @@ class CoreStorageUpCloud(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -1020,7 +1031,11 @@ class CoreStorageUpCloud(TimeStampedModel):
 
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
-            endpoint_url=f"https://{endpoint}", region_name=endpoint.split('.')[1]
+            endpoint_url=f"https://{endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -1488,9 +1503,12 @@ class CoreStorageAliBaba(TimeStampedModel):
 
         endpoint = region.endpoint
 
-        auth = oss2.Auth(access_key, secret_key)
+        auth = oss2.AuthV4(access_key, secret_key)
 
-        bucket = oss2.Bucket(auth, f"https://{endpoint}", bucket_name)
+        # Signature V4 requires the region ID, e.g. "us-east-1" from endpoint "oss-us-east-1.aliyuncs.com".
+        region_id = endpoint.split(".")[0].removeprefix("oss-").removesuffix("-internal")
+
+        bucket = oss2.Bucket(auth, f"https://{endpoint}", bucket_name, region=region_id)
 
         if prefix:
             if (prefix != "") and (prefix.endswith("/") is False):
@@ -1830,9 +1848,16 @@ class CoreStorageIonos(TimeStampedModel):
 
         endpoint = region.endpoint
 
+        # boto3 >= 1.36 sends checksums IONOS rejects (InvalidTrailer) unless
+        # checksum calculation/validation is set to "when_required".
+        # https://docs.ionos.com/cloud/managed-services/s3-object-storage/s3-tools/boto3-python-sdk
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name=region.code,
-            endpoint_url=f"https://{endpoint}", config=Config(signature_version='s3v4')
+            endpoint_url=f"https://{endpoint}", config=Config(
+                signature_version='s3v4',
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            )
         )
 
         if prefix:
@@ -2167,9 +2192,70 @@ class CoreStorage(TimeStampedModel):
             elif hasattr(self, 'storage_ibm'):
                 storage = getattr(self, 'storage_ibm')
                 return storage.validate()
+            elif hasattr(self, 'storage_local'):
+                storage = getattr(self, 'storage_local')
+                return storage.validate()
         except Exception as e:
             capture_exception(e)
             if show_error:
                 raise ValueError(e.__str__())
             else:
                 return False
+
+
+class CoreStorageLocal(TimeStampedModel):
+    """'Local Storage' backend: backups are kept as plain zip files on a disk path of
+    this BackupSheep server. `path` is an optional subdirectory under
+    settings.LOCAL_STORAGE_ROOT (''/None = the root itself)."""
+
+    storage = models.OneToOneField(
+        "CoreStorage", related_name="storage_local", on_delete=models.CASCADE
+    )
+    path = models.CharField(max_length=1024, null=True, blank=True)
+    no_delete = models.BooleanField(null=True)
+
+    class Meta:
+        db_table = "core_storage_local"
+
+    @staticmethod
+    def storage_root():
+        from django.conf import settings
+
+        return os.path.realpath(settings.LOCAL_STORAGE_ROOT)
+
+    def resolve_path(self, subpath=None):
+        """Resolve `subpath` (defaults to this storage's `path`) to an absolute
+        directory inside the local storage root. Rejects absolute paths and any
+        '..' traversal escaping the root."""
+        root = self.storage_root()
+        subpath = (subpath if subpath is not None else self.path) or ""
+        if os.path.isabs(subpath):
+            raise ValueError("Path must be relative to the local storage root.")
+        target = os.path.realpath(os.path.join(root, subpath))
+        if target != root and not target.startswith(root + os.sep):
+            raise ValueError("Path must stay inside the local storage root.")
+        return target
+
+    def validate(self, data=None, raise_exp=None):
+        import time
+
+        if data is not None:
+            path = data.get("path")
+        else:
+            path = self.path
+
+        target_dir = self.resolve_path(path)
+        os.makedirs(target_dir, exist_ok=True)
+
+        filename = f"backupsheep_test_{int(time.time())}.txt"
+        test_file = os.path.join(target_dir, filename)
+
+        with open(test_file, "w") as fh:
+            fh.write(filename)
+
+        with open(test_file, "r") as fh:
+            if fh.read() != filename:
+                return False
+
+        os.remove(test_file)
+        return True

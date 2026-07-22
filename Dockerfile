@@ -7,7 +7,8 @@
 #
 # System packages below provide the backup tooling the worker shells out to:
 #   - lftp .................. FTP/FTPS storage transfers
-#   - mariadb-client ........ mariadb-dump / mysqldump for MySQL/MariaDB backups
+#   - mariadb-client ........ mariadb-dump / mysqldump for MariaDB backups
+#   - mysql (8.4) ........... Oracle MySQL client in /opt/mysql/bin for MySQL backups
 #   - postgresql-client-14..18  version-matched pg_dump (CoreAuthDatabase.bin_path)
 #   - gunicorn .............. WSGI server for the web service
 FROM python:3.14-bookworm
@@ -35,13 +36,33 @@ RUN apt-get update \
 # PostgreSQL client tools (pg_dump / psql / pg_restore) for versions 14-18 from the
 # PGDG apt repo, installed side-by-side under /usr/lib/postgresql/<N>/bin. Database
 # backups select the exact pg_dump for the target server's version (CoreAuthDatabase.bin_path).
-# MariaDB clients (mariadb-dump / mysqldump) come from the mariadb-server install above;
-# drop a real MySQL client into /opt/mysql/bin to use it for MySQL targets.
+# MariaDB clients (mariadb-dump / mysqldump) come from the mariadb-server install above.
 RUN install -d /usr/share/postgresql-common/pgdg \
     && curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
     && apt-get -y install postgresql-client-14 postgresql-client-15 postgresql-client-16 postgresql-client-17 postgresql-client-18
+
+# Oracle MySQL 8.4 LTS client tools (mysql / mysqldump) for MySQL targets, shipped in
+# /opt/mysql/bin (CoreAuthDatabase.bin_path prefers them there; the MariaDB client stays
+# untouched in /usr/bin for MariaDB targets). The MySQL apt repo (mysql-apt-config) only
+# ships x86 packages, so the official glibc2.28 "Linux - Generic" tarball is used instead
+# -- it covers both x86_64 and aarch64. Only the two binaries are kept; they run against
+# the stock bookworm system libraries, so /opt/mysql/bin is self-contained.
+RUN set -eux; \
+    case "$(uname -m)" in \
+        x86_64) mysql_arch="x86_64" ;; \
+        aarch64) mysql_arch="aarch64" ;; \
+        *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    pkg="mysql-8.4.10-linux-glibc2.28-${mysql_arch}"; \
+    curl -fsSL -o /tmp/mysql-client.tar.xz "https://dev.mysql.com/get/Downloads/MySQL-8.4/${pkg}.tar.xz"; \
+    mkdir -p /tmp/mysql-client; \
+    tar -xJf /tmp/mysql-client.tar.xz -C /tmp/mysql-client "${pkg}/bin/mysql" "${pkg}/bin/mysqldump"; \
+    install -d /opt/mysql/bin; \
+    mv "/tmp/mysql-client/${pkg}/bin/mysql" "/tmp/mysql-client/${pkg}/bin/mysqldump" /opt/mysql/bin/; \
+    rm -rf /tmp/mysql-client /tmp/mysql-client.tar.xz; \
+    /opt/mysql/bin/mysqldump --version
 
 RUN wget https://github.com/robbyrussell/oh-my-zsh/raw/master/tools/install.sh -O - | zsh || true
 

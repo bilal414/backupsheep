@@ -37,6 +37,7 @@ urlpatterns = [
                 path("", include("apps.api.v1.storage.tencent.urls")),
                 path("", include("apps.api.v1.storage.rackcorp.urls")),
                 path("", include("apps.api.v1.storage.ibm.urls")),
+                path("", include("apps.api.v1.storage.local.urls")),
             ]
         ),
     ),

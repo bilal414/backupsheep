@@ -223,6 +223,14 @@
   ],
   "storage_types": [
     {
+      "code": "local",
+      "name": "Local Storage",
+      "is_enabled": true,
+      "position": 0,
+      "description": "Store backups on a local disk path on this BackupSheep server",
+      "image": ""
+    },
+    {
       "code": "aws_s3",
       "name": "Amazon S3",
       "is_enabled": true,

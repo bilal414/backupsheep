@@ -5,6 +5,7 @@ from apps.console.account.models import CoreAccount
 from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.api.v1.connection.serializers import CoreConnectionSerializer
 from apps.api.v1.utils.api_helpers import CurrentMemberDefault, CurrentAccountDefault
+from apps.console.backup.models import CoreCloudRestore
 from apps.console.connection.models import CoreConnection
 from apps.console.node.models import (
     CoreNode,
@@ -229,3 +230,33 @@ class CoreVolumeNodeWriteSerializer(serializers.ModelSerializer):
                 "You don't have access to this node."
             )
         return data
+
+
+class CoreCloudRestoreSerializer(serializers.ModelSerializer):
+    status_display = serializers.SerializerMethodField(read_only=True)
+    created_display = serializers.SerializerMethodField()
+    modified_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CoreCloudRestore
+        fields = "__all__"
+        read_only_fields = ("node", "resource_id", "status", "error", "celery_task_id")
+        datatables_always_serialize = ("id",)
+
+    @staticmethod
+    def get_status_display(obj):
+        return obj.get_status_display()
+
+    @staticmethod
+    def get_created_display(obj):
+        timezone = str(get_current_timezone())
+        timezone = pytz.timezone(timezone)
+        date_time = obj.created.astimezone(timezone).strftime("%b %d %Y - %I:%M%p")
+        return date_time
+
+    @staticmethod
+    def get_modified_display(obj):
+        timezone = str(get_current_timezone())
+        timezone = pytz.timezone(timezone)
+        date_time = obj.modified.astimezone(timezone).strftime("%b %d %Y - %I:%M%p")
+        return date_time

@@ -15,9 +15,12 @@ def storage_alibaba(stored_backup):
 
         file_name = f"{backup.node.name_slug}/{stored_backup.backup.uuid}.zip"
 
-        auth = oss2.Auth(bs_decrypt(storage.storage_alibaba.access_key, encryption_key), bs_decrypt(storage.storage_alibaba.secret_key, encryption_key))
+        auth = oss2.AuthV4(bs_decrypt(storage.storage_alibaba.access_key, encryption_key), bs_decrypt(storage.storage_alibaba.secret_key, encryption_key))
 
-        bucket = oss2.Bucket(auth, f"https://{storage.storage_alibaba.endpoint}", storage.storage_alibaba.bucket_name)
+        # Signature V4 requires the region ID, e.g. "us-east-1" from endpoint "oss-us-east-1.aliyuncs.com".
+        region = storage.storage_alibaba.endpoint.split(".")[0].removeprefix("oss-").removesuffix("-internal")
+
+        bucket = oss2.Bucket(auth, f"https://{storage.storage_alibaba.endpoint}", storage.storage_alibaba.bucket_name, region=region)
 
         if prefix:
             if (prefix != "") and (prefix.endswith("/") is False):

@@ -1375,6 +1375,24 @@ class StorageAWSS3UploadFailedError(APIException):
         return f"{self.message}  Backup UUID:{self.backup_uuid}. " f"This was attempt no:{self.attempt_no}."
 
 
+class StorageLocalUploadFailedError(APIException):
+    def __init__(
+        self,
+        backup_uuid=None,
+        attempt_no=None,
+        backup_type=None,
+        message="Unable to upload backup file.",
+    ):
+        self.backup_uuid = backup_uuid
+        self.attempt_no = attempt_no
+        self.backup_type = backup_type
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}  Backup UUID:{self.backup_uuid}. " f"This was attempt no:{self.attempt_no}."
+
+
 class StorageWasabiUploadFailedError(APIException):
     def __init__(
         self,
@@ -1556,6 +1574,124 @@ class SnapshotCreateError(APIException):
     def __init__(
         self,
         message="",
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class RestoreMissingParams(APIException):
+    status_code = 503
+    default_detail = "Looks like backup_id or name is missing from your request. Please try again."
+    default_code = "restore_missing_params"
+
+    def __init__(
+        self,
+        message="Looks like backup_id or name is missing from your request. Please try again.",
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class RestoreBackupNotFound(APIException):
+    status_code = 404
+    default_detail = "The backup you want to restore was not found or is not complete yet."
+    default_code = "restore_backup_not_found"
+
+    def __init__(
+        self,
+        message="The backup you want to restore was not found or is not complete yet.",
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class RestoreUnsupportedNode(APIException):
+    status_code = 503
+    default_detail = "Only cloud server and volume backups can be restored."
+    default_code = "restore_unsupported_node"
+
+    def __init__(
+        self,
+        message="Only cloud server and volume backups can be restored.",
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class RestoreCreateError(APIException):
+    status_code = 503
+    default_detail = "Unable to start restore. Please contact support."
+    default_code = "restore_create_failed"
+
+    def __init__(
+        self,
+        message="",
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class RestoreConfirmationRequired(APIException):
+    status_code = 400
+    default_detail = 'Pass "confirm": true to start a restore. Data on the target server will be overwritten.'
+    default_code = "restore_confirmation_required"
+
+    def __init__(
+        self,
+        message='Pass "confirm": true to start a restore. Data on the target server will be overwritten.',
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class RestoreStoragePointRequired(APIException):
+    status_code = 400
+    default_detail = (
+        "storage_point_id is required: the backup has no restorable copy or has "
+        "copies on more than one storage point."
+    )
+    default_code = "restore_storage_point_required"
+
+    def __init__(
+        self,
+        message=(
+            "storage_point_id is required: the backup has no restorable copy or has "
+            "copies on more than one storage point."
+        ),
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class RestoreStoragePointNotFound(APIException):
+    status_code = 404
+    default_detail = "The storage point was not found or has no restorable copy of this backup."
+    default_code = "restore_storage_point_not_found"
+
+    def __init__(
+        self,
+        message="The storage point was not found or has no restorable copy of this backup.",
     ):
         self.message = message
         super().__init__(self.message)

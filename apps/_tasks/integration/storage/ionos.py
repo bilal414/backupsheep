@@ -1,4 +1,5 @@
 import boto3
+from botocore.config import Config
 from apps._tasks.exceptions import (
     StorageScalewayUploadFailedError, StorageIonosUploadFailedError,
 )
@@ -20,10 +21,18 @@ def storage_ionos(stored_backup):
             aws_access_key_id=bs_decrypt(storage.storage_ionos.access_key, encryption_key),
             aws_secret_access_key=bs_decrypt(storage.storage_ionos.secret_key, encryption_key),
         )
+        # boto3 >= 1.36 sends checksums IONOS rejects (InvalidTrailer) unless
+        # checksum calculation/validation is set to "when_required".
+        # https://docs.ionos.com/cloud/managed-services/s3-object-storage/s3-tools/boto3-python-sdk
         s3 = session.resource(
             "s3",
             region_name=storage.storage_ionos.region.code,
             endpoint_url=f"https://{storage.storage_ionos.endpoint}",
+            config=Config(
+                signature_version="s3v4",
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:

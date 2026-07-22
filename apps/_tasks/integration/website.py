@@ -72,12 +72,6 @@ def backup_website(
         try:
 
             """
-            Check for connection validation 
-            """
-            if not node.connection.validate():
-                raise ConnectionValidationFailedError(node, attempt_no, backup_type)
-
-            """
             Initialize the backup
             """
             backup = node.backup_initiate(
@@ -88,6 +82,12 @@ def backup_website(
                 storage_ids,
                 notes,
             )
+
+            """
+            Check for connection validation 
+            """
+            if not node.connection.validate():
+                raise ConnectionValidationFailedError(node, attempt_no, backup_type)
 
             """
             Connect with website and generate snapshot 
@@ -103,7 +103,13 @@ def backup_website(
         except ConnectionValidationFailedError as error:
             node.notify_backup_fail(error, backup_type)
             node.backup_retrying_reset(self.request.id)
-            raise self.retry()
+            try:
+                raise self.retry()
+            except MaxRetriesExceededError:
+                """
+                Reset node for max retries
+                """
+                node.backup_max_retries_reached(self.request.id)
         except (SoftTimeLimitExceeded, NodeBackupTimeoutError) as error:
             node.notify_backup_fail(error, backup_type)
             node.backup_timeout_reset(self.request.id)

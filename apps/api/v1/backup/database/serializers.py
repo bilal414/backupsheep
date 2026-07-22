@@ -11,6 +11,7 @@ from apps.api.v1.utils.api_helpers import (
 from apps.console.backup.models import (
     CoreDatabaseBackup,
     CoreDatabaseBackupStoragePoints,
+    CoreDatabaseRestore,
 )
 from apps.console.connection.models import (
     CoreConnection,
@@ -97,3 +98,31 @@ class CoreDatabaseBackupSerializer(serializers.ModelSerializer):
     @staticmethod
     def get_type_display(obj):
         return obj.get_type_display()
+
+
+class CoreDatabaseRestoreSerializer(serializers.ModelSerializer):
+    status_display = serializers.SerializerMethodField(read_only=True)
+    created_display = serializers.SerializerMethodField()
+    modified_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CoreDatabaseRestore
+        fields = "__all__"
+
+    @staticmethod
+    def get_status_display(obj):
+        return obj.get_status_display()
+
+    @staticmethod
+    def get_created_display(obj):
+        timezone = str(get_current_timezone())
+        timezone = pytz.timezone(timezone)
+        date_time = obj.created.astimezone(timezone).strftime("%b %d %Y - %I:%M%p")
+        return date_time
+
+    @staticmethod
+    def get_modified_display(obj):
+        timezone = str(get_current_timezone())
+        timezone = pytz.timezone(timezone)
+        date_time = obj.modified.astimezone(timezone).strftime("%b %d %Y - %I:%M%p")
+        return date_time

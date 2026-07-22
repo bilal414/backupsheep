@@ -90,7 +90,10 @@ Migrations and the reference-data seed are idempotent, so re-running is safe.
 
 BackupSheep is a standard Django project (`manage.py`). You can run it directly with
 Python 3.12+ (3.14 tested), a PostgreSQL database, a Redis broker, and the system backup
-tools (`lftp`, `pg_dump` 14–18, `mysqldump`/`mariadb-dump`). Install `requirements.txt`,
+tools (`lftp`, `pg_dump` 14–18, `mysqldump`/`mariadb-dump`). For MySQL 8 targets you need
+the real Oracle MySQL client — the MariaDB-compat `mysqldump` rejects MySQL 8 dump flags;
+the Docker image ships the Oracle MySQL 8.4 client in `/opt/mysql/bin` and picks it up
+automatically (`CoreAuthDatabase.bin_path`). Install `requirements.txt`,
 set the same `.env`, then run `manage.py migrate`, `manage.py collectstatic`, a gunicorn
 server, the Celery workers, and Celery beat. The `Dockerfile` is the canonical reference
 for the exact system packages required.

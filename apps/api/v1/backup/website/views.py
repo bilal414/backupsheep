@@ -22,17 +22,26 @@ from apps._tasks.exceptions import (
     SnapshotCreateError,
     DownloadMissingParams,
     DownloadStoragePointNotFound,
-    DownloadStoragePointError, StoragePointError
+    DownloadStoragePointError, StoragePointError,
+    RestoreBackupNotFound,
+    RestoreConfirmationRequired,
+    RestoreCreateError,
+    RestoreStoragePointNotFound,
+    RestoreStoragePointRequired,
 )
 from apps.api.v1.backup.website.filters import CoreWebsiteBackupFilter
 from apps.api.v1.backup.website.permissions import (
     CoreWebsiteBackupViewPermissions,
 )
 from apps.api.v1.backup.website.serializers import CoreWebsiteBackupSerializer, \
-    CoreWebsiteBackupStoragePointsSerializer
+    CoreWebsiteBackupStoragePointsSerializer, CoreWebsiteRestoreSerializer
 from apps.api.v1.utils.api_filters import DateRangeFilter
 from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
-from apps.console.backup.models import CoreWebsiteBackup
+from apps.console.backup.models import (
+    CoreWebsiteBackup,
+    CoreWebsiteBackupStoragePoints,
+    CoreWebsiteRestore,
+)
 from apps.console.node.models import CoreNode
 from rest_framework import status
 
@@ -281,6 +290,60 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
             return Response(storage_points, status=status.HTTP_200_OK)
         except Exception as e:
             raise StoragePointError(e.__str__())
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        from apps._tasks.integration.restore import restore_website_backup
+
+        backup = self.get_object()
+
+        if request.data.get("confirm") is not True:
+            raise RestoreConfirmationRequired()
+        if backup.status != CoreWebsiteBackup.Status.COMPLETE:
+            raise RestoreBackupNotFound()
+
+        stored_backups = backup.stored_website_backups.filter(
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id__isnull=False,
+        )
+        storage_point_id = request.data.get("storage_point_id")
+        if storage_point_id is not None:
+            stored_backup = stored_backups.filter(id=storage_point_id).first()
+            if stored_backup is None:
+                raise RestoreStoragePointNotFound()
+        else:
+            if stored_backups.count() != 1:
+                raise RestoreStoragePointRequired()
+            stored_backup = stored_backups.first()
+
+        restore = CoreWebsiteRestore.objects.create(
+            backup=backup,
+            storage_point=stored_backup,
+            name=f"Restore of {backup.uuid}",
+            params={"delete": bool(request.data.get("delete"))},
+        )
+
+        try:
+            restore_website_backup.apply_async(
+                kwargs={
+                    "node_id": backup.website.node.id,
+                    "backup_id": backup.id,
+                    "restore_id": restore.id,
+                }
+            )
+        except Exception as e:
+            raise RestoreCreateError(e.__str__())
+
+        return Response(
+            CoreWebsiteRestoreSerializer(restore).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["get"])
+    def restores(self, request, pk=None):
+        backup = self.get_object()
+        restores = backup.restores.order_by("-created")
+        return Response(CoreWebsiteRestoreSerializer(restores, many=True).data)
 
     @action(detail=False)
     def highcharts(self, request):

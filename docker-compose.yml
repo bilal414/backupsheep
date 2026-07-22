@@ -84,6 +84,8 @@ services:
         condition: service_completed_successfully
     ports:
       - "8000:8000"
+    volumes:
+      - backup_storage:/backups
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=3)"]
       interval: 15s
@@ -106,6 +108,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - backup_storage:/backups
     restart: unless-stopped
 
   # Database dumps (pg_dump/mysqldump). Heavy CPU/disk, low concurrency. Writes the dump
@@ -123,6 +127,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - backup_workdir:/code/_storage
+      - backup_storage:/backups
     restart: unless-stopped
 
   # Website / WordPress / Basecamp file dumps. Heavy CPU/disk, low concurrency. Writes the
@@ -140,6 +145,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - backup_workdir:/code/_storage
+      - backup_storage:/backups
     restart: unless-stopped
 
   # Dedicated upload pool: takes each finished dump from the shared backup_workdir volume,
@@ -160,6 +166,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - backup_workdir:/code/_storage
+      - backup_storage:/backups
     restart: unless-stopped
 
   # Log pipeline: writes log entries to the DB (send_log_to_db), fans out Slack/Telegram/
@@ -197,3 +204,14 @@ services:
 volumes:
   pgdata:
   backup_workdir:
+  # This is where 'Local Storage' backups live (mounted at /backups in the app and
+  # worker containers). To keep backups on a big disk or an NFS share instead of the
+  # Docker-managed volume, override with a bind mount in docker-compose.override.yml:
+  #   volumes:
+  #     backup_storage:
+  #       driver: local
+  #       driver_opts:
+  #         type: none
+  #         o: bind
+  #         device: /mnt/storage/backupsheep
+  backup_storage:

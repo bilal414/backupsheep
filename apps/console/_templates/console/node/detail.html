@@ -201,7 +201,7 @@
                             </div>
                             <div class="sm:col-span-1">
                                 <dt class="text-sm font-medium text-gray-700">
-                                    {% if object.type == 3 or object.type == 4 or object.type == 5 %}Backups  {% if object.type == 3 %}{% if object.website.backup_type == 2 or object.website.backup_type == 3 %}(<a class="text-indigo-600 cursor-pointer" @click="openIncrementalResetModal()">reset</a>){% endif %}{% endif %}{% else %}
+                                    {% if object.type == 3 or object.type == 4 or object.type == 5 %}Backups  {% if object.type == 3 %}{% if object.website.incremental %}(<a class="text-indigo-600 cursor-pointer" @click="openIncrementalResetModal()">reset</a>){% endif %}{% endif %}{% else %}
                                         Snapshots{% endif %}
                                 </dt>
                                 <dd class="mt-1 text-sm text-gray-700">
@@ -634,6 +634,13 @@
                                                         Download
                                                     </button>
                                                 {% endif %}
+                                                {% if object.type == 3 or object.type == 4 %}
+                                                    <button @click="openBackupRestoreModal('{{ backup.id }}', '{{ backup.uuid }}')"
+                                                            type="button"
+                                                            class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        Restore
+                                                    </button>
+                                                {% endif %}
                                                 {#                                              <button @click="openBackupDeleteModal('{{ object.connection.integration.code }}', '{{ backup.id }}', '{{ backup.uuid }}')" type="button"#}
                                                 {#                                                      class="-ml-px relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">#}
                                                 {#                                                Delete#}
@@ -768,7 +775,7 @@
 
         <div x-show="openBackup" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
              aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
                 <div x-show="openBackup"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0"
@@ -778,8 +785,6 @@
                      x-transition:leave-end="opacity-0"
                      class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
 
-                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-
                 <div x-show="openBackup"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
@@ -787,8 +792,8 @@
                      x-transition:leave="ease-in duration-200"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
-                    <div>
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
                             <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -910,7 +915,7 @@
         </div>
         <div x-show="openPauseBackups" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
              aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
                 <div x-show="openPauseBackups"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0"
@@ -920,8 +925,6 @@
                      x-transition:leave-end="opacity-0"
                      class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
 
-                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-
                 <div x-show="openPauseBackups"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
@@ -929,8 +932,8 @@
                      x-transition:leave="ease-in duration-200"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
-                    <div>
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
                             <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -998,7 +1001,7 @@
         </div>
         <div x-show="openResumeBackups" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
              aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
                 <div x-show="openResumeBackups"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0"
@@ -1008,8 +1011,6 @@
                      x-transition:leave-end="opacity-0"
                      class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
 
-                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-
                 <div x-show="openResumeBackups"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
@@ -1017,8 +1018,8 @@
                      x-transition:leave="ease-in duration-200"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
-                    <div>
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
                             <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -1091,7 +1092,7 @@
 
         <div x-show="openBackupDownload" style="display: none;" class="fixed  z-10 inset-0 overflow-y-auto"
              aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
                 <div x-show="openBackupDownload"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0"
@@ -1101,8 +1102,6 @@
                      x-transition:leave-end="opacity-0"
                      class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
 
-                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-
                 <div x-show="openBackupDownload"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
@@ -1110,8 +1109,8 @@
                      x-transition:leave="ease-in duration-200"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle">
-                    <div>
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:w-auto sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
                             <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -1238,9 +1237,207 @@
             </div>
         </div>
 
+        <div x-show="openBackupRestore" style="display: none;" class="fixed  z-10 inset-0 overflow-y-auto"
+             aria-labelledby="modal-title" role="dialog" aria-modal="true">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
+                <div x-show="openBackupRestore"
+                     x-transition:enter="ease-out duration-300"
+                     x-transition:enter-start="opacity-0"
+                     x-transition:enter-end="opacity-100"
+                     x-transition:leave="ease-in duration-200"
+                     x-transition:leave-start="opacity-100"
+                     x-transition:leave-end="opacity-0"
+                     class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+
+                <div x-show="openBackupRestore"
+                     x-transition:enter="ease-out duration-300"
+                     x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                     x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+                     x-transition:leave="ease-in duration-200"
+                     x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+                     x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
+                        <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
+                            <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
+                                 xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                        stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor"
+                                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white"
+                                 fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                      d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                        </div>
+                        <div class="mt-3 text-center sm:mt-5">
+                            <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                                Restore Backup
+                            </h3>
+                            <div class="mt-2">
+                                <p x-show="loading" class="text-sm text-gray-700">
+                                    Requesting backup storage locations for <br/><span x-text="backup.uuid"></span>
+                                </p>
+                                <p x-show="!loading && !restoreStarted" class="text-sm text-gray-700">
+                                    You can restore backup (<span x-text="backup.uuid"></span>) from following storage
+                                    locations.
+                                </p>
+                                <p x-show="!loading && restoreStarted" class="text-sm text-gray-700">
+                                    Restoring backup (<span x-text="backup.uuid"></span>) to your server.
+                                </p>
+                            </div>
+                        </div>
+                        <div x-show="!loading && !restoreStarted" class="mt-3 text-left sm:mt-5">
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full divide-y divide-gray-200">
+                                    <thead class="bg-gray-50">
+                                    <tr>
+                                        <th scope="col"
+                                            class="px-4 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                            Storage
+                                        </th>
+                                        <th scope="col"
+                                            class="px-4 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                            Type
+                                        </th>
+                                        <th scope="col" class="relative px-4 py-2">
+                                            <span class="sr-only"></span>
+                                        </th>
+                                    </tr>
+                                    </thead>
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                    <template x-for="storagePoint in backup.storagePoints">
+                                        <tr x-show="storagePoint.status === 3">
+                                            <td class="px-4 py-2 whitespace-nowrap">
+                                                <div class="text-sm font-medium text-gray-700">
+                                                    <span x-text="storagePoint.storage.name"></span>
+                                                </div>
+                                            </td>
+                                            <td class="px-4 py-2 whitespace-nowrap">
+                                                <div class="text-sm font-medium text-gray-700">
+                                                    <span x-text="storagePoint.storage.type.name"></span>
+                                                </div>
+                                            </td>
+                                            <td class="px-4 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                                <input type="radio" name="restore_storage_point"
+                                                       x-model="restore.storage_point_id" :value="storagePoint.id"
+                                                       class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300">
+                                            </td>
+                                        </tr>
+                                    </template>
+                                    </tbody>
+                                </table>
+                                <p x-show="backup.storagePoints && backup.storagePoints.filter(sp => sp.status === 3).length === 0"
+                                   class="mt-2 text-sm text-gray-700">
+                                    No completed storage points available for this backup.
+                                </p>
+                            </div>
+                            {% if object.type == 3 %}
+                                <div class="mt-4">
+                                    <label class="inline-flex items-center text-sm font-medium text-gray-700">
+                                        <input type="checkbox" x-model="restore.delete"
+                                               class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded-sm mr-2">
+                                        Delete files on the server that are not present in this backup
+                                    </label>
+                                    <p class="mt-1 text-xs text-red-600">
+                                        Warning: any files on the server which are not part of this backup will be
+                                        permanently deleted.
+                                    </p>
+                                </div>
+                            {% endif %}
+                            <div class="mt-4 rounded-md bg-yellow-50 p-3">
+                                <p class="text-sm text-yellow-800">
+                                    <strong>Warning:</strong> This overwrites data on your server.
+                                    {% if object.type == 3 %}Website files{% else %}Database tables{% endif %}
+                                    will be replaced with the contents of this backup.
+                                </p>
+                            </div>
+                            <div class="mt-4">
+                                <label class="inline-flex items-center text-sm font-medium text-gray-700">
+                                    <input type="checkbox" x-model="restore.confirm"
+                                           class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded-sm mr-2">
+                                    I understand, start restore
+                                </label>
+                            </div>
+                        </div>
+                        <div x-show="!loading && restoreStarted" class="mt-3 text-left sm:mt-5">
+                            <div class="text-center">
+                                <span x-show="restoreStatus && restoreStatus.status === 3"
+                                      class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-100 text-green-800">
+                                    <span x-text="restoreStatus ? restoreStatus.status_display : ''"></span>
+                                </span>
+                                <span x-show="restoreStatus && restoreStatus.status === 4"
+                                      class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-100 text-red-800">
+                                    <span x-text="restoreStatus ? restoreStatus.status_display : ''"></span>
+                                </span>
+                                <span x-show="restoreStatus && restoreStatus.status !== 3 && restoreStatus.status !== 4"
+                                      class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-yellow-100 text-yellow-800">
+                                    <svg class="animate-spin -ml-0.5 mr-1.5 h-3 w-3 text-purple-600"
+                                         xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                                stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor"
+                                              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    <span x-text="restoreStatus ? restoreStatus.status_display : ''"></span>
+                                </span>
+                                <p x-show="restoreStatus && restoreStatus.status === 4 && restoreStatus.error"
+                                   class="mt-2 text-sm text-red-600"
+                                   x-text="restoreStatus && restoreStatus.error ? restoreStatus.error : ''"></p>
+                            </div>
+                            <div class="mt-4">
+                                <h4 class="text-sm font-medium text-gray-700">Recent restores</h4>
+                                <ul class="mt-2 divide-y divide-gray-200">
+                                    <template x-for="restoreItem in restoreList.slice(0, 5)" :key="restoreItem.id">
+                                        <li class="py-2 flex items-center justify-between">
+                                            <div class="text-sm text-gray-700">
+                                                <span x-text="restoreItem.created_display"></span>
+                                                <p x-show="restoreItem.status === 4 && restoreItem.error"
+                                                   class="mt-1 text-xs text-red-600" :title="restoreItem.error"
+                                                   x-text="restoreItem.error"></p>
+                                            </div>
+                                            <span x-show="restoreItem.status === 3"
+                                                  class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-100 text-green-800"
+                                                  x-text="restoreItem.status_display"></span>
+                                            <span x-show="restoreItem.status === 4"
+                                                  class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-100 text-red-800"
+                                                  x-text="restoreItem.status_display"></span>
+                                            <span x-show="restoreItem.status !== 3 && restoreItem.status !== 4"
+                                                  class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-yellow-100 text-yellow-800"
+                                                  x-text="restoreItem.status_display"></span>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div x-show="!loading && !restoreStarted" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                        <button @click="startRestore()" type="button"
+                                :disabled="!restore.confirm || !restore.storage_point_id"
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed sm:col-start-2 sm:text-sm">
+                            Restore
+                        </button>
+                        <button @click="closeRestoreModal()" type="button"
+                                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                            Cancel
+                        </button>
+                    </div>
+                    <div x-show="!loading && restoreStarted" class="mt-5 sm:mt-6 ">
+                        <button @click="closeRestoreModal()" type="button"
+                                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                            Close
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div x-show="openBackupTransfer" style="display: none;" class="fixed  z-10 inset-0 overflow-y-auto"
              aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
                 <div x-show="openBackupTransfer"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0"
@@ -1250,8 +1447,6 @@
                      x-transition:leave-end="opacity-0"
                      class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
 
-                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-
                 <div x-show="openBackupTransfer"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
@@ -1259,8 +1454,8 @@
                      x-transition:leave="ease-in duration-200"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle">
-                    <div>
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:w-auto sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
                             <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -1369,7 +1564,7 @@
 
         <div x-show="openDeleteNode" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
              aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
                 <div x-show="openDeleteNode"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0"
@@ -1379,8 +1574,6 @@
                      x-transition:leave-end="opacity-0"
                      class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
 
-                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-
                 <div x-show="openDeleteNode"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
@@ -1388,8 +1581,8 @@
                      x-transition:leave="ease-in duration-200"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
-                    <div>
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
                             <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -1455,7 +1648,7 @@
         </div>
         <div x-show="openBackupDelete" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
              aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
                 <div x-show="openBackupDelete"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0"
@@ -1465,8 +1658,6 @@
                      x-transition:leave-end="opacity-0"
                      class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
 
-                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-
                 <div x-show="openBackupDelete"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
@@ -1474,8 +1665,8 @@
                      x-transition:leave="ease-in duration-200"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
-                    <div>
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
                             <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -1542,7 +1733,7 @@
         </div>
         <div x-show="openSchedule" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
              aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
                 <div x-show="openSchedule"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0"
@@ -1552,8 +1743,6 @@
                      x-transition:leave-end="opacity-0"
                      class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
 
-                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-
                 <div x-show="openSchedule"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
@@ -1561,8 +1750,8 @@
                      x-transition:leave="ease-in duration-200"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
-                    <div>
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
                             <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -1798,7 +1987,6 @@
                                 </div>
                             </div>
 
-                            {% if object.website.backup_type != 2 and object.website.backup_type != 3 %}
                                 <div class="sm:col-span-6 ">
                                     <h3 class="text-base font-medium text-gray-900">
                                         Retention Policy
@@ -1825,7 +2013,6 @@
 
                                     </div>
                                 </div>
-                            {% endif %}
 
                             <div class="sm:col-span-6 ">
                                 <h3 class="text-base font-medium text-gray-900">
@@ -1994,7 +2181,7 @@
         </div>
         <div x-show="openModify" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
              aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
                 <div x-show="openModify"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0"
@@ -2004,8 +2191,6 @@
                      x-transition:leave-end="opacity-0"
                      class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
 
-                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-
                 <div x-show="openModify"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
@@ -2013,8 +2198,8 @@
                      x-transition:leave="ease-in duration-200"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
-                    <div>
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
                             <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -2090,7 +2275,7 @@
         </div>
         <div x-show="openIncrementalReset" style="display: none;" class="fixed z-10 inset-0 overflow-y-auto"
              aria-labelledby="modal-title" role="dialog" aria-modal="true">
-            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-6">
                 <div x-show="openIncrementalReset"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0"
@@ -2100,8 +2285,6 @@
                      x-transition:leave-end="opacity-0"
                      class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
 
-                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-
                 <div x-show="openIncrementalReset"
                      x-transition:enter="ease-out duration-300"
                      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
@@ -2109,8 +2292,8 @@
                      x-transition:leave="ease-in duration-200"
                      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                     class="inline-block align-bottom bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full sm:p-6">
-                    <div>
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                    <div class="flex-1 overflow-y-auto">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
                             <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
                                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -2131,9 +2314,9 @@
                             </h3>
                             <div class="mt-2">
                                 <p class="text-sm text-gray-700">
-                                    This action will reset file history for {{ object.website.get_backup_type_display }} backups for this node and your next
-                                    backup will be a full-backup. Only use this option if you want to reset the file
-                                    history or if you deleted your full backup.
+                                    This action will clear the local snapshot cache for this node. Your next backup
+                                    will download all files again and rebuild the cache. Each backup remains a
+                                    complete snapshot — only use this option if you want to force a full download.
                                 </p>
                             </div>
                         </div>
@@ -2143,7 +2326,7 @@
                             </h3>
                             <div class="mt-2">
                                 <p class="text-sm text-gray-700">
-                                    Reset {{ object.website.get_backup_type_display }} backup for <br/><strong>{{ object.name }}</strong>
+                                    Reset incremental backup cache for <br/><strong>{{ object.name }}</strong>
                                 </p>
                             </div>
                         </div>
@@ -2152,7 +2335,7 @@
                     <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                         <button @click="incrementalReset()" type="button"
                                 class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
-                            Reset {{ object.website.get_backup_type_display }} Backup
+                            Reset Incremental Backup
                         </button>
                         <button @click="closeIncrementalResetModal()" type="button"
                                 class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
@@ -2188,6 +2371,16 @@
                 openDeleteNode: false,
                 openIncrementalReset: false,
                 openBackupDownload: false,
+                openBackupRestore: false,
+                restore: {
+                    storage_point_id: null,
+                    delete: false,
+                    confirm: false,
+                },
+                restoreStatus: null,
+                restoreStarted: false,
+                restoreList: [],
+                restorePollHandle: null,
                 openBackupTransfer: false,
                 openSchedule: false,
                 openModify: false,
@@ -2345,6 +2538,158 @@
                 closeBackupDownloadModal() {
                     this.loading = false;
                     this.openBackupDownload = false;
+                },
+                openBackupRestoreModal(backupID, BackupUUID) {
+                    this.backup = {};
+                    this.loading = false;
+                    this.openBackupRestore = true;
+                    this.backup.id = backupID;
+                    this.backup.uuid = BackupUUID;
+                    this.restore = {
+                        storage_point_id: null,
+                        delete: false,
+                        confirm: false,
+                    };
+                    this.restoreStatus = null;
+                    this.restoreStarted = false;
+                    this.restoreList = [];
+                    this.getBackupStoragePoints(backupID).then(() => {
+                        /**
+                         * Pre-select the storage point when there is exactly one completed upload.
+                         */
+                        let completedStoragePoints = (this.backup.storagePoints || []).filter(storagePoint => storagePoint.status === 3);
+                        if (completedStoragePoints.length === 1) {
+                            this.restore.storage_point_id = completedStoragePoints[0].id;
+                        }
+                    });
+                    this.getBackupRestores(true);
+                },
+                closeRestoreModal() {
+                    this.loading = false;
+                    this.clearRestorePoll();
+                    this.openBackupRestore = false;
+                    this.restore = {
+                        storage_point_id: null,
+                        delete: false,
+                        confirm: false,
+                    };
+                    this.restoreStatus = null;
+                    this.restoreStarted = false;
+                    this.restoreList = [];
+                },
+                clearRestorePoll() {
+                    if (this.restorePollHandle) {
+                        clearInterval(this.restorePollHandle);
+                        this.restorePollHandle = null;
+                    }
+                },
+                startRestorePolling() {
+                    this.clearRestorePoll();
+                    this.restorePollHandle = setInterval(() => {
+                        if (!this.openBackupRestore) {
+                            this.clearRestorePoll();
+                            return;
+                        }
+                        this.getBackupRestores(false);
+                    }, 5000);
+                },
+                async getBackupRestores(showErrors) {
+                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + this.backup.id + "/restores/";
+
+                    let response = await fetch(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'GET',
+                    }).then(async (response) => {
+                        if (response.ok) {
+                            return response.json();
+                        } else {
+                            let json;
+                            try {
+                                json = await response.json();
+                            } catch (exception_var) {
+                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                            }
+
+                            throw new Error(json.detail);
+                        }
+                    }).then((json) => {
+                        this.restoreList = json;
+                        if (json.length > 0) {
+                            this.restoreStatus = json[0];
+                            /**
+                             * Stop polling once the latest restore reaches a final state.
+                             */
+                            if (this.restoreStatus.status === 3 || this.restoreStatus.status === 4) {
+                                this.clearRestorePoll();
+                            }
+                        }
+                    }).catch((error) => {
+                        if (showErrors) {
+                            Alpine.store('notifications').items.push({
+                                show: true,
+                                error: true,
+                                heading: 'Error!',
+                                details: error.message
+                            });
+                        }
+                    });
+                },
+                async startRestore() {
+                    this.loading = true;
+
+                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + this.backup.id + "/restore/";
+
+                    let data = {
+                        storage_point_id: this.restore.storage_point_id,
+                        confirm: true,
+                    };
+                    {% if object.type == 3 %}
+                        data.delete = this.restore.delete;
+                    {% endif %}
+
+                    let response = await fetch(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'POST',
+                        body: JSON.stringify(data)
+                    }).then(async (response) => {
+                        this.loading = false;
+                        if (response.status === 201) {
+                            return response.json();
+                        } else {
+                            let json;
+                            try {
+                                json = await response.json();
+                            } catch (exception_var) {
+                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                            }
+
+                            throw new Error(json.detail);
+                        }
+                    }).then((json) => {
+                        this.restoreStatus = json;
+                        this.restoreStarted = true;
+                        this.getBackupRestores(false);
+                        this.startRestorePolling();
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            success: true,
+                            heading: 'Success!',
+                            details: 'Restore started.'
+                        });
+                    }).catch((error) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            error: true,
+                            heading: 'Error!',
+                            details: error.message
+                        });
+                    });
                 },
 
                 openBackupTransferModal(storagePoint) {
