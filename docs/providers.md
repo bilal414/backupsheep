@@ -17,7 +17,6 @@ credentials in `.env` (see [Configuration](configuration.md)).
 | Amazon Web Services — RDS | `aws_rds` |
 | Amazon Lightsail | `lightsail` |
 | Hetzner Cloud | `hetzner` |
-| Linode | `linode` |
 | Vultr | `vultr` |
 | UpCloud | `upcloud` |
 | Oracle Cloud | `oracle` |
@@ -43,7 +42,7 @@ downloaded, into a per-node local cache — every backup is still a complete zip
 - **WordPress** (`wordpress`)
 - **Basecamp** (`basecamp`) — needs a 37signals OAuth app (`BASECAMP_CLIENT_ID/SECRET`).
 
-> `intercom`, `zendesk`, and `slack` rows are seeded but their console tiles are disabled
+> `zendesk` and `slack` rows are seeded but their console tiles are disabled
 > in this build; treat them as experimental/not wired.
 
 ## Storage destinations

@@ -1,4 +1,6 @@
 import boto3
+from botocore.client import Config
+
 from apps._tasks.exceptions import (
     NodeBackupFailedError,
     NodeSnapshotDeleteFailed, NodeDoSpacesUploadFailedError, NodeDigitalOceanSpacesBucketDeletedError,
@@ -24,8 +26,13 @@ def storage_do_spaces(stored_backup):
             aws_access_key_id=bs_decrypt(storage.storage_do_spaces.access_key, encryption_key),
             aws_secret_access_key=bs_decrypt(storage.storage_do_spaces.secret_key, encryption_key),
         )
+        config = Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
         s3 = session.resource(
-            "s3", endpoint_url=f"https://{storage.storage_do_spaces.region.endpoint}"
+            "s3", endpoint_url=f"https://{storage.storage_do_spaces.region.endpoint}",
+            config=config,
         )
 
         if prefix:

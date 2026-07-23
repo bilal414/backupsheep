@@ -91,6 +91,8 @@ class CoreOVHUSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         ck.add_recursive_rules(ovh.API_READ_WRITE, "/cloud/project/*/volume/snapshot")
         ck.add_recursive_rules(["POST"], "/cloud/project/*/instance/*/snapshot")
         ck.add_recursive_rules(["POST"], "/cloud/project/*/volume/*/snapshot")
+        ck.add_recursive_rules(["GET", "POST"], "/cloud/project/*/instance")
+        ck.add_recursive_rules(["GET", "POST"], "/cloud/project/*/volume")
 
         ovh_consumer_key_sig = f"ovh_us__consumer_key__{account.id}__{member.id}"
 

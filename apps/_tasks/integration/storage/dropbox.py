@@ -31,7 +31,7 @@ def storage_dropbox(stored_backup):
 
         file_size = os.path.getsize(local_zip)
         # Files uploaded through the API must be 350GB or smaller.
-        chunk_size = 157286400
+        chunk_size = 140 * 1024 * 1024
         dest_path = f"/{stored_backup.backup.uuid}.zip"
         access_token = bs_decrypt(stored_backup.storage.storage_dropbox.access_token, encryption_key)
         refresh_token = bs_decrypt(stored_backup.storage.storage_dropbox.refresh_token, encryption_key)

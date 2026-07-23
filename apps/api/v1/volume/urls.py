@@ -17,7 +17,6 @@ urlpatterns += [
                 path("", include("apps.api.v1.volume.ovh_ca.urls")),
                 path("", include("apps.api.v1.volume.ovh_eu.urls")),
                 path("", include("apps.api.v1.volume.ovh_us.urls")),
-                path("", include("apps.api.v1.volume.linode.urls")),
                 path("", include("apps.api.v1.volume.lightsail.urls")),
                 path("", include("apps.api.v1.volume.upcloud.urls")),
                 path("", include("apps.api.v1.volume.oracle.urls")),

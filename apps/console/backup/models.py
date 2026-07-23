@@ -78,15 +78,6 @@ class CoreVultrBackupStatus(TimeStampedModel):
         db_table = "core_vultr_backup_status"
 
 
-class CoreLinodeBackupStatus(TimeStampedModel):
-    code = models.CharField(max_length=64, unique=True)
-    name = models.CharField(max_length=64)
-    description = models.TextField(null=True)
-
-    class Meta:
-        db_table = "core_linode_backup_status"
-
-
 class CoreWebsiteBackupStatus(TimeStampedModel):
     code = models.CharField(max_length=64, unique=True)
     name = models.CharField(max_length=64)
@@ -1198,8 +1189,29 @@ class CoreVultrBackup(UtilBackup):
         """Single snapshot status check (no blocking loop); used by poll_cloud_backup.
         Returns COMPLETE / IN_PROGRESS; transient API errors return IN_PROGRESS (Vultr
         does not surface an errored state, so failure is detected via the timeout)."""
+        from ..node.models import CoreNode
+
         try:
             client = self.vultr.node.connection.auth_vultr.get_client()
+            if CoreNode.Type.VOLUME == self.vultr.node.type:
+                # Block storage snapshots live under /v2/blocks/snapshots, return the
+                # snapshot object at top level, and report state/COMPLETE (instance
+                # snapshots report status/complete instead).
+                r = requests.get(
+                    f"{settings.VULTR_API}/v2/blocks/snapshots/{self.unique_id}",
+                    headers=client,
+                    verify=True,
+                )
+                if r.status_code == 200:
+                    snapshot = r.json()
+                    if snapshot["state"] == "COMPLETE":
+                        self.size_gigabytes = round(int(snapshot.get("size", 0)) / (1000 ** 3), 2)
+                        self.status = UtilBackup.Status.COMPLETE
+                        self.save()
+                        r.close()
+                        return UtilBackup.Status.COMPLETE
+                r.close()
+                return UtilBackup.Status.IN_PROGRESS
             r = requests.get(
                 f"{settings.VULTR_API}/v2/snapshots/{self.unique_id}",
                 headers=client,
@@ -1228,6 +1240,7 @@ class CoreVultrBackup(UtilBackup):
 
     def soft_delete(self):
         from ..log.models import CoreLog
+        from ..node.models import CoreNode
 
         client = self.vultr.node.connection.auth_vultr.get_client()
 
@@ -1236,11 +1249,18 @@ class CoreVultrBackup(UtilBackup):
             f"is being deleted using connection {self.vultr.node.connection.name}"
         )
         try:
-            r = requests.delete(
-                f"{settings.VULTR_API}/v2/snapshots/{self.unique_id}",
-                headers=client,
-                verify=True,
-            )
+            if CoreNode.Type.VOLUME == self.vultr.node.type:
+                r = requests.delete(
+                    f"{settings.VULTR_API}/v2/blocks/snapshots/{self.unique_id}",
+                    headers=client,
+                    verify=True,
+                )
+            else:
+                r = requests.delete(
+                    f"{settings.VULTR_API}/v2/snapshots/{self.unique_id}",
+                    headers=client,
+                    verify=True,
+                )
 
             if r.status_code == 204:
                 self.status = UtilBackup.Status.DELETE_COMPLETED
@@ -1279,48 +1299,6 @@ class CoreVultrBackup(UtilBackup):
         Reset the node status
         """
         self.vultr.node.backup_complete_reset()
-
-
-class CoreLinodeBackup(UtilBackup):
-    linode = models.ForeignKey(
-        "CoreLinode", related_name="backups", on_delete=models.CASCADE
-    )
-    # old_status = models.ForeignKey(
-    #     CoreLinodeBackupStatus, related_name="backups", on_delete=models.PROTECT
-    # )
-    # old_type = models.ForeignKey(
-    #     CoreBackupType, related_name="linode_backups", on_delete=models.PROTECT
-    # )
-    schedule = models.ForeignKey(
-        "CoreSchedule",
-        related_name="linode_backups",
-        null=True,
-        on_delete=models.SET_NULL,
-    )
-    unique_id = models.CharField(max_length=64)
-    size_gigabytes = models.FloatField(null=True)
-    metadata = models.JSONField(null=True)
-
-    class Meta:
-        db_table = "core_linode_backup"
-
-    def delete_requested(self):
-        self.status = self.Status.DELETE_REQUESTED
-        self.save()
-
-    def cancel(self):
-        app.control.revoke(self.celery_task_id, terminate=True)
-
-        """
-        Set backup status to cancelled
-        """
-        self.status = self.Status.CANCELLED
-        self.save()
-
-        """
-        Reset the node status
-        """
-        self.linode.node.backup_complete_reset()
 
 
 class CoreGoogleCloudBackup(UtilBackup):
@@ -3070,7 +3048,9 @@ class CoreAWSBackup(UtilBackup):
                 snapshots_to_delete = image_to_delete["BlockDeviceMappings"]
 
                 for snapshot in snapshots_to_delete:
-                    snapshots_to_delete_id = snapshot["Ebs"]["SnapshotId"]
+                    snapshots_to_delete_id = snapshot.get("Ebs", {}).get("SnapshotId")
+                    if not snapshots_to_delete_id:
+                        continue
                     client.delete_snapshot(SnapshotId=snapshots_to_delete_id)
             elif CoreNode.Type.VOLUME == self.aws.node.type:
                 client.delete_snapshot(SnapshotId=self.unique_id)

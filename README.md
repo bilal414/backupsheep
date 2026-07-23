@@ -35,7 +35,7 @@
 |---|---|
 | **Websites / files** | FTP, FTPS, SFTP, SSH. Include/exclude rules (regex + glob), parallel transfers, all key types (Ed25519/ECDSA/RSA, incl. passphrase-protected), server-side tar transport for SSH sources. |
 | **Databases** | MySQL (bundled Oracle MySQL 8.4 client), MariaDB, PostgreSQL (version-matched `pg_dump` 14–18). Direct TCP or SSH tunnel, all databases or per-table selection, stored procedures, SSL/TLS. |
-| **Cloud servers & volumes** | DigitalOcean, AWS (EC2, RDS, Lightsail), Hetzner, Linode, Vultr, UpCloud, Oracle Cloud, Google Cloud, OVH (CA/EU/US) — provider-native snapshots. |
+| **Cloud servers & volumes** | DigitalOcean, AWS (EC2, RDS, Lightsail), Hetzner, Vultr, UpCloud, Oracle Cloud, Google Cloud, OVH (CA/EU/US) — provider-native snapshots. |
 | **SaaS apps** | WordPress, Basecamp. |
 
 ### Incremental website backups

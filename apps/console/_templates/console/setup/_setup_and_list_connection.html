@@ -1898,7 +1898,7 @@
 
             async openConnectionModal(connection_id, location_id, action_type, integration_code) {
 
-                if (!connection_id && (integration_code === "basecamp" || integration_code === "intercom")) {
+                if (!connection_id && (integration_code === "basecamp")) {
                     window.location.href = "{{connect_url|safe}}";
                 } else {
                     /**

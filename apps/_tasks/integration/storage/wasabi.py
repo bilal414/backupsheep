@@ -25,7 +25,12 @@ def storage_wasabi(stored_backup):
             aws_access_key_id=bs_decrypt(storage.storage_wasabi.access_key, encryption_key),
             aws_secret_access_key=bs_decrypt(storage.storage_wasabi.secret_key, encryption_key),
         )
-        config = Config(connect_timeout=300, retries={"max_attempts": 12})
+        config = Config(
+            connect_timeout=300,
+            retries={"max_attempts": 12},
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
         s3 = session.resource(
             "s3",
             endpoint_url=f"https://{storage.storage_wasabi.region.endpoint}",

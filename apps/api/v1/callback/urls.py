@@ -14,5 +14,4 @@ urlpatterns = [
     re_path(r'^callback/pcloud/?$', APICallbackPCloud.as_view()),
     re_path(r'^callback/microsoft/?$', APICallbackMicrosoft.as_view()),
     re_path(r'^callback/basecamp/?$', APICallbackBasecamp.as_view()),
-    re_path(r'^callback/intercom/?$', APICallbackIntercom.as_view()),
 ]

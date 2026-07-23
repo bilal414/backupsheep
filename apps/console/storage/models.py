@@ -54,7 +54,7 @@ class CoreStorageDropbox(TimeStampedModel):
 
         local_txt_file = f"_upload_test_files/backupsheep.txt"
         file_size = os.path.getsize(local_txt_file)
-        chunk_size = 157286400
+        chunk_size = 140 * 1024 * 1024
         dest_path = f"/{file_name}.txt"
         encryption_key = self.storage.account.get_encryption_key()
         access_token = bs_decrypt(self.access_token, encryption_key)
@@ -352,7 +352,7 @@ class CoreStorageGoogleDrive(TimeStampedModel):
         credentials = google.oauth2.credentials.Credentials(
             access_token,
             refresh_token=refresh_token,
-            token_uri="https://accounts.google.com/o/oauth2/token",
+            token_uri="https://oauth2.googleapis.com/token",
             client_id=settings.GOOGLE_CLIENT_ID,
             client_secret=settings.GOOGLE_CLIENT_SECRET,
         )
@@ -540,6 +540,7 @@ class CoreStorageWasabi(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -560,6 +561,10 @@ class CoreStorageWasabi(TimeStampedModel):
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{region.endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -607,6 +612,7 @@ class CoreStorageDoSpaces(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -627,6 +633,10 @@ class CoreStorageDoSpaces(TimeStampedModel):
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{region.endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -674,6 +684,7 @@ class CoreStorageFilebase(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -693,7 +704,11 @@ class CoreStorageFilebase(TimeStampedModel):
 
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
-            endpoint_url=f"https://s3.filebase.com",
+            endpoint_url=f"https://s3.filebase.io",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -741,6 +756,7 @@ class CoreStorageExoscale(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -761,6 +777,10 @@ class CoreStorageExoscale(TimeStampedModel):
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{region.endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -946,6 +966,7 @@ class CoreStorageVultr(TimeStampedModel):
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -966,6 +987,10 @@ class CoreStorageVultr(TimeStampedModel):
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=f"https://{endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -1090,6 +1115,7 @@ class CoreStorageOracle(TimeStampedModel):
 
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -1114,6 +1140,10 @@ class CoreStorageOracle(TimeStampedModel):
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             region_name=region.code, endpoint_url=f"https://{endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -1167,6 +1197,7 @@ class CoreStorageScaleway(TimeStampedModel):
 
         import boto3
         import time
+        from botocore.client import Config
 
         if data:
             access_key = data["access_key"]
@@ -1192,6 +1223,10 @@ class CoreStorageScaleway(TimeStampedModel):
             aws_secret_access_key=secret_key,
             region_name=region.code,
             endpoint_url=f"https://{endpoint}",
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
 
         if prefix:
@@ -1308,7 +1343,7 @@ class CoreStorageLeviia(TimeStampedModel):
 
     @property
     def endpoint(self):
-        endpoint = f"s3.leviia.com"
+        endpoint = f"s3.eu-west.leviia.com"
         return endpoint
 
     def validate(self, data=None, raise_exp=None):
@@ -1320,7 +1355,7 @@ class CoreStorageLeviia(TimeStampedModel):
         if data:
             access_key = data["access_key"]
             secret_key = data["secret_key"]
-            endpoint = f"s3.leviia.com"
+            endpoint = f"s3.eu-west.leviia.com"
             no_delete = data.get("no_delete")
             prefix = data["prefix"]
             bucket_name = data["bucket_name"]
@@ -1335,7 +1370,11 @@ class CoreStorageLeviia(TimeStampedModel):
 
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name="auto",
-            endpoint_url=f"https://{endpoint}", config=Config(signature_version='s3v4')
+            endpoint_url=f"https://{endpoint}", config=Config(
+                signature_version='s3v4',
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            )
         )
 
         if prefix:
@@ -1603,7 +1642,7 @@ class CoreStorageAzure(TimeStampedModel):
         blob_client.upload_blob(file_content, blob_type="BlockBlob")
 
         # Create a SAS token that expires in 1 hour
-        sas_expiry = datetime.datetime.utcnow() + timedelta(hours=1)
+        sas_expiry = datetime.datetime.now(datetime.timezone.utc) + timedelta(hours=1)
         sas_permissions = BlobSasPermissions(read=True, write=False, delete=False)
         sas_token = generate_blob_sas(
             account_name=blob_service_client.account_name,
@@ -1773,7 +1812,11 @@ class CoreStorageIDrive(TimeStampedModel):
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
             endpoint_url=endpoint if "://" in endpoint else f"https://{endpoint}",
-            config=Config(signature_version='s3v4')
+            config=Config(
+                signature_version='s3v4',
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            )
         )
 
         if prefix:
@@ -1933,7 +1976,11 @@ class CoreStorageRackCorp(TimeStampedModel):
 
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name=region.code,
-            endpoint_url=f"https://{endpoint}", config=Config(signature_version='s3v4')
+            endpoint_url=f"https://{endpoint}", config=Config(
+                signature_version='s3v4',
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            )
         )
 
         if prefix:

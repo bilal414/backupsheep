@@ -164,7 +164,6 @@ class CoreAccount(TimeStampedModel):
             CoreLightsailBackup,
             CoreAWSRDSBackup,
             CoreOracleBackup,
-            CoreLinodeBackup,
             CoreGoogleCloudBackup,
         )
         from ..utils.models import UtilBackup
@@ -216,9 +215,6 @@ class CoreAccount(TimeStampedModel):
         oracle_backups = CoreOracleBackup.objects.filter(
             status=UtilBackup.Status.COMPLETE, oracle__node__connection__account=self
         ).order_by("-modified")[:last_backup_count]
-        linode_backups = CoreLinodeBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, linode__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
         google_cloud_backups = CoreGoogleCloudBackup.objects.filter(
             status=UtilBackup.Status.COMPLETE, google_cloud__node__connection__account=self
         ).order_by("-modified")[:last_backup_count]
@@ -240,7 +236,6 @@ class CoreAccount(TimeStampedModel):
                 lightsail_backups,
                 aws_rds_backups,
                 oracle_backups,
-                linode_backups,
                 google_cloud_backups,
             )
         )

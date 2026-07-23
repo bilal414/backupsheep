@@ -195,7 +195,7 @@ class CoreAuthDigitalOcean(TimeStampedModel):
 
     def refresh_auth_token(self):
         from apps._tasks.helper.tasks import send_postmark_email
-        from datetime import datetime
+        from datetime import datetime, timezone
         from ..node.models import CoreNode
 
         encryption_key = self.connection.account.get_encryption_key()
@@ -214,7 +214,7 @@ class CoreAuthDigitalOcean(TimeStampedModel):
                 do_tokens = result.json()
                 self.access_token = bs_encrypt(do_tokens["access_token"], encryption_key)
                 self.refresh_token = bs_encrypt(do_tokens["refresh_token"], encryption_key)
-                self.expiry = datetime.fromtimestamp((int(time.time()) + int(do_tokens["expires_in"])))
+                self.expiry = datetime.fromtimestamp((int(time.time()) + int(do_tokens["expires_in"])), tz=timezone.utc)
                 if do_tokens.get("info"):
                     self.info_name = do_tokens["info"].get("name")
                     self.info_email = do_tokens["info"].get("email")
@@ -358,7 +358,7 @@ class CoreAuthHetzner(TimeStampedModel):
                 for server in servers:
                     server["_bs_unique_id"] = server.get("id", None)
                     server["_bs_name"] = server.get("name", None)
-                    server["_bs_region"] = server.get("datacenter", {}).get("description", None)
+                    server["_bs_region"] = server.get("location", {}).get("description", None)
                     server["_bs_size"] = server.get("primary_disk_size", None)
                     eligible_objects.append(server)
             else:
@@ -832,34 +832,75 @@ class CoreAuthVultr(TimeStampedModel):
         client = self.get_client()
         params = {"per_page": 500}
 
-        regions = requests.get(f"{settings.VULTR_API}/v2/regions", params=params, headers=client).json().get("regions")
+        regions = []
+        more_objects = True
+        cursor = None
+        while more_objects is True:
+            region_params = dict(params)
+            if cursor:
+                region_params["cursor"] = cursor
+            result = requests.get(f"{settings.VULTR_API}/v2/regions", params=region_params, headers=client)
+            if result.status_code != 200:
+                raise ValueError(
+                    f"Unable to get list of regions. Received status code {result.status_code} from API."
+                )
+            regions.extend(result.json().get("regions", []))
+            cursor = result.json().get("meta", {}).get("links", {}).get("next")
+            if not cursor:
+                more_objects = False
+        result.close()
 
         if object_type == "cloud":
-            result = requests.get(f"{settings.VULTR_API}/v2/instances", params=params, headers=client)
-            if result.status_code == 200:
-                for instance in result.json()["instances"]:
-                    instance["_bs_unique_id"] = instance.get("id", None)
-                    if (instance.get("hostname", None) == "vultr.guest") and instance.get("tag", None):
-                        instance["_bs_name"] = f"{instance.get('tag', None)}"
-                    else:
-                        instance["_bs_name"] = f"{instance.get('hostname', None)}"
+            more_objects = True
+            cursor = None
+            while more_objects is True:
+                instance_params = dict(params)
+                if cursor:
+                    instance_params["cursor"] = cursor
+                result = requests.get(f"{settings.VULTR_API}/v2/instances", params=instance_params, headers=client)
+                if result.status_code == 200:
+                    for instance in result.json()["instances"]:
+                        instance["_bs_unique_id"] = instance.get("id", None)
+                        # `tag` is deprecated in favor of the `tags` list; prefer the first tag when present
+                        tags = instance.get("tags") or []
+                        instance_tag = tags[0] if tags else instance.get("tag", None)
+                        if (instance.get("hostname", None) == "vultr.guest") and instance_tag:
+                            instance["_bs_name"] = f"{instance_tag}"
+                        else:
+                            instance["_bs_name"] = f"{instance.get('hostname', None)}"
 
-                    _bs_region = next((x for x in regions if x["id"] == instance.get("region", None)), None)
+                        _bs_region = next((x for x in regions if x["id"] == instance.get("region", None)), None)
 
-                    instance["_bs_region"] = f"{_bs_region['city']}, {_bs_region['country']}"
-                    instance["_bs_size"] = instance.get("disk", None)
-                    eligible_objects.append(instance)
+                        instance["_bs_region"] = f"{_bs_region['city']}, {_bs_region['country']}"
+                        instance["_bs_size"] = instance.get("disk", None)
+                        eligible_objects.append(instance)
+                    cursor = result.json().get("meta", {}).get("links", {}).get("next")
+                    if not cursor:
+                        more_objects = False
+                else:
+                    more_objects = False
             result.close()
         elif object_type == "volume":
-            result = requests.get(f"{settings.VULTR_API}/v2/blocks", params=params, headers=client)
-            if result.status_code == 200:
-                for block in result.json()["blocks"]:
-                    block["_bs_unique_id"] = block.get("id", None)
-                    block["_bs_name"] = block.get("label", None)
-                    _bs_region = next((x for x in regions if x["id"] == block.get("region", None)), None)
-                    block["_bs_region"] = f"{_bs_region['city']}, {_bs_region['country']}"
-                    block["_bs_size"] = block.get("size_gb", None)
-                    eligible_objects.append(block)
+            more_objects = True
+            cursor = None
+            while more_objects is True:
+                block_params = dict(params)
+                if cursor:
+                    block_params["cursor"] = cursor
+                result = requests.get(f"{settings.VULTR_API}/v2/blocks", params=block_params, headers=client)
+                if result.status_code == 200:
+                    for block in result.json()["blocks"]:
+                        block["_bs_unique_id"] = block.get("id", None)
+                        block["_bs_name"] = block.get("label", None)
+                        _bs_region = next((x for x in regions if x["id"] == block.get("region", None)), None)
+                        block["_bs_region"] = f"{_bs_region['city']}, {_bs_region['country']}"
+                        block["_bs_size"] = block.get("size_gb", None)
+                        eligible_objects.append(block)
+                    cursor = result.json().get("meta", {}).get("links", {}).get("next")
+                    if not cursor:
+                        more_objects = False
+                else:
+                    more_objects = False
             result.close()
         return eligible_objects
 
@@ -885,7 +926,6 @@ class CoreAuthOracle(TimeStampedModel):
         db_table = "core_auth_oracle"
 
     def get_client(self, data=None):
-        import tempfile
         from oci.config import validate_config
 
         if data:
@@ -902,13 +942,10 @@ class CoreAuthOracle(TimeStampedModel):
             encryption_key = self.connection.account.get_encryption_key()
             private_key = bs_decrypt(self.private_key, encryption_key)
 
-        fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
-        with os.fdopen(fd, "w") as tmp:
-            tmp.write(private_key)
-
+        # key_content passes the private key inline so no temp key file is written to disk.
         config = {
             "user": user,
-            "key_file": ssh_key_path,
+            "key_content": private_key,
             "fingerprint": fingerprint,
             "tenancy": tenancy,
             "region": region,
@@ -919,6 +956,7 @@ class CoreAuthOracle(TimeStampedModel):
 
     def get_eligible_objects(self, object_type="cloud"):
         import oci
+        from oci.identity.models import Compartment
 
         eligible_objects = []
         per_page = 1000
@@ -928,42 +966,59 @@ class CoreAuthOracle(TimeStampedModel):
             pass
         elif object_type == "volume":
             block_storage_client = oci.core.BlockstorageClient(config)
+            identity_client = oci.identity.IdentityClient(config)
 
             """
-            Get Boot Volumes
+            Volumes can live in child compartments, so list the volumes of the
+            tenancy root plus every accessible compartment beneath it.
             """
-            boot_volumes = block_storage_client.list_boot_volumes(limit=per_page, compartment_id=self.tenancy)
+            compartment_ids = [self.tenancy]
+            compartments = identity_client.list_compartments(self.tenancy, compartment_id_in_subtree=True)
+            if compartments.status == 200:
+                for compartment in compartments.data:
+                    if compartment.lifecycle_state == Compartment.LIFECYCLE_STATE_ACTIVE:
+                        compartment_ids.append(compartment.id)
 
-            if boot_volumes.status == 200:
-                for boot_volume in boot_volumes.data:
-                    eligible_object = {
-                        "id": boot_volume.id,
-                        "_bs_unique_id": boot_volume.id,
-                        "_bs_name": boot_volume.display_name,
-                        "_bs_region": boot_volume.availability_domain,
-                        "_bs_size": boot_volume.size_in_gbs,
-                        "_bs_vol_type": "boot",
-                    }
-                    eligible_objects.append(eligible_object)
+            for compartment_id in compartment_ids:
+                """
+                Get Boot Volumes
+                """
+                boot_volumes = oci.pagination.list_call_get_all_results(
+                    block_storage_client.list_boot_volumes, limit=per_page, compartment_id=compartment_id
+                )
 
-            """
-            Get Block Volumes
-            """
-            volumes = block_storage_client.list_volumes(limit=per_page, compartment_id=self.tenancy)
+                if boot_volumes.status == 200:
+                    for boot_volume in boot_volumes.data:
+                        eligible_object = {
+                            "id": boot_volume.id,
+                            "_bs_unique_id": boot_volume.id,
+                            "_bs_name": boot_volume.display_name,
+                            "_bs_region": boot_volume.availability_domain,
+                            "_bs_size": boot_volume.size_in_gbs,
+                            "_bs_vol_type": "boot",
+                        }
+                        eligible_objects.append(eligible_object)
 
-            if volumes.status == 200:
-                for volume in volumes.data:
-                    eligible_object = {
-                        "id": volume.id,
-                        "_bs_unique_id": volume.id,
-                        "_bs_name": volume.display_name,
-                        "_bs_region": volume.availability_domain,
-                        "_bs_size": volume.size_in_gbs,
-                        "_bs_vol_type": "block",
-                    }
-                    eligible_objects.append(eligible_object)
-            else:
-                raise ValueError(f"Unable to get list of volumes. Received status code {boot_volumes.status} from API.")
+                """
+                Get Block Volumes
+                """
+                volumes = oci.pagination.list_call_get_all_results(
+                    block_storage_client.list_volumes, limit=per_page, compartment_id=compartment_id
+                )
+
+                if volumes.status == 200:
+                    for volume in volumes.data:
+                        eligible_object = {
+                            "id": volume.id,
+                            "_bs_unique_id": volume.id,
+                            "_bs_name": volume.display_name,
+                            "_bs_region": volume.availability_domain,
+                            "_bs_size": volume.size_in_gbs,
+                            "_bs_vol_type": "block",
+                        }
+                        eligible_objects.append(eligible_object)
+                else:
+                    raise ValueError(f"Unable to get list of volumes. Received status code {volumes.status} from API.")
         return eligible_objects
 
     def validate(self, data=None, check_errors=None, raise_exp=None):
@@ -983,20 +1038,6 @@ class CoreAuthOracle(TimeStampedModel):
                 raise ValueError(f"Validation failed. Please check your integration details. Error: {e.__str__()}")
             else:
                 return False
-
-
-class CoreAuthLinode(TimeStampedModel):
-    connection = models.OneToOneField("CoreConnection", related_name="auth_linode", on_delete=models.CASCADE)
-    api_key = models.BinaryField(null=True)
-    info_name = models.CharField(max_length=64, null=True)
-    info_email = models.CharField(max_length=64, null=True)
-    encryption_updated = models.BooleanField(default=False)
-
-    class Meta:
-        db_table = "core_auth_linode"
-
-    def validate(self, check_errors=None, raise_exp=None):
-        return True
 
 
 class CoreAuthGoogleCloud(TimeStampedModel):
@@ -1029,42 +1070,72 @@ class CoreAuthGoogleCloud(TimeStampedModel):
         params = {"maxResults": 500}
 
         if object_type == "cloud":
-            result = client.get(f"{settings.GOOGLE_RESOURCE_API}/v1/projects", params={"pageSize": 100})
+            projects = []
+            page_token = None
+            while True:
+                project_params = {"pageSize": 100}
+                if page_token:
+                    project_params["pageToken"] = page_token
+                result = client.get(f"{settings.GOOGLE_RESOURCE_API}/v3/projects:search", params=project_params)
+                if result.status_code != 200:
+                    break
+                projects.extend(result.json().get("projects", []))
+                page_token = result.json().get("nextPageToken")
+                if not page_token:
+                    break
             if result.status_code == 200:
-                projects = result.json().get("projects")
                 # Check for active projects
                 for project in projects:
-                    if project["lifecycleState"] == "ACTIVE":
+                    if project["state"] == "ACTIVE":
                         active_projects.append(project)
 
                 if len(active_projects) > 0:
                     for active_project in active_projects:
-                        result = client.get(
-                            f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{active_project['projectId']}/zones",
-                            params=params,
-                        )
+                        zones = []
+                        page_token = None
+                        while True:
+                            zone_params = dict(params)
+                            if page_token:
+                                zone_params["pageToken"] = page_token
+                            result = client.get(
+                                f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{active_project['projectId']}/zones",
+                                params=zone_params,
+                            )
+                            if result.status_code != 200:
+                                break
+                            zones.extend(result.json().get("items", []))
+                            page_token = result.json().get("nextPageToken")
+                            if not page_token:
+                                break
                         if result.status_code == 200:
-                            if result.json().get("items"):
-                                zones = result.json().get("items")
-
-                                for zone in zones:
+                            for zone in zones:
+                                instances = []
+                                page_token = None
+                                while True:
+                                    instance_params = dict(params)
+                                    if page_token:
+                                        instance_params["pageToken"] = page_token
                                     result = client.get(
                                         f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{active_project['projectId']}/zones/{zone['name']}/instances",
-                                        params=params,
+                                        params=instance_params,
                                     )
-                                    if result.status_code == 200:
-                                        if result.json().get("items"):
-                                            instances = result.json().get("items")
-                                            for instance in instances:
-                                                instance["_bs_unique_id"] = instance.get("id", None)
-                                                instance["_bs_name"] = f"{instance.get('name', None)}"
-                                                instance["_bs_region"] = zone["name"]
-                                                instance["_bs_size"] = instance.get("disks", None)[0].get("diskSizeGb")
-                                                instance["_bs_project_id"] = active_project["projectId"]
-                                                instance["_bs_zone"] = zone["name"]
-                                                eligible_objects.append(instance)
+                                    if result.status_code != 200:
+                                        break
+                                    instances.extend(result.json().get("items", []))
+                                    page_token = result.json().get("nextPageToken")
+                                    if not page_token:
+                                        break
+                                if result.status_code == 200:
+                                    for instance in instances:
+                                        instance["_bs_unique_id"] = instance.get("id", None)
+                                        instance["_bs_name"] = f"{instance.get('name', None)}"
+                                        instance["_bs_region"] = zone["name"]
+                                        instance["_bs_size"] = (instance.get("disks") or [{}])[0].get("diskSizeGb")
+                                        instance["_bs_project_id"] = active_project["projectId"]
+                                        instance["_bs_zone"] = zone["name"]
+                                        eligible_objects.append(instance)
 
-                                    result.close()
+                                result.close()
                         else:
                             if result.json().get("error"):
                                 error = result.json().get("error")
@@ -1084,42 +1155,72 @@ class CoreAuthGoogleCloud(TimeStampedModel):
                         f"Unable to get list of instances. Received status code {result.status_code} from API."
                     )
         elif object_type == "volume":
-            result = client.get(f"{settings.GOOGLE_RESOURCE_API}/v1/projects", params={"pageSize": 100})
+            projects = []
+            page_token = None
+            while True:
+                project_params = {"pageSize": 100}
+                if page_token:
+                    project_params["pageToken"] = page_token
+                result = client.get(f"{settings.GOOGLE_RESOURCE_API}/v3/projects:search", params=project_params)
+                if result.status_code != 200:
+                    break
+                projects.extend(result.json().get("projects", []))
+                page_token = result.json().get("nextPageToken")
+                if not page_token:
+                    break
             if result.status_code == 200:
-                projects = result.json().get("projects")
                 # Check for active projects
                 for project in projects:
-                    if project["lifecycleState"] == "ACTIVE":
+                    if project["state"] == "ACTIVE":
                         active_projects.append(project)
 
                 if len(active_projects) > 0:
                     for active_project in active_projects:
-                        result = client.get(
-                            f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{active_project['projectId']}/zones",
-                            params=params,
-                        )
+                        zones = []
+                        page_token = None
+                        while True:
+                            zone_params = dict(params)
+                            if page_token:
+                                zone_params["pageToken"] = page_token
+                            result = client.get(
+                                f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{active_project['projectId']}/zones",
+                                params=zone_params,
+                            )
+                            if result.status_code != 200:
+                                break
+                            zones.extend(result.json().get("items", []))
+                            page_token = result.json().get("nextPageToken")
+                            if not page_token:
+                                break
                         if result.status_code == 200:
-                            if result.json().get("items"):
-                                zones = result.json().get("items")
-
-                                for zone in zones:
+                            for zone in zones:
+                                disks = []
+                                page_token = None
+                                while True:
+                                    disk_params = dict(params)
+                                    if page_token:
+                                        disk_params["pageToken"] = page_token
                                     result = client.get(
                                         f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{active_project['projectId']}/zones/{zone['name']}/disks",
-                                        params=params,
+                                        params=disk_params,
                                     )
-                                    if result.status_code == 200:
-                                        if result.json().get("items"):
-                                            disks = result.json().get("items")
-                                            for disk in disks:
-                                                disk["_bs_unique_id"] = disk.get("id", None)
-                                                disk["_bs_name"] = f"{disk.get('name', None)}"
-                                                disk["_bs_region"] = zone["name"]
-                                                disk["_bs_size"] = disk["sizeGb"]
-                                                disk["_bs_project_id"] = active_project["projectId"]
-                                                disk["_bs_zone"] = zone["name"]
-                                                eligible_objects.append(disk)
+                                    if result.status_code != 200:
+                                        break
+                                    disks.extend(result.json().get("items", []))
+                                    page_token = result.json().get("nextPageToken")
+                                    if not page_token:
+                                        break
+                                if result.status_code == 200:
+                                    for disk in disks:
+                                        disk["_bs_unique_id"] = disk.get("id", None)
+                                        disk["_bs_name"] = f"{disk.get('name', None)}"
+                                        disk["_bs_region"] = zone["name"]
+                                        disk["_bs_size"] = disk["sizeGb"]
+                                        disk["_bs_project_id"] = active_project["projectId"]
+                                        disk["_bs_zone"] = zone["name"]
+                                        eligible_objects.append(disk)
 
-                                    result.close()
+                                result.close()
                         else:
                             if result.json().get("error"):
                                 error = result.json().get("error")
@@ -1143,7 +1244,7 @@ class CoreAuthGoogleCloud(TimeStampedModel):
     def validate(self, data=None, check_errors=None, raise_exp=None):
         try:
             client = self.get_client(data=data)
-            result = client.get(f"{settings.GOOGLE_RESOURCE_API}/v1/projects", params={"pageSize": 100})
+            result = client.get(f"{settings.GOOGLE_RESOURCE_API}/v3/projects:search", params={"pageSize": 100})
             if result.status_code == 200:
                 return True
         except Exception as e:
@@ -2577,7 +2678,7 @@ class CoreAuthBasecamp(TimeStampedModel):
         refresh_token = bs_decrypt(self.refresh_token, encryption_key)
 
         params = {
-            "type": "refresh",
+            "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "client_id": settings.BASECAMP_CLIENT_ID,
             "client_secret": settings.BASECAMP_CLIENT_SECRET,
@@ -2589,7 +2690,9 @@ class CoreAuthBasecamp(TimeStampedModel):
         if token_request.status_code == 200:
             token_data = token_request.json()
             self.access_token = bs_encrypt(token_data["access_token"], encryption_key)
-            self.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])))
+            if token_data.get("refresh_token"):
+                self.refresh_token = bs_encrypt(token_data["refresh_token"], encryption_key)
+            self.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])), tz=timezone.utc)
             self.save()
 
     def validate(self, data=None, check_errors=None, raise_exp=None):

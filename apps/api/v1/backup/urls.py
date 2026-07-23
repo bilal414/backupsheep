@@ -18,7 +18,6 @@ urlpatterns += [
                 path("", include("apps.api.v1.backup.vultr.urls")),
                 path("", include("apps.api.v1.backup.ovh_ca.urls")),
                 path("", include("apps.api.v1.backup.ovh_eu.urls")),
-                path("", include("apps.api.v1.backup.linode.urls")),
                 path("", include("apps.api.v1.backup.aws_rds.urls")),
                 path("", include("apps.api.v1.backup.lightsail.urls")),
                 path("", include("apps.api.v1.backup.ovh_us.urls")),

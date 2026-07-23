@@ -23,25 +23,24 @@ django-celery-results==2.6.0
 
 # Cloud Storage & Services
 ## AWS
-boto3==1.43.13
+boto3==1.43.54
 
 ## Google Cloud
-google-cloud-storage==3.10.1
-google-auth==2.53.0
+google-cloud-storage==3.13.0
+google-auth==2.56.2
 google-auth-oauthlib==1.4.0
-google-api-python-client==2.196.0
+google-api-python-client==2.198.0
 
 ## Azure
-azure-storage-blob==12.29.0
-azure-identity==1.25.3
+azure-storage-blob==12.30.0
 
 ## Other Cloud Services
-dropbox==12.0.2
+dropbox==12.2.1
 pcloud==2.0.1
 ibm-cos-sdk==2.16.2
 oss2==2.19.1
 cos-python-sdk-v5==1.9.43
-oci==2.175.0
+oci==2.182.1
 ovh==1.2.0
 
 # File Transfer & Network
@@ -59,7 +58,7 @@ ipaddress==1.0.23
 
 # Security & Authentication
 python-dotenv==1.2.2
-# Capped <47 by oci 2.175.0 (Oracle Cloud SDK); 46.0.7 is the newest it allows.
+# oci 2.182.1 allows cryptography<50; 46.0.7 stays pinned for reproducibility.
 cryptography==46.0.7
 sentry-sdk==2.60.0
 firebase-admin==7.4.0
