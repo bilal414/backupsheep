@@ -1,4 +1,6 @@
 import boto3
+from botocore.client import Config
+
 from apps._tasks.exceptions import StorageExoScaleUploadFailedError
 from apps.api.v1.utils.api_helpers import bs_decrypt
 
@@ -15,7 +17,14 @@ def storage_exoscale(stored_backup):
             aws_access_key_id=bs_decrypt(storage.storage_exoscale.access_key, encryption_key),
             aws_secret_access_key=bs_decrypt(storage.storage_exoscale.secret_key, encryption_key),
         )
-        s3 = session.resource("s3", endpoint_url=f"https://{storage.storage_exoscale.region.endpoint}")
+        config = Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
+        s3 = session.resource(
+            "s3", endpoint_url=f"https://{storage.storage_exoscale.region.endpoint}",
+            config=config,
+        )
 
         if prefix:
             if (prefix != "") and (prefix.endswith("/") is False):

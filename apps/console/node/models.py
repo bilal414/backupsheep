@@ -5,7 +5,7 @@ import pytz
 import requests
 from celery import chord
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
 from django.db.models import UniqueConstraint
 from django.utils.text import slugify
 from django.utils.timezone import get_current_timezone
@@ -112,6 +112,12 @@ class CoreDigitalOcean(UtilCloud):
                             action = result.json()["action"]
                             backup.action_id = action.get("id")
                             backup.save()
+                        elif result.status_code == 422:
+                            raise NodeBackupFailedError(
+                                self.node,
+                                backup.uuid_str, backup.attempt_no, backup.type,
+                                "Droplet is locked by another action. We will try again shortly.",
+                            )
                         else:
                             raise NodeBackupFailedError(self.node, backup.uuid_str, backup.attempt_no, backup.type,
                                                         f"API call returned with status {result.status_code}")
@@ -280,136 +286,6 @@ class CoreDigitalOcean(UtilCloud):
             if result.status_code == 200 and result.json().get("volume", {}).get("id"):
                 return CoreCloudRestore.Status.COMPLETE
             return CoreCloudRestore.Status.IN_PROGRESS
-
-
-class CoreContabo(UtilCloud):
-    node = models.OneToOneField(
-        "CoreNode", related_name="contabo", on_delete=models.CASCADE
-    )
-    name = models.CharField(max_length=255)
-    unique_id = models.CharField(max_length=255)
-    notes = models.TextField(null=True, blank=True)
-    metadata = models.JSONField(null=True)
-
-    class Meta:
-        db_table = "core_contabo"
-
-    def validate(self):
-        node_ok = False
-        client = self.node.connection.auth_digitalocean.get_client()
-        if self.node.type == CoreNode.Type.CLOUD:
-            result = requests.get(
-                f"{settings.DIGITALOCEAN_API}/v2/droplets/{self.unique_id}",
-                headers=client,
-                verify=True,
-            )
-            if result.status_code == 200:
-                r_json = result.json()
-                if r_json.get("droplet"):
-                    server = r_json.get("droplet")
-                    if server.get("status") == "active" and not server.get("locked"):
-                        node_ok = True
-        elif self.node.type == CoreNode.Type.VOLUME:
-            result = requests.get(
-                f"{settings.DIGITALOCEAN_API}/v2/volumes/{self.unique_id}",
-                headers=client,
-                verify=True,
-            )
-            if result.status_code == 200:
-                node_ok = True
-        return node_ok
-
-    def create_snapshot(self, backup):
-        try:
-            client = self.node.connection.auth_digitalocean.get_client()
-
-            if self.node.type == CoreNode.Type.CLOUD:
-                result = requests.get(
-                    f"{settings.DIGITALOCEAN_API}/v2/droplets/{self.unique_id}",
-                    headers=client,
-                    verify=True,
-                )
-                if result.status_code == 200:
-                    droplet = result.json()["droplet"]
-                    if droplet["status"] == "active" or droplet["status"] == "new":
-                        droplet_data = {"type": "snapshot", "name": backup.uuid_str}
-                        result = requests.post(
-                            f"{settings.DIGITALOCEAN_API}/v2/droplets/{self.unique_id}/actions",
-                            headers=client,
-                            data=json.dumps(droplet_data),
-                            verify=True,
-                        )
-                        if result.status_code == 201:
-                            action = result.json()["action"]
-                            backup.action_id = action.get("id")
-                            backup.save()
-                        else:
-                            raise NodeBackupFailedError(self.node, backup.uuid_str, backup.attempt_no, backup.type,
-                                                        f"API call returned with status {result.status_code}")
-                    else:
-                        raise NodeBackupFailedError(self.node, backup.uuid_str, backup.attempt_no, backup.type,
-                                                    f"Droplet status is {droplet['status']}")
-                elif result.status_code == 502:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "Invalid response from DigitalOcean API. We will try again shortly.",
-                    )
-                elif result.status_code == 429:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "API rate limit exceeded. We will try again shortly.",
-                    )
-                elif result.status_code == 401:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "Unable to connect to your DigitalOcean account. "
-                        "Please reconnect your account to refresh authentication token.",
-                    )
-                else:
-                    raise NodeBackupFailedError(self.node, backup.uuid_str, backup.attempt_no, backup.type,
-                                                f"API call returned with status {result.status_code}")
-
-            elif self.node.type == CoreNode.Type.VOLUME:
-                volume_data = {"name": backup.uuid_str}
-
-                result = requests.post(
-                    f"{settings.DIGITALOCEAN_API}/v2/volumes/{self.unique_id}/snapshots",
-                    headers=client,
-                    data=json.dumps(volume_data),
-                    verify=True,
-                )
-
-                if result.status_code == 201:
-                    snapshot = result.json()["snapshot"]
-                    backup.unique_id = snapshot["id"]
-                    backup.size_gigabytes = snapshot["min_disk_size"]
-                    backup.save()
-                elif result.status_code == 502:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "Invalid response from DigitalOcean API. We will try again shortly.",
-                    )
-                elif result.status_code == 429:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "API rate limit exceeded. We will try again shortly.",
-                    )
-                elif result.status_code == 401:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "Unable to connect to your DigitalOcean account. "
-                        "Please reconnect your account to refresh authentication token.",
-                    )
-        except Exception as e:
-            raise NodeBackupFailedError(
-                self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
-            )
 
 
 class CoreHetzner(UtilCloud):
@@ -1758,9 +1634,7 @@ class CoreVultr(UtilCloud):
                 result = requests.post(
                     f"{settings.VULTR_API}/v2/snapshots",
                     headers=client,
-                    data=json.dumps(
-                        {"instance_id": self.unique_id, "description": self.node.name}
-                    ),
+                    json={"instance_id": self.unique_id, "description": self.node.name},
                     verify=True,
                 )
                 if result.status_code == 201:
@@ -1794,7 +1668,45 @@ class CoreVultr(UtilCloud):
                     self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
                 )
         elif self.node.type == CoreNode.Type.VOLUME:
-            pass
+            try:
+                # Block storage snapshots are created under /v2/blocks/snapshots and
+                # the API returns the snapshot object at top level (no wrapper key).
+                result = requests.post(
+                    f"{settings.VULTR_API}/v2/blocks/snapshots",
+                    headers=client,
+                    json={"block_id": self.unique_id, "description": backup.uuid_str},
+                    verify=True,
+                )
+                if result.status_code == 201:
+                    snapshot = result.json()
+                    backup.unique_id = snapshot["id"]
+                    backup.metadata = snapshot
+                    backup.save()
+                elif result.status_code == 502:
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str, backup.attempt_no, backup.type,
+                        "Invalid response from Vultr API. We will try again shortly.",
+                    )
+                elif result.status_code == 429:
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str, backup.attempt_no, backup.type,
+                        "API rate limit exceeded. We will try again shortly.",
+                    )
+                elif result.status_code == 401:
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str, backup.attempt_no, backup.type,
+                        "Unable to connect to your Vultr account. Please reconnect your account to refresh authentication token.",
+                    )
+                else:
+                    raise NodeBackupFailedError(self.node, backup.uuid_str, backup.attempt_no, backup.type,
+                                                f"API call returned with status {result.status_code}")
+            except Exception as e:
+                raise NodeBackupFailedError(
+                    self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
+                )
 
     def restore_snapshot(self, backup, restore):
         client = self.node.connection.auth_vultr.get_client()
@@ -1844,23 +1756,82 @@ class CoreVultr(UtilCloud):
             else:
                 raise Exception(f"API call returned with status {result.status_code}")
 
+        elif self.node.type == CoreNode.Type.VOLUME:
+            params = restore.params or {}
+            region = params.get("region")
+            size_gb = params.get("size_gb")
+
+            if not region or not size_gb:
+                result = requests.get(
+                    f"{settings.VULTR_API}/v2/blocks/{self.unique_id}",
+                    headers=client,
+                    verify=True,
+                )
+                if result.status_code == 200:
+                    block = result.json()["block"]
+                    region = region or block["region"]
+                    size_gb = size_gb or block["size_gb"]
+                else:
+                    raise Exception(
+                        f"Unable to get block storage details. API call returned with status {result.status_code}"
+                    )
+
+            # Restoring a block snapshot creates a brand new volume via POST /v2/blocks
+            # with snapshot_id set; region and size_gb are required alongside it.
+            result = requests.post(
+                f"{settings.VULTR_API}/v2/blocks",
+                headers=client,
+                json={
+                    "region": region,
+                    "size_gb": size_gb,
+                    "snapshot_id": backup.unique_id,
+                    "label": restore.name,
+                },
+                verify=True,
+            )
+            if result.status_code == 201:
+                block = result.json()["block"]
+                restore.resource_id = block["id"]
+                restore.save()
+            elif result.status_code == 401:
+                raise Exception(
+                    "Unable to connect to your Vultr account. Please reconnect your account to refresh authentication token."
+                )
+            elif result.status_code == 429:
+                raise Exception("API rate limit exceeded. Please try again shortly.")
+            else:
+                raise Exception(f"API call returned with status {result.status_code}")
+
     def check_restore(self, restore):
         from apps.console.backup.models import CoreCloudRestore
 
         client = self.node.connection.auth_vultr.get_client()
 
-        result = requests.get(
-            f"{settings.VULTR_API}/v2/instances/{restore.resource_id}",
-            headers=client,
-            verify=True,
-        )
-        if result.status_code == 200:
-            instance = result.json()["instance"]
-            if instance["status"] == "active":
-                return CoreCloudRestore.Status.COMPLETE
-            elif instance["status"] == "suspended":
-                return CoreCloudRestore.Status.FAILED
-        return CoreCloudRestore.Status.IN_PROGRESS
+        if self.node.type == CoreNode.Type.CLOUD:
+            result = requests.get(
+                f"{settings.VULTR_API}/v2/instances/{restore.resource_id}",
+                headers=client,
+                verify=True,
+            )
+            if result.status_code == 200:
+                instance = result.json()["instance"]
+                if instance["status"] == "active":
+                    return CoreCloudRestore.Status.COMPLETE
+                elif instance["status"] == "suspended":
+                    return CoreCloudRestore.Status.FAILED
+            return CoreCloudRestore.Status.IN_PROGRESS
+
+        elif self.node.type == CoreNode.Type.VOLUME:
+            result = requests.get(
+                f"{settings.VULTR_API}/v2/blocks/{restore.resource_id}",
+                headers=client,
+                verify=True,
+            )
+            if result.status_code == 200:
+                block = result.json()["block"]
+                if block["status"] == "active":
+                    return CoreCloudRestore.Status.COMPLETE
+            return CoreCloudRestore.Status.IN_PROGRESS
 
 
 class CoreOracle(UtilCloud):
@@ -2046,20 +2017,6 @@ class CoreOracle(UtilCloud):
                 elif request.data.lifecycle_state == Volume.LIFECYCLE_STATE_FAULTY:
                     return CoreCloudRestore.Status.FAILED
         return CoreCloudRestore.Status.IN_PROGRESS
-
-
-class CoreLinode(UtilCloud):
-    node = models.OneToOneField(
-        "CoreNode", related_name="linode", on_delete=models.CASCADE
-    )
-    name = models.CharField(max_length=255)
-    unique_id = models.CharField(max_length=255)
-    linode_id = models.CharField(max_length=255, null=True)
-    notes = models.TextField(null=True, blank=True)
-    metadata = models.JSONField(null=True)
-
-    class Meta:
-        db_table = "core_linode"
 
 
 class CoreGoogleCloud(UtilCloud):
@@ -2679,20 +2636,6 @@ class CoreBasecamp(TimeStampedModel):
         return backup
 
 
-class CoreIntercom(TimeStampedModel):
-    node = models.OneToOneField(
-        "CoreNode", related_name="intercom", on_delete=models.CASCADE
-    )
-    name = models.CharField(max_length=255)
-    notes = models.TextField(null=True, blank=True)
-
-    class Meta:
-        db_table = "core_intercom"
-
-    def create_snapshot(self, backup):
-        pass
-
-
 class CoreSchedule(TimeStampedModel):
     class Status(models.IntegerChoices):
         ACTIVE = 1, "Active"
@@ -3079,25 +3022,48 @@ class CoreNode(TimeStampedModel):
     def backup_initiate(
             self, celery_task_id, backup_type, attempt_no, schedule_id, storage_ids, notes
     ):
-        node_type_object = getattr(self, self.connection.integration.code)
-        backup, created = node_type_object.backups.get_or_create(celery_task_id=celery_task_id)
-        backup.status = UtilBackup.Status.IN_PROGRESS
-        backup.type = backup_type
-        backup.attempt_no = attempt_no
-        backup.schedule_id = schedule_id
-        backup.notes = notes
+        """
+        Duplicate-backup guard: lock this node's row so concurrent backup tasks for
+        the same node serialize here, then refuse to start a second backup while one
+        is still in flight. An active backup (see UtilBackup.ACTIVE_STATUSES) created
+        by a DIFFERENT celery task means its snapshot may already exist at the
+        provider, so the new task must exit without creating a backup record or
+        calling the provider API -- in that case this returns None and the caller
+        (the celery task) returns immediately. A retry of the SAME task reuses its
+        own backup (same celery_task_id) and is never blocked by it.
+        """
+        with transaction.atomic():
+            CoreNode.objects.select_for_update().get(id=self.id)
+            node_type_object = getattr(self, self.connection.integration.code)
+            active_backup = node_type_object.backups.filter(
+                status__in=UtilBackup.ACTIVE_STATUSES
+            ).exclude(celery_task_id=celery_task_id).first()
+            if active_backup:
+                print(
+                    f"Skipping duplicate backup of node {self.id}: backup "
+                    f"{active_backup.id} is already in flight (status "
+                    f"{active_backup.get_status_display()}, task "
+                    f"{active_backup.celery_task_id}); task {celery_task_id} exiting."
+                )
+                return None
+            backup, created = node_type_object.backups.get_or_create(celery_task_id=celery_task_id)
+            backup.status = UtilBackup.Status.IN_PROGRESS
+            backup.type = backup_type
+            backup.attempt_no = attempt_no
+            backup.schedule_id = schedule_id
+            backup.notes = notes
 
-        # Only setup UUID if it's new backup. No need to generate same UUID on retry
-        if created:
-            if schedule_id:
-                schedule = CoreSchedule.objects.get(id=schedule_id)
-                schedule_slug = f"{backup.get_type_display()}-{schedule.name}"
-            else:
-                schedule_slug = f"{backup.get_type_display()}"
-            n_and_s = f"{self.name} - {schedule_slug}"
-            n_and_s_trimmed = (n_and_s[:24]) if len(n_and_s) > 24 else n_and_s
-            backup.uuid = slugify(f"bs-{n_and_s_trimmed}-n{self.id}-b{backup.id}").replace("_", "-")
-        backup.save()
+            # Only setup UUID if it's new backup. No need to generate same UUID on retry
+            if created:
+                if schedule_id:
+                    schedule = CoreSchedule.objects.get(id=schedule_id)
+                    schedule_slug = f"{backup.get_type_display()}-{schedule.name}"
+                else:
+                    schedule_slug = f"{backup.get_type_display()}"
+                n_and_s = f"{self.name} - {schedule_slug}"
+                n_and_s_trimmed = (n_and_s[:24]) if len(n_and_s) > 24 else n_and_s
+                backup.uuid = slugify(f"bs-{n_and_s_trimmed}-n{self.id}-b{backup.id}").replace("_", "-")
+            backup.save()
 
         # Cloud servers and volumes don't have storage points for now
         if self.type == self.Type.DATABASE or self.type == self.Type.WEBSITE or self.type == self.Type.SAAS:

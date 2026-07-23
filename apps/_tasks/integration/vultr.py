@@ -81,6 +81,11 @@ def backup_vultr(
                 notes,
             )
 
+            # None means another backup for this node is already in flight under a
+            # different task -- exit gracefully so no duplicate snapshot is created.
+            if backup is None:
+                return
+
             """
             Connect with website and generate snapshot 
             """

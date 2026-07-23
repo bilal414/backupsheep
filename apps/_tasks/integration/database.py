@@ -77,6 +77,11 @@ def backup_database(
                 notes,
             )
 
+            # None means another backup for this node is already in flight under a
+            # different task -- exit gracefully so no duplicate backup is started.
+            if backup is None:
+                return
+
             """
             Check for connection validation 
             """

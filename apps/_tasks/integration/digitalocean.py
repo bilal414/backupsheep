@@ -86,6 +86,11 @@ def backup_digitalocean(
                 notes,
             )
 
+            # None means another backup for this node is already in flight under a
+            # different task -- exit gracefully so no duplicate snapshot is created.
+            if backup is None:
+                return
+
             """
             Generate snapshot. Only create if there's no existing action_id/unique_id,
             which means a snapshot for this backup is already running.

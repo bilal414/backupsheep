@@ -1,4 +1,6 @@
 import boto3
+from botocore.client import Config
+
 from apps._tasks.exceptions import StorageUpCloudUploadFailedError, StorageIDriveUploadFailedError
 from apps.api.v1.utils.api_helpers import bs_decrypt
 
@@ -22,8 +24,13 @@ def storage_idrive(stored_backup):
         # Allow a full URL (e.g. http://minio:9000) for S3-compatible/self-hosted
         # endpoints; bare hostnames keep the original https:// default.
         endpoint = storage.storage_idrive.endpoint
+        config = Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
         s3 = session.resource(
-            "s3", endpoint_url=endpoint if "://" in endpoint else f"https://{endpoint}"
+            "s3", endpoint_url=endpoint if "://" in endpoint else f"https://{endpoint}",
+            config=config,
         )
 
         if prefix:

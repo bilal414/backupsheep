@@ -45,8 +45,7 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
                 ] = f"{settings.BASECAMP_OAUTH_ENDPOINT}?" \
                     f"client_id={settings.BASECAMP_CLIENT_ID}" \
                     f"&type=web_server" \
-                    f"&response_type={settings.GOOGLE_RESPONSE_TYPE}" \
-                    f"&scope=https://www.googleapis.com/auth/cloud-platform" \
+                    f"&response_type=code" \
                     f"&redirect_uri={settings.APP_URL}{settings.BASECAMP_REDIRECT_URL}"
 
             query = Q(
@@ -135,7 +134,7 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                     scope=scope,
                 )
                 authorization_url, state = oauth.authorization_url(
-                    "https://accounts.google.com/o/oauth2/auth",
+                    "https://accounts.google.com/o/oauth2/v2/auth",
                     access_type="offline",
                     prompt="consent",
                 )

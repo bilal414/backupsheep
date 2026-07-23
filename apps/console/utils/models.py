@@ -142,6 +142,24 @@ class UtilBackup(TimeStampedModel):
         ON_DEMAND = 1, "On-Demand"
         SCHEDULED = 2, "Scheduled"
 
+    # Statuses in which a backup may still have work in flight -- a snapshot at the
+    # provider (cloud/volume) or a local dump/upload (website/database/saas).
+    # CoreNode.backup_initiate uses this to refuse a second backup for the same node
+    # while one is already running; every other status (COMPLETE, FAILED, TIMEOUT,
+    # CANCELLED, UPLOAD_FAILED, DELETE_*, ...) is terminal and allows a new backup.
+    ACTIVE_STATUSES = (
+        Status.PENDING,
+        Status.IN_PROGRESS,
+        Status.STARTED,
+        Status.RETRYING,
+        Status.DOWNLOAD_IN_PROGRESS,
+        Status.DOWNLOAD_COMPLETE,
+        Status.UPLOAD_READY,
+        Status.UPLOAD_IN_PROGRESS,
+        Status.UPLOAD_VALIDATION,
+        Status.UPLOAD_COMPLETE,
+    )
+
     def __str__(self):
         return f"{self.name} "
 

@@ -174,10 +174,10 @@ class APICallbackPCloud(APIView):
 
                     storage = CoreStorage()
 
-                    if CoreStoragePCloud.objects.filter(storage__account=account, userid=result.get("userid")).exists():
+                    if CoreStoragePCloud.objects.filter(storage__account=account, userid=result.get("uid", result.get("userid"))).exists():
                         storage_pcloud = CoreStoragePCloud.objects.get(
                             storage__account=account,
-                            userid=result.get("userid"),
+                            userid=result.get("uid", result.get("userid")),
                         )
                         storage = storage_pcloud.storage
                         is_new = False
@@ -206,7 +206,7 @@ class APICallbackPCloud(APIView):
                         storage_pcloud.storage = storage
                         storage_pcloud.access_token = bs_encrypt(result["access_token"], encryption_key)
                         storage_pcloud.token_type = result["token_type"]
-                        storage_pcloud.userid = result.get("userid", None)
+                        storage_pcloud.userid = result.get("uid", result.get("userid"))
 
                         if location:
                             storage_pcloud.location = location
@@ -437,104 +437,6 @@ class APICallbackBasecamp(APIView):
             )
             return redirect("console:setup:integration_open", integration_code="basecamp")
 
-class APICallbackIntercom(APIView):
-    permission_classes = (IsAuthenticated,)
-
-    def get(self, request):
-        data = self.request.query_params
-        error = data.get("error", None)
-        error_description = data.get("error_description", None)
-        member = self.request.user.member
-        account = member.get_current_account()
-        encryption_key = account.get_encryption_key()
-
-        try:
-            if error:
-                messages.add_message(request, messages.ERROR, error_description)
-                return redirect("console:setup:integration_open", integration_code="intercom")
-            else:
-                code = data.get("code", None)
-
-                params = {
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "type": "web_server",
-                    "client_id": settings.INTERCOM_CLIENT_ID,
-                    "client_secret": settings.INTERCOM_CLIENT_SECRET,
-                    "redirect_uri": f"{settings.APP_URL + settings.INTERCOM_REDIRECT_URL}",
-                }
-
-                token_request = requests.post(settings.INTERCOM_TOKEN_ENDPOINT, data=params)
-
-                if token_request.status_code == 200:
-                    token_data = token_request.json()
-
-                    url = "https://launchpad.37signals.com/authorization.json"
-
-                    headers = {"Authorization": f"Bearer {token_data['access_token']}"}
-
-                    response = requests.request("GET", url, headers=headers, data={})
-
-                    if response.status_code == 200:
-                        authorization = response.json()
-
-                        if CoreAuthBasecamp.objects.filter(
-                            connection__account=account, identity_id=authorization.get("identity").get("id")
-                        ).exists():
-                            auth = CoreAuthBasecamp.objects.get(
-                                connection__account=account, identity_id=authorization.get("identity").get("id")
-                            )
-                        else:
-                            connection = CoreConnection()
-                            connection.integration = CoreIntegration.objects.get(code="basecamp")
-                            connection.name = f'{authorization.get("identity").get("email_address")} ({authorization.get("identity").get("id")})'
-                            connection.account = account
-                            connection.location = connection.integration.locations.all().order_by("?")[0]
-                            connection.save()
-                            auth = CoreAuthBasecamp(connection=connection)
-
-                        auth.access_token = bs_encrypt(token_data["access_token"], encryption_key)
-                        auth.refresh_token = bs_encrypt(token_data["refresh_token"], encryption_key)
-
-                        auth.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])))
-
-                        auth.identity_id = authorization.get("identity").get("id")
-                        auth.metadata = authorization
-                        auth.save()
-
-                        # set connection status to active
-                        auth.connection.status = CoreConnection.Status.ACTIVE
-                        auth.connection.save()
-
-                        messages.add_message(
-                            request,
-                            messages.SUCCESS,
-                            "Your account is successfully connected. You can create nodes for your Basecamp now.",
-                        )
-
-                        return redirect("console:setup:integration_open", integration_code="basecamp")
-                    else:
-                        messages.add_message(
-                            request,
-                            messages.ERROR,
-                            "Unable to connect your Basecamp account. Please contact support at " "support@backupsheep.com",
-                        )
-                else:
-                    messages.add_message(
-                        request,
-                        messages.ERROR,
-                        "Unable to connect your Basecamp account. Please contact support at " "support@backupsheep.com",
-                    )
-                    return redirect("console:setup:integration_open", integration_code="basecamp")
-        except Exception as e:
-            capture_exception(e)
-            messages.add_message(
-                request,
-                messages.ERROR,
-                "Unable to connect your Basecamp account. Please contact support at " "support@backupsheep.com",
-            )
-            return redirect("console:setup:integration_open", integration_code="basecamp")
-
 
 class APICallbackDigitalOcean(APIView):
     permission_classes = (IsAuthenticated,)
@@ -675,7 +577,7 @@ class APICallbackOVHCA(APIView):
                 info_customer_code=ovh_account["customerCode"],
             )
             auth.info_name = info_name
-            auth.info_customer_code = ovh_account.get("info_customer_code")
+            auth.info_customer_code = ovh_account.get("customerCode")
             auth.info_email = ovh_account.get("email")
             auth.info_organization = ovh_account.get("organization", "n/a")
             auth.consumer_key = bs_encrypt(ovh_consumer_key, encryption_key)
@@ -737,7 +639,7 @@ class APICallbackOVHUS(APIView):
                 info_customer_code=ovh_account["customerCode"],
             )
             auth.info_name = info_name
-            auth.info_customer_code = ovh_account.get("info_customer_code")
+            auth.info_customer_code = ovh_account.get("customerCode")
             auth.info_email = ovh_account.get("email")
             auth.info_organization = ovh_account.get("organization", "n/a")
             auth.consumer_key = bs_encrypt(ovh_consumer_key, encryption_key)
@@ -799,7 +701,7 @@ class APICallbackOVHEU(APIView):
                 info_customer_code=ovh_account["customerCode"],
             )
             auth.info_name = info_name
-            auth.info_customer_code = ovh_account.get("info_customer_code")
+            auth.info_customer_code = ovh_account.get("customerCode")
             auth.info_email = ovh_account.get("email")
             auth.info_organization = ovh_account.get("organization", "n/a")
             auth.consumer_key = bs_encrypt(ovh_consumer_key, encryption_key)
@@ -932,7 +834,7 @@ class APICallbackGoogleDrive(APIView):
                 scope=scope,
             )
             response = oauth.fetch_token(
-                "https://accounts.google.com/o/oauth2/token",
+                "https://oauth2.googleapis.com/token",
                 code=code,
                 authorization_response=f"{settings.APP_URL}{self.request.get_full_path()}",
                 client_secret=settings.GOOGLE_CLIENT_SECRET,
@@ -944,7 +846,7 @@ class APICallbackGoogleDrive(APIView):
                 storage_google_drive = CoreStorageGoogleDrive()
                 credentials = google.oauth2.credentials.Credentials(
                     response["access_token"],
-                    token_uri="https://accounts.google.com/o/oauth2/token",
+                    token_uri="https://oauth2.googleapis.com/token",
                     client_id=settings.GOOGLE_CLIENT_ID,
                     client_secret=settings.GOOGLE_CLIENT_SECRET,
                     refresh_token=response["refresh_token"],

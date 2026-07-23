@@ -94,9 +94,6 @@ class CoreUsageBackup(TimeStampedModel):
     oracle_snapshot_count = models.BigIntegerField(null=True)
     oracle_snapshot_storage = models.BigIntegerField(null=True)
 
-    linode_snapshot_count = models.BigIntegerField(null=True)
-    linode_snapshot_storage = models.BigIntegerField(null=True)
-
     google_cloud_snapshot_count = models.BigIntegerField(null=True)
     google_cloud_snapshot_storage = models.BigIntegerField(null=True)
 

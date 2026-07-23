@@ -126,7 +126,7 @@ def storage_google_drive(stored_backup):
 
             with open(local_zip, "rb") as f:
                 total_file_size = os.path.getsize(local_zip)
-                chunk_size = 2147000000
+                chunk_size = 262144 * 8192
                 chunk_number = total_file_size // chunk_size
                 chunk_leftover = total_file_size - chunk_size * chunk_number
                 i = 0

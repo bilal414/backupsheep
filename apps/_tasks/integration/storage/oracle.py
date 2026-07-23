@@ -1,4 +1,6 @@
 import boto3
+from botocore.client import Config
+
 from apps._tasks.exceptions import (
     StorageOracleUploadFailedError,
 )
@@ -17,10 +19,15 @@ def storage_oracle(stored_backup):
             aws_access_key_id=bs_decrypt(storage.storage_oracle.access_key, encryption_key),
             aws_secret_access_key=bs_decrypt(storage.storage_oracle.secret_key, encryption_key),
         )
+        config = Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
         s3 = session.resource(
             "s3",
             region_name=storage.storage_oracle.region.code,
             endpoint_url=f"https://{storage.storage_oracle.endpoint}",
+            config=config,
         )
 
         if prefix:
