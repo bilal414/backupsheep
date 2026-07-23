@@ -105,6 +105,9 @@ MIDDLEWARE = [
     # afterward). Must run before RedirectMiddleware so onboarding wins over login.
     "utils.middleware.OnboardingMiddleware",
     "utils.middleware.RedirectMiddleware",
+    # Refreshes the self-hosted location's public IPs when the connection-setup
+    # endpoints dropdown data is fetched (cheap path check per request).
+    "utils.middleware.LocalLocationIPMiddleware",
 
 ]
 
@@ -383,6 +386,11 @@ DIGITALOCEAN_API = config.get("DIGITALOCEAN_API", "https://api.digitalocean.com"
 HETZNER_API = config.get("HETZNER_API", "https://api.hetzner.cloud")
 UPCLOUD_API = config.get("UPCLOUD_API", "https://api.upcloud.com/1.3")
 VULTR_API = config.get("VULTR_API", "https://api.vultr.com")
+# Public-IP lookup services used to detect this server's own outbound IPv4/IPv6 for the
+# self-hosted ("local") backup-server location, so users can allow-list them on their
+# firewalls. Any service returning a bare IP address as the response body works.
+PUBLIC_IPV4_LOOKUP_URL = config.get("PUBLIC_IPV4_LOOKUP_URL", "https://api.ipify.org")
+PUBLIC_IPV6_LOOKUP_URL = config.get("PUBLIC_IPV6_LOOKUP_URL", "https://api6.ipify.org")
 GOOGLE_COMPUTE_API = config.get("GOOGLE_COMPUTE_API", "https://compute.googleapis.com")
 GOOGLE_RESOURCE_API = config.get(
     "GOOGLE_RESOURCE_API", "https://cloudresourcemanager.googleapis.com"

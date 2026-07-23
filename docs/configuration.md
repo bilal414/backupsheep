@@ -122,3 +122,11 @@ these env vars only override the public API hosts or enable OAuth-based connecti
   to Basecamp's public hosts).
 
 See [Providers](providers.md) for which integrations need what.
+
+## Self-hosted server public IPs (optional)
+
+The *Self-hosted* backup-server location auto-detects this server's public IPv4/IPv6
+(shown in the connection-setup **Backup Server** dropdown for firewall allow-listing).
+`PUBLIC_IPV4_LOOKUP_URL` and `PUBLIC_IPV6_LOOKUP_URL` override the lookup services
+(defaults: `https://api.ipify.org` / `https://api6.ipify.org`); any service that returns
+a bare IP address as the response body works.

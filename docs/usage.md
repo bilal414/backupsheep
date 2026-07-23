@@ -27,6 +27,10 @@ A connection exposes the things you can back up (the *nodes*):
 - **Website** connections define an FTP/FTPS/SFTP/SSH target and the paths to back up.
 - **Database** connections define a database server and which databases to dump.
 
+When the **Backup Server** is *Self-hosted* (this BackupSheep server runs the backups),
+its detected public IPv4/IPv6 are shown in the dropdown — add those to your source
+servers' firewall allow lists so the backups can connect.
+
 Validate the connection, then select the node(s) you want to protect.
 
 ## 3. Schedule backups
