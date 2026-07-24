@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+from urllib.parse import quote
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
 import google.auth
@@ -32,7 +33,11 @@ if "BACKUPSHEEP_SECRETS" in os.environ:
     config = json.loads(os.environ.get("BACKUPSHEEP_SECRETS"))
 else:
     config = {
-        **dotenv_values(".env"),  # load shared development variables
+        # Keep the sample's defaults available to PaaS deployments, where runtime
+        # environment variables are injected but no .env file is mounted.
+        # A real .env and then process environment always take precedence.
+        **dotenv_values(os.path.join(BASE_DIR, ".env_sample")),
+        **dotenv_values(os.path.join(BASE_DIR, ".env")),
         **os.environ,  # override loaded values with environment variables
     }
 
@@ -177,6 +182,10 @@ REST_FRAMEWORK = {
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 MIGRATION_MODULES = {"apps": "apps._migrations"}
 
+DATABASE_OPTIONS = {}
+if config.get("DB_SSLMODE"):
+    DATABASE_OPTIONS["sslmode"] = config["DB_SSLMODE"]
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -185,6 +194,7 @@ DATABASES = {
         "PASSWORD": config["DB_PASSWORD"],
         "HOST": config["DB_HOST"],
         "PORT": config["DB_PORT"],
+        "OPTIONS": DATABASE_OPTIONS,
     },
 }
 
@@ -430,10 +440,23 @@ OVH_EU_APP_SECRET = config.get("OVH_EU_APP_SECRET", "")
 OVH_US_APP_KEY = config.get("OVH_US_APP_KEY", "")
 OVH_US_APP_SECRET = config.get("OVH_US_APP_SECRET", "")
 
-# Celery (task queue + scheduled backups)
-# Broker is RabbitMQ by default (the docker-compose stack includes it); override
-# CELERY_BROKER_URL in .env for another broker.
-CELERY_BROKER_URL = config.get("CELERY_BROKER_URL", "amqp://guest:guest@rabbitmq:5672//")
+# Celery (task queue + scheduled backups). The Compose stack supplies CELERY_BROKER_URL
+# directly. App Platform supplies its internal RabbitMQ host and credentials instead, so
+# derive a safely escaped AMQP URL when all three are present.
+def _celery_broker_url():
+    rabbitmq_host = config.get("RABBITMQ_HOST")
+    rabbitmq_user = config.get("RABBITMQ_DEFAULT_USER")
+    rabbitmq_password = config.get("RABBITMQ_DEFAULT_PASS")
+    if rabbitmq_host and rabbitmq_user and rabbitmq_password:
+        rabbitmq_port = config.get("RABBITMQ_PORT", "5672")
+        return (
+            f"amqp://{quote(str(rabbitmq_user), safe='')}:"
+            f"{quote(str(rabbitmq_password), safe='')}@{rabbitmq_host}:{rabbitmq_port}//"
+        )
+    return config.get("CELERY_BROKER_URL") or "amqp://guest:guest@rabbitmq:5672//"
+
+
+CELERY_BROKER_URL = _celery_broker_url()
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE

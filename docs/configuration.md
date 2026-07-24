@@ -3,10 +3,12 @@
 All configuration is read from environment variables at boot — in the Docker stack, from
 the `.env` file (`env_file: .env`). Copy `.env_sample` to `.env` and edit it.
 
-**How keys are read.** Most keys are read directly (the key must *exist* in `.env`, though
-its value may be empty); a few have built-in defaults and are fully optional. The simplest
-rule: **copy `.env_sample` wholesale and don't delete lines** — leave optional ones blank.
-Only `DJANGO_SECRET_KEY` and the `DB_*` connection values need real values to boot.
+**How keys are read.** `.env_sample` also supplies the non-secret defaults when a platform
+injects environment variables without mounting a `.env` file (such as DigitalOcean App
+Platform). A real `.env` and then process environment override those defaults. For a
+manual install, the simplest rule remains: **copy `.env_sample` wholesale and don't delete
+lines**. Only `DJANGO_SECRET_KEY` and the `DB_*` connection values need real values to
+boot.
 
 > Booleans (`DJANGO_DEBUG`, `DJANGO_HTTPS`) are parsed leniently: `true/1/yes/on` ⇒ on,
 > anything else ⇒ off.
@@ -17,7 +19,7 @@ Only `DJANGO_SECRET_KEY` and the `DB_*` connection values need real values to bo
 |----------|:--------:|---------|---------|
 | `DJANGO_SECRET_KEY` | ✅ | `change-this-key` (placeholder — **must change**) | Cryptographic signing key; also derives the key that encrypts stored email credentials. Use a long random value and keep it **stable**. |
 | `DJANGO_DEBUG` | ✅ | `false` | Django debug mode. **Keep false in production** (debug leaks tracebacks/settings on errors). |
-| `DJANGO_ALLOWED_HOSTS` | ✅ | `*` | Allowed Host header(s). Use your real hostname in production; comma-separated list supported. |
+| `DJANGO_ALLOWED_HOSTS` | ✅ | `localhost,127.0.0.1` | Allowed Host header(s). Use your real hostname in production; comma-separated list supported. |
 | `DJANGO_HTTPS` | optional | `false` | Set `true` when served over TLS to enable Secure cookies, HSTS, and HTTP→HTTPS redirect. See [deployment](deployment.md). |
 | `DJANGO_SERVER` | ✅ | `prod` | Environment label, sent to Sentry as the environment tag. |
 | `DJANGO_SETTINGS_MODULE` | ✅ | `backupsheep.settings` | Django settings module path. |
@@ -36,12 +38,14 @@ Only `DJANGO_SECRET_KEY` and the `DB_*` connection values need real values to bo
 | `DB_PASSWORD` | ✅ | *(you set it)* | Password (`POSTGRES_PASSWORD`). |
 | `DB_HOST` | ✅ | `db` | Host — the Compose service name. |
 | `DB_PORT` | ✅ | `5432` | Port. |
+| `DB_SSLMODE` | optional | unset | PostgreSQL `sslmode`, for example `require` for a managed database that requires TLS. |
 
 ## Task queue (Celery / RabbitMQ)
 
 | Variable | Required | Default | Purpose |
 |----------|:--------:|---------|---------|
 | `CELERY_BROKER_URL` | optional | `amqp://guest:guest@rabbitmq:5672//` | Celery broker URL. The default already points at the Compose stack's bundled `rabbitmq` service; change it only for an external broker. |
+| `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_PASS` | optional | unset | When all host/user/password values are present, BackupSheep derives an escaped AMQP URL from them. This is used by the DigitalOcean App Platform template so one RabbitMQ password can be shared safely between components. |
 | `LOG_RETENTION_DAYS` | optional | `30` | Days to keep backup run logs on local disk *and* activity-log entries in the database before `delete_old_logs` (03:00) / `delete_old_db_logs` (03:30) prune them. |
 
 ## Transactional email
