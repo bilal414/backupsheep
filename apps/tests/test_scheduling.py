@@ -1,7 +1,9 @@
 from unittest import mock
 
 from apps._tasks.helper import tasks as helper_tasks
+from apps.console.backup.models import CoreWebsiteBackup
 from apps.console.node.models import CoreNode, CoreSchedule, CoreScheduleRun
+from apps.console.storage.models import CoreStorage
 from apps.console.utils.models import UtilBackup
 from apps.console.backup.models import CoreDigitalOceanBackup
 from apps.tests import factories
@@ -72,3 +74,30 @@ class KeepLastRetentionTests(BaseTestCase):
         self.assertEqual(len(soft_deleted), 2)
         self.assertNotIn(polling.id, soft_deleted)
         self.assertTrue(set(soft_deleted).issubset({o.id for o in olds}))
+
+
+class AirGappedCopyPolicyTests(BaseTestCase):
+    def test_backup_is_not_started_when_required_air_gapped_copy_fails_validation(self):
+        node = factories.make_website_node(self.account, self.member)
+        air_gapped_storage = factories.make_storage(self.account, self.member, code="aws_s3")
+        air_gapped_storage.is_air_gapped = True
+        air_gapped_storage.save()
+        schedule = factories.make_schedule(
+            node, self.member, storages=(air_gapped_storage,)
+        )
+        schedule.require_air_gapped_copy = True
+        schedule.save()
+
+        with mock.patch.object(CoreStorage, "validate", return_value=False):
+            result = node.backup_initiate(
+                "air-gap-task",
+                UtilBackup.Type.SCHEDULED,
+                1,
+                schedule.id,
+                schedule.storage_ids,
+                None,
+            )
+
+        self.assertIsNone(result)
+        backup = CoreWebsiteBackup.objects.get(celery_task_id="air-gap-task")
+        self.assertEqual(backup.status, UtilBackup.Status.STORAGE_VALIDATION_FAILED)

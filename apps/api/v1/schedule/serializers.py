@@ -187,6 +187,22 @@ class CoreScheduleSerializer(serializers.ModelSerializer):
             data['day_of_week'] = None
             data['year'] = None
 
+        require_air_gapped_copy = data.get(
+            "require_air_gapped_copy",
+            getattr(self.instance, "require_air_gapped_copy", False),
+        )
+        if require_air_gapped_copy:
+            storage_points = data.get("storage_points")
+            if storage_points is None and self.instance:
+                storage_points = self.instance.storage_points.all()
+            if not storage_points or not any(
+                storage_point.is_air_gapped for storage_point in storage_points
+            ):
+                raise serializers.ValidationError(
+                    "An air-gapped copy policy requires at least one selected "
+                    "air-gapped storage destination."
+                )
+
         return data
 
     # @staticmethod

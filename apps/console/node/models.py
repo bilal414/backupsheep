@@ -2673,6 +2673,7 @@ class CoreSchedule(TimeStampedModel):
     storage_points = models.ManyToManyField(CoreStorage, related_name="schedules")
     name = models.CharField(max_length=255)
     keep_last = models.PositiveIntegerField(null=True)
+    require_air_gapped_copy = models.BooleanField(default=False)
     type_legacy = models.CharField(max_length=32, default="crontab")
     hour = models.CharField(max_length=255, null=True, blank=True)
     minute = models.CharField(max_length=255, null=True, blank=True)
@@ -3067,6 +3068,11 @@ class CoreNode(TimeStampedModel):
 
         # Cloud servers and volumes don't have storage points for now
         if self.type == self.Type.DATABASE or self.type == self.Type.WEBSITE or self.type == self.Type.SAAS:
+            schedule = CoreSchedule.objects.filter(id=schedule_id).first() if schedule_id else None
+            air_gapped_copy_required = bool(
+                schedule and schedule.require_air_gapped_copy
+            )
+            air_gapped_copy_accepted = False
             storage_points = CoreStorage.objects.filter(
                 id__in=storage_ids,
                 account=self.connection.account,
@@ -3078,6 +3084,9 @@ class CoreNode(TimeStampedModel):
                 """
                 if storage_point.validate():
                     backup.storage_points.add(storage_point)
+                    air_gapped_copy_accepted = (
+                        air_gapped_copy_accepted or storage_point.is_air_gapped
+                    )
                 else:
                     self.connection.account.create_backup_log(
                         message=f"Storage validation failed for {storage_point.name} ({storage_point.type.name}) "
@@ -3086,6 +3095,22 @@ class CoreNode(TimeStampedModel):
                         backup=backup
                     )
                     self.notify_storage_validation_fail(storage_point, backup)
+
+            if air_gapped_copy_required and not air_gapped_copy_accepted:
+                backup.status = UtilBackup.Status.STORAGE_VALIDATION_FAILED
+                backup.save()
+                self.connection.account.create_backup_log(
+                    message=(
+                        f"Required air-gapped copy was not accepted for backup "
+                        f"({backup.uuid_str}) of your node ({self.name})."
+                    ),
+                    node=self,
+                    backup=backup,
+                )
+                # Task callers already treat None as an intentional no-op. Do not
+                # snapshot a source when its required ransomware-protected copy is
+                # unavailable.
+                return None
 
         self.save()
         return backup

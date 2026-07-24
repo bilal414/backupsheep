@@ -1,6 +1,7 @@
 import time
 import boto3
 import pytz
+from django.db import transaction
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
@@ -37,6 +38,12 @@ class CoreStorageAWSS3ReadSerializer(serializers.ModelSerializer):
             "bucket_name",
             "region",
             "prefix",
+            "object_lock_mode",
+            "object_lock_retain_days",
+            "expected_bucket_owner",
+            "lifecycle_transition_days",
+            "lifecycle_storage_class",
+            "lifecycle_last_synced_at",
         )
         datatables_always_serialize = (
             "id",
@@ -46,6 +53,12 @@ class CoreStorageAWSS3ReadSerializer(serializers.ModelSerializer):
             "bucket_name",
             "region",
             "prefix",
+            "object_lock_mode",
+            "object_lock_retain_days",
+            "expected_bucket_owner",
+            "lifecycle_transition_days",
+            "lifecycle_storage_class",
+            "lifecycle_last_synced_at",
         )
 
     def get_access_key(self, obj):
@@ -72,8 +85,37 @@ class CoreStorageAWSS3WriteSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         try:
+            settings_data = {
+                "object_lock_mode": data.get(
+                    "object_lock_mode",
+                    getattr(self.instance, "object_lock_mode", ""),
+                ),
+                "object_lock_retain_days": data.get(
+                    "object_lock_retain_days",
+                    getattr(self.instance, "object_lock_retain_days", None),
+                ),
+                "expected_bucket_owner": data.get(
+                    "expected_bucket_owner",
+                    getattr(self.instance, "expected_bucket_owner", ""),
+                ),
+                "lifecycle_transition_days": data.get(
+                    "lifecycle_transition_days",
+                    getattr(self.instance, "lifecycle_transition_days", None),
+                ),
+                "lifecycle_storage_class": data.get(
+                    "lifecycle_storage_class",
+                    getattr(self.instance, "lifecycle_storage_class", ""),
+                ),
+                "prefix": data.get("prefix", getattr(self.instance, "prefix", "")),
+            }
+            CoreStorageAWSS3.validate_immutability_settings(settings_data)
+            validation_data = dict(data)
+            for field_name, value in settings_data.items():
+                validation_data.setdefault(field_name, value)
+            if self.instance:
+                validation_data.setdefault("no_delete", self.instance.no_delete)
             storage = CoreStorageAWSS3()
-            if not storage.validate(data):
+            if not storage.validate(validation_data):
                 raise ValueError("Please check bucket name and permissions.")
 
             data["access_key"] = bs_encrypt(data["access_key"], self.context["encryption_key"])
@@ -143,15 +185,63 @@ class CoreStorageWriteSerializer(serializers.ModelSerializer):
         ref_name = "Storage AWS S3 Write"
         fields = "__all__"
 
+    def validate(self, data):
+        data = super().validate(data)
+        aws_s3 = data.get("storage_aws_s3") or {}
+        existing_aws_s3 = getattr(self.instance, "storage_aws_s3", None)
+        is_air_gapped = data.get(
+            "is_air_gapped", getattr(self.instance, "is_air_gapped", False)
+        )
+        if is_air_gapped:
+            object_lock_mode = aws_s3.get(
+                "object_lock_mode",
+                getattr(existing_aws_s3, "object_lock_mode", ""),
+            )
+            retain_days = aws_s3.get(
+                "object_lock_retain_days",
+                getattr(existing_aws_s3, "object_lock_retain_days", None),
+            )
+            expected_bucket_owner = aws_s3.get(
+                "expected_bucket_owner",
+                getattr(existing_aws_s3, "expected_bucket_owner", ""),
+            )
+            if object_lock_mode != CoreStorageAWSS3.ObjectLockMode.COMPLIANCE or not retain_days:
+                raise serializers.ValidationError(
+                    "An air-gapped copy requires S3 Object Lock in Compliance mode "
+                    "with a retention period."
+                )
+            if not expected_bucket_owner:
+                raise serializers.ValidationError(
+                    "An air-gapped copy requires the expected AWS bucket owner account ID."
+                )
+            aws_s3["no_delete"] = True
+            data["storage_aws_s3"] = aws_s3
+        return data
+
+    @staticmethod
+    def _should_sync_lifecycle(storage_aws_s3, submitted_data):
+        lifecycle_fields = {"lifecycle_transition_days", "lifecycle_storage_class"}
+        return bool(
+            storage_aws_s3.lifecycle_is_configured()
+            or storage_aws_s3.lifecycle_last_synced_at
+            or lifecycle_fields.intersection(submitted_data.keys())
+        )
+
     def create(self, validated_data):
         storage_aws_s3 = validated_data.pop("storage_aws_s3", [])
-        instance = CoreStorage.objects.create(**validated_data)
-        storage_aws_s3["storage"] = instance
-        CoreStorageAWSS3.objects.create(**storage_aws_s3)
+        with transaction.atomic():
+            instance = CoreStorage.objects.create(**validated_data)
+            storage_aws_s3["storage"] = instance
+            aws_s3 = CoreStorageAWSS3.objects.create(**storage_aws_s3)
+            if self._should_sync_lifecycle(aws_s3, storage_aws_s3):
+                aws_s3.sync_lifecycle_configuration()
         return instance
 
     def update(self, instance, validated_data):
         storage_aws_s3 = validated_data.pop("storage_aws_s3", [])
-        super().update(instance.storage_aws_s3, storage_aws_s3)
-        instance = super().update(instance, validated_data)
+        with transaction.atomic():
+            aws_s3 = super().update(instance.storage_aws_s3, storage_aws_s3)
+            instance = super().update(instance, validated_data)
+            if self._should_sync_lifecycle(aws_s3, storage_aws_s3):
+                aws_s3.sync_lifecycle_configuration()
         return instance

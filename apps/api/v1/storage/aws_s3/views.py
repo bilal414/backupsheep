@@ -88,6 +88,24 @@ class CoreStorageAWSS3View(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         except Exception as e:
             raise StorageValidationFailed(e.__str__())
 
+    @action(detail=True, methods=["post"])
+    def sync_lifecycle(self, request, pk=None):
+        storage = self.get_object()
+        try:
+            lifecycle = storage.storage_aws_s3.sync_lifecycle_configuration()
+        except Exception as exc:
+            return Response(
+                {"detail": f"Unable to sync the S3 lifecycle rule: {exc}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            {
+                "detail": "BackupSheep S3 lifecycle rule is synchronized.",
+                "lifecycle": lifecycle,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=False)
     def highcharts(self, request):
         graph = {"categories": [], "series": []}
