@@ -1,0 +1,133 @@
+# Render Blueprint used by the "Deploy to Render" button in README.md.
+# BackupSheep needs independent web, worker, and scheduler processes. The worker consumes
+# every queue with concurrency 1 because Render services do not share a writable volume.
+
+services:
+  - type: web
+    name: backupsheep-web
+    runtime: docker
+    region: oregon
+    plan: starter
+    numInstances: 1
+    autoDeployTrigger: off
+    healthCheckPath: /healthz/
+    preDeployCommand: python manage.py migrate --noinput
+    envVars:
+      - fromGroup: backupsheep-common
+      - key: ONBOARDING_INSTALL_TOKEN
+        sync: false
+      - key: APP_DOMAIN
+        fromService:
+          type: web
+          name: backupsheep-web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: DJANGO_ALLOWED_HOSTS
+        fromService:
+          type: web
+          name: backupsheep-web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: DATABASE_URL
+        fromDatabase:
+          name: backupsheep-db
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: backupsheep-redis
+          property: connectionString
+
+  - type: worker
+    name: backupsheep-worker
+    runtime: docker
+    region: oregon
+    plan: starter
+    numInstances: 1
+    autoDeployTrigger: off
+    maxShutdownDelaySeconds: 300
+    dockerCommand: >-
+      celery -A backupsheep worker --loglevel=info --hostname=backup@%h
+      -Q cloud,default,database,files,storage,logs --concurrency=1
+    envVars:
+      - fromGroup: backupsheep-common
+      - key: APP_DOMAIN
+        fromService:
+          type: web
+          name: backupsheep-web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: DJANGO_ALLOWED_HOSTS
+        fromService:
+          type: web
+          name: backupsheep-web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: DATABASE_URL
+        fromDatabase:
+          name: backupsheep-db
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: backupsheep-redis
+          property: connectionString
+
+  - type: worker
+    name: backupsheep-beat
+    runtime: docker
+    region: oregon
+    plan: starter
+    numInstances: 1
+    autoDeployTrigger: off
+    dockerCommand: celery -A backupsheep beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    envVars:
+      - fromGroup: backupsheep-common
+      - key: APP_DOMAIN
+        fromService:
+          type: web
+          name: backupsheep-web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: DJANGO_ALLOWED_HOSTS
+        fromService:
+          type: web
+          name: backupsheep-web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: DATABASE_URL
+        fromDatabase:
+          name: backupsheep-db
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: backupsheep-redis
+          property: connectionString
+
+  - type: keyvalue
+    name: backupsheep-redis
+    plan: starter
+    maxmemoryPolicy: noeviction
+    # Redis is reachable over Render's private network only.
+    ipAllowList: []
+
+databases:
+  - name: backupsheep-db
+    databaseName: backupsheep
+    user: backupsheep
+    region: oregon
+    plan: basic-256mb
+    postgresMajorVersion: "18"
+    # The app uses the private connection string, not public database access.
+    ipAllowList: []
+
+envVarGroups:
+  - name: backupsheep-common
+    envVars:
+      - key: DJANGO_SERVER
+        value: prod
+      - key: DJANGO_DEBUG
+        value: "false"
+      - key: DJANGO_HTTPS
+        value: "true"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: APP_NAME
+        value: BackupSheep
+      - key: APP_PROTOCOL
+        value: "https://"

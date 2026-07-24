@@ -4,11 +4,10 @@ All configuration is read from environment variables at boot — in the Docker s
 the `.env` file (`env_file: .env`). Copy `.env_sample` to `.env` and edit it.
 
 **How keys are read.** `.env_sample` also supplies the non-secret defaults when a platform
-injects environment variables without mounting a `.env` file (such as DigitalOcean App
-Platform). A real `.env` and then process environment override those defaults. For a
-manual install, the simplest rule remains: **copy `.env_sample` wholesale and don't delete
-lines**. Only `DJANGO_SECRET_KEY` and the `DB_*` connection values need real values to
-boot.
+injects environment variables without mounting a `.env` file (such as Render or Railway).
+A real `.env` and then process environment override those defaults. For a manual install,
+the simplest rule remains: **copy `.env_sample` wholesale and don't delete lines**. Only
+`DJANGO_SECRET_KEY` and the database connection values need real values to boot.
 
 > Booleans (`DJANGO_DEBUG`, `DJANGO_HTTPS`) are parsed leniently: `true/1/yes/on` ⇒ on,
 > anything else ⇒ off.
@@ -38,14 +37,14 @@ boot.
 | `DB_PASSWORD` | ✅ | *(you set it)* | Password (`POSTGRES_PASSWORD`). |
 | `DB_HOST` | ✅ | `db` | Host — the Compose service name. |
 | `DB_PORT` | ✅ | `5432` | Port. |
+| `DATABASE_URL` | optional | unset | Managed PostgreSQL URL. When set, it overrides the five discrete `DB_*` connection values. |
 | `DB_SSLMODE` | optional | unset | PostgreSQL `sslmode`, for example `require` for a managed database that requires TLS. |
 
 ## Task queue (Celery / RabbitMQ)
 
 | Variable | Required | Default | Purpose |
 |----------|:--------:|---------|---------|
-| `CELERY_BROKER_URL` | optional | `amqp://guest:guest@rabbitmq:5672//` | Celery broker URL. The default already points at the Compose stack's bundled `rabbitmq` service; change it only for an external broker. |
-| `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_PASS` | optional | unset | When all host/user/password values are present, BackupSheep derives an escaped AMQP URL from them. This is used by the DigitalOcean App Platform template so one RabbitMQ password can be shared safely between components. |
+| `CELERY_BROKER_URL` | optional | `amqp://guest:guest@rabbitmq:5672//` | Celery broker URL. The Compose stack uses RabbitMQ; hosted-platform templates use a managed Redis URL. |
 | `LOG_RETENTION_DAYS` | optional | `30` | Days to keep backup run logs on local disk *and* activity-log entries in the database before `delete_old_logs` (03:00) / `delete_old_db_logs` (03:30) prune them. |
 
 ## Transactional email

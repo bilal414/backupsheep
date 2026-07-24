@@ -38,7 +38,11 @@ class OnboardingMiddleware(object):
             # visitors are forced to the wizard. Static assets always pass.
             if request.user.is_authenticated:
                 pass
-            elif not (path.startswith(onboarding) or path.startswith(settings.STATIC_URL)):
+            elif not (
+                path == "/healthz/"
+                or path.startswith(onboarding)
+                or path.startswith(settings.STATIC_URL)
+            ):
                 return HttpResponseRedirect(onboarding + "/")
         elif path.startswith(onboarding):
             # Already configured: wizard is locked.

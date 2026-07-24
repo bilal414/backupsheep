@@ -20,10 +20,6 @@
   <img src="https://img.shields.io/badge/docker-compose-2496ED.svg?logo=docker&logoColor=white" alt="Docker Compose">
 </p>
 
-<p align="center">
-  <a href="https://cloud.digitalocean.com/apps/new?repo=https://github.com/bilal414/backupsheep/tree/main"><img src="https://www.deploytodo.com/do-btn-blue.svg" alt="Deploy to DigitalOcean"></a>
-</p>
-
 > **Status: self-hostable (beta).** BackupSheep was a paid SaaS from 2017–2023 serving
 > 6,500+ users. It has been rewritten and open-sourced as a self-hosted application: all
 > SaaS/billing machinery has been removed so you can run it yourself. Licensed under the
@@ -121,17 +117,29 @@ The initial install serves plain HTTP on port 8000. Allow that port through your
 if needed, and put the app behind HTTPS before exposing it publicly. See
 [Production deployment](docs/deployment.md).
 
-### DigitalOcean App Platform
+### DigitalOcean Droplet
 
-[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/bilal414/backupsheep/tree/main)
+DigitalOcean App Platform's deploy button supports only a single service (optionally with
+a development database), while BackupSheep needs a web process, queue worker, scheduler,
+database, and broker. Create an Ubuntu 22.04+ or Debian 12+ Droplet, then use the
+[one-command installer](docs/digitalocean-droplet.md). It deploys the complete Docker
+Compose stack with persistent volumes.
 
-The button deploys the web console, an internal RabbitMQ broker, one all-queue Celery
-worker, Beat, a pre-deploy migration job, and a PostgreSQL development database. Before
-clicking **Create App**, replace the prompted Django secret, onboarding token, and
-RabbitMQ password with unique random values. Use object storage for backups: App Platform
-has no durable shared filesystem, so **Local Storage** is not suitable there. See the
-[DigitalOcean App Platform guide](docs/digitalocean-app-platform.md) for sizing,
-production limitations, and post-deploy setup.
+### Render
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/bilal414/backupsheep/tree/main)
+
+The Render Blueprint deploys the web console, one all-queue Celery worker, Beat, managed
+PostgreSQL, and managed Redis. Enter a private onboarding token during setup, then use
+external object storage for backups—**Local Storage** is not suitable for this PaaS
+deployment. See the [Render guide](docs/render.md) for its sizing and worker limitations.
+
+### Railway
+
+Railway requires a published multi-service template before it can issue a Deploy on Railway
+button. The repository includes the versioned service configurations and exact template
+publication steps in the [Railway guide](docs/railway.md). It provisions web, worker, Beat,
+PostgreSQL, and Redis in one project; use external object storage for backup archives.
 
 ### Manual Docker Compose install
 
@@ -205,7 +213,9 @@ Celery, Alpine.js + Tailwind CSS. See [docs/scaling.md](docs/scaling.md).
 | Guide | What's in it |
 |-------|--------------|
 | [Installation](docs/installation.md) | Prerequisites, Docker Compose setup, the `.env` you must edit |
-| [DigitalOcean App Platform](docs/digitalocean-app-platform.md) | Deploy-to-DO button, component layout, and platform limitations |
+| [DigitalOcean Droplet](docs/digitalocean-droplet.md) | Deploy the complete Docker stack with the one-command installer |
+| [Render](docs/render.md) | Deploy the managed web, worker, scheduler, PostgreSQL, and Redis stack |
+| [Railway](docs/railway.md) | Publish the ready-to-configure multi-service Railway deployment template |
 | [Configuration](docs/configuration.md) | Environment-variable reference, incl. `BS_LOCAL_STORAGE_PATH` |
 | [First-run wizard](docs/first-run.md) | The 5 setup steps; admin accounts & `/django-admin` |
 | [Usage](docs/usage.md) | Sources, storage, schedules, backup modes, retention, **restores**, dashboard, teams & permissions, notifications, activity log |
