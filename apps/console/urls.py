@@ -6,6 +6,9 @@ app_name = "console"
 urlpatterns = [
     path('', include('apps.console.auth.urls')),
     path('onboarding/', include('apps.console.onboarding.urls')),
+    # Public invite accept/signup page (must stay reachable while logged out --
+    # see LOGIN_REQUIRED_IGNORE_PATHS).
+    path('invite/', include('apps.console.invite.urls')),
     path(
         r"console/",
         include(

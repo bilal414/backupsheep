@@ -1,0 +1,155 @@
+{% extends "_master_auth.html" %}
+{% block title %}{{ heading }}{% endblock %}
+{% block og_title %}{{ heading }}{% endblock %}
+{% block description %}{{ heading }}{% endblock %}
+{% block og_description %}{{ heading }}{% endblock %}
+{% block page_class %}page_login{% endblock %}
+
+{% block content %}
+    <div class="flex min-h-full flex-col justify-center py-12 sm:px-6 lg:px-8">
+        <div class="sm:mx-auto sm:w-full sm:max-w-md">
+            <img class="mx-auto h-11 w-auto" src="{{ STATIC_URL }}console/images/logo.webp"
+                 alt="{{ site.app_name }}">
+            {% if invite_unavailable %}
+                <h2 class="mt-8 text-center text-2xl font-bold tracking-tight text-slate-900">Invite unavailable</h2>
+            {% else %}
+                <h2 class="mt-8 text-center text-2xl font-bold tracking-tight text-slate-900">Join
+                    {{ invite.account.get_name }}</h2>
+                <p class="mt-2 text-center text-sm text-slate-500">{{ invite.added_by.full_name }}
+                    ({{ invite.added_by.email }}) invited you to collaborate on {{ site.app_name }}</p>
+            {% endif %}
+        </div>
+
+        <div class="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+            <div class="bg-white py-8 px-6 shadow-lifted ring-1 ring-slate-900/5 sm:rounded-2xl sm:px-10">
+                {% if invite_unavailable %}
+                    {# Accepted, cancelled or expired invites land here. #}
+                    <div class="rounded-lg bg-amber-50 ring-1 ring-amber-200 text-amber-800 text-sm px-4 py-3">
+                        This invite is no longer active
+                        ({% if invite.status == 1 %}already accepted{% elif invite.status == 2 %}expired{% elif invite.status == 3 %}cancelled{% endif %}).
+                        Ask the account owner to send you a new invite.
+                    </div>
+                    <div class="mt-6">
+                        <a href="{% url 'console:auth:login' %}"
+                           class="flex w-full justify-center rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 transition-colors">
+                            Back to login
+                        </a>
+                    </div>
+                {% else %}
+                    <div class="mb-6">
+                        <dl class="space-y-2 text-sm">
+                            <div class="flex justify-between">
+                                <dt class="text-slate-500">Account</dt>
+                                <dd class="font-medium text-slate-900">{{ invite.account.get_name }}</dd>
+                            </div>
+                            <div class="flex justify-between">
+                                <dt class="text-slate-500">Invited by</dt>
+                                <dd class="font-medium text-slate-900">{{ invite.added_by.full_name }}</dd>
+                            </div>
+                            {% if groups %}
+                                <div class="flex justify-between">
+                                    <dt class="text-slate-500">Groups</dt>
+                                    <dd class="font-medium text-slate-900 text-right">
+                                        {% for group in groups %}
+                                            {{ group.name }}{% if not forloop.last %}, {% endif %}
+                                        {% endfor %}
+                                    </dd>
+                                </div>
+                            {% endif %}
+                        </dl>
+                    </div>
+
+                    {% if request.user.is_authenticated %}
+                        {% if request.user.email.lower == invite.email.lower %}
+                            {# Logged in with the invited email: one-click accept. #}
+                            <form method="post" class="space-y-6">
+                                {% csrf_token %}
+                                <button type="submit"
+                                        class="flex w-full justify-center rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 transition-colors">
+                                    Accept invite
+                                </button>
+                            </form>
+                        {% else %}
+                            <div class="rounded-lg bg-amber-50 ring-1 ring-amber-200 text-amber-800 text-sm px-4 py-3">
+                                You are logged in as <strong>{{ request.user.email }}</strong>, but this invite is
+                                for <strong>{{ invite.email }}</strong>. Log out and open this link again to accept it.
+                            </div>
+                            <div class="mt-6 text-center text-sm">
+                                <a href="{% url 'console:auth:logout' %}"
+                                   class="font-medium text-indigo-600 hover:text-indigo-500">Log out</a>
+                            </div>
+                        {% endif %}
+                    {% else %}
+                        {# Anonymous invitee: create an account and accept in one step. #}
+                        <form method="post" class="space-y-6" novalidate>
+                            {% csrf_token %}
+                            {% if form.non_field_errors %}
+                                <div class="rounded-lg bg-red-50 ring-1 ring-red-100 text-red-700 text-sm px-4 py-3">{{ form.non_field_errors }}</div>
+                            {% endif %}
+                            <div>
+                                <label for="email" class="block text-sm font-medium leading-6 text-slate-700">Email
+                                    address</label>
+                                <div class="mt-2">
+                                    <input id="email" type="email" value="{{ invite.email }}" readonly
+                                           class="block w-full rounded-lg border-0 px-3.5 py-2.5 text-slate-500 bg-slate-50 shadow-sm ring-1 ring-inset ring-slate-300 sm:text-sm sm:leading-6">
+                                </div>
+                            </div>
+                            <div>
+                                <label for="first_name" class="block text-sm font-medium leading-6 text-slate-700">First
+                                    name</label>
+                                <div class="mt-2">
+                                    {{ form.first_name }}
+                                    {% for error in form.first_name.errors %}
+                                        <p class="mt-2 text-sm text-red-600">{{ error }}</p>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <div>
+                                <label for="last_name" class="block text-sm font-medium leading-6 text-slate-700">Last
+                                    name</label>
+                                <div class="mt-2">
+                                    {{ form.last_name }}
+                                    {% for error in form.last_name.errors %}
+                                        <p class="mt-2 text-sm text-red-600">{{ error }}</p>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <div>
+                                <label for="password1" class="block text-sm font-medium leading-6 text-slate-700">Password</label>
+                                <div class="mt-2">
+                                    {{ form.password1 }}
+                                    {% for error in form.password1.errors %}
+                                        <p class="mt-2 text-sm text-red-600">{{ error }}</p>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <div>
+                                <label for="password2" class="block text-sm font-medium leading-6 text-slate-700">Confirm
+                                    password</label>
+                                <div class="mt-2">
+                                    {{ form.password2 }}
+                                    {% for error in form.password2.errors %}
+                                        <p class="mt-2 text-sm text-red-600">{{ error }}</p>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <div>
+                                <button type="submit"
+                                        class="flex w-full justify-center rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 transition-colors">
+                                    Create account &amp; accept invite
+                                </button>
+                            </div>
+                            <div class="text-center text-sm">
+                                <a href="{% url 'console:auth:login' %}?next={{ request.path }}"
+                                   class="font-medium text-indigo-600 hover:text-indigo-500">Already have an account?
+                                    Log in</a>
+                            </div>
+                        </form>
+                    {% endif %}
+                {% endif %}
+            </div>
+            <p class="mt-8 text-center text-xs text-slate-400">{{ site.app_name }} &mdash; automated backups for your
+                infrastructure</p>
+        </div>
+    </div>
+{% endblock %}

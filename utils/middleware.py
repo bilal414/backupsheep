@@ -83,3 +83,35 @@ class TimezoneMiddleware(MiddlewareMixin):
         # Code to be executed for each request/response after
         # the view is called.
         return response
+
+
+class LocalLocationIPMiddleware(object):
+    """Refresh the self-hosted ("local") location's public IPs when the
+    connection-setup "Backup Server" dropdown data is fetched.
+
+    The dropdown calls GET /api/v1/connections/<integration>/endpoints/ (one DRF
+    action per integration, 16 near-identical views); hooking here keeps that
+    single central trigger instead of editing every view. The refresh itself is
+    cache-throttled, so the per-request overhead is just the path check.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.method == "GET":
+            # Match exactly /api/v1/connections/<something>/endpoints/ -- no other
+            # route uses an "endpoints" segment.
+            parts = request.path.strip("/").split("/")
+            if (
+                    len(parts) == 5
+                    and parts[:3] == ["api", "v1", "connections"]
+                    and parts[4] == "endpoints"
+            ):
+                try:
+                    from apps.console.connection.models import CoreConnectionLocation
+
+                    CoreConnectionLocation.refresh_local_ip_addresses()
+                except Exception:
+                    pass
+        return self.get_response(request)

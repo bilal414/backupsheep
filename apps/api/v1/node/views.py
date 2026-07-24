@@ -12,7 +12,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
 
-from apps.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_helpers import visible_nodes
+from apps.api.v1.utils.api_permissions import MemberGroupPermissions
+from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from .filters import CoreNodeFilter
 from .serializers import CoreCloudRestoreSerializer, CoreNodeSerializer
@@ -32,8 +34,28 @@ from ..utils.api_filters import DateRangeFilter
 from apps._tasks.helper.tasks import node_delete_requested
 
 
+def _log_activity(request, log_type, data):
+    """Write an activity-log row; never let logging break the view."""
+    try:
+        CoreLog.record(request.user.member.get_current_account(), log_type, data)
+    except Exception:
+        pass
+
+
 class CoreNodeView(viewsets.ModelViewSet):
-    permission_classes = (IsAuthenticated, MemberPermissions,)
+    permission_classes = (IsAuthenticated, MemberGroupPermissions,)
+    action_permissions = {
+        "create": "node_changes",
+        "update": "node_changes",
+        "partial_update": "node_changes",
+        "destroy": "node_changes",
+        "pause": "node_changes",
+        "resume": "node_changes",
+        "delete": "node_changes",
+        "reset_incremental": "node_changes",
+        "take_snapshot": "backup_create",
+        "restore_backup": "backup_create",
+    }
     serializer_class = CoreNodeSerializer
     all_fields = [f.name for f in CoreNode._meta.get_fields()]
     filter_backends = [
@@ -47,15 +69,28 @@ class CoreNodeView(viewsets.ModelViewSet):
 
     def get_queryset(self):
         member = self.request.user.member
-        query = Q(connection__account=member.get_current_account())
-        queryset = CoreNode.objects.filter(query)
-        return queryset
+        return visible_nodes(member)
+
+    def perform_create(self, serializer):
+        node = serializer.save()
+        _log_activity(
+            self.request,
+            CoreLog.Type.NODE,
+            {
+                "message": f"Node '{node.name}' created.",
+                "action": "create",
+                "actor_email": self.request.user.email,
+                "node_id": node.id,
+                "node_name": node.name,
+                "connection_id": node.connection_id,
+                "connection_name": node.connection.name,
+            },
+        )
 
     @action(detail=False)
     def totals(self, request):
         member = self.request.user.member
-        query = Q(connection__account=member.get_current_account())
-        nodes = CoreNode.objects.filter(query)
+        nodes = visible_nodes(member)
 
         all_totals = {
             "combined": {
@@ -148,6 +183,21 @@ class CoreNodeView(viewsets.ModelViewSet):
                     "restore_id": restore.id,
                 }
             )
+            _log_activity(
+                request,
+                CoreLog.Type.RESTORE,
+                {
+                    "message": f"Restore '{restore.name}' requested for node '{node.name}'.",
+                    "action": "restore_create",
+                    "actor_email": request.user.email,
+                    "restore_id": restore.id,
+                    "restore_name": restore.name,
+                    "node_id": node.id,
+                    "node_name": node.name,
+                    "backup_id": backup.id,
+                    "backup_name": backup.name,
+                },
+            )
             return Response(
                 CoreCloudRestoreSerializer(restore).data,
                 status=status.HTTP_201_CREATED,
@@ -166,43 +216,46 @@ class CoreNodeView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def pause(self, request, pk=None):
         node = self.get_object()
-        notes = self.request.data.get("notes")
         node.status = CoreNode.Status.PAUSED
         node.save()
-        # log = CoreLog(account=self.request.user.member.get_current_account(), type=CoreLog.Type.NODE)
-        # log.data = {
-        #     "action": "status",
-        #     "value": node.get_status_display(),
-        #     "object": "node",
-        #     "id": node.id,
-        #     "name": node.name,
-        #     "notes": notes
-        # }
-        # log.save()
+        _log_activity(
+            request,
+            CoreLog.Type.NODE,
+            {
+                "message": f"Node '{node.name}' paused.",
+                "action": "pause",
+                "actor_email": request.user.email,
+                "node_id": node.id,
+                "node_name": node.name,
+                "connection_id": node.connection_id,
+                "connection_name": node.connection.name,
+            },
+        )
         return Response({"detail": "Node is paused."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         node = self.get_object()
-        notes = self.request.data.get("notes")
         node.status = CoreNode.Status.ACTIVE
         node.save()
-        # log = CoreLog(account=self.request.user.member.get_current_account(), type=CoreLog.Type.NODE)
-        # log.data = {
-        #     "action": "status",
-        #     "value": node.get_status_display(),
-        #     "object": "node",
-        #     "id": node.id,
-        #     "name": node.name,
-        #     "notes": notes
-        # }
-        # log.save()
+        _log_activity(
+            request,
+            CoreLog.Type.NODE,
+            {
+                "message": f"Node '{node.name}' resumed.",
+                "action": "resume",
+                "actor_email": request.user.email,
+                "node_id": node.id,
+                "node_name": node.name,
+                "connection_id": node.connection_id,
+                "connection_name": node.connection.name,
+            },
+        )
         return Response({"detail": "Node is resumed."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def delete(self, request, pk=None):
         node = self.get_object()
-        notes = self.request.data.get("notes")
         node.status = CoreNode.Status.DELETE_REQUESTED
         node.save()
 
@@ -213,16 +266,19 @@ class CoreNodeView(viewsets.ModelViewSet):
             args=[node.id],
         )
 
-        # log = CoreLog(account=self.request.user.member.get_current_account(), type=CoreLog.Type.NODE)
-        # log.data = {
-        #     "action": "delete",
-        #     "value": node.get_status_display(),
-        #     "object": "node",
-        #     "id": node.id,
-        #     "name": node.name,
-        #     "notes": notes
-        # }
-        # log.save()
+        _log_activity(
+            request,
+            CoreLog.Type.NODE,
+            {
+                "message": f"Node '{node.name}' delete requested.",
+                "action": "delete",
+                "actor_email": request.user.email,
+                "node_id": node.id,
+                "node_name": node.name,
+                "connection_id": node.connection_id,
+                "connection_name": node.connection.name,
+            },
+        )
         return Response({"detail": "Node will be deleted soon."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
@@ -238,6 +294,19 @@ class CoreNodeView(viewsets.ModelViewSet):
                 os.remove(cache_base + ".meta.json")
             except FileNotFoundError:
                 pass
+        _log_activity(
+            request,
+            CoreLog.Type.NODE,
+            {
+                "message": f"Incremental backups reset for node '{node.name}'.",
+                "action": "reset_incremental",
+                "actor_email": request.user.email,
+                "node_id": node.id,
+                "node_name": node.name,
+                "connection_id": node.connection_id,
+                "connection_name": node.connection.name,
+            },
+        )
         return Response({"detail": "We have reset the incremental backups. Your next backup will be a full backup."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"])

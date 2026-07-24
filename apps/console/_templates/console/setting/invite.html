@@ -212,6 +212,18 @@
                                                             class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                         Modify
                                                     </button>
+                                                {% endif %}
+                                                {% if invite.status == 4 %}
+                                                    <button @click="resendInvite('{{ invite.id }}')" type="button"
+                                                            class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        Resend
+                                                    </button>
+                                                    <button @click="cancelInvite('{{ invite.id }}')" type="button"
+                                                            class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        Cancel
+                                                    </button>
+                                                {% endif %}
+                                                {% if invite.status != 1 %}
                                                     <button @click="deleteInvite('{{ invite.id }}')" type="button"
                                                             class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                         Delete
@@ -673,6 +685,92 @@
 
                         if (response.status === 204) {
                             return {"detail": "Invite deleted."};
+                        } else {
+                            let json;
+                            try {
+                                json = await response.json();
+                            } catch (exception_var) {
+                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                            }
+                            throw new Error(json.detail);
+                        }
+                    }).then((json) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            success: true,
+                            heading: 'Success!',
+                            details: json.detail
+                        });
+                        window.location.reload();
+                    }).catch((error) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            error: true,
+                            heading: 'Error!',
+                            details: error.message
+                        });
+                    });
+                },
+                async resendInvite(invite_id) {
+                    Alpine.store('showLoading').toggle("Resending invite.");
+
+                    let url = "/api/v1/invites/" + invite_id + "/resend/";
+                    let method = "POST";
+
+                    let response = await fetch(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: method,
+                    }).then(async (response) => {
+                        Alpine.store('showLoading').toggle();
+
+                        if (response.ok) {
+                            return response.json();
+                        } else {
+                            let json;
+                            try {
+                                json = await response.json();
+                            } catch (exception_var) {
+                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                            }
+                            throw new Error(json.detail);
+                        }
+                    }).then((json) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            success: true,
+                            heading: 'Success!',
+                            details: json.detail
+                        });
+                        window.location.reload();
+                    }).catch((error) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            error: true,
+                            heading: 'Error!',
+                            details: error.message
+                        });
+                    });
+                },
+                async cancelInvite(invite_id) {
+                    Alpine.store('showLoading').toggle("Cancelling invite.");
+
+                    let url = "/api/v1/invites/" + invite_id + "/cancel/";
+                    let method = "POST";
+
+                    let response = await fetch(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: method,
+                    }).then(async (response) => {
+                        Alpine.store('showLoading').toggle();
+
+                        if (response.ok) {
+                            return response.json();
                         } else {
                             let json;
                             try {

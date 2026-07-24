@@ -580,6 +580,29 @@ class CurrentAccountDefault:
         return "%s()" % self.__class__.__name__
 
 
+def visible_nodes(member):
+    """Queryset of CoreNode rows `member` may see in their CURRENT account.
+
+    - The account's primary member sees every node in the account.
+    - Any other member sees the union of the `nodes` lists of the account
+      groups they belong to -- EXCEPT that a group whose `nodes` list is EMPTY
+      grants access to ALL account nodes (an unrestricted group).
+    - A member in no groups sees no nodes.
+    """
+    from apps.console.account.models import CoreAccountGroup
+    from apps.console.node.models import CoreNode
+
+    account = member.get_current_account()
+    nodes = CoreNode.objects.filter(connection__account=account)
+    if account is None or member.is_primary_account:
+        return nodes
+    account_groups = CoreAccountGroup.objects.filter(account=account, group__user=member.user)
+    if account_groups.filter(nodes__isnull=True).exists():
+        # At least one unrestricted group: full account-wide visibility.
+        return nodes
+    return nodes.filter(enrollments__in=account_groups).distinct()
+
+
 class GenerateGroup:
     requires_context = True
 

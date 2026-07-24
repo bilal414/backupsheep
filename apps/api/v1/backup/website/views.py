@@ -42,6 +42,7 @@ from apps.console.backup.models import (
     CoreWebsiteBackupStoragePoints,
     CoreWebsiteRestore,
 )
+from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from rest_framework import status
 
@@ -49,6 +50,14 @@ from apps.console.storage.models import CoreStorage
 from apps.api.v1.utils.api_exceptions import ExceptionDefault
 from google.cloud import storage as gc_storage
 from google.oauth2 import service_account
+
+
+def _log_activity(request, log_type, data):
+    """Write an activity-log row; never let logging break the view."""
+    try:
+        CoreLog.record(request.user.member.get_current_account(), log_type, data)
+    except Exception:
+        pass
 
 class CoreWebsiteBackupView(viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreWebsiteBackupViewPermissions)
@@ -106,6 +115,21 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
                     )
 
                     download_url = storage_point.generate_download_url()
+                    _log_activity(
+                        request,
+                        CoreLog.Type.BACKUP,
+                        {
+                            "message": f"Download URL generated for backup '{backup.uuid_str}'.",
+                            "action": "download",
+                            "actor_email": request.user.email,
+                            "backup_id": backup.id,
+                            "backup_name": backup.name,
+                            "node_id": backup.website.node_id,
+                            "node_name": backup.website.node.name,
+                            "connection_id": backup.website.node.connection_id,
+                            "connection_name": backup.website.node.connection.name,
+                        },
+                    )
                     return Response({"url": download_url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
                 else:
                     raise DownloadStoragePointNotFound()

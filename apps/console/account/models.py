@@ -6,6 +6,57 @@ from model_utils.models import TimeStampedModel
 from django.contrib.auth.models import Group
 from django.utils.text import slugify
 
+# Sentinel for CoreAccount.get_all_backups(): an explicit status=None means
+# "every status", while omitting the argument keeps the historical
+# COMPLETE-only default.
+_COMPLETE_ONLY = object()
+
+
+def get_backup_models():
+    """(model, node FK attribute) pairs for every concrete backup model.
+
+    The FK points at the node-type object (CoreWebsite, CoreDigitalOcean, ...)
+    that owns the `.node` property. Imports stay lazy: backup.models pulls in
+    storage/connection models which import this module back.
+    """
+    from ..backup.models import (
+        CoreWebsiteBackup,
+        CoreDatabaseBackup,
+        CoreWordPressBackup,
+        CoreBasecampBackup,
+        CoreDigitalOceanBackup,
+        CoreHetznerBackup,
+        CoreUpCloudBackup,
+        CoreOVHCABackup,
+        CoreOVHEUBackup,
+        CoreOVHUSBackup,
+        CoreVultrBackup,
+        CoreAWSBackup,
+        CoreLightsailBackup,
+        CoreAWSRDSBackup,
+        CoreOracleBackup,
+        CoreGoogleCloudBackup,
+    )
+
+    return (
+        (CoreWebsiteBackup, "website"),
+        (CoreDatabaseBackup, "database"),
+        (CoreWordPressBackup, "wordpress"),
+        (CoreBasecampBackup, "basecamp"),
+        (CoreDigitalOceanBackup, "digitalocean"),
+        (CoreHetznerBackup, "hetzner"),
+        (CoreUpCloudBackup, "upcloud"),
+        (CoreOVHCABackup, "ovh_ca"),
+        (CoreOVHEUBackup, "ovh_eu"),
+        (CoreOVHUSBackup, "ovh_us"),
+        (CoreVultrBackup, "vultr"),
+        (CoreAWSBackup, "aws"),
+        (CoreLightsailBackup, "lightsail"),
+        (CoreAWSRDSBackup, "aws_rds"),
+        (CoreOracleBackup, "oracle"),
+        (CoreGoogleCloudBackup, "google_cloud"),
+    )
+
 
 class CoreAccount(TimeStampedModel):
     class Status(models.IntegerChoices):
@@ -113,134 +164,87 @@ class CoreAccount(TimeStampedModel):
             query &= ~Q(storage__type__code="bs")
 
         # Website Storage
-        query_web = query & Q(
-            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE
-        )
-        storage_used += (
-            CoreWebsiteBackupStoragePoints.objects.filter(query_web)
-            .aggregate(Sum("backup__size"))
-            .get("backup__size__sum", 0)
-            or 0
-        )
+        if not database_only:
+            query_web = query & Q(
+                status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE
+            )
+            storage_used += (
+                CoreWebsiteBackupStoragePoints.objects.filter(query_web)
+                .aggregate(Sum("backup__size"))
+                .get("backup__size__sum", 0)
+                or 0
+            )
 
         # Database Storage
-        query_db = query & Q(
-            status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_COMPLETE
-        )
-        storage_used += (
-            CoreDatabaseBackupStoragePoints.objects.filter(query_db)
-            .aggregate(Sum("backup__size"))
-            .get("backup__size__sum", 0)
-            or 0
-        )
+        if not website_only:
+            query_db = query & Q(
+                status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_COMPLETE
+            )
+            storage_used += (
+                CoreDatabaseBackupStoragePoints.objects.filter(query_db)
+                .aggregate(Sum("backup__size"))
+                .get("backup__size__sum", 0)
+                or 0
+            )
 
         # WordPress Storage
-        query_db = query & Q(
-            status=CoreWordPressBackupStoragePoints.Status.UPLOAD_COMPLETE
-        )
-        storage_used += (
-            CoreWordPressBackupStoragePoints.objects.filter(query_db)
-            .aggregate(Sum("backup__size"))
-            .get("backup__size__sum", 0)
-            or 0
-        )
+        if not database_only:
+            query_wp = query & Q(
+                status=CoreWordPressBackupStoragePoints.Status.UPLOAD_COMPLETE
+            )
+            storage_used += (
+                CoreWordPressBackupStoragePoints.objects.filter(query_wp)
+                .aggregate(Sum("backup__size"))
+                .get("backup__size__sum", 0)
+                or 0
+            )
 
         return storage_used
 
-    def get_all_backups(self, last_backup_count=3):
-        from ..backup.models import (
-            CoreWebsiteBackup,
-            CoreDatabaseBackup,
-            CoreWordPressBackup,
-            CoreBasecampBackup,
-            CoreDigitalOceanBackup,
-            CoreHetznerBackup,
-            CoreUpCloudBackup,
-            CoreOVHCABackup,
-            CoreOVHEUBackup,
-            CoreOVHUSBackup,
-            CoreVultrBackup,
-            CoreAWSBackup,
-            CoreLightsailBackup,
-            CoreAWSRDSBackup,
-            CoreOracleBackup,
-            CoreGoogleCloudBackup,
-        )
+    def get_all_backups(
+        self, last_backup_count=3, status=_COMPLETE_ONLY, limit=None, node_ids=None
+    ):
+        """Unified, newest-first list of this account's backups across all models.
+
+        Default behavior is the historical one: COMPLETE backups only, up to
+        `last_backup_count` rows per backup model, and the full merged list
+        returned (not truncated to `last_backup_count` overall).
+
+        `status` accepts an iterable of UtilBackup.Status values to filter on,
+        or None to include every status. `limit` caps the merged result (and the
+        per-model pre-slice, so small limits stay cheap). `node_ids` optionally
+        scopes the result to a member's permitted nodes.
+        """
         from ..utils.models import UtilBackup
         from itertools import chain
 
-        website_backups = CoreWebsiteBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, website__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        database_backups = CoreDatabaseBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, database__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        wordpress_backups = CoreWordPressBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, wordpress__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        basecamp_backups = CoreBasecampBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, basecamp__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        digitalocean_backups = CoreDigitalOceanBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE,
-            digitalocean__node__connection__account=self,
-        ).order_by("-modified")[:last_backup_count]
-        hetzner_backups = CoreHetznerBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, hetzner__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        upcloud_backups = CoreUpCloudBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, upcloud__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        ovh_ca_backups = CoreOVHCABackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, ovh_ca__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        ovh_eu_backups = CoreOVHEUBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, ovh_eu__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        ovh_us_backups = CoreOVHUSBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, ovh_us__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        vultr_backups = CoreVultrBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, vultr__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        aws_backups = CoreAWSBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, aws__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        lightsail_backups = CoreLightsailBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, lightsail__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        aws_rds_backups = CoreAWSRDSBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, aws_rds__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        oracle_backups = CoreOracleBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, oracle__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
-        google_cloud_backups = CoreGoogleCloudBackup.objects.filter(
-            status=UtilBackup.Status.COMPLETE, google_cloud__node__connection__account=self
-        ).order_by("-modified")[:last_backup_count]
+        if status is _COMPLETE_ONLY:
+            status = (UtilBackup.Status.COMPLETE,)
 
-        backups = list(
-            chain(
-                website_backups,
-                database_backups,
-                wordpress_backups,
-                basecamp_backups,
-                digitalocean_backups,
-                hetzner_backups,
-                upcloud_backups,
-                ovh_ca_backups,
-                ovh_eu_backups,
-                ovh_us_backups,
-                vultr_backups,
-                aws_backups,
-                lightsail_backups,
-                aws_rds_backups,
-                oracle_backups,
-                google_cloud_backups,
+        per_model_count = limit if limit is not None else last_backup_count
+
+        querysets = []
+        for model, node_attr in get_backup_models():
+            queryset = model.objects.filter(
+                **{f"{node_attr}__node__connection__account": self}
             )
-        )
+            if node_ids is not None:
+                queryset = queryset.filter(**{f"{node_attr}__node_id__in": node_ids})
+            if status is not None:
+                queryset = queryset.filter(status__in=status)
+            queryset = queryset.select_related(
+                node_attr,
+                f"{node_attr}__node",
+                f"{node_attr}__node__connection",
+                f"{node_attr}__node__connection__integration",
+            )
+            querysets.append(queryset.order_by("-modified")[:per_model_count])
 
-        return sorted(backups, key=lambda backup: backup.modified, reverse=True)
+        backups = list(chain(*querysets))
+        backups = sorted(backups, key=lambda backup: backup.modified, reverse=True)
+        if limit is not None:
+            backups = backups[:limit]
+        return backups
 
     def get_node_count(self, exclude_paused=None):
         from ..node.models import CoreNode
@@ -283,6 +287,64 @@ class CoreAccount(TimeStampedModel):
             return self.name
         else:
             return self.get_primary_member().full_name
+
+    def get_notification_recipients(self, event):
+        """Distinct (member, email) pairs that should receive `event` notifications.
+
+        event is "success" or "fail". Considers ACTIVE memberships only and honors
+        each membership's notify_on_success / notify_on_fail flag (a NULL flag
+        counts as True); the primary membership is ALWAYS included regardless of
+        its flag so the account owner can never be silently opted out.
+        """
+        from ..member.models import CoreMemberAccount
+
+        if event == "success":
+            flag_field = "notify_on_success"
+        elif event == "fail":
+            flag_field = "notify_on_fail"
+        else:
+            raise ValueError(f"unknown notification event: {event}")
+
+        recipients = []
+        seen = set()
+        memberships = self.memberships.filter(
+            status=CoreMemberAccount.Status.ACTIVE
+        ).select_related("member__user")
+        for membership in memberships:
+            if not membership.primary:
+                if getattr(membership, flag_field) is False:
+                    continue
+            member = membership.member
+            email = member.user.email
+            if not email or (member.id, email) in seen:
+                continue
+            seen.add((member.id, email))
+            recipients.append((member, email))
+        return recipients
+
+    def send_notification(self, message):
+        """Fan a plain-text notification out to the account's connected channels.
+
+        Sends to every connected Slack workspace and Telegram chat (the channel
+        models carry no enabled/disabled flag, so every connected channel is an
+        active one). Each channel send is wrapped so one failing channel can
+        never break the others -- or the caller (send_log_to_db).
+        """
+        from sentry_sdk import capture_exception
+
+        for slack in self.notification_slack.all():
+            try:
+                slack.send(message)
+            except Exception as e:
+                capture_exception(e)
+                print(f"unable to send slack notification for account {self.id}: {e}")
+
+        for telegram in self.notification_telegram.all():
+            try:
+                telegram.send(message)
+            except Exception as e:
+                capture_exception(e)
+                print(f"unable to send telegram notification for account {self.id}: {e}")
 
 
 class CoreAccountGroup(TimeStampedModel):

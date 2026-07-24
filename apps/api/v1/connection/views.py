@@ -11,7 +11,9 @@ from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.console.connection.models import CoreConnection, CoreIntegration, CoreConnectionLocation
-from apps.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_helpers import visible_nodes
+from apps.api.v1.utils.api_permissions import MemberGroupPermissions
+from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from .filters import CoreConnectionFilter
 from .serializers import CoreConnectionSerializer
@@ -19,8 +21,17 @@ from ..utils.api_filters import DateRangeFilter
 from ..utils.api_serializers import ReadWriteSerializerMixin
 
 
+def _log_activity(request, log_type, data):
+    """Write an activity-log row; never let logging break the view."""
+    try:
+        CoreLog.record(request.user.member.get_current_account(), log_type, data)
+    except Exception:
+        pass
+
+
 class CoreConnectionView(viewsets.ModelViewSet):
-    permission_classes = (IsAuthenticated, MemberPermissions,)
+    permission_classes = (IsAuthenticated, MemberGroupPermissions,)
+    action_permissions = {"*": "integration_changes"}
     serializer_class = CoreConnectionSerializer
     all_fields = [f.name for f in CoreConnection._meta.get_fields()]
     filter_backends = [
@@ -36,22 +47,44 @@ class CoreConnectionView(viewsets.ModelViewSet):
         member = self.request.user.member
         query_partners = Q(account=member.get_current_account())
         queryset = CoreConnection.objects.filter(query_partners)
+        if not member.is_primary_account:
+            queryset = queryset.filter(nodes__in=visible_nodes(member)).distinct()
         return queryset
 
     @action(detail=True, methods=["post"])
     def pause(self, request, pk=None):
         connection = self.get_object()
-        notes = self.request.data.get("notes")
         connection.status = CoreConnection.Status.PAUSED
         connection.save()
+        _log_activity(
+            request,
+            CoreLog.Type.CONNECTION,
+            {
+                "message": f"Connection '{connection.name}' paused.",
+                "action": "pause",
+                "actor_email": request.user.email,
+                "connection_id": connection.id,
+                "connection_name": connection.name,
+            },
+        )
         return Response({"detail": "Connection is paused."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         connection = self.get_object()
-        notes = self.request.data.get("notes")
         connection.status = CoreConnection.Status.ACTIVE
         connection.save()
+        _log_activity(
+            request,
+            CoreLog.Type.CONNECTION,
+            {
+                "message": f"Connection '{connection.name}' resumed.",
+                "action": "resume",
+                "actor_email": request.user.email,
+                "connection_id": connection.id,
+                "connection_name": connection.name,
+            },
+        )
         return Response({"detail": "Connection is resumed."}, status=status.HTTP_200_OK)
 
     # @action(detail=True, methods=["post"])
@@ -67,16 +100,28 @@ class CoreConnectionView(viewsets.ModelViewSet):
         n_count = instance.nodes.filter().count()
         if n_count > 0:
             return Response({"detail": f"The integration is attached to {n_count} node(s). Delete the node(s) first or you can pause it if you are not using it anymore."}, status=status.HTTP_409_CONFLICT)
+        # Capture identity before the row disappears for the activity log.
+        connection_id, connection_name = instance.id, instance.name
         self.perform_destroy(instance)
+        _log_activity(
+            request,
+            CoreLog.Type.CONNECTION,
+            {
+                "message": f"Connection '{connection_name}' deleted.",
+                "action": "delete",
+                "actor_email": request.user.email,
+                "connection_id": connection_id,
+                "connection_name": connection_name,
+            },
+        )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @method_decorator(cache_page(60 * 60 * 1))
     @action(detail=False)
     def totals(self, request):
         member = self.request.user.member
-        query_partners = Q(account=member.get_current_account())
-        connections = CoreConnection.objects.filter(query_partners)
-        nodes = CoreNode.objects.filter(connection__in=connections)
+        connections = self.get_queryset()
+        nodes = visible_nodes(member)
         all_totals = {
             "combined": {
                 "connections": connections.count(),

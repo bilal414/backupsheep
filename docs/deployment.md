@@ -87,6 +87,7 @@ credentials.
 
 ## Email
 
-Configure a transactional-email provider (Postmark/Mailgun/SES) so password resets and
-failure notifications can be delivered. Without one, recover a lost admin password with
+Configure a transactional-email provider (Postmark/Mailgun/SES) so password resets, team
+invites, and backup/restore notifications can be delivered. Without one, recover a lost
+admin password with
 `docker compose run --rm app python manage.py changepassword <email>`.

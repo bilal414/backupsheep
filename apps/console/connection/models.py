@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import os
 
@@ -5,6 +6,7 @@ import boto3
 import requests
 from botocore.exceptions import ClientError
 from django.conf import settings
+from django.core.cache import cache
 from django.db import models
 import time
 
@@ -2780,6 +2782,58 @@ class CoreConnectionLocation(UtilBase):
         else:
             url = f"{self.api_url}{path}"
         return url
+
+    # Throttle for refresh_local_ip_addresses(): the cache key's TTL doubles as the
+    # re-check interval -- 24h after a successful refresh, ~15 min after any failure
+    # so a lookup-service outage doesn't get hammered on every request.
+    LOCAL_IP_CACHE_KEY = "core_connection_location_local_ip_refresh"
+    LOCAL_IP_SUCCESS_TTL = 60 * 60 * 24
+    LOCAL_IP_FAILURE_TTL = 60 * 15
+
+    @classmethod
+    def refresh_local_ip_addresses(cls):
+        """Detect this server's public IPv4/IPv6 and persist them on the self-hosted
+        ("local") location, so the connection-setup UI can show them for firewall
+        allow-listing. Throttled via the cache and never raises -- a lookup failure
+        must not break the request or task that triggered it."""
+        try:
+            location = cls.objects.filter(code="local").first()
+            if location is None:
+                return
+            # Atomic gate: only the first caller within the TTL performs the lookups.
+            if not cache.add(cls.LOCAL_IP_CACHE_KEY, True, timeout=cls.LOCAL_IP_FAILURE_TTL):
+                return
+
+            failed = False
+            update_fields = []
+
+            try:
+                response = requests.get(settings.PUBLIC_IPV4_LOOKUP_URL, timeout=5)
+                ip4 = str(ipaddress.IPv4Address(response.text.strip()))
+                if location.ip_address != ip4:
+                    location.ip_address = ip4
+                    update_fields.append("ip_address")
+            except Exception as e:
+                # Leave the stored value alone on transient errors.
+                failed = True
+                print(f"local location IPv4 lookup failed: {e}")
+
+            try:
+                response = requests.get(settings.PUBLIC_IPV6_LOOKUP_URL, timeout=5)
+                ip6 = str(ipaddress.IPv6Address(response.text.strip()))
+                if location.ip_address_v6 != ip6:
+                    location.ip_address_v6 = ip6
+                    update_fields.append("ip_address_v6")
+            except Exception as e:
+                failed = True
+                print(f"local location IPv6 lookup failed: {e}")
+
+            if update_fields:
+                location.save(update_fields=update_fields)
+            if not failed:
+                cache.set(cls.LOCAL_IP_CACHE_KEY, True, timeout=cls.LOCAL_IP_SUCCESS_TTL)
+        except Exception as e:
+            print(f"refresh_local_ip_addresses failed: {e}")
 
 
 class CoreConnectionLocationIntegration(TimeStampedModel):

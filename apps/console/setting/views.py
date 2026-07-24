@@ -94,7 +94,11 @@ class InviteView(LoginRequiredMixin, TemplateView):
             "enrollments"
         ] = self.request.user.member.get_current_account().enrollments.all()
         context["account"] = self.request.user.member.get_current_account()
-        context["invites_received"] = self.request.user.member.invites_received()
+        invites_received = self.request.user.member.invites_received()
+        # Lazily flip past-expiry pending invites so the page shows the real state.
+        for invite in invites_received:
+            invite.expire_if_needed()
+        context["invites_received"] = invites_received
         return self.render_to_response(context)
 
 

@@ -524,6 +524,12 @@
                                                     <span
                                                         x-text="endpoint.location"></span>
                                                 </span>
+                                                <span x-show="endpoint.ip_address"
+                                                      class="block truncate text-xs">
+                                                    IPv4: <span x-text="endpoint.ip_address"></span><span
+                                                        x-show="endpoint.ip_address_v6"> &middot; IPv6: <span
+                                                        x-text="endpoint.ip_address_v6"></span></span>
+                                                </span>
 
                                             <span
                                                     x-show="connection.location?.id === endpoint?.id"

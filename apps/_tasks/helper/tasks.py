@@ -18,7 +18,7 @@ from backupsheep.celery import app
 
 from apps.console.connection.models import CoreAuthBasecamp
 from apps.console.member.models import CoreMember
-from apps.console.notification.models import CoreNotificationEmail, CoreNotificationSlack
+from apps.console.notification.models import CoreNotificationSlack
 from apps.console.storage.models import CoreStorageType, CoreStorage, CoreStorageOneDrive, CoreStorageDropbox, \
     CoreStorageGoogleDrive
 from apps.console.utils.models import UtilBackup
@@ -152,6 +152,22 @@ def delete_old_logs(self, max_age_days=None):
                     pass
     except FileNotFoundError:
         pass
+    except Exception as e:
+        capture_exception(e)
+
+
+@current_app.task(name="delete_old_db_logs", bind=True, ignore_result=True)
+def delete_old_db_logs(self):
+    """Prune old CoreLog rows from the database.
+
+    DB counterpart of delete_old_logs (which prunes on-disk run logs): delegates
+    to CoreLog.prune(), which deletes rows older than settings.LOG_RETENTION_DAYS.
+    Scheduled daily by Celery beat (see CELERY_BEAT_SCHEDULE).
+    """
+    from apps.console.log.models import CoreLog
+
+    try:
+        CoreLog.prune()
     except Exception as e:
         capture_exception(e)
 
@@ -399,34 +415,35 @@ def account_delete(self):
     name="send_postmark_email",
     bind=True,
     ignore_result=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
 )
 def send_postmark_email(self, to_email, template, context):
+    """Generic notification email task: log + render + send ANY email template.
+
+    Replaces the stale Postmark-only version, which filtered on a non-existent
+    CoreNotificationEmail.account FK and only ever sent password_reset emails.
+    Despite the historical task name (kept for backwards compatibility with
+    existing callers/queues), delivery goes through
+    CoreNotificationLogEmail.send(), which honors the configured email provider
+    (postmark / mailgun / ses). The log row needs the member FK, so emails to
+    an address with no matching member are skipped with a print-log.
+    """
     try:
         from apps.console.notification.models import CoreNotificationLogEmail
 
-        if CoreMember.objects.filter(user__email=to_email).exists():
-            member = CoreMember.objects.filter(user__email=to_email).first()
+        member = CoreMember.objects.filter(user__email=to_email).first()
+        if member is None:
+            print(f"no member found for email, skipping {template} email: {to_email}")
+            return
 
-            # Create email log
-            if member.get_primary_account():
-                account = member.get_primary_account()
-                if CoreNotificationEmail.objects.filter(account=account,
-                                                        email=to_email,
-                                                        status=CoreNotificationEmail.Status.VERIFIED).exists():
+        email_notification = CoreNotificationLogEmail()
+        email_notification.member = member
+        email_notification.email = to_email
+        email_notification.template = template
+        email_notification.context = context
+        email_notification.save()
 
-                    email_notification = CoreNotificationLogEmail()
-                    email_notification.account = account
-                    email_notification.email = to_email
-                    email_notification.template = template
-                    email_notification.context = context
-                    email_notification.save()
-
-                    if template == "password_reset":
-                        email_notification.send()
-                else:
-                    print(f"email not verified : {to_email}")
+        # Now Send email (works for any template, not just password_reset)
+        email_notification.send()
     except Exception as e:
         capture_exception(e)
 

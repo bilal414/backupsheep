@@ -4,6 +4,7 @@ from rest_framework import serializers
 from django.contrib.auth.models import Group, Permission
 
 from apps.console.account.models import CoreAccountGroup
+from apps.console.node.models import CoreNode
 from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
@@ -25,6 +26,12 @@ class CoreAccountGroupWriteSerializer(serializers.ModelSerializer):
     type_display = serializers.SerializerMethodField(read_only=True)
     permissions = serializers.ListField(required=False, child=serializers.CharField(), write_only=True)
     notes = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    # Node-level scoping: the set of account nodes this group grants access to.
+    # Ownership is enforced in validate() so a group can never point at another
+    # account's nodes.
+    nodes = serializers.PrimaryKeyRelatedField(
+        many=True, queryset=CoreNode.objects.all(), required=False
+    )
 
     class Meta:
         model = CoreAccountGroup
@@ -38,6 +45,7 @@ class CoreAccountGroupWriteSerializer(serializers.ModelSerializer):
             "group",
             "permissions",
             "notes",
+            "nodes",
         )
 
     def validate(self, data):
@@ -56,16 +64,20 @@ class CoreAccountGroupWriteSerializer(serializers.ModelSerializer):
             else:
                 self.instance.group.name = group_name
                 self.instance.group.save()
-                #
-                # # Now add permissions to group
-                # if data.get("permissions"):
-                #     for permission in data.get("permissions"):
-                #         self.instance.group.permissions.add(permission)
         else:
             if account.enrollments.filter(name__iexact=data["name"]).exists():
                 errors["name"] = ["Group name must be unique."]
             else:
                 data["group"] = Group.objects.create(name=group_name)
+
+        # Nodes must belong to the current account.
+        nodes = data.get("nodes")
+        if nodes:
+            allowed = CoreNode.objects.filter(
+                connection__account=account, id__in=[node.id for node in nodes]
+            ).count()
+            if allowed != len(nodes):
+                errors["nodes"] = ["Nodes must belong to the current account."]
 
         if bool(errors):
             raise serializers.ValidationError(errors)
@@ -82,6 +94,8 @@ class CoreAccountGroupReadSerializer(serializers.ModelSerializer):
     type_display = serializers.SerializerMethodField(read_only=True)
     permissions = serializers.SerializerMethodField(read_only=True)
     permission_details = serializers.SerializerMethodField(read_only=True)
+    # Node-level scoping: ids of the account nodes assigned to this group.
+    nodes = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
 
     class Meta:
         model = CoreAccountGroup
@@ -95,6 +109,7 @@ class CoreAccountGroupReadSerializer(serializers.ModelSerializer):
             "permissions",
             "permission_details",
             "notes",
+            "nodes",
         )
 
     @staticmethod

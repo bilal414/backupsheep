@@ -37,12 +37,12 @@ Only `DJANGO_SECRET_KEY` and the `DB_*` connection values need real values to bo
 | `DB_HOST` | ✅ | `db` | Host — the Compose service name. |
 | `DB_PORT` | ✅ | `5432` | Port. |
 
-## Task queue (Celery / Redis)
+## Task queue (Celery / RabbitMQ)
 
 | Variable | Required | Default | Purpose |
 |----------|:--------:|---------|---------|
-| `CELERY_BROKER_URL` | optional | `redis://localhost:6379/0` | Redis broker URL. In the Compose stack set `redis://redis:6379/0`. |
-| `LOG_RETENTION_DAYS` | optional | `30` | Days to keep backup run logs on local disk before `delete_old_logs` prunes them. |
+| `CELERY_BROKER_URL` | optional | `amqp://guest:guest@rabbitmq:5672//` | Celery broker URL. The default already points at the Compose stack's bundled `rabbitmq` service; change it only for an external broker. |
+| `LOG_RETENTION_DAYS` | optional | `30` | Days to keep backup run logs on local disk *and* activity-log entries in the database before `delete_old_logs` (03:00) / `delete_old_db_logs` (03:30) prune them. |
 
 ## Transactional email
 
@@ -57,6 +57,17 @@ Pick one provider (or none). The wizard can set this per-install; `.env` is the 
 
 > Without a configured provider, password-reset emails won't send — recover with
 > `manage.py changepassword`. See [Troubleshooting](troubleshooting.md).
+
+## Notification channels: Slack / Telegram (optional)
+
+Email notifications work without these; they're only needed to connect the matching
+channel under **Settings → Notifications**. Leave blank to keep the channel disabled.
+
+| Variable | Purpose |
+|----------|---------|
+| `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` | Slack app credentials — create an app at <https://api.slack.com/apps> with the `incoming-webhook` scope and redirect URL `<APP_URL>/api/v1/callback/slack/`. |
+| `SLACK_TOKEN_URL` | Slack OAuth token endpoint used to exchange/refresh tokens (Slack's is `https://slack.com/api/oauth.v2.access`). |
+| `TELEGRAM_BOT_KEY` | Telegram bot token from BotFather; chats are then added by chat ID in the console. |
 
 ## Application-log storage (optional)
 
@@ -122,3 +133,11 @@ these env vars only override the public API hosts or enable OAuth-based connecti
   to Basecamp's public hosts).
 
 See [Providers](providers.md) for which integrations need what.
+
+## Self-hosted server public IPs (optional)
+
+The *Self-hosted* backup-server location auto-detects this server's public IPv4/IPv6
+(shown in the connection-setup **Backup Server** dropdown for firewall allow-listing).
+`PUBLIC_IPV4_LOOKUP_URL` and `PUBLIC_IPV6_LOOKUP_URL` override the lookup services
+(defaults: `https://api.ipify.org` / `https://api6.ipify.org`); any service that returns
+a bare IP address as the response body works.

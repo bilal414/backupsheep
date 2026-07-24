@@ -6,6 +6,7 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_helpers import visible_nodes
 from apps.console.log.models import CoreLog
 from .filters import CoreLogFilter
 from .permissions import CoreLogViewPermissions
@@ -29,5 +30,10 @@ class CoreLogView(mixins.ListModelMixin, viewsets.GenericViewSet):
     def get_queryset(self):
         member = self.request.user.member
         query_partners = Q(account=member.get_current_account())
-        queryset = CoreLog.objects.filter(query_partners)
+        # Deterministic default ordering: newest first.
+        queryset = CoreLog.objects.filter(query_partners).order_by("-created")
+        if not member.is_primary_account:
+            queryset = queryset.filter(
+                data__node_id__in=visible_nodes(member).values_list("id", flat=True)
+            )
         return queryset

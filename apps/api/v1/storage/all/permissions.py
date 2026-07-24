@@ -1,12 +1,8 @@
-from rest_framework import permissions
+from apps.api.v1.utils.api_permissions import MemberGroupPermissions
 
 
-class CoreStorageAllPermissions(permissions.BasePermission):
-    # def has_permission(self, request, view):
-    #     if request.method in permissions.SAFE_METHODS:
-    #         return True
-    #     else:
-    #         return hasattr(request.user, "member")
+class CoreStorageAllPermissions(MemberGroupPermissions):
+    action_permissions = {"*": "storage_changes"}
 
     def has_object_permission(self, request, view, obj):
         if request.user.member.memberships.filter(account=obj.account).exists():

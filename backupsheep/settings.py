@@ -105,6 +105,9 @@ MIDDLEWARE = [
     # afterward). Must run before RedirectMiddleware so onboarding wins over login.
     "utils.middleware.OnboardingMiddleware",
     "utils.middleware.RedirectMiddleware",
+    # Refreshes the self-hosted location's public IPs when the connection-setup
+    # endpoints dropdown data is fetched (cheap path check per request).
+    "utils.middleware.LocalLocationIPMiddleware",
 
 ]
 
@@ -294,6 +297,8 @@ LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/api/',
     r'/error/',
     r'/onboarding',
+    # Public team-invite acceptance page (no login required).
+    r'/invite/',
 ]
 
 # POSTMARK - Email Service
@@ -316,6 +321,15 @@ MAILGUN_API_URL = config["MAILGUN_API_URL"]
 
 # Options are postmark, mailgun and ses
 EMAIL_PROVIDER = config["EMAIL_PROVIDER"]
+
+# Slack / Telegram notification channels (only needed to connect those channels
+# to an account; email notifications work without them). Create a Slack app at
+# https://api.slack.com/apps for the id/secret; TELEGRAM_BOT_KEY comes from
+# BotFather. Blank keeps the channels disabled.
+SLACK_TOKEN_URL = config.get("SLACK_TOKEN_URL", "")
+SLACK_CLIENT_ID = config.get("SLACK_CLIENT_ID", "")
+SLACK_CLIENT_SECRET = config.get("SLACK_CLIENT_SECRET", "")
+TELEGRAM_BOT_KEY = config.get("TELEGRAM_BOT_KEY", "")
 
 # 'Local Storage' backup destination: root directory on this server under which the
 # `local` storage backend keeps backup zips. In the Compose stack this is the
@@ -383,6 +397,11 @@ DIGITALOCEAN_API = config.get("DIGITALOCEAN_API", "https://api.digitalocean.com"
 HETZNER_API = config.get("HETZNER_API", "https://api.hetzner.cloud")
 UPCLOUD_API = config.get("UPCLOUD_API", "https://api.upcloud.com/1.3")
 VULTR_API = config.get("VULTR_API", "https://api.vultr.com")
+# Public-IP lookup services used to detect this server's own outbound IPv4/IPv6 for the
+# self-hosted ("local") backup-server location, so users can allow-list them on their
+# firewalls. Any service returning a bare IP address as the response body works.
+PUBLIC_IPV4_LOOKUP_URL = config.get("PUBLIC_IPV4_LOOKUP_URL", "https://api.ipify.org")
+PUBLIC_IPV6_LOOKUP_URL = config.get("PUBLIC_IPV6_LOOKUP_URL", "https://api6.ipify.org")
 GOOGLE_COMPUTE_API = config.get("GOOGLE_COMPUTE_API", "https://compute.googleapis.com")
 GOOGLE_RESOURCE_API = config.get(
     "GOOGLE_RESOURCE_API", "https://cloudresourcemanager.googleapis.com"
@@ -464,6 +483,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "delete_old_logs",
         "schedule": crontab(minute=0, hour=3),  # daily at 03:00 (worker timezone)
     },
+    # Prune old CoreLog rows from the database (see delete_old_db_logs task).
+    "delete-old-db-logs": {
+        "task": "delete_old_db_logs",
+        "schedule": crontab(minute=30, hour=3),  # daily at 03:30 (worker timezone)
+    },
 }
 
 # Task routing across the worker types (see docker-compose.yml):
@@ -515,4 +539,5 @@ CELERY_TASK_ROUTES = {
     "send_log_to_telegram": {"queue": "logs"},
     "send_to_firebase": {"queue": "logs"},
     "delete_old_logs": {"queue": "logs"},
+    "delete_old_db_logs": {"queue": "logs"},
 }

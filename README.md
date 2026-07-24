@@ -84,10 +84,12 @@ Select any historical backup and restore it straight from the console:
 
 ### Operations
 
-Schedules (daily/weekly/monthly + cron) with keep-last retention · on-demand backups ·
-failure notifications (email, Slack, Telegram) · team accounts with members · REST API
-for everything the console does · specialized Celery worker queues you can scale
-independently.
+Live dashboard (stat cards, storage usage, recent and upcoming runs, failures needing
+attention) · schedules (daily/weekly/monthly + cron) with keep-last retention ·
+on-demand backups · backup & restore notifications by email, Slack and Telegram ·
+team accounts with invite links, groups, granular permissions and per-node scoping ·
+account-wide activity log (including sign-in tracking) · REST API for everything the
+console does · specialized Celery worker queues you can scale independently.
 
 ---
 
@@ -165,7 +167,7 @@ Celery, Alpine.js + Tailwind CSS. See [docs/scaling.md](docs/scaling.md).
 | [Installation](docs/installation.md) | Prerequisites, Docker Compose setup, the `.env` you must edit |
 | [Configuration](docs/configuration.md) | Environment-variable reference, incl. `BS_LOCAL_STORAGE_PATH` |
 | [First-run wizard](docs/first-run.md) | The 5 setup steps; admin accounts & `/django-admin` |
-| [Usage](docs/usage.md) | Sources, storage, schedules, backup modes, retention, **restores** |
+| [Usage](docs/usage.md) | Sources, storage, schedules, backup modes, retention, **restores**, dashboard, teams & permissions, notifications, activity log |
 | [Providers](docs/providers.md) | Every backup source & storage destination, and what each needs |
 | [Production deployment](docs/deployment.md) | HTTPS/reverse proxy, hardening, storage volumes, secrets |
 | [Scaling & operations](docs/scaling.md) | Worker queues, scaling uploads, the beat singleton, multi-host |
