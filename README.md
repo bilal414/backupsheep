@@ -130,16 +130,18 @@ Compose stack with persistent volumes.
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/bilal414/backupsheep/tree/main)
 
 The Render Blueprint deploys the web console, one all-queue Celery worker, Beat, managed
-PostgreSQL, and managed Redis. Enter a private onboarding token during setup, then use
-external object storage for backups—**Local Storage** is not suitable for this PaaS
-deployment. See the [Render guide](docs/render.md) for its sizing and worker limitations.
+PostgreSQL, and a private RabbitMQ service with persistent storage. Enter a private
+onboarding token during setup, then use external object storage for backups—**Local
+Storage** is not suitable for this PaaS deployment. See the [Render guide](docs/render.md)
+for its sizing and worker limitations.
 
 ### Railway
 
 Railway requires a published multi-service template before it can issue a Deploy on Railway
 button. The repository includes the versioned service configurations and exact template
 publication steps in the [Railway guide](docs/railway.md). It provisions web, worker, Beat,
-PostgreSQL, and Redis in one project; use external object storage for backup archives.
+PostgreSQL, and a private RabbitMQ service in one project; use external object storage for
+backup archives.
 
 ### Manual Docker Compose install
 
@@ -214,7 +216,7 @@ Celery, Alpine.js + Tailwind CSS. See [docs/scaling.md](docs/scaling.md).
 |-------|--------------|
 | [Installation](docs/installation.md) | Prerequisites, Docker Compose setup, the `.env` you must edit |
 | [DigitalOcean Droplet](docs/digitalocean-droplet.md) | Deploy the complete Docker stack with the one-command installer |
-| [Render](docs/render.md) | Deploy the managed web, worker, scheduler, PostgreSQL, and Redis stack |
+| [Render](docs/render.md) | Deploy the web, worker, scheduler, PostgreSQL, and private RabbitMQ stack |
 | [Railway](docs/railway.md) | Publish the ready-to-configure multi-service Railway deployment template |
 | [Configuration](docs/configuration.md) | Environment-variable reference, incl. `BS_LOCAL_STORAGE_PATH` |
 | [First-run wizard](docs/first-run.md) | The 5 setup steps; admin accounts & `/django-admin` |

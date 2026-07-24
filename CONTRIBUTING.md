@@ -16,7 +16,7 @@ python manage.py migrate
 python manage.py runserver
 ```
 
-You also need a PostgreSQL database and a Redis broker for full functionality, plus the
+You also need a PostgreSQL database and a RabbitMQ broker for full functionality, plus the
 system backup tools (`lftp`, `pg_dump` 14–18, `mysqldump`/`mariadb-dump`) if you exercise
 real backups — the `Dockerfile` is the canonical list.
 

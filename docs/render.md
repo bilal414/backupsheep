@@ -10,13 +10,15 @@ The [render.yaml](../render.yaml) Blueprint creates:
 - one all-queue Celery worker;
 - one singleton Celery Beat scheduler;
 - managed Render PostgreSQL; and
-- managed Render Key Value (Redis) as the Celery broker.
+- a private, persistent RabbitMQ service as the Celery broker.
 
 ## Deploy
 
 Click the button and authorize Render to read the repository. During Blueprint creation,
 enter a long random `ONBOARDING_INSTALL_TOKEN`; Render generates the Django secret and
-connects the managed PostgreSQL and Redis services automatically. Once the web service is
+connects PostgreSQL and the private RabbitMQ service automatically. RabbitMQ uses the
+official pinned image, a generated password, and a persistent disk at
+`/var/lib/rabbitmq`; it is not exposed to the public internet. Once the web service is
 healthy, enter the onboarding token in BackupSheep's first-run wizard.
 
 The Blueprint deliberately sets `autoDeployTrigger: off`: deployments created through a

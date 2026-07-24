@@ -17,7 +17,8 @@ sqlparse==0.5.5
 tzdata==2026.2
 
 # Task Queue & Celery
-celery[redis]==5.6.3
+# BackupSheep uses RabbitMQ exclusively; Celery's AMQP transport is included by default.
+celery==5.6.3
 django-celery-beat==2.9.0
 django-celery-results==2.6.0
 

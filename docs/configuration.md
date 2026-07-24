@@ -42,9 +42,18 @@ the simplest rule remains: **copy `.env_sample` wholesale and don't delete lines
 
 ## Task queue (Celery / RabbitMQ)
 
+BackupSheep supports RabbitMQ only. Use either a complete AMQP URL or the connection
+fragments supplied by hosted-platform templates. When `RABBITMQ_HOST` is set, the fragment
+variables take precedence and BackupSheep URL-encodes the username, password, and virtual
+host before constructing the AMQP URL.
+
 | Variable | Required | Default | Purpose |
 |----------|:--------:|---------|---------|
-| `CELERY_BROKER_URL` | optional | `amqp://guest:guest@rabbitmq:5672//` | Celery broker URL. The Compose stack uses RabbitMQ; hosted-platform templates use a managed Redis URL. |
+| `CELERY_BROKER_URL` | optional | `amqp://guest:guest@rabbitmq:5672//` | Full RabbitMQ AMQP URL (`amqp://` or `amqps://`). |
+| `RABBITMQ_HOST` | optional | unset | RabbitMQ hostname for fragment-based configuration. |
+| `RABBITMQ_PORT` | optional | `5672` | RabbitMQ AMQP port for fragment-based configuration. |
+| `RABBITMQ_USER`, `RABBITMQ_PASSWORD` | optional | `guest` | RabbitMQ credentials for fragment-based configuration. |
+| `RABBITMQ_VHOST` | optional | `/` | RabbitMQ virtual host for fragment-based configuration. |
 | `LOG_RETENTION_DAYS` | optional | `30` | Days to keep backup run logs on local disk *and* activity-log entries in the database before `delete_old_logs` (03:00) / `delete_old_db_logs` (03:30) prune them. |
 
 ## Transactional email

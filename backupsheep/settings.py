@@ -13,7 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
-from urllib.parse import parse_qsl, unquote, urlparse
+from urllib.parse import parse_qsl, quote, unquote, urlparse
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
 import google.auth
@@ -475,9 +475,37 @@ OVH_EU_APP_SECRET = config.get("OVH_EU_APP_SECRET", "")
 OVH_US_APP_KEY = config.get("OVH_US_APP_KEY", "")
 OVH_US_APP_SECRET = config.get("OVH_US_APP_SECRET", "")
 
-# Celery (task queue + scheduled backups). The bundled Compose stack uses RabbitMQ;
-# hosted-platform templates may supply a managed Redis URL instead. Celery supports both.
-CELERY_BROKER_URL = config.get("CELERY_BROKER_URL") or "amqp://guest:guest@rabbitmq:5672//"
+# Celery (task queue + scheduled backups). BackupSheep uses RabbitMQ exclusively.
+# Hosted platforms can provide RabbitMQ as individually referenced variables, which avoids
+# embedding or escaping a generated password in their deployment manifests.
+DEFAULT_CELERY_BROKER_URL = "amqp://guest:guest@rabbitmq:5672//"
+
+
+def _resolve_celery_broker_url(values):
+    """Return an AMQP URL from a complete URL or RabbitMQ connection fragments.
+
+    Fragment variables take precedence because managed-platform deployments inject them
+    at runtime while `.env_sample` supplies the Compose URL as a fallback. Credentials
+    and virtual hosts are URL-encoded so generated platform secrets remain valid.
+    """
+    host = str(values.get("RABBITMQ_HOST") or "").strip()
+    if host:
+        port = str(values.get("RABBITMQ_PORT") or "5672").strip()
+        user = quote(str(values.get("RABBITMQ_USER") or "guest"), safe="")
+        password = quote(str(values.get("RABBITMQ_PASSWORD") or "guest"), safe="")
+        vhost = str(values.get("RABBITMQ_VHOST") or "/").strip().strip("/")
+        vhost_path = quote(vhost, safe="")
+        if vhost_path:
+            return f"amqp://{user}:{password}@{host}:{port}/{vhost_path}"
+        return f"amqp://{user}:{password}@{host}:{port}//"
+
+    broker_url = str(values.get("CELERY_BROKER_URL") or DEFAULT_CELERY_BROKER_URL)
+    if urlparse(broker_url).scheme not in {"amqp", "amqps"}:
+        raise ValueError("CELERY_BROKER_URL must use RabbitMQ's amqp:// or amqps:// scheme.")
+    return broker_url
+
+
+CELERY_BROKER_URL = _resolve_celery_broker_url(config)
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE

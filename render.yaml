@@ -31,10 +31,29 @@ services:
           name: backupsheep-db
           property: connectionString
       - key: CELERY_BROKER_URL
+        value: ""
+      - key: RABBITMQ_HOST
         fromService:
-          type: keyvalue
-          name: backupsheep-redis
-          property: connectionString
+          type: pserv
+          name: backupsheep-rabbitmq
+          property: host
+      - key: RABBITMQ_PORT
+        value: "5672"
+      - key: RABBITMQ_USER
+        fromService:
+          type: pserv
+          name: backupsheep-rabbitmq
+          envVarKey: RABBITMQ_DEFAULT_USER
+      - key: RABBITMQ_PASSWORD
+        fromService:
+          type: pserv
+          name: backupsheep-rabbitmq
+          envVarKey: RABBITMQ_DEFAULT_PASS
+      - key: RABBITMQ_VHOST
+        fromService:
+          type: pserv
+          name: backupsheep-rabbitmq
+          envVarKey: RABBITMQ_DEFAULT_VHOST
 
   - type: worker
     name: backupsheep-worker
@@ -64,10 +83,29 @@ services:
           name: backupsheep-db
           property: connectionString
       - key: CELERY_BROKER_URL
+        value: ""
+      - key: RABBITMQ_HOST
         fromService:
-          type: keyvalue
-          name: backupsheep-redis
-          property: connectionString
+          type: pserv
+          name: backupsheep-rabbitmq
+          property: host
+      - key: RABBITMQ_PORT
+        value: "5672"
+      - key: RABBITMQ_USER
+        fromService:
+          type: pserv
+          name: backupsheep-rabbitmq
+          envVarKey: RABBITMQ_DEFAULT_USER
+      - key: RABBITMQ_PASSWORD
+        fromService:
+          type: pserv
+          name: backupsheep-rabbitmq
+          envVarKey: RABBITMQ_DEFAULT_PASS
+      - key: RABBITMQ_VHOST
+        fromService:
+          type: pserv
+          name: backupsheep-rabbitmq
+          envVarKey: RABBITMQ_DEFAULT_VHOST
 
   - type: worker
     name: backupsheep-beat
@@ -94,17 +132,49 @@ services:
           name: backupsheep-db
           property: connectionString
       - key: CELERY_BROKER_URL
+        value: ""
+      - key: RABBITMQ_HOST
         fromService:
-          type: keyvalue
-          name: backupsheep-redis
-          property: connectionString
+          type: pserv
+          name: backupsheep-rabbitmq
+          property: host
+      - key: RABBITMQ_PORT
+        value: "5672"
+      - key: RABBITMQ_USER
+        fromService:
+          type: pserv
+          name: backupsheep-rabbitmq
+          envVarKey: RABBITMQ_DEFAULT_USER
+      - key: RABBITMQ_PASSWORD
+        fromService:
+          type: pserv
+          name: backupsheep-rabbitmq
+          envVarKey: RABBITMQ_DEFAULT_PASS
+      - key: RABBITMQ_VHOST
+        fromService:
+          type: pserv
+          name: backupsheep-rabbitmq
+          envVarKey: RABBITMQ_DEFAULT_VHOST
 
-  - type: keyvalue
-    name: backupsheep-redis
+  - type: pserv
+    name: backupsheep-rabbitmq
+    runtime: image
+    region: oregon
     plan: starter
-    maxmemoryPolicy: noeviction
-    # Redis is reachable over Render's private network only.
-    ipAllowList: []
+    numInstances: 1
+    image:
+      url: docker.io/library/rabbitmq:4.3.4-management-alpine
+    disk:
+      name: rabbitmq-data
+      mountPath: /var/lib/rabbitmq
+      sizeGB: 1
+    envVars:
+      - key: RABBITMQ_DEFAULT_USER
+        value: backupsheep
+      - key: RABBITMQ_DEFAULT_PASS
+        generateValue: true
+      - key: RABBITMQ_DEFAULT_VHOST
+        value: backupsheep
 
 databases:
   - name: backupsheep-db
