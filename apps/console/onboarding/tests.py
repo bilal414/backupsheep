@@ -35,6 +35,12 @@ class OnboardingFlowTests(TestCase):
         self.assertEqual(r.status_code, 302)
         self.assertTrue(r.headers["Location"].startswith("/onboarding"))
 
+    @override_settings(SECURE_SSL_REDIRECT=True)
+    def test_healthcheck_bypasses_onboarding_and_login_gates(self):
+        r = self.client.get("/healthz/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.content, b"ok")
+
     def test_account_creation_rejects_missing_or_wrong_install_token(self):
         for bad_token in ("", "wrong-token"):
             r = self._create_admin(install_token=bad_token)

@@ -13,7 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, unquote, urlparse
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
 import google.auth
@@ -66,6 +66,9 @@ CSRF_TRUSTED_ORIGINS = [f"{config['APP_PROTOCOL']}{config['APP_DOMAIN']}"]
 HTTPS_ENABLED = _as_bool(config.get("DJANGO_HTTPS", "false"))
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_CONTENT_TYPE_NOSNIFF = True
+# Platform health probes commonly reach the container over private HTTP even when the
+# public endpoint is HTTPS. This endpoint contains no sensitive data and must remain 200.
+SECURE_REDIRECT_EXEMPT = [r"^healthz/$"]
 if HTTPS_ENABLED:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
@@ -182,21 +185,52 @@ REST_FRAMEWORK = {
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 MIGRATION_MODULES = {"apps": "apps._migrations"}
 
-DATABASE_OPTIONS = {}
-if config.get("DB_SSLMODE"):
-    DATABASE_OPTIONS["sslmode"] = config["DB_SSLMODE"]
 
-DATABASES = {
-    "default": {
+def _database_config():
+    """Build Django's PostgreSQL configuration from a URL or discrete DB_* values.
+
+    Managed platforms conventionally provide DATABASE_URL. Docker Compose and existing
+    installs keep using DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT, so both forms stay
+    supported without requiring a provider-specific settings module.
+    """
+
+    database_url = config.get("DATABASE_URL")
+    if database_url:
+        parsed = urlparse(str(database_url))
+        if parsed.scheme not in {"postgres", "postgresql"}:
+            raise ValueError("DATABASE_URL must use the postgres:// or postgresql:// scheme")
+
+        options = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if config.get("DB_SSLMODE"):
+            # An explicit DB_SSLMODE is useful when a platform URL omits its TLS mode.
+            options["sslmode"] = config["DB_SSLMODE"]
+
+        return {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": unquote(parsed.path.lstrip("/")),
+            "USER": unquote(parsed.username or ""),
+            "PASSWORD": unquote(parsed.password or ""),
+            "HOST": parsed.hostname or "",
+            "PORT": str(parsed.port or 5432),
+            "OPTIONS": options,
+        }
+
+    options = {}
+    if config.get("DB_SSLMODE"):
+        options["sslmode"] = config["DB_SSLMODE"]
+
+    return {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": config["DB_NAME"],
         "USER": config["DB_USER"],
         "PASSWORD": config["DB_PASSWORD"],
         "HOST": config["DB_HOST"],
         "PORT": config["DB_PORT"],
-        "OPTIONS": DATABASE_OPTIONS,
-    },
-}
+        "OPTIONS": options,
+    }
+
+
+DATABASES = {"default": _database_config()}
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
@@ -301,6 +335,7 @@ ONBOARDING_INSTALL_TOKEN = config.get("ONBOARDING_INSTALL_TOKEN", "")
 ONBOARDING_INSTALL_TOKEN_FILE = os.path.join(BASE_DIR, "_storage", "install_token")
 
 LOGIN_REQUIRED_IGNORE_PATHS = [
+    r'/healthz/',
     r'/login',
     r'/reset',
     r'/django-admin/',
@@ -440,23 +475,44 @@ OVH_EU_APP_SECRET = config.get("OVH_EU_APP_SECRET", "")
 OVH_US_APP_KEY = config.get("OVH_US_APP_KEY", "")
 OVH_US_APP_SECRET = config.get("OVH_US_APP_SECRET", "")
 
-# Celery (task queue + scheduled backups). The Compose stack supplies CELERY_BROKER_URL
-# directly. App Platform supplies its internal RabbitMQ host and credentials instead, so
-# derive a safely escaped AMQP URL when all three are present.
-def _celery_broker_url():
-    rabbitmq_host = config.get("RABBITMQ_HOST")
-    rabbitmq_user = config.get("RABBITMQ_DEFAULT_USER")
-    rabbitmq_password = config.get("RABBITMQ_DEFAULT_PASS")
-    if rabbitmq_host and rabbitmq_user and rabbitmq_password:
-        rabbitmq_port = config.get("RABBITMQ_PORT", "5672")
-        return (
-            f"amqp://{quote(str(rabbitmq_user), safe='')}:"
-            f"{quote(str(rabbitmq_password), safe='')}@{rabbitmq_host}:{rabbitmq_port}//"
-        )
-    return config.get("CELERY_BROKER_URL") or "amqp://guest:guest@rabbitmq:5672//"
+# Celery (task queue + scheduled backups). BackupSheep uses RabbitMQ exclusively.
+# Hosted platforms can provide RabbitMQ as individually referenced variables, which avoids
+# embedding or escaping a generated password in their deployment manifests.
+DEFAULT_CELERY_BROKER_URL = "amqp://guest:guest@rabbitmq:5672//"
 
 
-CELERY_BROKER_URL = _celery_broker_url()
+def _resolve_celery_broker_url(values):
+    """Return an AMQP URL from a complete URL or RabbitMQ connection fragments.
+
+    Fragment variables take precedence because managed-platform deployments inject them
+    at runtime while `.env_sample` supplies the Compose URL as a fallback. Credentials
+    and virtual hosts are URL-encoded so generated platform secrets remain valid.
+    """
+    host = str(values.get("RABBITMQ_HOST") or "").strip()
+    if host:
+        port = str(values.get("RABBITMQ_PORT") or "5672").strip()
+        user = quote(str(values.get("RABBITMQ_USER") or "guest"), safe="")
+        password = quote(str(values.get("RABBITMQ_PASSWORD") or "guest"), safe="")
+        vhost = str(values.get("RABBITMQ_VHOST") or "/").strip().strip("/")
+        vhost_path = quote(vhost, safe="")
+        if vhost_path:
+            return f"amqp://{user}:{password}@{host}:{port}/{vhost_path}"
+        return f"amqp://{user}:{password}@{host}:{port}//"
+
+    # The Heroku template provisions CloudAMQP's RabbitMQ plan, which exposes its
+    # canonical AMQP URL as CLOUDAMQP_URL. Prefer it over the Compose fallback from
+    # .env_sample, while still allowing an explicitly supplied RabbitMQ URL elsewhere.
+    broker_url = str(
+        values.get("CLOUDAMQP_URL")
+        or values.get("CELERY_BROKER_URL")
+        or DEFAULT_CELERY_BROKER_URL
+    )
+    if urlparse(broker_url).scheme not in {"amqp", "amqps"}:
+        raise ValueError("RabbitMQ broker URLs must use the amqp:// or amqps:// scheme.")
+    return broker_url
+
+
+CELERY_BROKER_URL = _resolve_celery_broker_url(config)
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE

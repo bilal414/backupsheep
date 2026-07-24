@@ -24,7 +24,7 @@ Self-hosting means you own the deployment's security. Before exposing an instanc
 - Keep `DJANGO_DEBUG=false`.
 - Set `DJANGO_ALLOWED_HOSTS` to your real hostname(s), not `*`.
 - Serve over TLS (reverse proxy) and set `DJANGO_HTTPS=true` + `APP_PROTOCOL=https://`.
-- Use a strong `DB_PASSWORD`; don't expose the database/Redis ports publicly.
+- Use a strong `DB_PASSWORD`; don't expose the database/RabbitMQ ports publicly.
 - Restrict who can reach the console (network/firewall/VPN) — it stores cloud-provider and
   storage credentials and SSH keys.
 
