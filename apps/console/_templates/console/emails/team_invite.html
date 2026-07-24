@@ -1,17 +1,11 @@
 {% extends "console/emails/_master.html" %}
 {% block content %}
     <h2>Join the ranks of {{ account_name }}</h2>
-    <p>You've been invited by {{ member_name }} {{ member_email }} to join the {{ account_name }} account on
-        BackupSheep.</p>
+    <p>You've been invited by {{ member_name }} ({{ member_email }}) to join the {{ account_name }} account on
+        {{ site_app_name }}.</p>
 
-
-    <p>If you don't have an account then you can create free developer account here <a target="_blank"
-                                                                                       href="https://backupsheep.com/signup/?plan=developer">https://backupsheep.com/signup/?plan=developer</a>
-    </p>
-
-
-    <p>You need to login to your BackupSheep account to view invites under Settings >> Invites page or use the button
-        below.</p>
+    <p>Use the button below to view and accept your invite. If you don't have a {{ site_app_name }} account yet,
+        you can create one on the same page &mdash; no separate signup needed.</p>
     <!-- Action -->
     <table class="body-action" align="center" width="100%" cellpadding="0" cellspacing="0">
         <tr>

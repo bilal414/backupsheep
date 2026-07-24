@@ -1,17 +1,15 @@
 import pytz
-from django.contrib.auth.models import User
 from django.utils.timezone import get_current_timezone
-from firebase_admin.auth import UserNotFoundError
 from rest_framework import serializers
-from firebase_admin import auth
 from apps.api.v1.utils.api_helpers import CurrentAccountDefault, CurrentMemberDefault
 from apps.console.invite.models import CoreInvite
-from apps.console.member.models import CoreMember
 
 
 class CoreInviteReadSerializer(serializers.ModelSerializer):
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()
+    accept_url = serializers.CharField(read_only=True)
+    status_display = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreInvite
@@ -32,6 +30,10 @@ class CoreInviteReadSerializer(serializers.ModelSerializer):
         return date_time
 
     @staticmethod
+    def get_status_display(obj):
+        return obj.get_status_display()
+
+    @staticmethod
     def get_full_name(obj):
         return obj.full_name
 
@@ -43,48 +45,30 @@ class CoreInviteReadSerializer(serializers.ModelSerializer):
 class CoreInviteWriteSerializer(serializers.ModelSerializer):
     account = serializers.HiddenField(default=CurrentAccountDefault(), write_only=True)
     added_by = serializers.HiddenField(default=CurrentMemberDefault())
+    # Lifetime is managed server-side: save() defaults it to now + INVITE_TTL_DAYS
+    # and the resend action resets it.
+    expires_at = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = CoreInvite
         fields = "__all__"
 
     def validate(self, data):
-        if not CoreMember.objects.filter(user__email=data["email"]).exists():
-            raise serializers.ValidationError(
-                {
-                    "email": f"We could not locate any user with the email {data['email']}. If they are a new user, please have them create a free Developer account first, after which you can send an invitation."
-                }
+        # Invitees deliberately do NOT need an existing user account -- the public
+        # /invite/<uuid>/ page lets them sign up while accepting. What is not
+        # allowed is stacking duplicate pending invites for the same email+account.
+        account = data.get("account") or (self.instance.account if self.instance else None)
+        email = data.get("email") or (self.instance.email if self.instance else None)
+        if account and email:
+            query = CoreInvite.objects.filter(
+                account=account,
+                email__iexact=email,
+                status=CoreInvite.Status.PENDING,
             )
+            if self.instance:
+                query = query.exclude(id=self.instance.id)
+            if query.exists():
+                raise serializers.ValidationError(
+                    {"email": f"A pending invite for {email} already exists on this account."}
+                )
         return data
-
-    # def update(self, instance, validated_data):
-    #     user = validated_data.pop("user", [])
-    #     memberships = validated_data.pop("memberships", [])
-    #     auth.update_user(
-    #         instance.user.username,
-    #         email=user.get("email"),
-    #         password=user.get("password"),
-    #         display_name=f"{user.get('first_name')} {user.get('last_name')} ",
-    #     )
-    #     user.pop('password', None)
-    #     user.pop('password_confirm', None)
-    #     super().update(instance.user, user)
-    #     for membership in memberships:
-    #         super().update(instance.memberships.get(current=True), membership)
-    #         super().update(instance.memberships.get(current=True).account, membership)
-    #     instance = super().update(instance, validated_data)
-    #     if instance.timezone:
-    #         self.context["request"].session["django_timezone"] = instance.timezone
-    #     return instance
-
-    # def create(self, validated_data):
-    #     # Create User First
-    #     user = validated_data.pop("user", [])
-    #     if auth.get_user_by_email(user["email"]):
-    #     serializer = UserWriteSerializer(user)
-    #     serializer.is_valid(raise_exception=True)
-    #     serializer.save()
-    #
-    #     validated_data["user"] = User.objects.create(**user)
-    #     instance = super().create(**validated_data)
-    #     return instance

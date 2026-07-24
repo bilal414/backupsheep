@@ -11,12 +11,21 @@ from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.api.v1.utils.api_permissions import MemberPermissions
+from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from apps.console.storage.models import CoreStorage
 from .filters import CoreStorageFilter
 from .serializers import CoreStorageSerializer
 from ..utils.api_filters import DateRangeFilter
 from ..utils.api_serializers import ReadWriteSerializerMixin
+
+
+def _log_activity(request, log_type, data):
+    """Write an activity-log row; never let logging break the view."""
+    try:
+        CoreLog.record(request.user.member.get_current_account(), log_type, data)
+    except Exception:
+        pass
 
 
 class CoreStorageView(mixins.ListModelMixin, viewsets.GenericViewSet):
@@ -41,23 +50,53 @@ class CoreStorageView(mixins.ListModelMixin, viewsets.GenericViewSet):
     @action(detail=True, methods=["post"])
     def pause(self, request, pk=None):
         storage = self.get_object()
-        notes = self.request.data.get("notes")
         storage.status = CoreStorage.Status.PAUSED
         storage.save()
+        _log_activity(
+            request,
+            CoreLog.Type.STORAGE,
+            {
+                "message": f"Storage '{storage.name}' paused.",
+                "action": "pause",
+                "actor_email": request.user.email,
+                "storage_id": storage.id,
+                "storage_name": storage.name,
+            },
+        )
         return Response({"detail": "Storage is paused."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         storage = self.get_object()
-        notes = self.request.data.get("notes")
         storage.status = CoreStorage.Status.ACTIVE
         storage.save()
+        _log_activity(
+            request,
+            CoreLog.Type.STORAGE,
+            {
+                "message": f"Storage '{storage.name}' resumed.",
+                "action": "resume",
+                "actor_email": request.user.email,
+                "storage_id": storage.id,
+                "storage_name": storage.name,
+            },
+        )
         return Response({"detail": "Storage is resumed."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def delete(self, request, pk=None):
         storage = self.get_object()
-        notes = self.request.data.get("notes")
         storage.status = CoreStorage.Status.DELETE_REQUESTED
         storage.save()
+        _log_activity(
+            request,
+            CoreLog.Type.STORAGE,
+            {
+                "message": f"Storage '{storage.name}' delete requested.",
+                "action": "delete",
+                "actor_email": request.user.email,
+                "storage_id": storage.id,
+                "storage_name": storage.name,
+            },
+        )
         return Response({"detail": "Storage will be deleted soon."}, status=status.HTTP_200_OK)

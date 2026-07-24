@@ -131,8 +131,10 @@ class CoreNotificationEmailView(viewsets.ModelViewSet):
 
     def get_queryset(self):
         member = self.request.user.member
-        query_partners = Q(account=member.get_current_account())
-        queryset = CoreNotificationEmail.objects.filter(query_partners)
+        # CoreNotificationEmail has a `member` FK (no account FK): scope to emails
+        # registered by any member of the current account.
+        query_partners = Q(member__memberships__account=member.get_current_account())
+        queryset = CoreNotificationEmail.objects.filter(query_partners).distinct()
         return queryset
 
     @action(detail=True, methods=["post"])

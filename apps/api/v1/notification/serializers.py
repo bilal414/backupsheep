@@ -90,25 +90,16 @@ class CoreNotificationTelegramSerializer(serializers.ModelSerializer):
 class CoreNotificationEmailSerializer(serializers.ModelSerializer):
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()
-    account = serializers.HiddenField(default=CurrentAccountDefault(), write_only=True)
+    # The model FK is `member` (not `account`): a notification email belongs to
+    # the member who registered it. Verification is a separate explicit step via
+    # the view's send_verification_email action + the emailed verify link, so the
+    # serializer intentionally does NOT call out to any external service here.
+    member = serializers.HiddenField(default=CurrentMemberDefault())
     email = serializers.EmailField(required=True, allow_null=False, allow_blank=False)
 
     class Meta:
         model = CoreNotificationEmail
         fields = "__all__"
-
-    def validate(self, data):
-        chat_id = data.get("chat_id")
-        result = requests.get(
-            f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_KEY}/sendMessage?"
-            f"chat_id={chat_id}"
-            f"&text=Hey! This is validation message that your Telegram integration is working fine.",
-            headers={"content-type": "application/json"},
-            verify=True,
-        )
-        if result.status_code != 200:
-            raise serializers.ValidationError({"chat_id": result.json().get("description")})
-        return data
 
     @staticmethod
     def get_created_display(obj):

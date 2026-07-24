@@ -15,6 +15,8 @@ from apps.api.v1.schedule.filters import CoreScheduleFilter
 from apps.api.v1.schedule.permissions import CoreScheduleViewPermissions
 from apps.api.v1.schedule.serializers import CoreScheduleSerializer, CoreScheduleRunSerializer
 from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_helpers import visible_nodes
+from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode, CoreSchedule, CoreScheduleRun
 from rest_framework import status
 from django.utils.text import slugify
@@ -22,6 +24,14 @@ from rest_framework.decorators import action
 from celery import current_app
 
 from apps.api.v1.utils.api_exceptions import ExceptionDefault
+
+
+def _log_activity(request, log_type, data):
+    """Write an activity-log row; never let logging break the view."""
+    try:
+        CoreLog.record(request.user.member.get_current_account(), log_type, data)
+    except Exception:
+        pass
 
 
 class CoreScheduleView(viewsets.ModelViewSet):
@@ -42,8 +52,7 @@ class CoreScheduleView(viewsets.ModelViewSet):
 
     def get_queryset(self):
         member = self.request.user.member
-        query = Q(node__connection__account=member.get_current_account())
-        query |= Q(node__connection__account=member.get_primary_account())
+        query = Q(node__in=visible_nodes(member))
         # query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
         # query &= ~Q(status=CoreSchedule.Status.DELETE_REQUESTED)
         if self.request.query_params.get("node"):
@@ -57,6 +66,19 @@ class CoreScheduleView(viewsets.ModelViewSet):
         self.perform_create(serializer)
         schedule = serializer.instance
         schedule.schedule_create()
+        _log_activity(
+            request,
+            CoreLog.Type.SCHEDULE,
+            {
+                "message": f"Schedule '{schedule.name}' created.",
+                "action": "create",
+                "actor_email": request.user.email,
+                "schedule_id": schedule.id,
+                "schedule_name": schedule.name,
+                "node_id": schedule.node_id,
+                "node_name": schedule.node.name,
+            },
+        )
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
@@ -68,6 +90,19 @@ class CoreScheduleView(viewsets.ModelViewSet):
         self.perform_update(serializer)
         schedule = serializer.instance
         schedule.schedule_update()
+        _log_activity(
+            request,
+            CoreLog.Type.SCHEDULE,
+            {
+                "message": f"Schedule '{schedule.name}' updated.",
+                "action": "update",
+                "actor_email": request.user.email,
+                "schedule_id": schedule.id,
+                "schedule_name": schedule.name,
+                "node_id": schedule.node_id,
+                "node_name": schedule.node.name,
+            },
+        )
 
         if getattr(instance, "_prefetched_objects_cache", None):
             # If 'prefetch_related' has been applied to a queryset, we need to
@@ -90,8 +125,24 @@ class CoreScheduleView(viewsets.ModelViewSet):
                     status=status.HTTP_409_CONFLICT,
                 )
             else:
+                # Capture identity before the row disappears for the activity log.
+                schedule_id, schedule_name = instance.id, instance.name
+                node_id, node_name = instance.node_id, instance.node.name
                 instance.schedule_delete()
                 instance.delete()
+                _log_activity(
+                    request,
+                    CoreLog.Type.SCHEDULE,
+                    {
+                        "message": f"Schedule '{schedule_name}' deleted.",
+                        "action": "delete",
+                        "actor_email": request.user.email,
+                        "schedule_id": schedule_id,
+                        "schedule_name": schedule_name,
+                        "node_id": node_id,
+                        "node_name": node_name,
+                    },
+                )
                 return Response({"detail": "Schedule will be deleted soon."}, status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])
@@ -114,6 +165,19 @@ class CoreScheduleView(viewsets.ModelViewSet):
                     "storage_ids": schedule.storage_ids,
                 },
             )
+            _log_activity(
+                request,
+                CoreLog.Type.SCHEDULE,
+                {
+                    "message": f"Schedule '{schedule.name}' triggered.",
+                    "action": "trigger",
+                    "actor_email": request.user.email,
+                    "schedule_id": schedule.id,
+                    "schedule_name": schedule.name,
+                    "node_id": schedule.node_id,
+                    "node_name": schedule.node.name,
+                },
+            )
             headers = self.get_success_headers(serializer.data)
             return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
         else:
@@ -125,6 +189,19 @@ class CoreScheduleView(viewsets.ModelViewSet):
         schedule.status = CoreSchedule.Status.PAUSED
         schedule.save()
         schedule.schedule_update()
+        _log_activity(
+            request,
+            CoreLog.Type.SCHEDULE,
+            {
+                "message": f"Schedule '{schedule.name}' paused.",
+                "action": "pause",
+                "actor_email": request.user.email,
+                "schedule_id": schedule.id,
+                "schedule_name": schedule.name,
+                "node_id": schedule.node_id,
+                "node_name": schedule.node.name,
+            },
+        )
         return Response({"detail": "Schedule is paused."}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
@@ -133,4 +210,17 @@ class CoreScheduleView(viewsets.ModelViewSet):
         schedule.status = CoreSchedule.Status.ACTIVE
         schedule.save()
         schedule.schedule_update()
+        _log_activity(
+            request,
+            CoreLog.Type.SCHEDULE,
+            {
+                "message": f"Schedule '{schedule.name}' resumed.",
+                "action": "resume",
+                "actor_email": request.user.email,
+                "schedule_id": schedule.id,
+                "schedule_name": schedule.name,
+                "node_id": schedule.node_id,
+                "node_name": schedule.node.name,
+            },
+        )
         return Response({"detail": "Schedule is resumed."}, status=status.HTTP_200_OK)

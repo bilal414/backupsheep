@@ -231,6 +231,10 @@
 
                                         <td class="px-4 py-4 whitespace-nowrap text-right text-sm font-medium">
                                             {% if membership.member.id != member.id %}
+                                                <button @click="editMembership('{{ membership.id }}')" type="button"
+                                                        class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                    Edit
+                                                </button>
                                                 <button @click="removeMembership('{{ membership.id }}')" type="button"
                                                         class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Remove
@@ -247,6 +251,91 @@
 
                 </div>
             </div>
+
+            {# Edit panel: groups + notify flags for the selected membership. #}
+            <div x-show="membership" style="display: none;" class="shadow-sm sm:rounded-md" id="edit-membership">
+                <div class="bg-white py-6 px-4 space-y-6 sm:p-6">
+                    <div>
+                        <h2 class="text-lg leading-6 font-medium text-gray-900">
+                            Edit User - <span x-text="membership?.full_name"></span>
+                        </h2>
+                        <p class="mt-1 text-sm text-gray-500">Change the groups and notification flags for
+                            <span x-text="membership?.email"></span>.</p>
+                    </div>
+                    <div class="grid grid-cols-6 gap-6">
+                        <div class="col-span-6 sm:col-span-3">
+                            <label class="block text-sm font-medium text-gray-700">Groups</label>
+                            <div class="sm:col-span-6">
+                                <fieldset class="overflow-auto h-56">
+                                    <div class="divide-y divide-gray-200">
+                                        {% for enrollment in enrollments %}
+                                            <div class="relative flex items-start py-4 px-1">
+                                                <div class="flex items-center h-5">
+                                                    <input id="membership-group-{{ enrollment.id }}"
+                                                           name="membership-group-{{ enrollment.id }}" type="checkbox"
+                                                           value="{{ enrollment.id }}"
+                                                           x-model="membershipGroups"
+                                                           class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded-sm">
+                                                </div>
+                                                <div class="ml-3 text-sm">
+                                                    <label for="membership-group-{{ enrollment.id }}"
+                                                           class="font-medium text-gray-700">{{ enrollment.name }}
+                                                        <small>({{ enrollment.get_type_display }})</small>
+                                                        {% if enrollment.default %}
+                                                            <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-100 text-purple-800"> Default </span>
+                                                        {% endif %}
+                                                    </label>
+                                                </div>
+                                            </div>
+                                        {% endfor %}
+                                    </div>
+                                </fieldset>
+                                <p x-show="membershipErrors.groups" class="mt-2 text-sm text-red-600"
+                                   x-text="membershipErrors.groups"></p>
+                            </div>
+                        </div>
+                        <div class="col-span-6 sm:col-span-3">
+                            <label class="block text-sm font-medium text-gray-700">Notifications</label>
+                            <div class="mt-2 space-y-4">
+                                <div class="relative flex items-start">
+                                    <div class="flex items-center h-5">
+                                        <input id="membership-notify-on-success" type="checkbox"
+                                               x-model="membership.notify_on_success"
+                                               class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded-sm">
+                                    </div>
+                                    <div class="ml-3 text-sm">
+                                        <label for="membership-notify-on-success" class="font-medium text-gray-700">Backup
+                                            Success</label>
+                                    </div>
+                                </div>
+                                <div class="relative flex items-start">
+                                    <div class="flex items-center h-5">
+                                        <input id="membership-notify-on-fail" type="checkbox"
+                                               x-model="membership.notify_on_fail"
+                                               class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300 rounded-sm">
+                                    </div>
+                                    <div class="ml-3 text-sm">
+                                        <label for="membership-notify-on-fail" class="font-medium text-gray-700">Backup
+                                            Failure</label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <p x-show="membershipErrors.detail" class="mt-2 text-sm text-red-600"
+                       x-text="membershipErrors.detail"></p>
+                </div>
+                <div class="px-4 py-3 bg-gray-50 text-right sm:px-6">
+                    <button @click="closeMembershipEditor()" type="button"
+                            class="inline-flex items-center px-4 py-2 border border-gray-300 shadow-xs text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        Cancel
+                    </button>
+                    <button @click="saveMembership()"
+                            class="ml-3 bg-indigo-600 border border-transparent rounded-md shadow-xs py-2 px-4 inline-flex justify-center text-sm font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        Save User
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
     <script>
@@ -261,26 +350,70 @@
                 navigator.clipboard.writeText(subject)
             });
             Alpine.data('settingsUser', () => ({
-                userErrors: {},
-                user: {
-                    groups: []
-                },
-                openType: false,
-                typeActiveIndex: null,
+                membership: null,
+                membershipGroups: [],
+                membershipErrors: {},
                 init() {
                 },
-                async saveUser(user_id) {
+                async editMembership(membership_id) {
+                    // Load the account's memberships and open the editor for this one.
+                    Alpine.store('showLoading').toggle("Fetching user details.");
+
+                    let url = "/api/v1/members/";
+                    let method = "GET";
+
+                    let response = await fetch(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: method
+                    }).then(async (response) => {
+                        Alpine.store('showLoading').toggle();
+
+                        if (response.ok) {
+                            return response.json();
+                        } else {
+                            let json;
+                            try {
+                                json = await response.json();
+                                this.membershipErrors = json;
+                            } catch (exception_var) {
+                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
+                            }
+                            throw new Error(json.detail);
+                        }
+                    }).then((json) => {
+                        let found = json.find((item) => item.id === parseInt(membership_id));
+                        if (!found) {
+                            throw new Error("Unable to load this membership. Please contact support.");
+                        }
+                        this.membershipErrors = {};
+                        this.membership = found;
+                        // Checkbox binding uses string values; the API returns int ids.
+                        this.membershipGroups = (found.groups || []).map((group) => String(group.id));
+                        const element = document.getElementById("edit-membership");
+                        element.scrollIntoView();
+                    }).catch((error) => {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            error: true,
+                            heading: 'Error!',
+                            details: error.message
+                        });
+                    });
+                },
+                async saveMembership() {
                     Alpine.store('showLoading').toggle("Saving user details.");
 
-                    let url = "/api/v1/users/";
+                    let url = "/api/v1/members/" + this.membership.member_id + "/update_membership/";
                     let method = "POST";
 
-                    if (user_id) {
-                        url = "/api/v1/users/" + this.user.id + "/";
-                        method = "PATCH";
-                    }
-
-                    let data = this.user
+                    let data = {
+                        groups: this.membershipGroups,
+                        notify_on_success: this.membership.notify_on_success,
+                        notify_on_fail: this.membership.notify_on_fail,
+                    };
 
                     let response = await fetch(url, {
                         headers: {
@@ -298,7 +431,7 @@
                             let json;
                             try {
                                 json = await response.json();
-                                this.userErrors = json;
+                                this.membershipErrors = json;
                             } catch (exception_var) {
                                 json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
                             }
@@ -309,7 +442,7 @@
                             show: true,
                             success: true,
                             heading: 'Success!',
-                            details: json.detail
+                            details: json.detail || 'User updated.'
                         });
                         window.location.reload();
                     }).catch((error) => {
@@ -320,6 +453,11 @@
                             details: error.message
                         });
                     });
+                },
+                closeMembershipEditor() {
+                    this.membership = null;
+                    this.membershipGroups = [];
+                    this.membershipErrors = {};
                 },
                 async removeMembership(membership_id) {
                     Alpine.store('showLoading').toggle("Removing user from account.");
@@ -345,7 +483,7 @@
                             let json;
                             try {
                                 json = await response.json();
-                                this.userErrors = json;
+                                this.membershipErrors = json;
                             } catch (exception_var) {
                                 json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
                             }
@@ -367,105 +505,6 @@
                             details: error.message
                         });
                     });
-                },
-                async deleteUser(user_id) {
-                    Alpine.store('showLoading').toggle("Deleting user details.");
-
-                    let url = "/api/v1/users/" + user_id + "/";
-                    let method = "DELETE";
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method,
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.status === 204) {
-                            return {"detail": "User deleted."};
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-                        window.location.reload();
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-                async getUser(user_id) {
-                    Alpine.store('showLoading').toggle("Fetching user details.");
-
-                    let url = "/api/v1/users/" + user_id + "/";
-                    let method = "GET";
-
-
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: method
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            let json;
-                            try {
-                                json = await response.json();
-                                this.userErrors = json;
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            throw new Error(json.detail);
-                        }
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: json.detail
-                        });
-                        this.user = json;
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-                toggleTypeDropdown() {
-                    this.openType = !this.openType;
-                    this.typeActiveIndex = null;
-                },
-                toggleNotification(notificationType) {
-                    if (notificationType === "success") {
-                        this.user.notify_on_success = !this.user.notify_on_success;
-                    } else if (notificationType === "fail") {
-                        this.user.notify_on_fail = !this.user.notify_on_fail;
-                    }
                 },
             }));
         });

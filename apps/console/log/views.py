@@ -3,6 +3,7 @@ from django.views.generic import TemplateView
 from django.core.paginator import Paginator
 
 from apps.console.log.models import CoreLog
+from apps.api.v1.utils.api_helpers import visible_nodes
 from django.contrib.auth.mixins import AccessMixin, LoginRequiredMixin
 
 
@@ -18,6 +19,7 @@ class LogView(LoginRequiredMixin, TemplateView):
         integration = self.request.GET.get("integration")
         message = self.request.GET.get("message")
         error = self.request.GET.get("error")
+        log_type = self.request.GET.get("type")
 
         if p_size:
             if int(p_size) > 100:
@@ -25,6 +27,8 @@ class LogView(LoginRequiredMixin, TemplateView):
 
         member = self.request.user.member
         query = Q(account=member.get_current_account())
+        if not member.is_primary_account:
+            query &= Q(data__node_id__in=visible_nodes(member).values_list("id", flat=True))
 
         if node:
             query &= Q(data__node_id=int(node))
@@ -35,6 +39,20 @@ class LogView(LoginRequiredMixin, TemplateView):
         if integration:
             query &= Q(data__connection_id=int(integration))
 
+        # Free-text substring search inside the JSON payload.
+        if message:
+            query &= Q(data__message__icontains=message)
+
+        if error:
+            query &= Q(data__error__icontains=error)
+
+        # Activity type filter (CoreLog.Type value); ignore non-numeric input.
+        if log_type:
+            try:
+                query &= Q(type=int(log_type))
+            except (TypeError, ValueError):
+                log_type = None
+
         logs = CoreLog.objects.filter(query).order_by("-created")
 
         context["heading"] = "Logs"
@@ -44,6 +62,10 @@ class LogView(LoginRequiredMixin, TemplateView):
         context["backup"] = backup
         context["logs_count"] = logs.count()
         context["integration"] = integration
+        context["message"] = message
+        context["error"] = error
+        context["type"] = log_type
+        context["log_types"] = CoreLog.Type.choices
 
         page = Paginator(logs, p_size).page(p_no)
         context["page"] = page

@@ -17,6 +17,60 @@ class CoreMemberAccountSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+class CurrentAccountMembershipSerializer(serializers.ModelSerializer):
+    """One membership row for the account member list (Users settings page):
+    member details plus groups/notify flags/status within the current account."""
+
+    member_id = serializers.IntegerField(source="member.id", read_only=True)
+    first_name = serializers.CharField(source="member.user.first_name", read_only=True)
+    last_name = serializers.CharField(source="member.user.last_name", read_only=True)
+    full_name = serializers.SerializerMethodField()
+    email = serializers.CharField(source="member.user.email", read_only=True)
+    status_display = serializers.SerializerMethodField()
+    groups = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CoreMemberAccount
+        fields = (
+            "id",
+            "member_id",
+            "first_name",
+            "last_name",
+            "full_name",
+            "email",
+            "status",
+            "status_display",
+            "notify_on_success",
+            "notify_on_fail",
+            "current",
+            "primary",
+            "groups",
+            "created",
+        )
+
+    @staticmethod
+    def get_full_name(obj):
+        return obj.member.full_name
+
+    @staticmethod
+    def get_status_display(obj):
+        return obj.get_status_display()
+
+    def get_groups(self, obj):
+        # Intersect the member's auth groups with the current account's enrollments.
+        account = self.context["account"]
+        enrollments = account.enrollments.filter(group__user=obj.member.user)
+        return [
+            {
+                "id": enrollment.id,
+                "name": enrollment.name,
+                "type": enrollment.type,
+                "type_display": enrollment.get_type_display(),
+            }
+            for enrollment in enrollments
+        ]
+
+
 class CoreMemberAccountWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreMemberAccount

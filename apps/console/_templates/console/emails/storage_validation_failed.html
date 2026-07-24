@@ -1,0 +1,49 @@
+{% extends "console/emails/_master.html" %}
+{% block content %}
+    <h2>Whoops!</h2>
+    <p>Storage validation failed for your <strong>{{ storage_type }}</strong> storage
+        <strong>{{ storage_name }}</strong> while starting backup <strong>{{ backup_name }}</strong> of node
+        <strong>{{ node_name }}</strong> (<strong>{{ node_type }}</strong>).</p>
+
+    <p>The backup is running without this storage. Please check the storage connection and credentials so future
+        backups can be uploaded to it.</p>
+
+    <!-- Action -->
+    <table class="body-action" align="center" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+            <td align="center">
+                <!-- Border based button https://litmus.com/blog/a-guide-to-bulletproof-buttons-in-email-design -->
+                <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                    <tr>
+                        <td align="center">
+                            <table border="0" cellspacing="0" cellpadding="0">
+                                <tr>
+                                    <td>
+                                        <a href="{{ site_app_url }}/console/nodes/{{ node_id }}/" class="button button--" target="_blank">check
+                                            node</a>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+
+    <p>Thanks,
+        <br>{{ sender_name }}</p>
+    <p><strong>P.S.</strong> Need immediate help getting started? Check out our <a href="{{ help_url }}">help
+        documentation</a>. Or, just reply to this email, support team is always ready to help!</p>
+    <!-- Sub copy -->
+    <table class="body-sub">
+        <tr>
+            <td>
+                <p class="sub">If you’re having trouble with the button above, copy and paste the URL below into your
+                    web browser.</p>
+                <p class="sub">{{ site_app_url }}/console/nodes/{{ node_id }}/</p>
+            </td>
+        </tr>
+    </table>
+
+{% endblock %}

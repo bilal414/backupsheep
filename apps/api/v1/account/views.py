@@ -15,6 +15,16 @@ from ..utils.api_filters import DateRangeFilter
 from ..utils.api_serializers import ReadWriteSerializerMixin
 
 
+def _record_member_log(account, data):
+    """Team-activity audit log. Never allowed to break the action it describes."""
+    try:
+        from apps.console.log.models import CoreLog
+
+        CoreLog.record(account, CoreLog.Type.MEMBER, data)
+    except Exception as e:
+        print(f"Unable to record member log: {e}")
+
+
 class CoreAccountView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreAccountViewPermissions)
     read_serializer_class = CoreAccountSerializer
@@ -42,6 +52,7 @@ class CoreAccountView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         if account.memberships.filter(id=membership_id).exists() and self.request.user.member.is_primary_account:
 
             membership = account.memberships.get(id=membership_id)
+            removed_member = membership.member
 
             # Remove from groups
             for enrollment in account.enrollments.filter():
@@ -49,6 +60,16 @@ class CoreAccountView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
             # Remove membership
             membership.delete()
+
+            _record_member_log(
+                account,
+                {
+                    "message": f"Member {removed_member.email} removed from the account.",
+                    "actor_email": request.user.email,
+                    "member_id": removed_member.id,
+                    "member_email": removed_member.email,
+                },
+            )
 
             return Response(
                 {"detail": f"User access removed from account {account.name}."},

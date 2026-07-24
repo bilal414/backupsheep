@@ -1,6 +1,11 @@
 from celery import current_app
 from sentry_sdk import capture_exception
 
+from apps._tasks.integration.restore_common import (
+    notify_restore_completed,
+    notify_restore_failed,
+    notify_restore_started,
+)
 from apps.console.backup.models import (
     CoreCloudRestore,
     CoreDatabaseRestore,
@@ -32,6 +37,8 @@ def restore_cloud_backup(self, node_id=None, backup_id=None, restore_id=None):
     restore.celery_task_id = self.request.id
     restore.save()
 
+    notify_restore_started(node, backup, restore)
+
     try:
         restore.node_type_object.restore_snapshot(backup, restore)
     except Exception as error:
@@ -39,6 +46,7 @@ def restore_cloud_backup(self, node_id=None, backup_id=None, restore_id=None):
         restore.status = CoreCloudRestore.Status.FAILED
         restore.error = error.__str__()
         restore.save()
+        notify_restore_failed(node, backup, restore, error)
         return
 
     # Hand off to async polling instead of blocking the worker (same pattern as
@@ -84,17 +92,20 @@ def poll_cloud_restore(self, node_id, restore_id, started_at=None, interval=120,
     if status == CoreCloudRestore.Status.COMPLETE:
         restore.status = CoreCloudRestore.Status.COMPLETE
         restore.save()
+        notify_restore_completed(node, restore.backup, restore)
         return
 
     if status == CoreCloudRestore.Status.FAILED:
         restore.status = CoreCloudRestore.Status.FAILED
         restore.save()
+        notify_restore_failed(node, restore.backup, restore, restore.error or "restore failed")
         return
 
     if (_time.time() - started_at) > timeout:
         restore.status = CoreCloudRestore.Status.FAILED
         restore.error = "Timed out waiting for the restored resource to become ready."
         restore.save()
+        notify_restore_failed(node, restore.backup, restore, restore.error)
         return
 
     poll_cloud_restore.apply_async(
@@ -126,6 +137,8 @@ def restore_website_backup(self, node_id=None, backup_id=None, restore_id=None):
     restore.celery_task_id = self.request.id
     restore.save()
 
+    notify_restore_started(node, backup, restore)
+
     try:
         restore_website(backup, restore)
     except Exception as error:
@@ -133,10 +146,12 @@ def restore_website_backup(self, node_id=None, backup_id=None, restore_id=None):
         restore.status = CoreWebsiteRestore.Status.FAILED
         restore.error = error.__str__()
         restore.save()
+        notify_restore_failed(node, backup, restore, error)
         return
 
     restore.status = CoreWebsiteRestore.Status.COMPLETE
     restore.save()
+    notify_restore_completed(node, backup, restore)
 
 
 @current_app.task(
@@ -163,6 +178,8 @@ def restore_database_backup(self, node_id=None, backup_id=None, restore_id=None)
     restore.celery_task_id = self.request.id
     restore.save()
 
+    notify_restore_started(node, backup, restore)
+
     try:
         restore_database(backup, restore)
     except Exception as error:
@@ -170,7 +187,9 @@ def restore_database_backup(self, node_id=None, backup_id=None, restore_id=None)
         restore.status = CoreDatabaseRestore.Status.FAILED
         restore.error = error.__str__()
         restore.save()
+        notify_restore_failed(node, backup, restore, error)
         return
 
     restore.status = CoreDatabaseRestore.Status.COMPLETE
     restore.save()
+    notify_restore_completed(node, backup, restore)

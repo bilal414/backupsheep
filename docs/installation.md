@@ -10,7 +10,7 @@ stack. It's the recommended way to self-host.
 - **git**.
 - ~2 GB RAM to start; backups of large databases/sites need disk for the working copy.
 
-The stack includes its own PostgreSQL and Redis, so you don't need to install those
+The stack includes its own PostgreSQL and RabbitMQ, so you don't need to install those
 separately. (You *can* point at external ones — see [Configuration](configuration.md).)
 
 ## 1. Clone and configure
@@ -31,7 +31,7 @@ Open `.env` and set, at minimum:
 The remaining defaults are already wired for the Compose stack:
 
 - `DB_HOST=db`, `DB_PORT=5432`, `DB_NAME=backupsheep`, `DB_USER=backupsheep`
-- `CELERY_BROKER_URL=redis://redis:6379/0`
+- `CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//`
 - `DJANGO_DEBUG=false`, `DJANGO_ALLOWED_HOSTS=*` (tighten the host for production)
 
 Provider/email/storage credentials can stay blank — you add those later through the UI or
@@ -46,9 +46,9 @@ docker compose up --build
 
 On first start, Compose:
 
-1. starts `db` (PostgreSQL) and `redis`, waiting for both to pass healthchecks;
+1. starts `db` (PostgreSQL) and `rabbitmq`, waiting for both to pass healthchecks;
 2. runs the one-shot **`migrate`** service, which applies all database migrations **and
-   seeds the reference data** (the 20 backup sources, 25 storage types, and provider
+   seeds the reference data** (the 18 backup sources, 26 storage types, and provider
    regions a fresh install needs) and creates the cache table, then exits;
 3. starts the web **`app`**, the five Celery **workers**, and **`beat`**.
 
@@ -89,7 +89,7 @@ Migrations and the reference-data seed are idempotent, so re-running is safe.
 ## Running without Docker (advanced)
 
 BackupSheep is a standard Django project (`manage.py`). You can run it directly with
-Python 3.12+ (3.14 tested), a PostgreSQL database, a Redis broker, and the system backup
+Python 3.12+ (3.14 tested), a PostgreSQL database, a RabbitMQ broker, and the system backup
 tools (`lftp`, `pg_dump` 14–18, `mysqldump`/`mariadb-dump`). For MySQL 8 targets you need
 the real Oracle MySQL client — the MariaDB-compat `mysqldump` rejects MySQL 8 dump flags;
 the Docker image ships the Oracle MySQL 8.4 client in `/opt/mysql/bin` and picks it up

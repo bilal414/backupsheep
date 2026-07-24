@@ -297,6 +297,8 @@ LOGIN_REQUIRED_IGNORE_PATHS = [
     r'/api/',
     r'/error/',
     r'/onboarding',
+    # Public team-invite acceptance page (no login required).
+    r'/invite/',
 ]
 
 # POSTMARK - Email Service
@@ -319,6 +321,15 @@ MAILGUN_API_URL = config["MAILGUN_API_URL"]
 
 # Options are postmark, mailgun and ses
 EMAIL_PROVIDER = config["EMAIL_PROVIDER"]
+
+# Slack / Telegram notification channels (only needed to connect those channels
+# to an account; email notifications work without them). Create a Slack app at
+# https://api.slack.com/apps for the id/secret; TELEGRAM_BOT_KEY comes from
+# BotFather. Blank keeps the channels disabled.
+SLACK_TOKEN_URL = config.get("SLACK_TOKEN_URL", "")
+SLACK_CLIENT_ID = config.get("SLACK_CLIENT_ID", "")
+SLACK_CLIENT_SECRET = config.get("SLACK_CLIENT_SECRET", "")
+TELEGRAM_BOT_KEY = config.get("TELEGRAM_BOT_KEY", "")
 
 # 'Local Storage' backup destination: root directory on this server under which the
 # `local` storage backend keeps backup zips. In the Compose stack this is the
@@ -472,6 +483,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "delete_old_logs",
         "schedule": crontab(minute=0, hour=3),  # daily at 03:00 (worker timezone)
     },
+    # Prune old CoreLog rows from the database (see delete_old_db_logs task).
+    "delete-old-db-logs": {
+        "task": "delete_old_db_logs",
+        "schedule": crontab(minute=30, hour=3),  # daily at 03:30 (worker timezone)
+    },
 }
 
 # Task routing across the worker types (see docker-compose.yml):
@@ -523,4 +539,5 @@ CELERY_TASK_ROUTES = {
     "send_log_to_telegram": {"queue": "logs"},
     "send_to_firebase": {"queue": "logs"},
     "delete_old_logs": {"queue": "logs"},
+    "delete_old_db_logs": {"queue": "logs"},
 }

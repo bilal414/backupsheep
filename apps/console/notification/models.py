@@ -128,9 +128,9 @@ class CoreNotificationLogEmail(TimeStampedModel):
 
             ses_client = boto3.client(
                 "ses",
-                aws_access_key_id=site.email_cred("access_key_id", "AWS_SES_ACCESS_KEY_ID"),
-                aws_secret_access_key=site.email_cred("secret_access_key", "AWS_SES_SECRET_ACCESS_KEY"),
-                region_name=site.email_cred("region_name", "AWS_SES_REGION_NAME"),
+                aws_access_key_id=site.email_cred("access_key_id", "SES_ACCESS_KEY_ID"),
+                aws_secret_access_key=site.email_cred("secret_access_key", "SES_SECRET_ACCESS_KEY"),
+                region_name=site.email_cred("region_name", "SES_REGION_NAME"),
             )
 
             ses_mail_sender = SesMailSender(ses_client)

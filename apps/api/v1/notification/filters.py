@@ -19,7 +19,7 @@ class CoreNotificationTelegramFilter(filters.FilterSet):
 
 
 class CoreNotificationEmailFilter(filters.FilterSet):
-    account = filters.CharFilter(field_name="account_id")
+    member = filters.CharFilter(field_name="member_id")
 
     class Meta:
         model = CoreNotificationEmail

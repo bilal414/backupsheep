@@ -3085,6 +3085,7 @@ class CoreNode(TimeStampedModel):
                         node=self,
                         backup=backup
                     )
+                    self.notify_storage_validation_fail(storage_point, backup)
 
         self.save()
         return backup
@@ -3141,6 +3142,41 @@ class CoreNode(TimeStampedModel):
         self.status = self.Status.DELETE_REQUESTED
         self.save()
 
+    def notify_storage_validation_fail(self, storage, backup):
+        """Email 'fail' recipients when a storage point fails validation at backup start.
+
+        Called from backup_initiate, so everything is wrapped: a notification
+        problem must never break the backup itself. The email's action_url is
+        built inside the storage_validation_failed template from the injected
+        site_app_url + node_id passed here.
+        """
+        from apps._tasks.helper.tasks import send_postmark_email
+
+        try:
+            if self.notify_on_fail and self.connection.account.notify_on_fail:
+                account = self.connection.account
+                data = {
+                    "message": f"Storage validation failed for {storage.name} ({storage.type.name}) "
+                               f"during backup ({backup.uuid_str}) of your node ({self.name}).",
+                    "node_id": self.id,
+                    "node_name": self.name,
+                    "node_type": self.get_type_display().lower(),
+                    "storage_type": storage.type.name,
+                    "storage_name": storage.name,
+                    "backup_name": backup.uuid_str,
+                    "connection_name": self.connection.name,
+                    "help_url": "https://support.backupsheep.com",
+                    "sender_name": "BackupSheep - Notification Bot",
+                }
+                for _member, to_email in account.get_notification_recipients("fail"):
+                    send_postmark_email.delay(
+                        to_email,
+                        "storage_validation_failed",
+                        data,
+                    )
+        except Exception as e:
+            capture_exception(e)
+
     def notify_backup_fail(self, error, backup_type):
         from apps._tasks.helper.tasks import send_postmark_email
         from datetime import datetime
@@ -3152,10 +3188,18 @@ class CoreNode(TimeStampedModel):
 
         try:
             if self.notify_on_fail and self.connection.account.notify_on_fail:
-                member = self.connection.account.get_primary_member()
-                to_email = member.user.email
+                account = self.connection.account
+                # Email every eligible member (notify_on_fail honored; the primary
+                # membership is always included) instead of only the primary member.
+                recipients = account.get_notification_recipients("fail")
 
-                timezone = pytz.timezone(member.timezone or "UTC")
+                def notify_recipients(template, data):
+                    for _member, to_email in recipients:
+                        send_postmark_email.delay(to_email, template, data)
+
+                member = recipients[0][0] if recipients else None
+
+                timezone = pytz.timezone((member.timezone if member else None) or "UTC")
                 now = datetime.now()
 
                 date_time = now.astimezone(timezone).strftime("%b %d %Y - %I:%M%p %Z")
@@ -3196,8 +3240,7 @@ class CoreNode(TimeStampedModel):
 
                     self.connection.account.create_log(data=data)
 
-                    send_postmark_email.delay(
-                        to_email,
+                    notify_recipients(
                         error.email_template_id,
                         data,
                     )
@@ -3224,8 +3267,7 @@ class CoreNode(TimeStampedModel):
 
                     self.connection.account.create_log(data=data)
 
-                    send_postmark_email.delay(
-                        to_email,
+                    notify_recipients(
                         error.email_template_id,
                         data
                     )
@@ -3262,8 +3304,7 @@ class CoreNode(TimeStampedModel):
 
                     self.connection.account.create_log(data=data)
 
-                    send_postmark_email.delay(
-                        to_email,
+                    notify_recipients(
                         error.email_template_id,
                         data
                     )
@@ -3291,8 +3332,7 @@ class CoreNode(TimeStampedModel):
 
                     self.connection.account.create_log(data=data)
 
-                    send_postmark_email.delay(
-                        to_email,
+                    notify_recipients(
                         "error_during_backup",
                         data
                     )
@@ -3319,8 +3359,7 @@ class CoreNode(TimeStampedModel):
 
                     self.connection.account.create_log(data=data)
 
-                    send_postmark_email.delay(
-                        to_email,
+                    notify_recipients(
                         "error_during_backup",
                         data
                     )
@@ -3358,8 +3397,7 @@ class CoreNode(TimeStampedModel):
 
                     self.connection.account.create_log(data=data)
 
-                    send_postmark_email.delay(
-                        to_email,
+                    notify_recipients(
                         "unable_to_start_backup",
                         data,
                     )
@@ -3379,10 +3417,14 @@ class CoreNode(TimeStampedModel):
 
         try:
             if self.notify_on_fail and self.connection.account.notify_on_fail:
-                membership = self.connection.account.memberships.get(primary=True)
-                to_email = membership.member.user.email
+                account = self.connection.account
+                # Email every eligible member (notify_on_fail honored; the primary
+                # membership is always included) instead of only the primary member.
+                recipients = account.get_notification_recipients("fail")
 
-                timezone = pytz.timezone(membership.member.timezone or "UTC")
+                member = recipients[0][0] if recipients else None
+
+                timezone = pytz.timezone((member.timezone if member else None) or "UTC")
                 now = datetime.now()
 
                 date_time = now.astimezone(timezone).strftime("%b %d %Y - %I:%M%p %Z")
@@ -3412,11 +3454,12 @@ class CoreNode(TimeStampedModel):
 
                 self.connection.account.create_log(data=data)
 
-                send_postmark_email.delay(
-                    to_email,
-                    "unable_to_upload_backup",
-                    data,
-                )
+                for _member, to_email in recipients:
+                    send_postmark_email.delay(
+                        to_email,
+                        "unable_to_upload_backup",
+                        data,
+                    )
         except Exception as e:
             capture_exception(e)
 
@@ -3425,10 +3468,14 @@ class CoreNode(TimeStampedModel):
 
         try:
             if self.notify_on_success and self.connection.account.notify_on_success:
-                member = self.connection.account.get_primary_member()
-                to_email = member.user.email
+                account = self.connection.account
+                # Email every eligible member (notify_on_success honored; the primary
+                # membership is always included) instead of only the primary member.
+                recipients = account.get_notification_recipients("success")
 
-                timezone = pytz.timezone(member.timezone or "UTC")
+                member = recipients[0][0] if recipients else None
+
+                timezone = pytz.timezone((member.timezone if member else None) or "UTC")
                 date_time = backup.modified.astimezone(timezone).strftime(
                     "%b %d %Y - %I:%M%p %Z"
                 )
@@ -3481,11 +3528,12 @@ class CoreNode(TimeStampedModel):
 
                 self.connection.account.create_log(data=data)
 
-                send_postmark_email.delay(
-                    to_email,
-                    "backup_is_complete",
-                    data,
-                )
+                for _member, to_email in recipients:
+                    send_postmark_email.delay(
+                        to_email,
+                        "backup_is_complete",
+                        data,
+                    )
         except Exception as e:
             capture_exception(e)
 

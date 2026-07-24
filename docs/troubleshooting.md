@@ -9,8 +9,9 @@ you changed `DB_NAME/DB_USER/DB_PASSWORD` *after* the `db` volume was first crea
 volume keeps the original credentials — `docker compose down -v` to reset it (this
 **deletes** the database) or set the vars back.
 
-**Celery workers log "connection refused" to Redis.**
-Set `CELERY_BROKER_URL=redis://redis:6379/0` (the Compose service name), not `localhost`.
+**Celery workers log "connection refused" to RabbitMQ (amqp).**
+Keep `CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//` (the Compose service name),
+not `localhost`.
 
 **`migrate` exits with an error.**
 Check the `migrate` service logs: `docker compose logs migrate`. It applies schema
@@ -44,6 +45,12 @@ docker compose run --rm app python manage.py createsuperuser
 **The setup wizard won't let me create another admin / keeps redirecting.**
 By design — the wizard is one-time and locks after setup. Invite additional members from
 the console instead.
+
+**An invite email never arrived.**
+Invites go out through the configured transactional-email provider; with email disabled
+the message can't be delivered (the invite itself is still created). Configure a provider,
+then use **Resend** under **Settings → Invites** — resending also restarts the 7-day
+acceptance window. Cancelled or expired links simply stop working; send a fresh invite.
 
 ## Backups & runs
 

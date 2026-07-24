@@ -14,7 +14,7 @@ logs you in automatically.
 
 > **Important:** this is a one-time action. The wizard refuses to create a second admin
 > once one exists. The first account is the account owner; you can invite more members
-> later from the console.
+> later from the console (see [Usage → Team accounts](usage.md#team-accounts-groups--permissions)).
 
 ### 2. Application settings
 Set the display **app name**, the public **protocol + domain** this install is reached at

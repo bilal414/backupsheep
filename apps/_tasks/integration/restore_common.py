@@ -22,6 +22,7 @@ import zipfile
 
 import requests
 from django.conf import settings
+from sentry_sdk import capture_exception
 
 # (connect, read) timeout for the download URL fetch; 1 MiB stream chunks.
 DOWNLOAD_TIMEOUT = (30, 300)
@@ -109,3 +110,113 @@ def maybe_extract_tar(dest_dir, backup_uuid_str):
         tf.extractall(dest_root, filter="data")
     os.remove(tar_path)
     return dest_root
+
+
+# ---------------------------------------------------------------------------
+# Restore notifications (email + activity log)
+#
+# The restore tasks in restore.py call the three notify_restore_* helpers at
+# each status transition. Both side effects are individually wrapped so a
+# notification problem can never break the restore itself:
+#
+#   * an activity-log entry via CoreLog.record(account, CoreLog.Type.RESTORE, data)
+#   * an email (restore_started / restore_completed / restore_failed template)
+#     to every get_notification_recipients() member -- "success" for a completed
+#     restore, "fail" for started/failed.
+#
+# `backup` is None-tolerant throughout: a cloud restore only stores backup_id,
+# and the source snapshot may be gone by the time the poll task finalizes.
+# ---------------------------------------------------------------------------
+
+
+def _restore_backup_name(backup, restore):
+    if backup is not None:
+        return backup.uuid_str
+    return getattr(restore, "backup_id", None)
+
+
+def _restore_context(node, backup, restore, message, error=None):
+    """Context shared by the restore_* email templates. The action_url back to
+    the node page is built in-template from the injected site_app_url + node_id."""
+    return {
+        "message": message,
+        "node_id": node.id,
+        "node_name": node.name,
+        "connection_id": node.connection.id,
+        "connection_name": node.connection.name,
+        "backup_id": backup.id if backup is not None else None,
+        "backup_name": _restore_backup_name(backup, restore),
+        "restore_id": restore.id,
+        "restore_name": restore.name,
+        "error_details": str(error) if error else "",
+        "help_url": "https://support.backupsheep.com",
+        "sender_name": "BackupSheep - Notification Bot",
+    }
+
+
+def _record_restore_event(node, backup, restore, message):
+    """Emit a RESTORE activity-log entry; a log failure never breaks a restore."""
+    try:
+        from apps.console.log.models import CoreLog
+
+        account = node.connection.account
+        data = {
+            "message": message,
+            "node_id": node.id,
+            "node_name": node.name,
+            "connection_id": node.connection.id,
+            "connection_name": node.connection.name,
+            "backup_id": backup.id if backup is not None else None,
+            "backup_name": _restore_backup_name(backup, restore),
+            "restore_id": restore.id,
+            "restore_name": restore.name,
+        }
+        CoreLog.record(account, CoreLog.Type.RESTORE, data)
+    except Exception as e:
+        capture_exception(e)
+
+
+def _email_restore_recipients(node, event, template, context):
+    """Email a restore notification to every eligible member for `event`."""
+    try:
+        from apps._tasks.helper.tasks import send_postmark_email
+
+        account = node.connection.account
+        for _member, to_email in account.get_notification_recipients(event):
+            send_postmark_email.delay(to_email, template, context)
+    except Exception as e:
+        capture_exception(e)
+
+
+def notify_restore_started(node, backup, restore):
+    message = (
+        f"Restore ({restore.name}) of backup {_restore_backup_name(backup, restore)} "
+        f"for node {node.name} has started."
+    )
+    _record_restore_event(node, backup, restore, message)
+    _email_restore_recipients(
+        node, "fail", "restore_started", _restore_context(node, backup, restore, message)
+    )
+
+
+def notify_restore_completed(node, backup, restore):
+    message = (
+        f"Restore ({restore.name}) of backup {_restore_backup_name(backup, restore)} "
+        f"for node {node.name} has completed."
+    )
+    _record_restore_event(node, backup, restore, message)
+    _email_restore_recipients(
+        node, "success", "restore_completed", _restore_context(node, backup, restore, message)
+    )
+
+
+def notify_restore_failed(node, backup, restore, error):
+    message = (
+        f"Restore ({restore.name}) of backup {_restore_backup_name(backup, restore)} "
+        f"for node {node.name} has failed."
+    )
+    _record_restore_event(node, backup, restore, message)
+    _email_restore_recipients(
+        node, "fail", "restore_failed",
+        _restore_context(node, backup, restore, message, error=error),
+    )

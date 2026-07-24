@@ -32,10 +32,19 @@ from apps.api.v1.backup.basecamp.serializers import (
 from apps.api.v1.utils.api_filters import DateRangeFilter
 from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
 from apps.console.backup.models import CoreBasecampBackup
+from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from rest_framework import status
 from google.cloud import storage as gc_storage
 from google.oauth2 import service_account
+
+
+def _log_activity(request, log_type, data):
+    """Write an activity-log row; never let logging break the view."""
+    try:
+        CoreLog.record(request.user.member.get_current_account(), log_type, data)
+    except Exception:
+        pass
 
 
 class CoreBasecampBackupView(viewsets.ModelViewSet):
@@ -87,6 +96,21 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
                 if backup.stored_basecamp_backups.filter(id=storage_point_id).exists():
                     storage_point = backup.stored_basecamp_backups.get(id=storage_point_id)
                     download_url = storage_point.generate_download_url()
+                    _log_activity(
+                        request,
+                        CoreLog.Type.BACKUP,
+                        {
+                            "message": f"Download URL generated for backup '{backup.uuid_str}'.",
+                            "action": "download",
+                            "actor_email": request.user.email,
+                            "backup_id": backup.id,
+                            "backup_name": backup.name,
+                            "node_id": backup.basecamp.node_id,
+                            "node_name": backup.basecamp.node.name,
+                            "connection_id": backup.basecamp.node.connection_id,
+                            "connection_name": backup.basecamp.node.connection.name,
+                        },
+                    )
                     return Response({"url": download_url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
                 else:
                     raise DownloadStoragePointNotFound()
