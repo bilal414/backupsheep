@@ -20,6 +20,10 @@
   <img src="https://img.shields.io/badge/docker-compose-2496ED.svg?logo=docker&logoColor=white" alt="Docker Compose">
 </p>
 
+<p align="center">
+  <a href="https://cloud.digitalocean.com/apps/new?repo=https://github.com/bilal414/backupsheep/tree/main"><img src="https://www.deploytodo.com/do-btn-blue.svg" alt="Deploy to DigitalOcean"></a>
+</p>
+
 > **Status: self-hostable (beta).** BackupSheep was a paid SaaS from 2017–2023 serving
 > 6,500+ users. It has been rewritten and open-sourced as a self-hosted application: all
 > SaaS/billing machinery has been removed so you can run it yourself. Licensed under the
@@ -93,7 +97,43 @@ console does · specialized Celery worker queues you can scale independently.
 
 ---
 
-## Quick start (Docker Compose)
+## Quick start
+
+### One-command server install
+
+On a fresh **Ubuntu 22.04+ or Debian 12+** server, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash
+```
+
+The installer downloads BackupSheep from GitHub, installs Docker Engine with the Compose
+plugin and Git, generates secure application/database/onboarding secrets, builds the
+stack, and waits for the app health check. It prints the onboarding URL and token at the
+end. It detects the public IPv4 address by default; pass your hostname explicitly when
+you know it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash -s -- --domain backups.example.com
+```
+
+The initial install serves plain HTTP on port 8000. Allow that port through your firewall
+if needed, and put the app behind HTTPS before exposing it publicly. See
+[Production deployment](docs/deployment.md).
+
+### DigitalOcean App Platform
+
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/bilal414/backupsheep/tree/main)
+
+The button deploys the web console, an internal RabbitMQ broker, one all-queue Celery
+worker, Beat, a pre-deploy migration job, and a PostgreSQL development database. Before
+clicking **Create App**, replace the prompted Django secret, onboarding token, and
+RabbitMQ password with unique random values. Use object storage for backups: App Platform
+has no durable shared filesystem, so **Local Storage** is not suitable there. See the
+[DigitalOcean App Platform guide](docs/digitalocean-app-platform.md) for sizing,
+production limitations, and post-deploy setup.
+
+### Manual Docker Compose install
 
 You need [Docker](https://docs.docker.com/get-docker/) with the Compose plugin, and `git`.
 
@@ -165,6 +205,7 @@ Celery, Alpine.js + Tailwind CSS. See [docs/scaling.md](docs/scaling.md).
 | Guide | What's in it |
 |-------|--------------|
 | [Installation](docs/installation.md) | Prerequisites, Docker Compose setup, the `.env` you must edit |
+| [DigitalOcean App Platform](docs/digitalocean-app-platform.md) | Deploy-to-DO button, component layout, and platform limitations |
 | [Configuration](docs/configuration.md) | Environment-variable reference, incl. `BS_LOCAL_STORAGE_PATH` |
 | [First-run wizard](docs/first-run.md) | The 5 setup steps; admin accounts & `/django-admin` |
 | [Usage](docs/usage.md) | Sources, storage, schedules, backup modes, retention, **restores**, dashboard, teams & permissions, notifications, activity log |
