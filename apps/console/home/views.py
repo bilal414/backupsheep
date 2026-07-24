@@ -8,6 +8,7 @@ from croniter import croniter
 from apps.api.v1.utils.api_helpers import visible_nodes
 from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreSchedule
+from apps.console.storage.models import CoreStorage
 from apps.console.utils.models import UtilBackup
 
 
@@ -112,6 +113,11 @@ class IndexView(LoginRequiredMixin, TemplateView):
         context["upcoming_schedules"] = upcoming_schedules[:5]
         context["recent_activity"] = activity.order_by("-created")[:6]
         context["storage_used"] = account.storage_used() if member.is_primary_account else None
+        context["storage_cost_summary"] = (
+            CoreStorage.cost_summary_for_account(account)
+            if member.is_primary_account
+            else None
+        )
         context["heading"] = "Dashboard"
         context["active_url"] = "dashboard"
         return self.render_to_response(context)

@@ -71,6 +71,10 @@
                                     </th>
                                     <th scope="col"
                                         class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                                        Est. monthly storage
+                                    </th>
+                                    <th scope="col"
+                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
                                         Status
                                     </th>
                                     <th scope="col" class="relative px-6 py-3">
@@ -96,6 +100,9 @@
                                                     <div class="text-sm font-medium text-gray-700">
                                                         {{ storage.name }}
                                                     </div>
+                                                    {% if storage.is_air_gapped %}
+                                                        <div class="mt-1 text-xs font-medium text-emerald-700">Air-gapped copy</div>
+                                                    {% endif %}
                                                 </div>
                                             </div>
                                         </td>
@@ -113,6 +120,14 @@
                                             <div class="text-sm text-gray-700">{{ storage.stats_wordpress_count|default:0|intcomma }}
                                                 - {{ storage.stats_wordpress_backup_count|default:0|intcomma }}
                                                 - {{ storage.stats_wordpress_size|filesizeformat }}</div>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <div class="text-sm font-medium text-gray-700">
+                                                ${{ storage.cost_estimate.estimated_monthly_storage_usd|floatformat:4 }}
+                                            </div>
+                                            <div class="mt-1 text-xs text-gray-500">
+                                                {{ storage.cost_estimate.stored_bytes|filesizeformat }} stored
+                                            </div>
                                         </td>
 
                                         <td class="px-6 py-4 whitespace-nowrap">
@@ -398,6 +413,105 @@
                                 <p x-show="storageErrors.auth?.prefix" class="mt-2 text-sm text-red-600"
                                    id="folder-name-error" x-text="storageErrors.auth?.prefix"></p>
                             </div>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
+                            <div class="rounded-md border border-emerald-200 bg-emerald-50 p-4">
+                                <label for="air-gapped-copy" class="inline-flex items-center gap-x-2 text-sm font-semibold text-emerald-900">
+                                    <input x-model="storage.is_air_gapped" type="checkbox" name="air-gapped-copy"
+                                           id="air-gapped-copy"
+                                           class="rounded border-emerald-300 text-emerald-600 shadow-xs focus:ring-emerald-500">
+                                    Designate this as an air-gapped copy
+                                </label>
+                                <p class="mt-2 text-sm text-emerald-800">Requires S3 Object Lock in Compliance mode, a retention period, and the destination account ID. BackupSheep will never delete this copy.</p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
+                            <label for="s3-no-delete" class="inline-flex items-center gap-x-2 text-sm font-medium text-gray-700">
+                                <input x-model="selectedStorage.no_delete" type="checkbox" name="s3-no-delete"
+                                       id="s3-no-delete"
+                                       class="rounded border-gray-300 text-indigo-600 shadow-xs focus:ring-indigo-500">
+                                Keep backups when BackupSheep deletes a backup record
+                            </label>
+                            <p class="mt-2 text-sm text-gray-600">Use this deletion-protection switch when the destination must be retained indefinitely outside BackupSheep.</p>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
+                            <div class="border-t border-slate-200 pt-4">
+                                <p class="text-sm font-semibold text-gray-800">Immutable backup protection</p>
+                                <p class="mt-1 text-xs text-gray-600">The S3 bucket must already have Object Lock enabled. Compliance mode cannot be bypassed before retention expires.</p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-3" x-show="storageTypeCode === 'aws_s3'">
+                            <label for="object-lock-mode" class="block text-sm font-medium text-gray-700">Object Lock mode</label>
+                            <select x-model="selectedStorage.object_lock_mode" id="object-lock-mode"
+                                    class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                                <option value="">Disabled</option>
+                                <option value="GOVERNANCE">Governance</option>
+                                <option value="COMPLIANCE">Compliance</option>
+                            </select>
+                        </div>
+                        <div class="sm:col-span-3" x-show="storageTypeCode === 'aws_s3'">
+                            <label for="object-lock-days" class="block text-sm font-medium text-gray-700">Retention (days)</label>
+                            <input x-model.number="selectedStorage.object_lock_retain_days" type="number" min="1"
+                                   name="object-lock-days" id="object-lock-days"
+                                   class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                        </div>
+                        <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
+                            <label for="expected-bucket-owner" class="block text-sm font-medium text-gray-700">Expected AWS bucket owner account ID</label>
+                            <input x-model="selectedStorage.expected_bucket_owner" type="text" inputmode="numeric" maxlength="12"
+                                   name="expected-bucket-owner" id="expected-bucket-owner"
+                                   class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                            <p class="mt-1 text-xs text-gray-600">Optional for normal S3 destinations; required for an air-gapped copy.</p>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
+                            <div class="border-t border-slate-200 pt-4">
+                                <p class="text-sm font-semibold text-gray-800">Automatic lifecycle tiering</p>
+                                <p class="mt-1 text-xs text-gray-600">BackupSheep creates or updates only its own lifecycle rule for this folder prefix.</p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-3" x-show="storageTypeCode === 'aws_s3'">
+                            <label for="lifecycle-days" class="block text-sm font-medium text-gray-700">Move after (days)</label>
+                            <input x-model.number="selectedStorage.lifecycle_transition_days" type="number" min="1"
+                                   name="lifecycle-days" id="lifecycle-days"
+                                   class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                        </div>
+                        <div class="sm:col-span-3" x-show="storageTypeCode === 'aws_s3'">
+                            <label for="lifecycle-class" class="block text-sm font-medium text-gray-700">Target class</label>
+                            <select x-model="selectedStorage.lifecycle_storage_class" id="lifecycle-class"
+                                    class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                                <option value="">No automatic tiering</option>
+                                <option value="STANDARD_IA">Standard-IA</option>
+                                <option value="ONEZONE_IA">One Zone-IA</option>
+                                <option value="INTELLIGENT_TIERING">Intelligent-Tiering</option>
+                                <option value="GLACIER_IR">Glacier Instant Retrieval</option>
+                                <option value="GLACIER">Glacier Flexible Retrieval</option>
+                                <option value="DEEP_ARCHIVE">Glacier Deep Archive</option>
+                            </select>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
+                            <div class="border-t border-slate-200 pt-4">
+                                <p class="text-sm font-semibold text-gray-800">Cost rates (USD)</p>
+                                <p class="mt-1 text-xs text-gray-600">Enter your actual contracted rates per GiB. Dashboard projections use these rates; provider invoices remain authoritative.</p>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-2" x-show="storageTypeCode === 'aws_s3'">
+                            <label for="standard-rate" class="block text-sm font-medium text-gray-700">Standard / GiB-month</label>
+                            <input x-model.number="storage.storage_cost_usd_per_gib_month" type="number" min="0" step="0.000001"
+                                   id="standard-rate" class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                        </div>
+                        <div class="sm:col-span-2" x-show="storageTypeCode === 'aws_s3'">
+                            <label for="cold-rate" class="block text-sm font-medium text-gray-700">Cold / GiB-month</label>
+                            <input x-model.number="storage.cold_storage_cost_usd_per_gib_month" type="number" min="0" step="0.000001"
+                                   id="cold-rate" class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                        </div>
+                        <div class="sm:col-span-2" x-show="storageTypeCode === 'aws_s3'">
+                            <label for="retrieval-rate" class="block text-sm font-medium text-gray-700">Retrieval / GiB</label>
+                            <input x-model.number="storage.retrieval_cost_usd_per_gib" type="number" min="0" step="0.000001"
+                                   id="retrieval-rate" class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
                         </div>
 
                         {% if storage.code == "google_cloud" %}
@@ -840,6 +954,10 @@
                 let data = {
                     name: this.storage.name,
                     notes: this.storage.notes,
+                    is_air_gapped: this.storage.is_air_gapped || false,
+                    storage_cost_usd_per_gib_month: this.storage.storage_cost_usd_per_gib_month || 0,
+                    cold_storage_cost_usd_per_gib_month: this.storage.cold_storage_cost_usd_per_gib_month || 0,
+                    retrieval_cost_usd_per_gib: this.storage.retrieval_cost_usd_per_gib || 0,
                 };
 
                 data["storage_" + this.storageTypeCode] = {
@@ -853,6 +971,12 @@
                     prefix: this.selectedStorage.prefix || '',
                     region: this.selectedStorage.region?.id,
                     endpoint: this.selectedStorage.endpoint,
+                    no_delete: this.selectedStorage.no_delete || false,
+                    object_lock_mode: this.selectedStorage.object_lock_mode || '',
+                    object_lock_retain_days: this.selectedStorage.object_lock_retain_days || null,
+                    expected_bucket_owner: this.selectedStorage.expected_bucket_owner || '',
+                    lifecycle_transition_days: this.selectedStorage.lifecycle_transition_days || null,
+                    lifecycle_storage_class: this.selectedStorage.lifecycle_storage_class || '',
                 };
 
                 if (this.storageTypeCode === "local") {

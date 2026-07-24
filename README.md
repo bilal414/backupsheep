@@ -56,6 +56,15 @@ Tencent COS, Alibaba OSS — plus **Local Storage**: keep backups as plain zip f
 the BackupSheep server's own disk (or any bind-mounted path/NFS). Push every backup to
 several destinations at once.
 
+### Immutable S3 archives and lifecycle controls
+
+For Amazon S3 destinations, enable Object Lock governance or compliance retention on
+every new archive, prevent BackupSheep cleanup from creating misleading delete markers,
+and designate a protected air-gapped copy that a schedule must successfully validate
+before it starts. Configure a prefix-scoped lifecycle rule to tier older archives to
+cold S3 classes, then enter your contracted rates to see projected cost by source and
+destination. See [immutable backups & lifecycle controls](docs/immutable-backups-and-lifecycle.md).
+
 ### One-click restores
 
 Select any historical backup and restore it straight from the console:
@@ -238,6 +247,7 @@ Celery, Alpine.js + Tailwind CSS. See [docs/scaling.md](docs/scaling.md).
 | [Heroku](docs/heroku.md) | Deploy via Heroku Button with PostgreSQL and managed RabbitMQ |
 | [Railway](docs/railway.md) | Publish the ready-to-configure multi-service Railway deployment template |
 | [Configuration](docs/configuration.md) | Environment-variable reference, incl. `BS_LOCAL_STORAGE_PATH` |
+| [Immutable backups & lifecycle](docs/immutable-backups-and-lifecycle.md) | S3 Object Lock, air-gapped copy policy, lifecycle tiering, and cost projections |
 | [First-run wizard](docs/first-run.md) | The 5 setup steps; admin accounts & `/django-admin` |
 | [Usage](docs/usage.md) | Sources, storage, schedules, backup modes, retention, **restores**, dashboard, teams & permissions, notifications, activity log |
 | [Providers](docs/providers.md) | Every backup source & storage destination, and what each needs |

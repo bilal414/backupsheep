@@ -11,6 +11,7 @@ from django.conf import settings
 from django.db import models, IntegrityError
 from django.db.models import UniqueConstraint
 from django.urls import reverse
+from django.utils import timezone
 from google.cloud.exceptions import NotFound
 from model_utils import Choices
 from model_utils.fields import StatusField
@@ -1487,10 +1488,14 @@ class CoreWebsiteBackup(UtilBackup):
         db_table = "core_website_backup"
 
     def soft_delete(self):
-        for stored_website_backup in self.stored_website_backups.all():
-            stored_website_backup.soft_delete()
-        self.status = self.Status.DELETE_COMPLETED
-        self.save()
+        deleted = all(
+            stored_website_backup.soft_delete() is not False
+            for stored_website_backup in self.stored_website_backups.all()
+        )
+        if deleted:
+            self.status = self.Status.DELETE_COMPLETED
+            self.save()
+        return deleted
 
     def all_storage_points_uploaded(self):
         return self.stored_website_backups.all().count() == self.stored_website_backups.filter(
@@ -1574,17 +1579,22 @@ class BaseBackupStoragePoints(TimeStampedModel):
         encryption_key = self.storage.account.get_encryption_key()
 
         if self.storage.type.code == "aws_s3":
+            aws_s3 = self.storage.storage_aws_s3
             s3_client = boto3.client(
                 "s3",
-                self.storage.storage_aws_s3.region.code,
-                aws_access_key_id=bs_decrypt(self.storage.storage_aws_s3.access_key, encryption_key),
+                aws_s3.region.code,
+                aws_access_key_id=bs_decrypt(aws_s3.access_key, encryption_key),
                 aws_secret_access_key=bs_decrypt(
-                    self.storage.storage_aws_s3.secret_key, encryption_key
+                    aws_s3.secret_key, encryption_key
                 ),
             )
+            owner_kwargs = aws_s3.expected_bucket_owner_kwargs(
+                aws_s3.expected_bucket_owner
+            )
             s3_object = s3_client.head_object(
-                Bucket=self.storage.storage_aws_s3.bucket_name,
+                Bucket=aws_s3.bucket_name,
                 Key=f"{self.storage_file_id}",
+                **owner_kwargs,
             )
             if s3_object.get("StorageClass") and (
                     s3_object.get("StorageClass") == "GLACIER"
@@ -1592,7 +1602,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
             ):
                 if not s3_object.get("Restore"):
                     s3_client.restore_object(
-                        Bucket=self.storage.storage_aws_s3.bucket_name,
+                        Bucket=aws_s3.bucket_name,
                         Key=f"{self.storage_file_id}",
                         RestoreRequest={
                             "Days": 2,
@@ -1600,6 +1610,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                                 "Tier": "Expedited",
                             },
                         },
+                        **owner_kwargs,
                     )
                     return "restore_requested"
                 elif 'ongoing-request="true"' in s3_object.get("Restore"):
@@ -1608,8 +1619,9 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     response = s3_client.generate_presigned_url(
                         "get_object",
                         Params={
-                            "Bucket": self.storage.storage_aws_s3.bucket_name,
+                            "Bucket": aws_s3.bucket_name,
                             "Key": f"{self.storage_file_id}",
+                            **owner_kwargs,
                         },
                         ExpiresIn=24 * 3600,
                     )
@@ -1618,8 +1630,9 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 response = s3_client.generate_presigned_url(
                     "get_object",
                     Params={
-                        "Bucket": self.storage.storage_aws_s3.bucket_name,
+                        "Bucket": aws_s3.bucket_name,
                         "Key": f"{self.storage_file_id}",
+                        **owner_kwargs,
                     },
                     ExpiresIn=24 * 3600,
                 )
@@ -2052,10 +2065,29 @@ class BaseBackupStoragePoints(TimeStampedModel):
         self.status = self.Status.DELETE_REQUESTED
         self.save()
 
+    def defer_protected_delete(self, reason, retain_until=None):
+        """Keep a protected storage point restorable and record why cleanup paused."""
+        metadata = dict(self.metadata or {})
+        metadata["deletion_protection"] = {
+            "reason": reason,
+            "deferred_at": timezone.now().isoformat(),
+            "retain_until": retain_until.isoformat() if retain_until else None,
+        }
+        self.metadata = metadata
+        self.save(update_fields=["metadata", "modified"])
+        self.storage.account.create_storage_log(
+            f"Backup {self.backup.uuid_str} remains in {self.storage.name} - "
+            f"{self.storage.type.name}: deletion is protected ({reason}).",
+            self.backup.node,
+            self.backup,
+            self.storage,
+        )
+        return False
+
     def soft_delete(self):
         import boto3
-        from ..log.models import CoreLog
         import subprocess
+        from django.utils.dateparse import parse_datetime
 
         encryption_key = self.storage.account.get_encryption_key()
 
@@ -2071,16 +2103,66 @@ class BaseBackupStoragePoints(TimeStampedModel):
         try:
             if self.storage_file_id:
                 if self.storage.type.code == "aws_s3":
+                    aws_s3 = self.storage.storage_aws_s3
+                    if aws_s3.no_delete or self.storage.is_air_gapped:
+                        return self.defer_protected_delete(
+                            "destination deletion protection is enabled"
+                        )
                     s3_client = boto3.client(
                         "s3",
-                        # self.storage.storage_aws_s3.region.code,
-                        aws_access_key_id=bs_decrypt(self.storage.storage_aws_s3.access_key, encryption_key),
-                        aws_secret_access_key=bs_decrypt(self.storage.storage_aws_s3.secret_key, encryption_key),
+                        region_name=aws_s3.region.code if aws_s3.region else None,
+                        aws_access_key_id=bs_decrypt(aws_s3.access_key, encryption_key),
+                        aws_secret_access_key=bs_decrypt(aws_s3.secret_key, encryption_key),
                     )
-                    s3_client.delete_object(
-                        Bucket=self.storage.storage_aws_s3.bucket_name,
-                        Key=f"{self.storage_file_id}",
+                    owner_kwargs = aws_s3.expected_bucket_owner_kwargs(
+                        aws_s3.expected_bucket_owner
                     )
+                    head_args = {
+                        "Bucket": aws_s3.bucket_name,
+                        "Key": f"{self.storage_file_id}",
+                        **owner_kwargs,
+                    }
+                    try:
+                        s3_object = s3_client.head_object(**head_args)
+                    except ClientError as exc:
+                        # A missing object has already been deleted outside
+                        # BackupSheep; close the local record without issuing a
+                        # bare delete that could create a versioned delete marker.
+                        error_code = (exc.response.get("Error") or {}).get("Code")
+                        if error_code not in {"404", "NoSuchKey", "NotFound"}:
+                            raise
+                        s3_object = {}
+
+                    lock_metadata = (self.metadata or {}).get("s3_object_lock") or {}
+                    retain_until = s3_object.get("ObjectLockRetainUntilDate")
+                    if retain_until is None and lock_metadata.get("retain_until"):
+                        retain_until = parse_datetime(lock_metadata["retain_until"])
+                    if retain_until and timezone.is_naive(retain_until):
+                        retain_until = timezone.make_aware(retain_until)
+                    legal_hold = (
+                        s3_object.get("ObjectLockLegalHoldStatus")
+                        or lock_metadata.get("legal_hold")
+                    )
+                    if legal_hold == "ON":
+                        return self.defer_protected_delete("S3 Object Lock legal hold is active")
+                    if retain_until and retain_until > timezone.now():
+                        return self.defer_protected_delete(
+                            "S3 Object Lock retention is active", retain_until
+                        )
+
+                    version_id = s3_object.get("VersionId") or lock_metadata.get("version_id")
+                    if aws_s3.object_lock_is_configured() and not version_id:
+                        return self.defer_protected_delete(
+                            "Object Lock version ID is unavailable; deletion is deferred safely"
+                        )
+                    delete_args = {
+                        "Bucket": aws_s3.bucket_name,
+                        "Key": f"{self.storage_file_id}",
+                        **owner_kwargs,
+                    }
+                    if version_id:
+                        delete_args["VersionId"] = version_id
+                    s3_client.delete_object(**delete_args)
                 elif self.storage.type.code == "do_spaces":
                     s3_client = boto3.client(
                         "s3",
@@ -2367,6 +2449,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
             )
 
             self.storage.account.create_storage_log(message, self.backup.node, self.backup, self.storage)
+            return True
         except SSHException as e:
             self.status = self.Status.DELETE_FAILED
             self.save()
@@ -2376,6 +2459,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 f"Error: {e.__str__()}"
             )
             self.storage.account.create_storage_log(message, self.backup.node, self.backup, self.storage)
+            return False
         except NotFound as e:
             self.status = self.Status.DELETE_FAILED
             self.save()
@@ -2385,6 +2469,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 f"Error: {e.__str__()}"
             )
             self.storage.account.create_storage_log(message, self.backup.node, self.backup, self.storage)
+            return False
         except Exception as e:
             capture_exception(e)
             self.status = self.Status.DELETE_FAILED
@@ -2396,6 +2481,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 f"Error: {e.__str__()}"
             )
             self.storage.account.create_storage_log(message, self.backup.node, self.backup, self.storage)
+            return False
 
 
 class CoreWebsiteBackupStoragePoints(BaseBackupStoragePoints):
@@ -2481,10 +2567,14 @@ class CoreWordPressBackup(UtilBackup):
         db_table = "core_wordpress_backup"
 
     def soft_delete(self):
-        for stored_wordpress_backup in self.stored_wordpress_backups.all():
-            stored_wordpress_backup.soft_delete()
-        self.status = self.Status.DELETE_COMPLETED
-        self.save()
+        deleted = all(
+            stored_wordpress_backup.soft_delete() is not False
+            for stored_wordpress_backup in self.stored_wordpress_backups.all()
+        )
+        if deleted:
+            self.status = self.Status.DELETE_COMPLETED
+            self.save()
+        return deleted
 
     def all_storage_points_uploaded(self):
         return self.stored_wordpress_backups.all().count() == self.stored_wordpress_backups.filter(
@@ -2674,10 +2764,14 @@ class CoreBasecampBackup(UtilBackup):
         db_table = "core_basecamp_backup"
 
     def soft_delete(self):
-        for stored_basecamp_backup in self.stored_basecamp_backups.all():
-            stored_basecamp_backup.soft_delete()
-        self.status = self.Status.DELETE_COMPLETED
-        self.save()
+        deleted = all(
+            stored_basecamp_backup.soft_delete() is not False
+            for stored_basecamp_backup in self.stored_basecamp_backups.all()
+        )
+        if deleted:
+            self.status = self.Status.DELETE_COMPLETED
+            self.save()
+        return deleted
 
     def all_storage_points_uploaded(self):
         return (
@@ -2856,10 +2950,14 @@ class CoreDatabaseBackup(UtilBackup):
 
 
     def soft_delete(self):
-        for stored_database_backup in self.stored_database_backups.all():
-            stored_database_backup.soft_delete()
-        self.status = self.Status.DELETE_COMPLETED
-        self.save()
+        deleted = all(
+            stored_database_backup.soft_delete() is not False
+            for stored_database_backup in self.stored_database_backups.all()
+        )
+        if deleted:
+            self.status = self.Status.DELETE_COMPLETED
+            self.save()
+        return deleted
 
     @property
     def node(self):

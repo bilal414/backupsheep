@@ -95,7 +95,22 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                 type=storage_type,
             )
 
-            storage_list = CoreStorage.objects.filter(query).order_by("-created")
+            storage_list = list(CoreStorage.objects.filter(query).order_by("-created"))
+            cost_by_storage_id = {
+                item["storage_id"]: item
+                for item in CoreStorage.cost_summary_for_account(
+                    member.get_current_account()
+                )["destinations"]
+            }
+            for storage_item in storage_list:
+                storage_item.cost_estimate = cost_by_storage_id.get(
+                    storage_item.id,
+                    {
+                        "stored_bytes": 0,
+                        "estimated_monthly_storage_usd": 0,
+                        "estimated_full_retrieval_usd": 0,
+                    },
+                )
             # storage_list = (
             #     CoreStorage.objects.filter(query)
             #     .annotate(
@@ -108,7 +123,7 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
             #     )
             #     .order_by("-created")
             # )
-            context["storage_count"] = storage_list.count()
+            context["storage_count"] = len(storage_list)
             context["heading"] = f"Integrations - {storage_type.name}"
 
             page = Paginator(storage_list, p_size).page(p_no)

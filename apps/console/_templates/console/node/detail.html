@@ -2144,6 +2144,15 @@
                                     <p x-show="scheduleErrors.storage_point_ids" class="mt-2 text-sm text-red-600"
                                        id="email-error" x-text="scheduleErrors.storage_point_ids"></p>
                                 </div>
+                                <div class="sm:col-span-6">
+                                    <label for="require-air-gapped-copy" class="inline-flex items-center gap-x-2 text-sm font-medium text-gray-700">
+                                        <input x-model="schedule.require_air_gapped_copy" type="checkbox"
+                                               id="require-air-gapped-copy"
+                                               class="rounded border-gray-300 text-emerald-600 shadow-xs focus:ring-emerald-500">
+                                        Require a selected air-gapped copy for every backup
+                                    </label>
+                                    <p class="mt-1 text-sm text-gray-600">If the protected destination cannot be validated, BackupSheep will not start the backup.</p>
+                                </div>
                             {% endif %}
 
                             <div class="sm:col-span-6 mt-4">
@@ -2425,6 +2434,7 @@
                     name: null,
                     keep_last: null,
                     notes: null,
+                    require_air_gapped_copy: false,
                     storage_point_ids: [],
                 },
                 init() {
@@ -2798,6 +2808,7 @@
                             name: null,
                             keep_last: null,
                             notes: null,
+                            require_air_gapped_copy: false,
                             storage_point_ids: [],
                         };
                         this.schedule.id = null;
@@ -4000,4 +4011,3 @@
     {{ object.id |json_script:"node-id" }}
     {{ object.connection.location.id |json_script:"location-id" }}
 {% endblock %}
-

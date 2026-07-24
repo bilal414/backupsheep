@@ -47,6 +47,15 @@ class CoreStorageView(mixins.ListModelMixin, viewsets.GenericViewSet):
         queryset = CoreStorage.objects.filter(query_partners)
         return queryset
 
+    @action(detail=False, methods=["get"])
+    def costs(self, request):
+        """Projected storage and one-full-restore costs by destination/source."""
+        return Response(
+            CoreStorage.cost_summary_for_account(
+                request.user.member.get_current_account()
+            )
+        )
+
     @action(detail=True, methods=["post"])
     def pause(self, request, pk=None):
         storage = self.get_object()

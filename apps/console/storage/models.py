@@ -1,9 +1,12 @@
 import json
 import os
 import uuid
+from datetime import timedelta
+from decimal import Decimal
 
 import requests
 from django.db import models
+from django.utils import timezone
 from model_utils.models import TimeStampedModel
 from sentry_sdk import capture_message, capture_exception
 
@@ -457,6 +460,18 @@ class CoreStorageGoogleDrive(TimeStampedModel):
 
 
 class CoreStorageAWSS3(TimeStampedModel):
+    class ObjectLockMode(models.TextChoices):
+        GOVERNANCE = "GOVERNANCE", "Governance"
+        COMPLIANCE = "COMPLIANCE", "Compliance"
+
+    class LifecycleStorageClass(models.TextChoices):
+        STANDARD_IA = "STANDARD_IA", "Standard-IA"
+        ONEZONE_IA = "ONEZONE_IA", "One Zone-IA"
+        INTELLIGENT_TIERING = "INTELLIGENT_TIERING", "Intelligent-Tiering"
+        GLACIER_IR = "GLACIER_IR", "Glacier Instant Retrieval"
+        GLACIER = "GLACIER", "Glacier Flexible Retrieval"
+        DEEP_ARCHIVE = "DEEP_ARCHIVE", "Glacier Deep Archive"
+
     storage = models.OneToOneField(
         "CoreStorage", related_name="storage_aws_s3", on_delete=models.CASCADE
     )
@@ -469,55 +484,216 @@ class CoreStorageAWSS3(TimeStampedModel):
         CoreAWSRegion, related_name="storage_aws_s3", on_delete=models.PROTECT, null=True
     )
     encryption_updated = models.BooleanField(default=False)
+    object_lock_mode = models.CharField(
+        choices=ObjectLockMode.choices, max_length=16, blank=True, default=""
+    )
+    object_lock_retain_days = models.PositiveIntegerField(null=True, blank=True)
+    expected_bucket_owner = models.CharField(max_length=12, null=True, blank=True)
+    lifecycle_transition_days = models.PositiveIntegerField(null=True, blank=True)
+    lifecycle_storage_class = models.CharField(
+        choices=LifecycleStorageClass.choices, max_length=32, blank=True, default=""
+    )
+    lifecycle_last_synced_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "core_storage_aws_s3"
+
+    @staticmethod
+    def normalize_prefix(prefix):
+        if prefix and not prefix.endswith("/"):
+            return f"{prefix}/"
+        return prefix or ""
+
+    @staticmethod
+    def expected_bucket_owner_kwargs(expected_bucket_owner):
+        if expected_bucket_owner:
+            return {"ExpectedBucketOwner": str(expected_bucket_owner)}
+        return {}
+
+    def object_lock_is_configured(self):
+        return bool(self.object_lock_mode and self.object_lock_retain_days)
+
+    def lifecycle_is_configured(self):
+        return bool(self.lifecycle_transition_days and self.lifecycle_storage_class)
+
+    def lifecycle_rule_id(self):
+        return f"backupsheep-storage-{self.storage_id}-lifecycle"
+
+    def _connection_values(self, data=None):
+        if data:
+            return {
+                "access_key": data["access_key"],
+                "secret_key": data["secret_key"],
+                "bucket_name": data["bucket_name"],
+                "prefix": data.get("prefix") or "",
+                "region": data.get("region"),
+                "no_delete": data.get("no_delete"),
+                "object_lock_mode": data.get("object_lock_mode") or "",
+                "object_lock_retain_days": data.get("object_lock_retain_days"),
+                "expected_bucket_owner": data.get("expected_bucket_owner") or "",
+                "lifecycle_transition_days": data.get("lifecycle_transition_days"),
+                "lifecycle_storage_class": data.get("lifecycle_storage_class") or "",
+            }
+
+        encryption_key = self.storage.account.get_encryption_key()
+        return {
+            "access_key": bs_decrypt(self.access_key, encryption_key),
+            "secret_key": bs_decrypt(self.secret_key, encryption_key),
+            "bucket_name": self.bucket_name,
+            "prefix": self.prefix or "",
+            "region": self.region,
+            "no_delete": self.no_delete,
+            "object_lock_mode": self.object_lock_mode,
+            "object_lock_retain_days": self.object_lock_retain_days,
+            "expected_bucket_owner": self.expected_bucket_owner or "",
+            "lifecycle_transition_days": self.lifecycle_transition_days,
+            "lifecycle_storage_class": self.lifecycle_storage_class,
+        }
+
+    @staticmethod
+    def _s3_client(values):
+        import boto3
+
+        kwargs = {
+            "aws_access_key_id": values["access_key"],
+            "aws_secret_access_key": values["secret_key"],
+        }
+        region = values.get("region")
+        if region and getattr(region, "code", None):
+            kwargs["region_name"] = region.code
+        return boto3.client("s3", **kwargs)
+
+    @staticmethod
+    def validate_immutability_settings(data):
+        mode = data.get("object_lock_mode") or ""
+        retain_days = data.get("object_lock_retain_days")
+        expected_bucket_owner = data.get("expected_bucket_owner") or ""
+        transition_days = data.get("lifecycle_transition_days")
+        lifecycle_class = data.get("lifecycle_storage_class") or ""
+
+        if bool(mode) != bool(retain_days):
+            raise ValueError("Object Lock mode and retention days must be configured together.")
+        if retain_days is not None and retain_days < 1:
+            raise ValueError("Object Lock retention must be at least one day.")
+        if expected_bucket_owner and (not expected_bucket_owner.isdigit() or len(expected_bucket_owner) != 12):
+            raise ValueError("Expected bucket owner must be a 12-digit AWS account ID.")
+        if bool(transition_days) != bool(lifecycle_class):
+            raise ValueError("Lifecycle transition days and storage class must be configured together.")
+        if transition_days is not None and transition_days < 1:
+            raise ValueError("Lifecycle transition must be at least one day.")
+        if transition_days and not (data.get("prefix") or ""):
+            raise ValueError("A folder prefix is required before BackupSheep can manage an S3 lifecycle rule.")
 
     def validate(self, data=None, raise_exp=None):
         import boto3
         import time
 
-        if data:
-            access_key = data["access_key"]
-            secret_key = data["secret_key"]
-            no_delete = data.get("no_delete")
-            prefix = data["prefix"]
-            bucket_name = data["bucket_name"]
-        else:
-            encryption_key = self.storage.account.get_encryption_key()
-            access_key = bs_decrypt(self.access_key, encryption_key)
-            secret_key = bs_decrypt(self.secret_key, encryption_key)
-            no_delete = self.no_delete
-            prefix = self.prefix
-            bucket_name = self.bucket_name
+        values = self._connection_values(data)
+        self.validate_immutability_settings(values)
+        s3_client = self._s3_client(values)
+        owner_kwargs = self.expected_bucket_owner_kwargs(values["expected_bucket_owner"])
 
-        s3_client = boto3.client(
-            "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key
-        )
+        # A test upload into an Object Lock bucket can itself become immutable. For
+        # protected destinations, verify the bucket capability without creating an
+        # object that neither BackupSheep nor the customer can clean up.
+        if values["object_lock_mode"]:
+            response = s3_client.get_object_lock_configuration(
+                Bucket=values["bucket_name"], **owner_kwargs
+            )
+            configuration = response.get("ObjectLockConfiguration") or {}
+            if configuration.get("ObjectLockEnabled") != "Enabled":
+                raise ValueError(
+                    "S3 Object Lock is not enabled for this bucket. Enable it before configuring retention."
+                )
+            s3_client.head_bucket(Bucket=values["bucket_name"], **owner_kwargs)
+            return True
 
-        if prefix:
-            if (prefix != "") and (prefix.endswith("/") is False):
-                prefix += "/"
+        # A deletion-protected destination should not accumulate validation files.
+        # We can still verify access to the intended bucket without a write/delete
+        # probe that conflicts with the user's deletion-protection policy.
+        if values["no_delete"]:
+            s3_client.head_bucket(Bucket=values["bucket_name"], **owner_kwargs)
+            return True
 
+        prefix = self.normalize_prefix(values["prefix"])
         filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
 
         result = s3_client.put_object(
-            Body=filename, Bucket=bucket_name, Key=filename
+            Body=filename, Bucket=values["bucket_name"], Key=filename, **owner_kwargs
         )
 
         if not result.get("ETag"):
             return False
 
-        s3_object = s3_client.get_object(Bucket=bucket_name, Key=filename)
+        s3_object = s3_client.get_object(
+            Bucket=values["bucket_name"], Key=filename, **owner_kwargs
+        )
 
         if not s3_object.get("ETag"):
             return False
 
-        if not no_delete:
-            s3_delete = s3_client.delete_object(Bucket=bucket_name, Key=filename)
+        if not values["no_delete"]:
+            s3_delete = s3_client.delete_object(
+                Bucket=values["bucket_name"], Key=filename, **owner_kwargs
+            )
             if s3_delete["ResponseMetadata"]["HTTPStatusCode"] != 204:
                 return False
         return True
+
+    def sync_lifecycle_configuration(self):
+        """Merge BackupSheep's lifecycle rule without replacing user-owned rules."""
+        from botocore.exceptions import ClientError
+
+        values = self._connection_values()
+        s3_client = self._s3_client(values)
+        owner_kwargs = self.expected_bucket_owner_kwargs(values["expected_bucket_owner"])
+        try:
+            response = s3_client.get_bucket_lifecycle_configuration(
+                Bucket=self.bucket_name, **owner_kwargs
+            )
+            existing_rules = response.get("Rules") or []
+        except ClientError as exc:
+            error_code = (exc.response.get("Error") or {}).get("Code")
+            if error_code not in {"NoSuchLifecycleConfiguration", "NoSuchLifecycle"}:
+                raise
+            existing_rules = []
+
+        rule_id = self.lifecycle_rule_id()
+        rules = [rule for rule in existing_rules if rule.get("ID") != rule_id]
+        if self.lifecycle_is_configured():
+            rules.append(
+                {
+                    "ID": rule_id,
+                    "Status": "Enabled",
+                    "Filter": {"Prefix": self.normalize_prefix(self.prefix)},
+                    "Transitions": [
+                        {
+                            "Days": self.lifecycle_transition_days,
+                            "StorageClass": self.lifecycle_storage_class,
+                        }
+                    ],
+                }
+            )
+
+        if rules:
+            s3_client.put_bucket_lifecycle_configuration(
+                Bucket=self.bucket_name,
+                LifecycleConfiguration={"Rules": rules},
+                **owner_kwargs,
+            )
+        elif existing_rules:
+            s3_client.delete_bucket_lifecycle(
+                Bucket=self.bucket_name, **owner_kwargs
+            )
+
+        self.lifecycle_last_synced_at = timezone.now()
+        self.save(update_fields=["lifecycle_last_synced_at", "modified"])
+        return {
+            "rule_id": rule_id,
+            "enabled": self.lifecycle_is_configured(),
+            "transition_days": self.lifecycle_transition_days,
+            "storage_class": self.lifecycle_storage_class,
+        }
 
 
 class CoreStorageWasabi(TimeStampedModel):
@@ -2122,6 +2298,18 @@ class CoreStorage(TimeStampedModel):
     stats_wordpress_size = models.BigIntegerField(null=True)
     # Delete this later
     stat_wordpress_size = models.BigIntegerField(null=True)
+    # Protection and pricing are destination-level settings. Pricing is deliberately
+    # explicit: provider rates vary by region, agreement, and storage class.
+    is_air_gapped = models.BooleanField(default=False)
+    storage_cost_usd_per_gib_month = models.DecimalField(
+        max_digits=12, decimal_places=6, default=Decimal("0")
+    )
+    cold_storage_cost_usd_per_gib_month = models.DecimalField(
+        max_digits=12, decimal_places=6, default=Decimal("0")
+    )
+    retrieval_cost_usd_per_gib = models.DecimalField(
+        max_digits=12, decimal_places=6, default=Decimal("0")
+    )
 
     class Meta:
         db_table = "core_storage"
@@ -2158,6 +2346,168 @@ class CoreStorage(TimeStampedModel):
 
         database["backup__size__sum"] = humanfriendly.format_size(database["backup__size__sum"] or 0)
         return database
+
+    @staticmethod
+    def _format_cost(value):
+        return float(value.quantize(Decimal("0.0001")))
+
+    @staticmethod
+    def _storage_point_is_cold(storage, backup_created, now):
+        try:
+            aws_s3 = storage.storage_aws_s3
+        except CoreStorageAWSS3.DoesNotExist:
+            return False
+        if not aws_s3.lifecycle_is_configured() or not backup_created:
+            return False
+        return backup_created <= now - timedelta(days=aws_s3.lifecycle_transition_days)
+
+    @classmethod
+    def cost_summary_for_account(cls, account):
+        """Return current per-destination and per-source cost estimates in USD.
+
+        Costs are based on BackupSheep's recorded successful uploads. A configured
+        lifecycle transition is treated as cold storage after its age threshold;
+        actual provider billing remains authoritative because transitions can be
+        asynchronous and contracts vary by customer and region.
+        """
+        from ..backup.models import (
+            CoreBasecampBackupStoragePoints,
+            CoreDatabaseBackupStoragePoints,
+            CoreWebsiteBackupStoragePoints,
+            CoreWordPressBackupStoragePoints,
+        )
+
+        storages = {
+            storage.id: storage
+            for storage in cls.objects.filter(account=account).select_related("type")
+        }
+        destinations = {
+            storage.id: {
+                "storage_id": storage.id,
+                "storage_name": storage.name,
+                "storage_type": storage.type.name,
+                "is_air_gapped": storage.is_air_gapped,
+                "stored_bytes": 0,
+                "standard_stored_bytes": 0,
+                "cold_stored_bytes": 0,
+                "estimated_monthly_storage_usd": Decimal("0"),
+                "estimated_full_retrieval_usd": Decimal("0"),
+            }
+            for storage in storages.values()
+        }
+        sources = {}
+        point_models = (
+            (
+                CoreWebsiteBackupStoragePoints,
+                "backup__website__node_id",
+                "backup__website__node__name",
+            ),
+            (
+                CoreDatabaseBackupStoragePoints,
+                "backup__database__node_id",
+                "backup__database__node__name",
+            ),
+            (
+                CoreWordPressBackupStoragePoints,
+                "backup__wordpress__node_id",
+                "backup__wordpress__node__name",
+            ),
+            (
+                CoreBasecampBackupStoragePoints,
+                "backup__basecamp__node_id",
+                "backup__basecamp__node__name",
+            ),
+        )
+        gib = Decimal(1024 ** 3)
+        now = timezone.now()
+
+        for point_model, node_id_field, node_name_field in point_models:
+            points = point_model.objects.filter(
+                storage__account=account,
+                status=point_model.Status.UPLOAD_COMPLETE,
+                backup__size__isnull=False,
+            ).values(
+                "storage_id",
+                "backup__size",
+                "backup__created",
+                node_id_field,
+                node_name_field,
+            )
+            for point in points.iterator():
+                storage = storages.get(point["storage_id"])
+                if storage is None:
+                    continue
+                size = int(point["backup__size"] or 0)
+                is_cold = cls._storage_point_is_cold(storage, point["backup__created"], now)
+                size_gib = Decimal(size) / gib
+                monthly_rate = (
+                    storage.cold_storage_cost_usd_per_gib_month
+                    if is_cold
+                    else storage.storage_cost_usd_per_gib_month
+                )
+                monthly_cost = size_gib * monthly_rate
+                retrieval_cost = size_gib * storage.retrieval_cost_usd_per_gib
+
+                destination = destinations[storage.id]
+                destination["stored_bytes"] += size
+                destination["cold_stored_bytes" if is_cold else "standard_stored_bytes"] += size
+                destination["estimated_monthly_storage_usd"] += monthly_cost
+                destination["estimated_full_retrieval_usd"] += retrieval_cost
+
+                source_key = (point.get(node_id_field), point.get(node_name_field) or "Unknown source")
+                source = sources.setdefault(
+                    source_key,
+                    {
+                        "source_id": source_key[0],
+                        "source_name": source_key[1],
+                        "stored_bytes": 0,
+                        "estimated_monthly_storage_usd": Decimal("0"),
+                        "estimated_full_retrieval_usd": Decimal("0"),
+                    },
+                )
+                source["stored_bytes"] += size
+                source["estimated_monthly_storage_usd"] += monthly_cost
+                source["estimated_full_retrieval_usd"] += retrieval_cost
+
+        destination_rows = []
+        for destination in destinations.values():
+            destination["estimated_monthly_storage_usd"] = cls._format_cost(
+                destination["estimated_monthly_storage_usd"]
+            )
+            destination["estimated_full_retrieval_usd"] = cls._format_cost(
+                destination["estimated_full_retrieval_usd"]
+            )
+            destination_rows.append(destination)
+        source_rows = []
+        for source in sources.values():
+            source["estimated_monthly_storage_usd"] = cls._format_cost(
+                source["estimated_monthly_storage_usd"]
+            )
+            source["estimated_full_retrieval_usd"] = cls._format_cost(
+                source["estimated_full_retrieval_usd"]
+            )
+            source_rows.append(source)
+
+        destination_rows.sort(key=lambda item: item["storage_name"].lower())
+        source_rows.sort(key=lambda item: item["source_name"].lower())
+        return {
+            "currency": "USD",
+            "stored_bytes": sum(row["stored_bytes"] for row in destination_rows),
+            "estimated_monthly_storage_usd": cls._format_cost(
+                sum(
+                    (Decimal(str(row["estimated_monthly_storage_usd"])) for row in destination_rows),
+                    Decimal("0"),
+                )
+            ),
+            "estimated_full_retrieval_usd": cls._format_cost(
+                sum(
+                    (Decimal(str(row["estimated_full_retrieval_usd"])) for row in destination_rows),
+                    Decimal("0"),
+                )
+            ),
+            "destinations": destination_rows,
+            "sources": source_rows,
+        }
 
     def validate(self, show_error=None):
         try:
