@@ -125,6 +125,14 @@ database, and broker. Create an Ubuntu 22.04+ or Debian 12+ Droplet, then use th
 [one-command installer](docs/digitalocean-droplet.md). It deploys the complete Docker
 Compose stack with persistent volumes.
 
+### Other cloud VMs
+
+The same complete installer works on fresh Ubuntu 22.04+ or Debian 12+ VMs from **AWS**,
+**Azure**, **Google Cloud**, **Hetzner**, **Vultr**, **Akamai/Linode**, **OVHcloud**,
+**Scaleway**, **UpCloud**, and similar providers. The [cloud VM guide](docs/cloud-vms.md)
+includes the exact one-command and reusable cloud-init configuration. This is the preferred
+path for durable local archives and independently scalable worker pools.
+
 ### Render
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/bilal414/backupsheep/tree/main)
@@ -134,6 +142,15 @@ PostgreSQL, and a private RabbitMQ service with persistent storage. Enter a priv
 onboarding token during setup, then use external object storage for backups—**Local
 Storage** is not suitable for this PaaS deployment. See the [Render guide](docs/render.md)
 for its sizing and worker limitations.
+
+### Heroku
+
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy?template=https://github.com/bilal414/backupsheep/tree/main)
+
+The Heroku button provisions PostgreSQL, CloudAMQP's **RabbitMQ** Little Lemur plan, and
+separate web, worker, and Beat processes. Enter an onboarding token and the app's public
+hostname during setup; use external object storage for backup archives. See the
+[Heroku guide](docs/heroku.md) for its limits and production sizing.
 
 ### Railway
 
@@ -216,7 +233,9 @@ Celery, Alpine.js + Tailwind CSS. See [docs/scaling.md](docs/scaling.md).
 |-------|--------------|
 | [Installation](docs/installation.md) | Prerequisites, Docker Compose setup, the `.env` you must edit |
 | [DigitalOcean Droplet](docs/digitalocean-droplet.md) | Deploy the complete Docker stack with the one-command installer |
+| [Cloud VMs](docs/cloud-vms.md) | One-command/cloud-init deployments on AWS, Azure, Google Cloud, and VM providers |
 | [Render](docs/render.md) | Deploy the web, worker, scheduler, PostgreSQL, and private RabbitMQ stack |
+| [Heroku](docs/heroku.md) | Deploy via Heroku Button with PostgreSQL and managed RabbitMQ |
 | [Railway](docs/railway.md) | Publish the ready-to-configure multi-service Railway deployment template |
 | [Configuration](docs/configuration.md) | Environment-variable reference, incl. `BS_LOCAL_STORAGE_PATH` |
 | [First-run wizard](docs/first-run.md) | The 5 setup steps; admin accounts & `/django-admin` |

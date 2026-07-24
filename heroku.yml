@@ -1,0 +1,28 @@
+# Heroku Container-stack process definitions. app.json provisions PostgreSQL and the
+# RabbitMQ-only CloudAMQP Little Lemur add-on used by these processes.
+build:
+  docker:
+    web: Dockerfile
+
+release:
+  image: web
+  command:
+    - python manage.py migrate --noinput
+
+run:
+  web:
+    image: web
+    command:
+      - >-
+        sh -c 'python manage.py collectstatic --noinput && exec gunicorn
+        backupsheep.wsgi:application --workers=4 --timeout=3600 --bind 0.0.0.0:$PORT'
+  worker:
+    image: web
+    command:
+      - >-
+        celery -A backupsheep worker --loglevel=info --hostname=backup@%h
+        -Q cloud,default,database,files,storage,logs --concurrency=1
+  beat:
+    image: web
+    command:
+      - celery -A backupsheep beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler

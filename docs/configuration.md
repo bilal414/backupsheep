@@ -45,11 +45,14 @@ the simplest rule remains: **copy `.env_sample` wholesale and don't delete lines
 BackupSheep supports RabbitMQ only. Use either a complete AMQP URL or the connection
 fragments supplied by hosted-platform templates. When `RABBITMQ_HOST` is set, the fragment
 variables take precedence and BackupSheep URL-encodes the username, password, and virtual
-host before constructing the AMQP URL.
+host before constructing the AMQP URL. The Heroku template's RabbitMQ-specific CloudAMQP
+plan supplies `CLOUDAMQP_URL`; it takes precedence over the Compose default URL when no
+fragments are present.
 
 | Variable | Required | Default | Purpose |
 |----------|:--------:|---------|---------|
 | `CELERY_BROKER_URL` | optional | `amqp://guest:guest@rabbitmq:5672//` | Full RabbitMQ AMQP URL (`amqp://` or `amqps://`). |
+| `CLOUDAMQP_URL` | optional | unset | RabbitMQ AMQP URL injected by the Heroku CloudAMQP add-on. |
 | `RABBITMQ_HOST` | optional | unset | RabbitMQ hostname for fragment-based configuration. |
 | `RABBITMQ_PORT` | optional | `5672` | RabbitMQ AMQP port for fragment-based configuration. |
 | `RABBITMQ_USER`, `RABBITMQ_PASSWORD` | optional | `guest` | RabbitMQ credentials for fragment-based configuration. |

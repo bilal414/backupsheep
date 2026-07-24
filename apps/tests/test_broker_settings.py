@@ -30,6 +30,18 @@ class CeleryBrokerSettingsTests(SimpleTestCase):
             broker_url, "amqp://guest:guest@rabbitmq.internal:5672//"
         )
 
+    def test_cloudamqp_url_takes_precedence_over_compose_fallback(self):
+        broker_url = _resolve_celery_broker_url(
+            {
+                "CELERY_BROKER_URL": "amqp://guest:guest@rabbitmq:5672//",
+                "CLOUDAMQP_URL": "amqps://backup:secret@rabbitmq.example/vhost",
+            }
+        )
+
+        self.assertEqual(
+            broker_url, "amqps://backup:secret@rabbitmq.example/vhost"
+        )
+
     def test_non_amqp_broker_url_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "RabbitMQ"):
             _resolve_celery_broker_url({"CELERY_BROKER_URL": "memory://"})

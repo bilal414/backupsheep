@@ -499,9 +499,16 @@ def _resolve_celery_broker_url(values):
             return f"amqp://{user}:{password}@{host}:{port}/{vhost_path}"
         return f"amqp://{user}:{password}@{host}:{port}//"
 
-    broker_url = str(values.get("CELERY_BROKER_URL") or DEFAULT_CELERY_BROKER_URL)
+    # The Heroku template provisions CloudAMQP's RabbitMQ plan, which exposes its
+    # canonical AMQP URL as CLOUDAMQP_URL. Prefer it over the Compose fallback from
+    # .env_sample, while still allowing an explicitly supplied RabbitMQ URL elsewhere.
+    broker_url = str(
+        values.get("CLOUDAMQP_URL")
+        or values.get("CELERY_BROKER_URL")
+        or DEFAULT_CELERY_BROKER_URL
+    )
     if urlparse(broker_url).scheme not in {"amqp", "amqps"}:
-        raise ValueError("CELERY_BROKER_URL must use RabbitMQ's amqp:// or amqps:// scheme.")
+        raise ValueError("RabbitMQ broker URLs must use the amqp:// or amqps:// scheme.")
     return broker_url
 
 

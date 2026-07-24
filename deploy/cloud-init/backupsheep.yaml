@@ -1,0 +1,11 @@
+#cloud-config
+#
+# Generic cloud-init user data for a fresh Ubuntu 22.04+ or Debian 12+ VM. This runs as
+# root, downloads the reviewed BackupSheep installer from GitHub, and starts the complete
+# Docker Compose stack (PostgreSQL, RabbitMQ, web, workers, and Beat).
+#
+# For a DNS name, replace the final command with:
+#   - [bash, /tmp/backupsheep-install.sh, --domain, backups.example.com]
+runcmd:
+  - [curl, -fsSL, "https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh", -o, /tmp/backupsheep-install.sh]
+  - [bash, /tmp/backupsheep-install.sh]

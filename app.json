@@ -1,0 +1,74 @@
+{
+  "name": "BackupSheep",
+  "description": "Self-hosted backup automation for databases, websites, servers, and cloud infrastructure.",
+  "repository": "https://github.com/bilal414/backupsheep",
+  "website": "https://github.com/bilal414/backupsheep",
+  "keywords": [
+    "backup",
+    "postgresql",
+    "rabbitmq",
+    "celery",
+    "django"
+  ],
+  "stack": "container",
+  "success_url": "/",
+  "addons": [
+    {
+      "plan": "heroku-postgresql",
+      "as": "DATABASE"
+    },
+    {
+      "plan": "cloudamqp:lemur",
+      "as": "CLOUDAMQP"
+    }
+  ],
+  "env": {
+    "DJANGO_SECRET_KEY": {
+      "description": "A generated cryptographic signing key for this installation.",
+      "generator": "secret"
+    },
+    "ONBOARDING_INSTALL_TOKEN": {
+      "description": "Choose a long private token. You will enter it once in BackupSheep's first-run wizard.",
+      "required": true
+    },
+    "APP_DOMAIN": {
+      "description": "The exact public hostname, without https:// (for example, your-app.herokuapp.com or backups.example.com).",
+      "required": true
+    },
+    "DJANGO_ALLOWED_HOSTS": {
+      "description": "Comma-separated accepted hosts. Keep .herokuapp.com for the default Heroku domain; add any custom domain after deployment.",
+      "value": ".herokuapp.com",
+      "required": false
+    },
+    "DJANGO_SERVER": {
+      "value": "prod",
+      "required": false
+    },
+    "DJANGO_DEBUG": {
+      "value": "false",
+      "required": false
+    },
+    "DJANGO_HTTPS": {
+      "value": "true",
+      "required": false
+    },
+    "APP_PROTOCOL": {
+      "value": "https://",
+      "required": false
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "basic"
+    },
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    },
+    "beat": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  }
+}
