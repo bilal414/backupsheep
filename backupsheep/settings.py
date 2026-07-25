@@ -12,8 +12,11 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 import io
 import json
 import os
+import warnings
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlparse
+
+from django.core.exceptions import ImproperlyConfigured
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
 import google.auth
@@ -55,6 +58,17 @@ def _as_bool(value, default=False):
 SECRET_KEY = config["DJANGO_SECRET_KEY"]
 DEBUG = _as_bool(config.get("DJANGO_DEBUG", "false"))
 DJANGO_SERVER = config["DJANGO_SERVER"]
+
+# .env_sample values are merged in as defaults (see config above) so a PaaS deploy
+# that forgets to set DJANGO_SECRET_KEY would otherwise boot with a publicly known
+# signing key. Refuse to start a production instance in that state instead of
+# running with forgeable sessions and undecryptable-credential keys.
+if DJANGO_SERVER == "prod" and SECRET_KEY == "change-this-key":
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY is still the .env_sample placeholder. Set a long random "
+        "value (python -c 'import secrets; print(secrets.token_urlsafe(64))') before "
+        "running BackupSheep with DJANGO_SERVER=prod."
+    )
 # Accepts one host or a comma-separated list, e.g. "backup.example.com,www.example.com".
 ALLOWED_HOSTS = [h.strip() for h in str(config["DJANGO_ALLOWED_HOSTS"]).split(",") if h.strip()]
 CSRF_TRUSTED_ORIGINS = [f"{config['APP_PROTOCOL']}{config['APP_DOMAIN']}"]
@@ -490,6 +504,15 @@ def _resolve_celery_broker_url(values):
     """
     host = str(values.get("RABBITMQ_HOST") or "").strip()
     if host:
+        if not (values.get("RABBITMQ_USER") and values.get("RABBITMQ_PASSWORD")):
+            # guest/guest is RabbitMQ's well-known default; fine for the private
+            # Compose network, dangerous for any broker reachable beyond it.
+            warnings.warn(
+                "RABBITMQ_HOST is set without RABBITMQ_USER/RABBITMQ_PASSWORD; "
+                "falling back to the well-known guest/guest credentials. Set explicit "
+                "credentials unless this broker is on a trusted private network.",
+                stacklevel=2,
+            )
         port = str(values.get("RABBITMQ_PORT") or "5672").strip()
         user = quote(str(values.get("RABBITMQ_USER") or "guest"), safe="")
         password = quote(str(values.get("RABBITMQ_PASSWORD") or "guest"), safe="")
@@ -553,6 +576,11 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 # Backup run logs are kept on the container's local _storage volume (never uploaded to
 # any external bucket) and pruned by the delete_old_logs task after this many days.
 LOG_RETENTION_DAYS = int(config.get("LOG_RETENTION_DAYS", 30))
+
+# Lifetime (seconds) of presigned download URLs generated for backup archives. 24h by
+# default; lower it for immutable/compliance destinations where long-lived URLs weaken
+# the protection story.
+S3_DOWNLOAD_URL_EXPIRES = int(config.get("S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))
 
 # Periodic maintenance fired by Celery beat. The DatabaseScheduler syncs these entries
 # into django-celery-beat's PeriodicTask table on startup.
