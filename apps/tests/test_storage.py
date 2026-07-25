@@ -427,3 +427,175 @@ class LocalStorageDownloadViewTests(BaseTestCase):
             self.client.force_login(self.user)
             r = self.client.get(f"/api/v1/storage/local/file/{point.id}/")
             self.assertEqual(r.status_code, 404)
+
+
+class S3ImmutabilityFollowupTests(BaseTestCase):
+    """Regression tests for deferred-deletion retries and async lifecycle sync."""
+
+    def _protected_storage(self, *, air_gapped=False, no_delete=None):
+        storage = factories.make_storage(self.account, self.member, code="aws_s3")
+        storage.is_air_gapped = air_gapped
+        storage.save()
+        aws_s3 = storage.storage_aws_s3
+        key = self.account.get_encryption_key()
+        aws_s3.access_key = bs_encrypt("access", key)
+        aws_s3.secret_key = bs_encrypt("secret", key)
+        aws_s3.object_lock_mode = CoreStorageAWSS3.ObjectLockMode.COMPLIANCE
+        aws_s3.object_lock_retain_days = 30
+        aws_s3.expected_bucket_owner = "123456789012"
+        aws_s3.no_delete = no_delete
+        aws_s3.save()
+        return storage
+
+    def test_legal_hold_defers_deletion(self):
+        storage = self._protected_storage()
+        point = make_website_backup_point(
+            self.member, storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id="legal-hold.zip",
+        )
+        client = mock.MagicMock()
+        client.head_object.return_value = {
+            "VersionId": "version-1",
+            "ObjectLockMode": "COMPLIANCE",
+            "ObjectLockLegalHoldStatus": "ON",
+            "ObjectLockRetainUntilDate": timezone.now() - timedelta(days=1),
+        }
+
+        with mock.patch("boto3.client", return_value=client):
+            self.assertFalse(point.soft_delete())
+
+        point.refresh_from_db()
+        self.assertEqual(point.status, CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE)
+        self.assertIn("deletion_protection", point.metadata)
+        client.delete_object.assert_not_called()
+
+    def test_missing_version_id_defers_when_object_lock_configured(self):
+        storage = self._protected_storage()
+        point = make_website_backup_point(
+            self.member, storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id="no-version.zip",
+        )
+        client = mock.MagicMock()
+        client.head_object.return_value = {
+            "ObjectLockMode": "COMPLIANCE",
+            "ObjectLockRetainUntilDate": timezone.now() - timedelta(days=1),
+        }
+
+        with mock.patch("boto3.client", return_value=client):
+            self.assertFalse(point.soft_delete())
+
+        point.refresh_from_db()
+        self.assertEqual(point.status, CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE)
+        self.assertIn("deletion_protection", point.metadata)
+        client.delete_object.assert_not_called()
+
+    def test_retry_task_deletes_once_retention_has_expired(self):
+        from apps._tasks.helper.maintenance import retry_protected_storage_deletes
+
+        storage = self._protected_storage()
+        point = make_website_backup_point(
+            self.member, storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id="retry.zip",
+        )
+        point.metadata = {
+            "deletion_protection": {
+                "reason": "S3 Object Lock retention is active",
+                "deferred_at": (timezone.now() - timedelta(days=31)).isoformat(),
+                "retain_until": (timezone.now() - timedelta(days=1)).isoformat(),
+            }
+        }
+        point.save()
+        client = mock.MagicMock()
+        client.head_object.return_value = {
+            "VersionId": "version-expired",
+            "ObjectLockMode": "COMPLIANCE",
+            "ObjectLockRetainUntilDate": timezone.now() - timedelta(days=1),
+        }
+
+        with mock.patch("boto3.client", return_value=client):
+            retry_protected_storage_deletes.apply()
+
+        point.refresh_from_db()
+        self.assertEqual(point.status, CoreWebsiteBackupStoragePoints.Status.DELETE_COMPLETED)
+        client.delete_object.assert_called_once_with(
+            Bucket="test-bucket",
+            Key="retry.zip",
+            VersionId="version-expired",
+            ExpectedBucketOwner="123456789012",
+        )
+
+    def test_retry_task_skips_permanently_protected_destinations(self):
+        from apps._tasks.helper.maintenance import retry_protected_storage_deletes
+
+        deferred_metadata = {
+            "deletion_protection": {
+                "reason": "destination deletion protection is enabled",
+                "deferred_at": timezone.now().isoformat(),
+                "retain_until": None,
+            }
+        }
+        air_gapped_storage = self._protected_storage(air_gapped=True)
+        air_gapped_point = make_website_backup_point(
+            self.member, air_gapped_storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id="air-gapped.zip",
+        )
+        air_gapped_point.metadata = deferred_metadata
+        air_gapped_point.save()
+
+        no_delete_storage = self._protected_storage(no_delete=True)
+        no_delete_point = make_website_backup_point(
+            self.member, no_delete_storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id="no-delete.zip",
+        )
+        no_delete_point.metadata = deferred_metadata
+        no_delete_point.save()
+
+        with mock.patch("boto3.client") as boto_client:
+            retry_protected_storage_deletes.apply()
+
+        boto_client.assert_not_called()
+        air_gapped_point.refresh_from_db()
+        no_delete_point.refresh_from_db()
+        self.assertEqual(air_gapped_point.status, CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE)
+        self.assertEqual(no_delete_point.status, CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE)
+
+    def test_sync_lifecycle_endpoint_queues_task(self):
+        storage = self._protected_storage()
+        self.client.force_login(self.user)
+        with mock.patch(
+            "apps.api.v1.storage.aws_s3.views.storage_aws_s3_sync_lifecycle.apply_async"
+        ) as dispatch:
+            response = self.client.post(
+                f"/api/v1/storage/aws_s3/{storage.id}/sync_lifecycle/"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        dispatch.assert_called_once_with(args=[storage.storage_aws_s3.id])
+
+    def test_serializer_validation_error_is_a_clean_400(self):
+        from apps.api.v1.storage.aws_s3.serializers import CoreStorageAWSS3WriteSerializer
+        from apps.console.connection.models import CoreAWSRegion
+
+        aws_s3 = self._protected_storage().storage_aws_s3
+        region_id = aws_s3.region_id or CoreAWSRegion.objects.first().id
+        serializer = CoreStorageAWSS3WriteSerializer(
+            instance=aws_s3,
+            data={
+                "access_key": "access",
+                "secret_key": "secret",
+                "bucket_name": "test-bucket",
+                "region": region_id,
+                # mode without retention days -> invalid combination
+                "object_lock_mode": CoreStorageAWSS3.ObjectLockMode.COMPLIANCE,
+                "object_lock_retain_days": None,
+            },
+            context={"encryption_key": self.account.get_encryption_key()},
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("configured together", str(serializer.errors))
