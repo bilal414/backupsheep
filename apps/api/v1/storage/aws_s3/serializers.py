@@ -11,7 +11,7 @@ from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault, StorageDefault, bs_encrypt,
 )
-from apps._tasks.integration.storage.tasks import storage_aws_s3_sync_lifecycle
+from apps._tasks.helper.maintenance import storage_aws_s3_sync_lifecycle
 from apps.console.backup.models import CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints
 from apps.console.connection.models import CoreAWSRegion
 from apps.console.storage.models import CoreStorageAWSS3, CoreStorage, CoreStorageType

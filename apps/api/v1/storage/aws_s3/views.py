@@ -19,7 +19,7 @@ from .filters import CoreStorageAWSS3Filter
 from .permissions import CoreStorageAWSS3Permissions
 from .serializers import CoreStorageReadSerializer, CoreStorageWriteSerializer
 from apps._tasks.exceptions import StorageValidationFailed
-from apps._tasks.integration.storage.tasks import storage_aws_s3_sync_lifecycle
+from apps._tasks.helper.maintenance import storage_aws_s3_sync_lifecycle
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_helpers import get_start_end_of_previous_day
 from ...utils.api_serializers import ReadWriteSerializerMixin
