@@ -110,7 +110,7 @@ class CoreStorageAWSS3View(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         end_time = arrow.get(get_start_end_of_previous_day(days=0)["start_time"])
 
         temp_data = []
-        for r in arrow.span_range(
+        for r in arrow.Arrow.span_range(
                 "day", start_time.astimezone(timezone), end_time.astimezone(timezone)
         ):
             size = (
@@ -141,7 +141,7 @@ class CoreStorageAWSS3View(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         )
 
         # we need labels for the days.
-        for r in arrow.span_range("day", start_time, end_time):
+        for r in arrow.Arrow.span_range("day", start_time, end_time):
             graph["categories"].append(r[0].format("MM/DD/YY"))
 
         return Response(graph)
