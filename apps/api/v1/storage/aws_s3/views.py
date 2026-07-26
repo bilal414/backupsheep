@@ -19,6 +19,7 @@ from .filters import CoreStorageAWSS3Filter
 from .permissions import CoreStorageAWSS3Permissions
 from .serializers import CoreStorageReadSerializer, CoreStorageWriteSerializer
 from apps._tasks.exceptions import StorageValidationFailed
+from apps._tasks.helper.maintenance import storage_aws_s3_sync_lifecycle
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_helpers import get_start_end_of_previous_day
 from ...utils.api_serializers import ReadWriteSerializerMixin
@@ -91,19 +92,12 @@ class CoreStorageAWSS3View(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def sync_lifecycle(self, request, pk=None):
         storage = self.get_object()
-        try:
-            lifecycle = storage.storage_aws_s3.sync_lifecycle_configuration()
-        except Exception as exc:
-            return Response(
-                {"detail": f"Unable to sync the S3 lifecycle rule: {exc}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Runs as a Celery task: the AWS call can be slow, so it must not block the
+        # request. The task retries with backoff and updates lifecycle_last_synced_at.
+        storage_aws_s3_sync_lifecycle.apply_async(args=[storage.storage_aws_s3.id])
         return Response(
-            {
-                "detail": "BackupSheep S3 lifecycle rule is synchronized.",
-                "lifecycle": lifecycle,
-            },
-            status=status.HTTP_200_OK,
+            {"detail": "BackupSheep S3 lifecycle synchronization has been queued."},
+            status=status.HTTP_202_ACCEPTED,
         )
 
     @action(detail=False)

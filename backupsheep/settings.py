@@ -526,6 +526,7 @@ CELERY_RESULT_SERIALIZER = "json"
 # send_task()/chord(), which fails on an unregistered task unless listed here.
 CELERY_IMPORTS = (
     "apps._tasks.helper.tasks",
+    "apps._tasks.helper.maintenance",
     "apps._tasks.integration.aws",
     "apps._tasks.integration.aws_rds",
     "apps._tasks.integration.basecamp",
@@ -567,6 +568,12 @@ CELERY_BEAT_SCHEDULE = {
         "task": "delete_old_db_logs",
         "schedule": crontab(minute=30, hour=3),  # daily at 03:30 (worker timezone)
     },
+    # Retry deletes that were deferred by S3 Object Lock retention/legal holds, so
+    # keep_last retention resumes once the protection window expires.
+    "retry-protected-storage-deletes": {
+        "task": "retry_protected_storage_deletes",
+        "schedule": crontab(minute=15, hour="*/6"),  # every 6 hours
+    },
 }
 
 # Task routing across the worker types (see docker-compose.yml):
@@ -596,6 +603,9 @@ CELERY_TASK_ROUTES = {
     "storage_upload": {"queue": "storage"},
     "finalize_backup": {"queue": "storage"},
     "delete_from_disk": {"queue": "storage"},
+    # S3 lifecycle rule application + deferred Object Lock delete retries.
+    "storage_aws_s3_sync_lifecycle": {"queue": "storage"},
+    "retry_protected_storage_deletes": {"queue": "storage"},
     # Cloud/volume provider snapshots — API-only, no local disk.
     "backup_digitalocean": {"queue": "cloud"},
     "backup_hetzner": {"queue": "cloud"},
