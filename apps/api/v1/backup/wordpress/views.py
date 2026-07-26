@@ -114,7 +114,7 @@ class CoreWordPressBackupView(viewsets.ModelViewSet):
                             "connection_name": backup.wordpress.node.connection.name,
                         },
                     )
-                    return Response({"url": download_url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+                    return Response({"url": download_url, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
                 else:
                     raise DownloadStoragePointNotFound()
             except Exception as e:
@@ -140,7 +140,7 @@ class CoreWordPressBackupView(viewsets.ModelViewSet):
                 expiration=timedelta(hours=24),
                 method="GET",
             )
-            return Response({"url": url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+            return Response({"url": url, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         else:
             s3_endpoint = f"https://{settings.AWS_S3_LOGS_ENDPOINT}"
 
@@ -164,9 +164,9 @@ class CoreWordPressBackupView(viewsets.ModelViewSet):
                     "Bucket": settings.AWS_S3_LOGS_BUCKET,
                     "Key": f"{backup.uuid_str}.log",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600)),
             )
-            return Response({"url": response, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+            return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
 
     @action(detail=True)
     def storage_points(self, request, pk=None):

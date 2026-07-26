@@ -2563,9 +2563,6 @@ class CoreStorage(TimeStampedModel):
             elif hasattr(self, 'storage_onedrive'):
                 storage = getattr(self, 'storage_onedrive')
                 return storage.validate()
-            elif hasattr(self, 'storage_googlecloud'):
-                storage = getattr(self, 'storage_googlecloud')
-                return storage.validate()
             elif hasattr(self, 'storage_vultr'):
                 storage = getattr(self, 'storage_vultr')
                 return storage.validate()
