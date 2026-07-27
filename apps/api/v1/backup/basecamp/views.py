@@ -111,7 +111,7 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
                             "connection_name": backup.basecamp.node.connection.name,
                         },
                     )
-                    return Response({"url": download_url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+                    return Response({"url": download_url, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
                 else:
                     raise DownloadStoragePointNotFound()
             except Exception as e:
@@ -144,9 +144,9 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
                 "Bucket": settings.AWS_S3_LOGS_BUCKET,
                 "Key": f"{backup.uuid_str}.log",
             },
-            ExpiresIn=24 * 3600,
+            ExpiresIn=int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600)),
         )
-        return Response({"url": response, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+        return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
 
     @action(detail=True)
     def storage_points(self, request, pk=None):

@@ -130,7 +130,7 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
                             "connection_name": backup.website.node.connection.name,
                         },
                     )
-                    return Response({"url": download_url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+                    return Response({"url": download_url, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
                 else:
                     raise DownloadStoragePointNotFound()
             except Exception as e:
@@ -168,7 +168,7 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
                 expiration=timedelta(hours=24),
                 method="GET",
             )
-            return Response({"url": url, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+            return Response({"url": url, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         elif backup.created > date_aws_s3:
             s3_endpoint = f"https://{settings.AWS_S3_LOGS_ENDPOINT}"
 
@@ -192,9 +192,9 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
                     "Bucket": settings.AWS_S3_LOGS_BUCKET,
                     "Key": f"{backup.uuid_str}.log",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600)),
             )
-            return Response({"url": response, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+            return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         elif date < backup.created < date_aws_s3:
             s3_client = boto3.client(
                 "s3",
@@ -209,10 +209,10 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
                     "Bucket": settings.LOGS_S3_BUCKET,
                     "Key": f"{backup.uuid_str}.log",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600)),
             )
             response = response.replace(f"{settings.LOGS_S3_ENDPOINT}/logs", "https://logs.backupsheep.com")
-            return Response({"url": response, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+            return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         else:
             s3_client = boto3.client(
                 "s3",
@@ -226,9 +226,9 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
                     "Bucket": settings.AWS_LOGS_BUCKET,
                     "Key": f"{backup.uuid_str}.log",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600)),
             )
-            return Response({"url": response, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+            return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
 
     @action(detail=True)
     def download_dir_tree(self, request, pk=None):
@@ -268,9 +268,9 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
                     "Bucket": settings.AWS_S3_LOGS_BUCKET,
                     "Key": f"{backup.uuid_str}-dir-tree.log",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600)),
             )
-            return Response({"url": response, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+            return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         elif date < backup.created < date_aws_s3:
             s3_client = boto3.client(
                 "s3",
@@ -285,10 +285,10 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
                     "Bucket": settings.LOGS_S3_BUCKET,
                     "Key": f"{backup.uuid_str}-dir-tree.log",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600)),
             )
             response = response.replace(f"{settings.LOGS_S3_ENDPOINT}/logs", "https://logs.backupsheep.com")
-            return Response({"url": response, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+            return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         else:
             s3_client = boto3.client(
                 "s3",
@@ -302,9 +302,9 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
                     "Bucket": settings.AWS_LOGS_BUCKET,
                     "Key": f"{backup.uuid_str}-dir-tree.log",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600)),
             )
-            return Response({"url": response, "expire_in": 24 * 3600}, status=status.HTTP_201_CREATED)
+            return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
 
     @action(detail=True)
     def storage_points(self, request, pk=None):

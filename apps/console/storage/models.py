@@ -2352,14 +2352,15 @@ class CoreStorage(TimeStampedModel):
         return float(value.quantize(Decimal("0.0001")))
 
     @staticmethod
-    def _storage_point_is_cold(storage, backup_created, now):
+    def _storage_cold_cutoff(storage, now):
+        """Backups older than this timestamp are billed at the cold-storage rate."""
         try:
             aws_s3 = storage.storage_aws_s3
         except CoreStorageAWSS3.DoesNotExist:
-            return False
-        if not aws_s3.lifecycle_is_configured() or not backup_created:
-            return False
-        return backup_created <= now - timedelta(days=aws_s3.lifecycle_transition_days)
+            return None
+        if not aws_s3.lifecycle_is_configured():
+            return None
+        return now - timedelta(days=aws_s3.lifecycle_transition_days)
 
     @classmethod
     def cost_summary_for_account(cls, account):
@@ -2369,7 +2370,13 @@ class CoreStorage(TimeStampedModel):
         lifecycle transition is treated as cold storage after its age threshold;
         actual provider billing remains authoritative because transitions can be
         asynchronous and contracts vary by customer and region.
+
+        Byte totals are aggregated in SQL (one grouped query per destination per
+        backup type) instead of iterating every storage-point row in Python, so the
+        dashboard and /api/v1/storage/costs/ stay fast on installs with many backups.
         """
+        from django.db.models import Q, Sum
+
         from ..backup.models import (
             CoreBasecampBackupStoragePoints,
             CoreDatabaseBackupStoragePoints,
@@ -2420,54 +2427,60 @@ class CoreStorage(TimeStampedModel):
         )
         gib = Decimal(1024 ** 3)
         now = timezone.now()
+        cold_cutoffs = {
+            storage.id: cls._storage_cold_cutoff(storage, now)
+            for storage in storages.values()
+        }
 
-        for point_model, node_id_field, node_name_field in point_models:
-            points = point_model.objects.filter(
-                storage__account=account,
-                status=point_model.Status.UPLOAD_COMPLETE,
-                backup__size__isnull=False,
-            ).values(
-                "storage_id",
-                "backup__size",
-                "backup__created",
-                node_id_field,
-                node_name_field,
-            )
-            for point in points.iterator():
-                storage = storages.get(point["storage_id"])
-                if storage is None:
-                    continue
-                size = int(point["backup__size"] or 0)
-                is_cold = cls._storage_point_is_cold(storage, point["backup__created"], now)
-                size_gib = Decimal(size) / gib
-                monthly_rate = (
-                    storage.cold_storage_cost_usd_per_gib_month
-                    if is_cold
-                    else storage.storage_cost_usd_per_gib_month
+        for storage in storages.values():
+            cutoff = cold_cutoffs[storage.id]
+            destination = destinations[storage.id]
+            for point_model, node_id_field, node_name_field in point_models:
+                annotations = {"stored": Sum("backup__size")}
+                if cutoff:
+                    annotations["cold_stored"] = Sum(
+                        "backup__size", filter=Q(backup__created__lte=cutoff)
+                    )
+                rows = (
+                    point_model.objects.filter(
+                        storage_id=storage.id,
+                        status=point_model.Status.UPLOAD_COMPLETE,
+                        backup__size__isnull=False,
+                    )
+                    .values(node_id_field, node_name_field)
+                    .annotate(**annotations)
                 )
-                monthly_cost = size_gib * monthly_rate
-                retrieval_cost = size_gib * storage.retrieval_cost_usd_per_gib
+                for row in rows:
+                    stored = int(row["stored"] or 0)
+                    cold = int(row.get("cold_stored") or 0) if cutoff else 0
+                    standard = stored - cold
 
-                destination = destinations[storage.id]
-                destination["stored_bytes"] += size
-                destination["cold_stored_bytes" if is_cold else "standard_stored_bytes"] += size
-                destination["estimated_monthly_storage_usd"] += monthly_cost
-                destination["estimated_full_retrieval_usd"] += retrieval_cost
+                    monthly_cost = (
+                        (Decimal(cold) / gib) * storage.cold_storage_cost_usd_per_gib_month
+                        + (Decimal(standard) / gib) * storage.storage_cost_usd_per_gib_month
+                    )
+                    retrieval_cost = (Decimal(stored) / gib) * storage.retrieval_cost_usd_per_gib
 
-                source_key = (point.get(node_id_field), point.get(node_name_field) or "Unknown source")
-                source = sources.setdefault(
-                    source_key,
-                    {
-                        "source_id": source_key[0],
-                        "source_name": source_key[1],
-                        "stored_bytes": 0,
-                        "estimated_monthly_storage_usd": Decimal("0"),
-                        "estimated_full_retrieval_usd": Decimal("0"),
-                    },
-                )
-                source["stored_bytes"] += size
-                source["estimated_monthly_storage_usd"] += monthly_cost
-                source["estimated_full_retrieval_usd"] += retrieval_cost
+                    destination["stored_bytes"] += stored
+                    destination["cold_stored_bytes"] += cold
+                    destination["standard_stored_bytes"] += standard
+                    destination["estimated_monthly_storage_usd"] += monthly_cost
+                    destination["estimated_full_retrieval_usd"] += retrieval_cost
+
+                    source_key = (row.get(node_id_field), row.get(node_name_field) or "Unknown source")
+                    source = sources.setdefault(
+                        source_key,
+                        {
+                            "source_id": source_key[0],
+                            "source_name": source_key[1],
+                            "stored_bytes": 0,
+                            "estimated_monthly_storage_usd": Decimal("0"),
+                            "estimated_full_retrieval_usd": Decimal("0"),
+                        },
+                    )
+                    source["stored_bytes"] += stored
+                    source["estimated_monthly_storage_usd"] += monthly_cost
+                    source["estimated_full_retrieval_usd"] += retrieval_cost
 
         destination_rows = []
         for destination in destinations.values():
@@ -2549,9 +2562,6 @@ class CoreStorage(TimeStampedModel):
                 return storage.validate()
             elif hasattr(self, 'storage_onedrive'):
                 storage = getattr(self, 'storage_onedrive')
-                return storage.validate()
-            elif hasattr(self, 'storage_googlecloud'):
-                storage = getattr(self, 'storage_googlecloud')
                 return storage.validate()
             elif hasattr(self, 'storage_vultr'):
                 storage = getattr(self, 'storage_vultr')

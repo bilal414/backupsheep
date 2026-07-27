@@ -34,6 +34,12 @@ from backupsheep.celery import app
 from botocore.config import Config
 
 
+def _presigned_url_expiry():
+    """Seconds before a generated backup download URL expires (configurable via
+    S3_DOWNLOAD_URL_EXPIRES; default 24h)."""
+    return int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))
+
+
 class CoreBackupType(TimeStampedModel):
     code = models.CharField(max_length=64, unique=True)
     name = models.CharField(max_length=64)
@@ -1623,7 +1629,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                             "Key": f"{self.storage_file_id}",
                             **owner_kwargs,
                         },
-                        ExpiresIn=24 * 3600,
+                        ExpiresIn=_presigned_url_expiry(),
                     )
                     return response
             else:
@@ -1634,7 +1640,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         "Key": f"{self.storage_file_id}",
                         **owner_kwargs,
                     },
-                    ExpiresIn=24 * 3600,
+                    ExpiresIn=_presigned_url_expiry(),
                 )
                 return response
         elif self.storage.type.code == "do_spaces":
@@ -1654,7 +1660,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_do_spaces.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "filebase":
@@ -1672,7 +1678,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_filebase.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "exoscale":
@@ -1690,7 +1696,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_exoscale.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "oracle":
@@ -1709,7 +1715,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_oracle.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "scaleway":
@@ -1728,7 +1734,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_scaleway.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "backblaze_b2":
@@ -1747,7 +1753,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_backblaze_b2.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "linode":
@@ -1765,7 +1771,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_linode.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "vultr":
@@ -1783,7 +1789,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_vultr.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "upcloud":
@@ -1802,7 +1808,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_upcloud.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "cloudflare":
@@ -1822,7 +1828,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_cloudflare.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "wasabi":
@@ -1840,7 +1846,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_wasabi.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "dropbox":
@@ -1976,7 +1982,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_leviia.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "idrive":
@@ -1994,7 +2000,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_idrive.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "ionos":
@@ -2013,7 +2019,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_ionos.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "rackcorp":
@@ -2032,7 +2038,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_rackcorp.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "ibm":
@@ -2051,7 +2057,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "Bucket": self.storage.storage_ibm.bucket_name,
                     "Key": f"{self.storage_file_id}",
                 },
-                ExpiresIn=24 * 3600,
+                ExpiresIn=_presigned_url_expiry(),
             )
             return response
         elif self.storage.type.code == "local":

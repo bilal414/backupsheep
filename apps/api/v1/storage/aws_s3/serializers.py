@@ -11,6 +11,7 @@ from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault, StorageDefault, bs_encrypt,
 )
+from apps._tasks.helper.maintenance import storage_aws_s3_sync_lifecycle
 from apps.console.backup.models import CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints
 from apps.console.connection.models import CoreAWSRegion
 from apps.console.storage.models import CoreStorageAWSS3, CoreStorage, CoreStorageType
@@ -120,6 +121,11 @@ class CoreStorageAWSS3WriteSerializer(serializers.ModelSerializer):
 
             data["access_key"] = bs_encrypt(data["access_key"], self.context["encryption_key"])
             data["secret_key"] = bs_encrypt(data["secret_key"], self.context["encryption_key"])
+        except ValueError as e:
+            # Configuration problems (Object Lock / lifecycle settings, or a failed
+            # bucket permission probe) are client errors: surface them as a 400 with
+            # the real reason instead of an unhandled 500.
+            raise serializers.ValidationError(str(e))
         except Exception as e:
             raise serializers.ValidationError(f"Unable to authenticate. {e.__str__()}")
         return data
@@ -219,13 +225,25 @@ class CoreStorageWriteSerializer(serializers.ModelSerializer):
         return data
 
     @staticmethod
-    def _should_sync_lifecycle(storage_aws_s3, submitted_data):
+    def _queue_lifecycle_sync(storage_aws_s3, submitted_data):
+        """Dispatch the S3 lifecycle sync after the transaction commits.
+
+        The sync is an AWS API call, so it must not run inside the request's DB
+        transaction (a slow S3 response would hold the transaction open and can time
+        out the request). The Celery task re-reads the row and applies the rule.
+        """
         lifecycle_fields = {"lifecycle_transition_days", "lifecycle_storage_class"}
-        return bool(
+        should_sync = bool(
             storage_aws_s3.lifecycle_is_configured()
             or storage_aws_s3.lifecycle_last_synced_at
             or lifecycle_fields.intersection(submitted_data.keys())
         )
+        if should_sync:
+            transaction.on_commit(
+                lambda: storage_aws_s3_sync_lifecycle.apply_async(
+                    args=[storage_aws_s3.id]
+                )
+            )
 
     def create(self, validated_data):
         storage_aws_s3 = validated_data.pop("storage_aws_s3", [])
@@ -233,8 +251,7 @@ class CoreStorageWriteSerializer(serializers.ModelSerializer):
             instance = CoreStorage.objects.create(**validated_data)
             storage_aws_s3["storage"] = instance
             aws_s3 = CoreStorageAWSS3.objects.create(**storage_aws_s3)
-            if self._should_sync_lifecycle(aws_s3, storage_aws_s3):
-                aws_s3.sync_lifecycle_configuration()
+            self._queue_lifecycle_sync(aws_s3, storage_aws_s3)
         return instance
 
     def update(self, instance, validated_data):
@@ -242,6 +259,5 @@ class CoreStorageWriteSerializer(serializers.ModelSerializer):
         with transaction.atomic():
             aws_s3 = super().update(instance.storage_aws_s3, storage_aws_s3)
             instance = super().update(instance, validated_data)
-            if self._should_sync_lifecycle(aws_s3, storage_aws_s3):
-                aws_s3.sync_lifecycle_configuration()
+            self._queue_lifecycle_sync(aws_s3, storage_aws_s3)
         return instance
