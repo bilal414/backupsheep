@@ -8,6 +8,7 @@ from unittest import mock
 
 from django.test import override_settings
 from django.utils import timezone
+from botocore.exceptions import ClientError
 
 from apps._tasks.integration.storage.aws_s3 import storage_aws_s3
 from apps._tasks.integration.storage.local import storage_local
@@ -489,6 +490,27 @@ class S3ImmutabilityFollowupTests(BaseTestCase):
         point.refresh_from_db()
         self.assertEqual(point.status, CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE)
         self.assertIn("deletion_protection", point.metadata)
+        client.delete_object.assert_not_called()
+
+    def test_missing_object_is_marked_deleted_even_with_object_lock_configured(self):
+        storage = self._protected_storage()
+        point = make_website_backup_point(
+            self.member,
+            storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            storage_file_id="already-gone.zip",
+        )
+        client = mock.MagicMock()
+        client.head_object.side_effect = ClientError(
+            {"Error": {"Code": "404", "Message": "Not Found"}},
+            "HeadObject",
+        )
+
+        with mock.patch("boto3.client", return_value=client):
+            self.assertTrue(point.soft_delete())
+
+        point.refresh_from_db()
+        self.assertEqual(point.status, CoreWebsiteBackupStoragePoints.Status.DELETE_COMPLETED)
         client.delete_object.assert_not_called()
 
     def test_retry_task_deletes_once_retention_has_expired(self):

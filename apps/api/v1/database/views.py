@@ -109,7 +109,7 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             "nodes": databases.count(),
             "backups": CoreDatabaseBackup.objects.filter(
                 database__in=databases,
-                status=UtilBackup.Status.COMPLETE
+                status__in=UtilBackup.SUCCESS_STATUSES
             ).count(),
             "storage": 0,
             "in_progress": CoreNode.objects.filter(

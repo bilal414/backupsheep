@@ -59,6 +59,7 @@ fragments are present.
 | `RABBITMQ_VHOST` | optional | `/` | RabbitMQ virtual host for fragment-based configuration. |
 | `LOG_RETENTION_DAYS` | optional | `30` | Days to keep backup run logs on local disk *and* activity-log entries in the database before `delete_old_logs` (03:00) / `delete_old_db_logs` (03:30) prune them. |
 | `S3_DOWNLOAD_URL_EXPIRES` | optional | `86400` | Seconds before a generated backup download URL expires. Lower it (e.g. `3600`) for immutable/compliance destinations where long-lived presigned URLs weaken the protection story. |
+| `SSH_KNOWN_HOSTS_PATH` | optional | `_storage/ssh_known_hosts` | Reviewed OpenSSH `known_hosts` file used for SSH/SFTP backup sources. Unknown host keys are rejected; mount/populate this file with keys verified out-of-band. |
 
 ## Transactional email
 

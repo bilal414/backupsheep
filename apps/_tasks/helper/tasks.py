@@ -502,8 +502,18 @@ def node_delete_requested(self, node_id):
                     node_type_object = getattr(node, node.connection.integration.code)
 
                     query = ~Q(status=UtilBackup.Status.DELETE_COMPLETED)
-                    for backup in node_type_object.backups.filter(query).order_by("created"):
+                    pending_backups = node_type_object.backups.filter(query).order_by("created")
+                    for backup in pending_backups:
                         backup.soft_delete()
+
+                    # A node row owns the backup catalog.  Never cascade-delete it
+                    # while a provider still has an unconfirmed backup: doing so
+                    # destroys the only local pointer available for a later retry.
+                    if node_type_object.backups.filter(query).exists():
+                        raise RuntimeError(
+                            f"Node {node_id} still has backups whose remote deletion "
+                            "has not been confirmed."
+                        )
 
                     for schedule in CoreSchedule.objects.filter(node=node):
                         schedule.schedule_delete()
@@ -545,33 +555,28 @@ def clean_delete_failed_backups(self):
             if hasattr(node, node.connection.integration.code):
                 node_type_object = getattr(node, node.connection.integration.code)
 
-                for backup in node_type_object.backups.filter(status=UtilBackup.Status.DELETE_FAILED).order_by(
-                    "created"
-                ):
-                    print(f"removing backup.. {backup.uuid}")
-                    backup.delete()
-
+                cleanup_statuses = (
+                    UtilBackup.Status.DELETE_FAILED,
+                    UtilBackup.Status.DELETE_FAILED_NOT_FOUND,
+                    UtilBackup.Status.DELETE_MAX_RETRY_FAILED,
+                    UtilBackup.Status.MAX_RETRY_FAILED,
+                    UtilBackup.Status.CANCELLED,
+                )
                 for backup in node_type_object.backups.filter(
-                    status=UtilBackup.Status.DELETE_FAILED_NOT_FOUND
+                    status__in=cleanup_statuses
                 ).order_by("created"):
-                    print(f"removing backup.. {backup.uuid}")
-                    backup.delete()
-
-                for backup in node_type_object.backups.filter(
-                    status=UtilBackup.Status.DELETE_MAX_RETRY_FAILED
-                ).order_by("created"):
-                    print(f"removing backup.. {backup.uuid}")
-                    backup.delete()
-
-                for backup in node_type_object.backups.filter(status=UtilBackup.Status.MAX_RETRY_FAILED).order_by(
-                    "created"
-                ):
-                    print(f"removing backup MAX_RETRY_FAILED.. {backup.uuid}")
-                    backup.delete()
-
-                for backup in node_type_object.backups.filter(status=UtilBackup.Status.CANCELLED).order_by("created"):
-                    print(f"removing backup CANCELLED.. {backup.uuid}")
-                    backup.delete()
+                    try:
+                        if backup.soft_delete() is False:
+                            capture_message(
+                                f"Keeping backup {backup.uuid}: remote deletion is still unconfirmed."
+                            )
+                        else:
+                            print(f"remote deletion confirmed for backup {backup.uuid}")
+                    except Exception as exc:
+                        capture_exception(exc)
+                        capture_message(
+                            f"Keeping backup {backup.uuid}: cleanup retry failed."
+                        )
 
     except Exception as e:
         capture_exception(e)

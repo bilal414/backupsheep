@@ -39,6 +39,17 @@ from ..member.models import CoreMember
 from ..utils.models import UtilBase
 
 
+def _configure_ssh_host_keys(ssh):
+    """Use reviewed known-host keys and reject unknown SSH servers."""
+    import paramiko
+
+    ssh.load_system_host_keys()
+    known_hosts_path = getattr(settings, "SSH_KNOWN_HOSTS_PATH", None)
+    if known_hosts_path and os.path.isfile(known_hosts_path):
+        ssh.load_host_keys(known_hosts_path)
+    ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+
+
 class CoreIntegration(UtilBase):
     class Type(models.TextChoices):
         CLOUD = "cloud", "Cloud"
@@ -1388,7 +1399,7 @@ class CoreAuthWebsite(TimeStampedModel):
 
         if use_public_key:
             ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            _configure_ssh_host_keys(ssh)
             pkey = paramiko.RSAKey.from_private_key_file(settings.SSH_KEY_PATH)
             ssh.connect(
                 host,
@@ -1403,7 +1414,7 @@ class CoreAuthWebsite(TimeStampedModel):
             sftp = ssh.open_sftp()
         elif use_private_key:
             ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            _configure_ssh_host_keys(ssh)
             fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
             try:
                 with os.fdopen(fd, "w") as tmp:
@@ -1437,7 +1448,7 @@ class CoreAuthWebsite(TimeStampedModel):
                 raise
         else:
             ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            _configure_ssh_host_keys(ssh)
             ssh.connect(
                 host,
                 auth_timeout=180,
@@ -2211,7 +2222,7 @@ class CoreAuthDatabase(TimeStampedModel):
 
         if use_public_key:
             ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            _configure_ssh_host_keys(ssh)
             pkey = paramiko.RSAKey.from_private_key_file(settings.SSH_KEY_PATH)
             ssh.connect(
                 ssh_host,
@@ -2228,7 +2239,7 @@ class CoreAuthDatabase(TimeStampedModel):
             sftp.close()
         elif use_private_key:
             ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            _configure_ssh_host_keys(ssh)
             fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
             try:
                 with os.fdopen(fd, "w") as tmp:
@@ -2558,6 +2569,7 @@ class CoreAuthWordPress(TimeStampedModel):
         assert_url_not_metadata(url, "WordPress url")
 
         client = self.get_client()
+        safe_url = url
 
         # adapter = SSLAdapter(ssl.PROTOCOL_TLSv1_2)
         # s = requests.Session()
@@ -2575,29 +2587,39 @@ class CoreAuthWordPress(TimeStampedModel):
             session.mount("http://", adapter)
             session.mount("https://", adapter)
             url = f"{url}/?rest_route=/backupsheep/updraftplus/validate&key={key}&t={time.time()}"
-            result = session.get(url, timeout=60, verify=False, headers=client)
+            safe_url = url.replace(f"key={key}", "key=[REDACTED]")
+            result = session.get(url, timeout=60, verify=True, headers=client)
         except Exception as e:
             if check_errors:
                 if "handshake failure" in e.__str__():
                     raise ValueError(
                         "SSL handshake failed. "
-                        f"Please use our website and database integration for this website. Validation URL: {url}"
+                        f"Please use our website and database integration for this website. Validation URL: {safe_url}"
                     )
                 elif "retries exceeded with url" in e.__str__():
                     raise ValueError(
                         f"Unable to connect to your WordPress website due to timeout. If you are using Cloudflare,"
                         f" Stackpath or any security plugin in your WordPress then please allow backup server IPs."
-                        f"  Validation URL: {url}"
+                        f"  Validation URL: {safe_url}"
                     )
                 else:
                     raise ValueError(
                         f"Unable to connect to your website. If you are using Cloudflare, "
                         f"Stackpath or any security plugin in your WordPress then please allow backup "
                         f"server IPs or you can"
-                        f" use our website and database integration for this website. Validation URL: {url}"
+                        f" use our website and database integration for this website. Validation URL: {safe_url}"
                     )
             else:
                 return False
+        try:
+            result.raise_for_status()
+        except Exception as e:
+            if check_errors:
+                raise ValueError(
+                    f"WordPress validation returned HTTP {result.status_code}. "
+                    f"Validation URL: {safe_url}"
+                ) from e
+            return False
         if result.status_code == 200:
             try:
                 if result.json().get("plugins", {}).get("backupsheep") and result.json().get("plugins", {}).get(
@@ -2607,26 +2629,26 @@ class CoreAuthWordPress(TimeStampedModel):
                 elif not result.json().get("validate_backupsheep_key"):
                     raise ValueError(
                         "Invalid WordPress Key. Please get correct WordPress Key from your integration "
-                        f"and add it to BackupSheep Wordpress plugin. Validation URL: {url}"
+                        f"and add it to BackupSheep Wordpress plugin. Validation URL: {safe_url}"
                     )
                 elif not result.json().get("plugins", {}).get("backupsheep") and not result.json().get(
                     "plugins", {}
                 ).get("updraftplus"):
-                    raise ValueError(f"Your BackupSheep & UpdraftPlus plugins are not active. Validation URL: {url}")
+                    raise ValueError(f"Your BackupSheep & UpdraftPlus plugins are not active. Validation URL: {safe_url}")
                 elif not result.json().get("plugins", {}).get("backupsheep") and not result.json().get(
                     "plugins", {}
                 ).get("updraftplus"):
-                    raise ValueError(f"Your BackupSheep & UpdraftPlus plugins are not active. Validation URL: {url}")
+                    raise ValueError(f"Your BackupSheep & UpdraftPlus plugins are not active. Validation URL: {safe_url}")
                 elif not result.json().get("plugins", {}).get("backupsheep"):
-                    raise ValueError(f"Your BackupSheep plugin is not active. Validation URL: {url}")
+                    raise ValueError(f"Your BackupSheep plugin is not active. Validation URL: {safe_url}")
                 elif not result.json().get("plugins", {}).get("updraftplus"):
-                    raise ValueError(f"Your UpdraftPlus plugin is not active. Validation URL: {url}")
+                    raise ValueError(f"Your UpdraftPlus plugin is not active. Validation URL: {safe_url}")
             except JSONDecodeError:
                 if check_errors:
                     raise ValueError(
                         f"Invalid JSON response. If you are using Cloudflare then add backup server IPs"
                         f"to web application firewall. Also check your .htaccess file on your web server."
-                        f" Validation URL: {url}"
+                        f" Validation URL: {safe_url}"
                     )
                 else:
                     return False
@@ -2637,7 +2659,10 @@ class CoreAuthWordPress(TimeStampedModel):
                     return False
         elif result.status_code == 404:
             if result.json().get("rest_no_route") == "rest_no_route":
-                raise ValueError("Please install BackupSheep and UpdraftPlus plugin. Validation URL: {url}")
+                raise ValueError(
+                    "Please install BackupSheep and UpdraftPlus plugin. "
+                    f"Validation URL: {safe_url}"
+                )
         else:
             if check_errors:
                 soup = BeautifulSoup(result.text)

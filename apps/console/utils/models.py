@@ -125,6 +125,7 @@ class UtilBackup(TimeStampedModel):
         UPLOAD_IN_PROGRESS = 9, "Upload In Progress"
         UPLOAD_COMPLETE = 10, "Upload Complete"
         UPLOAD_VALIDATION = 22, "Upload Validation"
+        PARTIAL = 23, "Partial (Some Destinations Failed)"
         UPLOAD_FAILED = 11, "Upload Failed"
         DELETE_REQUESTED = 12, "Delete REQUESTED"
         DELETE_IN_PROGRESS = 13, "Delete In-Progress"
@@ -137,6 +138,8 @@ class UtilBackup(TimeStampedModel):
         CANCELLED = 19, "Cancelled"
         TIMEOUT = 21, "Timeout"
         STORAGE_VALIDATION_FAILED = 30, "Storage Validation Failed"
+
+    SUCCESS_STATUSES = (Status.COMPLETE, Status.PARTIAL)
 
     class Type(models.IntegerChoices):
         ON_DEMAND = 1, "On-Demand"

@@ -37,7 +37,7 @@ class CoreDatabaseReadSerializer(serializers.ModelSerializer):
     @staticmethod
     def get_totals(obj):
         totals = {
-            "backups": obj.backups.filter(status=UtilBackup.Status.COMPLETE).count(),
+            "backups": obj.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).count(),
             "schedules": CoreSchedule.objects.filter(node=obj.node, status=CoreSchedule.Status.ACTIVE).count(),
         }
         return totals

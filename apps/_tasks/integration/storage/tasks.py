@@ -333,30 +333,59 @@ def finalize_backup(self, node_id, backup_id):
         raise TaskParamsNotProvided()
 
     try:
-        if backup.storage_points_uploaded() > 0:
-            # At least one destination has the backup -> success.
-            if backup.status != UtilBackup.Status.COMPLETE:
-                backup.status = UtilBackup.Status.COMPLETE
-                backup.save()
-                node.notify_backup_success(backup)
+        uploaded_count = backup.storage_points_uploaded()
+        all_uploaded = backup.all_storage_points_uploaded()
+        storage_point_count = backup.stored_website_backups.all().count() if node.type == CoreNode.Type.WEBSITE else (
+            backup.stored_database_backups.all().count() if node.type == CoreNode.Type.DATABASE else (
+                backup.stored_wordpress_backups.all().count()
+                if node.connection.integration.code == "wordpress"
+                else backup.stored_basecamp_backups.all().count()
+            )
+        )
 
-                # Retention: keep only the newest `keep_last` completed backups of
-                # this schedule (applies to every file-based node type, incl. basecamp).
-                if backup.schedule and (backup.schedule.keep_last or 0) > 0:
-                    keep_last = backup.schedule.keep_last
-                    completed = list(
-                        backup.__class__.objects.filter(
-                            schedule=backup.schedule,
-                            status=UtilBackup.Status.COMPLETE,
-                        ).order_by("created")
-                    )
-                    for old_backup in completed[:-keep_last]:
-                        old_backup.soft_delete()
+        if uploaded_count > 0:
+            final_status = (
+                UtilBackup.Status.COMPLETE
+                if all_uploaded
+                else UtilBackup.Status.PARTIAL
+            )
+            metadata = dict(backup.metadata or {})
+            metadata["storage_upload_summary"] = {
+                "uploaded": uploaded_count,
+                "configured": storage_point_count,
+                "partial": final_status == UtilBackup.Status.PARTIAL,
+            }
+            status_changed = backup.status != final_status
+            backup.status = final_status
+            backup.metadata = metadata
+            backup.save()
+
+            if status_changed and final_status == UtilBackup.Status.COMPLETE:
+                node.notify_backup_success(backup)
+            elif status_changed:
+                message = (
+                    f"Backup {backup.uuid_str} completed partially: "
+                    f"{uploaded_count}/{storage_point_count} storage destinations succeeded."
+                )
+                node.connection.account.create_backup_log(message, node, backup)
+                capture_message(message)
+
+            # Retention includes partial runs: they occupy destination space and
+            # must not bypass the schedule's keep_last policy.
+            if backup.schedule and (backup.schedule.keep_last or 0) > 0:
+                keep_last = backup.schedule.keep_last
+                successful = list(
+                    backup.__class__.objects.filter(
+                        schedule=backup.schedule,
+                        status__in=UtilBackup.SUCCESS_STATUSES,
+                    ).order_by("created")
+                )
+                for old_backup in successful[:-keep_last]:
+                    old_backup.soft_delete()
         else:
             # Nothing was stored anywhere -> failure (do not silently mark complete).
-            if backup.status != UtilBackup.Status.COMPLETE:
-                backup.status = UtilBackup.Status.UPLOAD_FAILED
-                backup.save()
+            backup.status = UtilBackup.Status.UPLOAD_FAILED
+            backup.save(update_fields=["status", "modified"])
     except Exception as e:
         capture_exception(e)
     finally:

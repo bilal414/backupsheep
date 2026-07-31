@@ -1,14 +1,53 @@
 import subprocess
 import os
 import requests
+import re
 from sentry_sdk import capture_exception
 import hashlib
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from apps._tasks.exceptions import NodeBackupFailedError
+from apps._tasks.integration.backup._archive import create_zip
 from apps.api.v1.utils.api_helpers import check_string_in_file, aws_s3_upload_log_file
 from apps.api.v1.utils.api_helpers import mkdir_p, safe_basename, ssrf_safe_get
 from apps._tasks.helper.tasks import delete_from_disk
 from apps.console.utils.models import UtilBackup
 import time
+
+
+_WORDPRESS_SUCCESS_STATUSES = frozenset({
+    "backup_complete",
+    "backup_completed",
+    "complete",
+    "completed",
+    "success",
+    "successful",
+    "succeeded",
+})
+_WORDPRESS_FAILURE_STATUSES = frozenset({
+    "backup_error",
+    "backup_failed",
+    "cancelled",
+    "canceled",
+    "error",
+    "errored",
+    "failed",
+    "failure",
+})
+
+
+def _redact_url(url):
+    """Remove the WordPress API key from URLs written to backup logs."""
+    parts = urlsplit(url)
+    query = urlencode(
+        (name, "[REDACTED]" if name.lower() == "key" else value)
+        for name, value in parse_qsl(parts.query, keep_blank_values=True)
+    )
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
+def _redact_error(message):
+    """Remove API keys from exception text before it reaches logs or Sentry."""
+    return re.sub(r"([?&]key=)[^&\s]+", r"\1[REDACTED]", message or "")
 
 
 def snapshot_wordpress(backup):
@@ -53,14 +92,14 @@ def snapshot_wordpress(backup):
                   f"&include={node.wordpress.include}" \
                   f"&t={time.time()}"
 
-            log_file.write(f"Tigger Backup: {url} \n")
+            log_file.write(f"Trigger Backup: {_redact_url(url)} \n")
 
             # We don't need to wait for this
             ssrf_safe_get(
                 url,
                 auth=auth,
                 headers=client,
-                verify=False,
+                verify=True,
                 timeout=3600,
             )
         except Exception as e:
@@ -78,26 +117,37 @@ def snapshot_wordpress(backup):
                       f"/?rest_route=/backupsheep/updraftplus/status&backup_uuid={backup.uuid_str}" \
                       f"&key={node.connection.auth_wordpress.key}" \
                       f"&t={time.time()}"
-                log_file.write(f"Check backup status: {url} \n")
+                log_file.write(f"Check backup status: {_redact_url(url)} \n")
                 result = ssrf_safe_get(
                     url,
                     auth=auth,
                     headers=client,
-                    verify=False,
+                    verify=True,
                     timeout=180,
                 )
+                result.raise_for_status()
                 # Strip any directory component the remote site may include so it cannot
                 # be used to write/read outside the backup's _storage directory.
-                updraft_log_file = safe_basename(result.json().get("log_file"))
-                status = result.json().get("status")
+                status_payload = result.json()
+                updraft_log_file = safe_basename(status_payload.get("log_file"))
+                status = status_payload.get("status")
+                normalized_status = str(status or "").strip().lower()
 
                 msg = f"Check counter no {check_counter}. Backup status: {status} Logfile: {updraft_log_file}."
                 log_file.write(f"INFO: {msg} \n")
 
-                if status:
+                if normalized_status in _WORDPRESS_FAILURE_STATUSES:
+                    raise NodeBackupFailedError(
+                        node,
+                        backup.uuid_str,
+                        backup.attempt_no,
+                        backup.type,
+                        message=f"WordPress backup failed with status: {status}",
+                    )
+                if normalized_status in _WORDPRESS_SUCCESS_STATUSES:
                     backup_status = True
 
-                    msg = f"Backup is complete. Validation using status flag from API."
+                    msg = f"Backup is complete. Validated status flag from API: {status}."
                     log_file.write(f"INFO: {msg} \n")
                 elif updraft_log_file:
                     # download the log file
@@ -105,14 +155,15 @@ def snapshot_wordpress(backup):
                           f"/?rest_route=/backupsheep/updraftplus/download&backup_file={updraft_log_file}" \
                           f"&key={node.connection.auth_wordpress.key}" \
                           f"&t={time.time()}"
-                    log_file.write(f"Download updraft backup log: {url} \n")
+                    log_file.write(f"Download updraft backup log: {_redact_url(url)} \n")
                     r = ssrf_safe_get(
                         url,
                         auth=auth,
                         headers=client,
-                        verify=False,
+                        verify=True,
                         stream=True,
                     )
+                    r.raise_for_status()
                     # save downloaded log file
                     with open(f"{local_dir}{updraft_log_file}", "wb") as b_file:
                         for chunk in r.iter_content(chunk_size=1024):
@@ -126,17 +177,11 @@ def snapshot_wordpress(backup):
                         msg = f"Backup is complete. Validation using log file: {updraft_log_file}."
                         log_file.write(f"INFO: {msg} \n")
                 else:
-                    msg = f"Unable to find log UpdraftPlus file in WordPress to validate status." \
-                          f"Check counter no {check_counter}. Backup status: {status} Logfile: {updraft_log_file}."
-                    log_file.write(f"INFO: {msg} \n")
-
-                    raise NodeBackupFailedError(
-                        node,
-                        backup.uuid_str,
-                        backup.attempt_no,
-                        backup.type,
-                        message=f"Unable to find log UpdraftPlus file in WordPress to validate status",
+                    msg = (
+                        "WordPress returned a non-terminal backup status without a log. "
+                        f"Check counter no {check_counter}. Backup status: {status}."
                     )
+                    log_file.write(f"INFO: {msg} \n")
             else:
                 msg = f"Giving up on status checking. Backup status is considered a failure. " \
                       f"Check counter no {check_counter}."
@@ -157,135 +202,110 @@ def snapshot_wordpress(backup):
               f"&t={time.time()}" \
               f"&key={node.connection.auth_wordpress.key}"
 
-        log_file.write(f"Get list of backup files: {url} \n")
+        log_file.write(f"Get list of backup files: {_redact_url(url)} \n")
 
         result = ssrf_safe_get(
             url,
             auth=auth,
             headers=client,
-            verify=False,
+            verify=True,
             timeout=180,
         )
-        if result.status_code == 200:
-            msg = f"We have list of backup files."
-            log_file.write(f"INFO: {msg} \n")
+        result.raise_for_status()
+        msg = "We have list of backup files."
+        log_file.write(f"INFO: {msg} \n")
 
-            # We have change name names of file to add MD5 so files can be restored.
-            md5_code = hashlib.md5(str(int(time.time())).encode()).hexdigest()[0:12]
+        # We have changed the file names to add MD5 so files can be restored.
+        md5_code = hashlib.md5(str(int(time.time())).encode()).hexdigest()[0:12]
 
-            backup_files = result.json()["files"]
-            for backup_file in backup_files:
-                url = f"{node.connection.auth_wordpress.url}" \
-                      f"/?rest_route=/backupsheep/updraftplus/download&backup_file={backup_file}" \
-                      f"&key={node.connection.auth_wordpress.key}" \
-                      f"&t={time.time()}"
-
-                # download the file
-                msg = f"Downloading file: {backup_file} using URL {url}"
-                log_file.write(f"Downloading file: {backup_file} using URL {url} \n")
-
-                r = ssrf_safe_get(
-                    url,
-                    auth=auth,
-                    headers=client,
-                    verify=False,
-                    stream=True,
-                )
-                # save downloaded file (strip any directory component the remote site may
-                # include so the write stays inside the backup's _storage directory)
-                backup_file_alt = safe_basename(backup_file.replace(backup.uuid_str, md5_code))
-
-                '''
-                Sometime .gz files are sent by server as text. So we will add .zip so we can download it.
-                It will be renamed back to .gz on BackupSheep server.
-                This happens only to database backup files.
-                '''
-                if backup_file_alt.endswith('-db.gz.zip'):
-                    backup_file_alt.replace("-db.gz.zip", "-db.gz")
-
-                with open(f"{local_dir}{backup_file_alt}", "wb") as b_file:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        if chunk:
-                            b_file.write(chunk)
-
-                msg = f"Saved file as: {backup_file_alt}"
-                log_file.write(f"INFO: {msg} \n")
-
-            '''
-            We downloaded all files. Now we we will delete files. 
-            '''
-            for backup_file in backup_files:
-                url = f"{node.connection.auth_wordpress.url}" \
-                      f"/?rest_route=/backupsheep/updraftplus/delete&backup_file={backup_file}" \
-                      f"&backup_uuid={backup.uuid_str}&key={node.connection.auth_wordpress.key}" \
-                      f"&t={time.time()}"
-
-                log_file.write(f"Delete file: {url} \n")
-
-                r_delete = ssrf_safe_get(
-                    url,
-                    auth=auth,
-                    headers=client,
-                    verify=False,
-                    )
-
-                if r_delete.status_code == 200:
-                    if r_delete.json().get("deleted"):
-                        msg = f"Deleted file from WordPress: {backup_file} using URL: {url}"
-                        log_file.write(f"INFO: {msg} \n")
-                    else:
-                        msg = f"Unable to delete file from WordPress: {backup_file} using URL: {url}"
-                        log_file.write(f"INFO: {msg} \n")
-                else:
-                    msg = f"Unable to delete file from WordPress: {backup_file} using URL: {url}"
-                    log_file.write(f"INFO: {msg} \n")
-        else:
-            msg = f"Unable to get list of files from API call {url}"
-            log_file.write(f"INFO: {msg} \n")
-
+        backup_files = result.json().get("files", [])
+        if not backup_files:
             raise NodeBackupFailedError(
                 node,
                 backup.uuid_str,
                 backup.attempt_no,
                 backup.type,
-                message=msg,
+                message="WordPress returned no backup files.",
             )
 
+        for backup_file in backup_files:
+            url = f"{node.connection.auth_wordpress.url}" \
+                  f"/?rest_route=/backupsheep/updraftplus/download&backup_file={backup_file}" \
+                  f"&key={node.connection.auth_wordpress.key}" \
+                  f"&t={time.time()}"
+
+            log_file.write(
+                f"Downloading file: {backup_file} using URL {_redact_url(url)} \n"
+            )
+
+            r = ssrf_safe_get(
+                url,
+                auth=auth,
+                headers=client,
+                verify=True,
+                stream=True,
+            )
+            r.raise_for_status()
+            # Strip any directory component the remote site may include so the write
+            # stays inside the backup's _storage directory.
+            backup_file_alt = safe_basename(backup_file.replace(backup.uuid_str, md5_code))
+
+            # Some servers return database .gz files with a .zip suffix.
+            if backup_file_alt.endswith("-db.gz.zip"):
+                backup_file_alt = backup_file_alt.replace("-db.gz.zip", "-db.gz")
+
+            with open(f"{local_dir}{backup_file_alt}", "wb") as b_file:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        b_file.write(chunk)
+
+            log_file.write(f"INFO: Saved file as: {backup_file_alt} \n")
+
+        # We downloaded all files; now remove the remote copies.
+        for backup_file in backup_files:
+            url = f"{node.connection.auth_wordpress.url}" \
+                  f"/?rest_route=/backupsheep/updraftplus/delete&backup_file={backup_file}" \
+                  f"&backup_uuid={backup.uuid_str}&key={node.connection.auth_wordpress.key}" \
+                  f"&t={time.time()}"
+
+            log_file.write(f"Delete file: {_redact_url(url)} \n")
+
+            r_delete = ssrf_safe_get(
+                url,
+                auth=auth,
+                headers=client,
+                verify=True,
+            )
+            r_delete.raise_for_status()
+            if not r_delete.json().get("deleted"):
+                raise NodeBackupFailedError(
+                    node,
+                    backup.uuid_str,
+                    backup.attempt_no,
+                    backup.type,
+                    message=f"WordPress did not delete backup file: {backup_file}",
+                )
+            log_file.write(f"INFO: Deleted file from WordPress: {backup_file}.\n")
+
         # Rebuild backup history on Updraft
-        url = f"{node.connection.auth_wordpress.url}"
-        f"/?rest_route=/backupsheep/updraftplus/rebuild_history"
-        f"&t={time.time()}"
-        f"&key={node.connection.auth_wordpress.key}"
-        ssrf_safe_get(
+        url = (
+            f"{node.connection.auth_wordpress.url}"
+            f"/?rest_route=/backupsheep/updraftplus/rebuild_history"
+            f"&t={time.time()}"
+            f"&key={node.connection.auth_wordpress.key}"
+        )
+        rebuild_result = ssrf_safe_get(
             url,
             auth=auth,
             headers=client,
-            verify=False,
+            verify=True,
             timeout=180,
         )
-        log_file.write(f"Rebuild backup history on Updraft: {msg} \n")
-
-        # Update Permissions
-        execstr = f"sudo chown ubuntu:ubuntu ../{backup.uuid_str} -R"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=43200,
-            shell=True,
-            cwd=local_dir,
-        )
+        rebuild_result.raise_for_status()
+        log_file.write(f"Rebuild backup history on Updraft: {_redact_url(url)} \n")
 
         # ZIP all downloaded files.
-        execstr = rf"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=43200,
-            shell=True,
-            cwd=local_dir,
-        )
+        create_zip(local_dir, local_zip, timeout=43200)
 
         # Generate Report
         try:
@@ -309,11 +329,10 @@ def snapshot_wordpress(backup):
         except Exception as e:
             capture_exception(e)
 
-        if os.path.exists(local_zip):
-            backup.size = os.stat(local_zip).st_size
-            backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
-            backup.save()
-            log_file.write(f"Size (compressed): {backup.size_display()} \n")
+        backup.size = os.stat(local_zip).st_size
+        backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
+        backup.save()
+        log_file.write(f"Size (compressed): {backup.size_display()} \n")
 
 
         """
@@ -323,8 +342,9 @@ def snapshot_wordpress(backup):
             args=[backup.uuid_str, "dir"],
         )
     except Exception as e:
-        log_file.write(f"Error: {e.__str__()} \n")
-        capture_exception(e)
+        error = _redact_error(str(e))
+        log_file.write(f"Error: {error} \n")
+        capture_exception(RuntimeError(error))
         """
         Delete files
         """
@@ -332,7 +352,7 @@ def snapshot_wordpress(backup):
             args=[backup.uuid_str, "both"],
         )
         raise NodeBackupFailedError(
-            node, backup.uuid_str, backup.attempt_no, backup.type, e.__str__()
+            node, backup.uuid_str, backup.attempt_no, backup.type, error
         )
     finally:
         """

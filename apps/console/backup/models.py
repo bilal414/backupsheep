@@ -2137,7 +2137,16 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         error_code = (exc.response.get("Error") or {}).get("Code")
                         if error_code not in {"404", "NoSuchKey", "NotFound"}:
                             raise
-                        s3_object = {}
+                        self.status = self.Status.DELETE_COMPLETED
+                        self.save()
+                        message = (
+                            f"Backup {self.backup.uuid_str} was already absent from "
+                            f"storage point {self.storage.name} - {self.storage.type.name}."
+                        )
+                        self.storage.account.create_storage_log(
+                            message, self.backup.node, self.backup, self.storage
+                        )
+                        return True
 
                     lock_metadata = (self.metadata or {}).get("s3_object_lock") or {}
                     retain_until = s3_object.get("ObjectLockRetainUntilDate")
@@ -2668,7 +2677,7 @@ class CoreWordPressBackup(UtilBackup):
                 f"&t={time.time()}",
                 auth=auth,
                 headers=client,
-                verify=False,
+                verify=True,
                 timeout=180,
             )
             if result.status_code == 200:
@@ -2685,7 +2694,7 @@ class CoreWordPressBackup(UtilBackup):
                             allow_redirects=True,
                             auth=auth,
                             headers=client,
-                            verify=False
+                            verify=True
                         )
                         if r_delete.status_code == 200:
                             if r_delete.json().get("deleted"):

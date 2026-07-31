@@ -79,6 +79,7 @@ class IndexView(LoginRequiredMixin, TemplateView):
                 status=(
                     UtilBackup.Status.FAILED,
                     UtilBackup.Status.MAX_RETRY_FAILED,
+                    UtilBackup.Status.PARTIAL,
                     UtilBackup.Status.UPLOAD_FAILED,
                     UtilBackup.Status.STORAGE_VALIDATION_FAILED,
                     UtilBackup.Status.TIMEOUT,

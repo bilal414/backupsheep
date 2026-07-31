@@ -2952,7 +2952,7 @@ class CoreNode(TimeStampedModel):
 
             if node_type_object.backups.filter().count() > 0:
                 last_backup = node_type_object.backups.filter().order_by("-created").first()
-                if last_backup.status == UtilBackup.Status.COMPLETE:
+                if last_backup.status in UtilBackup.SUCCESS_STATUSES:
                     return True
                 else:
                     t_difference = datetime.datetime.now(tz=pytz.UTC) - last_backup.created
@@ -2965,8 +2965,8 @@ class CoreNode(TimeStampedModel):
 
     def last_backup_date(self):
         node_type_object = getattr(self, self.connection.integration.code)
-        if node_type_object.backups.filter(status=UtilBackup.Status.COMPLETE).count() > 0:
-            backup = node_type_object.backups.filter(status=UtilBackup.Status.COMPLETE).order_by('-created').first()
+        if node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).count() > 0:
+            backup = node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).order_by('-created').first()
             timezone = str(get_current_timezone())
             timezone = pytz.timezone(timezone)
             date_time = backup.created.astimezone(timezone).strftime("%b %d %Y - %I:%M%p")
@@ -2991,22 +2991,22 @@ class CoreNode(TimeStampedModel):
 
     def total_backups(self):
         node_type_object = getattr(self, self.connection.integration.code)
-        return node_type_object.backups.filter(status=UtilBackup.Status.COMPLETE).count()
+        return node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).count()
 
     def total_storage(self):
         from django.db.models import Sum
 
         if self.connection.integration.code == "website" or self.connection.integration.code == "database":
             node_type_object = getattr(self, self.connection.integration.code)
-            node_stats = node_type_object.backups.filter(status=UtilBackup.Status.COMPLETE).aggregate(Sum("size"))
+            node_stats = node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).aggregate(Sum("size"))
             return humanfriendly.format_size(node_stats["size__sum"] or 0)
         elif self.connection.integration.type == "saas":
             node_type_object = getattr(self, self.connection.integration.code)
-            node_stats = node_type_object.backups.filter(status=UtilBackup.Status.COMPLETE).aggregate(Sum("size"))
+            node_stats = node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).aggregate(Sum("size"))
             return humanfriendly.format_size(node_stats["size__sum"] or 0)
         else:
             node_type_object = getattr(self, self.connection.integration.code)
-            node_stats = node_type_object.backups.filter(status=UtilBackup.Status.COMPLETE).aggregate(
+            node_stats = node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).aggregate(
                 Sum("size_gigabytes"))
             return humanfriendly.format_size(1000 ** 3 * (node_stats["size_gigabytes__sum"] or 0))
 

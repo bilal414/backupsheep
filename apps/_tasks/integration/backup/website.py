@@ -48,9 +48,11 @@ import shutil
 import subprocess
 
 import paramiko
+from django.conf import settings
 from sentry_sdk import capture_exception
 
 from apps._tasks.exceptions import NodeBackupFailedError, NodeBackupTimeoutError
+from apps._tasks.integration.backup._archive import create_zip
 from apps.api.v1.utils.api_helpers import bs_decrypt, mkdir_p, create_directory_v2, ensure_disk_space
 from apps.console.connection.models import CoreAuthWebsite
 from apps._tasks.helper.tasks import delete_from_disk
@@ -63,7 +65,9 @@ _LFTP_BASE_SETTINGS = (
     "set net:reconnect-interval-base 5",
     "set net:reconnect-interval-multiplier 1",
     "set net:max-retries 5",
-    "set sftp:auto-confirm true",
+    # Never accept an SSH/SFTP host key automatically.  The worker must have the
+    # reviewed key in SSH_KNOWN_HOSTS_PATH (or the system known_hosts file).
+    "set sftp:auto-confirm false",
     "set ftp:use-mdtm off",
     "set mirror:set-permissions off",
 )
@@ -92,6 +96,22 @@ def _redact(text, username, password):
     return out.replace("_storage/", "")
 
 
+def _check_ssh_command(stdout, stderr, description):
+    """Read a remote command result and fail on a non-zero SSH exit status."""
+    stdout_data = stdout.read()
+    stderr_data = stderr.read()
+    exit_status = stdout.channel.recv_exit_status()
+    if exit_status != 0:
+        if isinstance(stderr_data, bytes):
+            stderr_data = stderr_data.decode("utf-8", "replace")
+        detail = (stderr_data or "").strip()
+        raise RuntimeError(
+            f"Remote {description} failed with exit code {exit_status}"
+            + (f": {detail[-1000:]}" if detail else "")
+        )
+    return stdout_data
+
+
 # Minimum free-space floor for the preflight check (1 GiB).
 _PREFLIGHT_FLOOR = 1 << 30
 
@@ -100,7 +120,7 @@ def _last_complete_zip_size(backup, **node_filter):
     """Size in bytes of the node's most recent COMPLETE backup of the same class
     (0 when there is none) -- the basis for the disk-space preflight estimate."""
     last = (
-        backup.__class__.objects.filter(status=UtilBackup.Status.COMPLETE, **node_filter)
+        backup.__class__.objects.filter(status__in=UtilBackup.SUCCESS_STATUSES, **node_filter)
         .order_by("-created")
         .first()
     )
@@ -199,11 +219,16 @@ def _build_lftp_script(*, auth, host_url, port, username, password, ssh_key_path
         # SFTP via the system ssh -> supports every key type. lftp runs the
         # connect-program through a shell, so shell-quote the username/key path (then
         # lftp-quote the whole value) to keep an exotic username from injecting.
-        connect = f"ssh -a -x -p {port} -l {shlex.quote(username)} -i {shlex.quote(ssh_key_path)}"
+        known_hosts_path = shlex.quote(settings.SSH_KNOWN_HOSTS_PATH)
+        connect = (
+            f"ssh -a -x -o StrictHostKeyChecking=yes "
+            f"-o UserKnownHostsFile={known_hosts_path} -p {port} "
+            f"-l {shlex.quote(username)} -i {shlex.quote(ssh_key_path)}"
+        )
         lines.append(f"set sftp:connect-program {_lftp_quote(connect)}")
-        lines.append(f"open -p {port} {host_url}")
+        lines.append(f"open -p {port} {_lftp_quote(host_url)}")
     else:
-        lines.append(f"open -p {port} {host_url}")
+        lines.append(f"open -p {port} {_lftp_quote(host_url)}")
         lines.append(f"user {_lftp_quote(username)} {_lftp_quote(password)}")
 
     lines.append(transfer)
@@ -274,16 +299,11 @@ def _finalize_zip(backup, local_dir, *, keep_dir):
 
     # Zip the downloaded tree (no sudo / no chown). The zip path must be absolute:
     # cwd is local_dir, which in incremental mode is the node's cache directory.
-    subprocess.run(
-        ["zip", "-y", "-r", os.path.abspath(local_zip), ".", "-i", "*"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=COMMAND_TIMEOUT, cwd=local_dir,
-    )
-
-    if os.path.exists(local_zip):
-        backup.size = os.stat(local_zip).st_size
-        backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
-        backup.save()
-        _write_log(backup, f"Size (compressed): {backup.size_display()}\n")
+    create_zip(local_dir, local_zip, timeout=COMMAND_TIMEOUT)
+    backup.size = os.stat(local_zip).st_size
+    backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
+    backup.save()
+    _write_log(backup, f"Size (compressed): {backup.size_display()}\n")
 
     if not keep_dir:
         # The working directory is no longer needed; the zip is what gets uploaded.
@@ -529,6 +549,8 @@ def _snapshot_tar(backup):
     command_timeout = 24 * 3600
 
     ssh_key_path = None
+    sftp = None
+    ssh = None
 
     try:
         # Disk-space preflight before the tar is pulled down (~2x the last
@@ -575,21 +597,18 @@ def _snapshot_tar(backup):
 
         # Create backup directory
         _stdin, _stdout, _stderr = ssh.exec_command(f"mkdir -p {shlex.quote(bs_backup_directory)}")
-        _stdout.channel.set_combine_stderr(True)
-        output = _stdout.readlines()
+        _check_ssh_command(_stdout, _stderr, "backup directory creation")
 
         # Remove any existing backup tar
         _stdin, _stdout, _stderr = ssh.exec_command(f"rm -rf {shlex.quote(bs_backup_tar)}")
-        _stdout.channel.set_combine_stderr(True)
-        output = _stdout.readlines()
+        _check_ssh_command(_stdout, _stderr, "old archive cleanup")
 
         command = (
             f"tar --create --no-check-device {exclude_rules} "
             f"--file={shlex.quote(bs_backup_tar)} {bs_backup_sources}"
         )
         _stdin, _stdout, _stderr = ssh.exec_command(command, timeout=command_timeout)
-        _stdout.channel.set_combine_stderr(True)
-        output = _stdout.readlines()
+        _check_ssh_command(_stdout, _stderr, "remote tar creation")
 
         # Download Backup file
         sftp.get(bs_backup_tar, f"{local_dir}{backup.uuid}.tar")
@@ -602,16 +621,20 @@ def _snapshot_tar(backup):
         """
         backup.total_files = 0
 
-        execstr = f'tar -list --file="{backup.uuid}.tar"'
+        execstr = ["tar", "-list", "--file", f"{backup.uuid}.tar"]
         process = subprocess.run(
             execstr,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=command_timeout,
-            shell=True,
             cwd=local_dir,
             universal_newlines=True,
         )
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Downloaded tar failed validation with exit code {process.returncode}: "
+                f"{(process.stderr or '').strip()[-1000:]}"
+            )
         with open(backup_file_list_path, "a+") as backup_file_list:
             for line in process.stdout.splitlines():
                 backup_file_list.write(f"{line}\n")
@@ -622,21 +645,11 @@ def _snapshot_tar(backup):
         """
         Create final backup zip folder
         """
-        execstr = rf"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=command_timeout,
-            shell=True,
-            cwd=local_dir,
-        )
-
-        if os.path.exists(local_zip):
-            backup.size = os.stat(local_zip).st_size
-            backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
-            backup.save()
-            _write_log(backup, f"Size (compressed): {backup.size_display()}\n")
+        create_zip(local_dir, local_zip, timeout=command_timeout)
+        backup.size = os.stat(local_zip).st_size
+        backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
+        backup.save()
+        _write_log(backup, f"Size (compressed): {backup.size_display()}\n")
 
         """
         Delete directory because no need for it now that we have zip
@@ -668,3 +681,9 @@ def _snapshot_tar(backup):
         """
         if ssh_key_path and os.path.exists(ssh_key_path):
             os.remove(ssh_key_path)
+        for client in (sftp, ssh):
+            try:
+                if client:
+                    client.close()
+            except Exception:
+                pass

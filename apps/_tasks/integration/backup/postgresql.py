@@ -32,6 +32,7 @@ import zipfile
 import os
 from sentry_sdk import capture_exception
 from apps._tasks.exceptions import NodeBackupFailedError
+from apps._tasks.integration.backup._archive import validate_zip_archive
 from apps._tasks.helper.tasks import delete_from_disk
 from apps.api.v1.utils.api_helpers import bs_decrypt, ensure_disk_space
 from apps.api.v1.utils.api_helpers import zipdir, mkdir_p
@@ -41,7 +42,6 @@ from apps._tasks.integration.backup._sanitize import (
     safe_password,
     safe_options,
 )
-from os import path
 
 COMMAND_TIMEOUT = 12 * 3600
 
@@ -184,7 +184,7 @@ def snapshot_postgresql(backup):
         # (dump files plus the final zip), floored at 1 GiB.
         last = (
             backup.__class__.objects.filter(
-                database__node=node, status=UtilBackup.Status.COMPLETE)
+                database__node=node, status__in=UtilBackup.SUCCESS_STATUSES)
             .order_by("-created").first()
         )
         ensure_disk_space(
@@ -445,11 +445,11 @@ def snapshot_postgresql(backup):
         zipdir(local_dir, zipf)
         zipf.close()
 
-        if path.exists(local_zip):
-            backup.size = os.stat(local_zip).st_size
-            backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
-            backup.save()
-            log_file.write(f"Size (compressed): {backup.size_display()} \n")
+        validate_zip_archive(local_zip, required_suffix=".sql")
+        backup.size = os.stat(local_zip).st_size
+        backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
+        backup.save()
+        log_file.write(f"Size (compressed): {backup.size_display()} \n")
 
         """
         Delete directory because no need for it now that we have zip

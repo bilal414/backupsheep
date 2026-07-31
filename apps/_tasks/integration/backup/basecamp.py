@@ -3,6 +3,7 @@ import os
 import requests
 from sentry_sdk import capture_exception
 from apps._tasks.exceptions import NodeBackupFailedError
+from apps._tasks.integration.backup._archive import create_zip
 from apps.api.v1.utils.api_helpers import aws_s3_upload_log_file
 from apps.api.v1.utils.api_helpers import mkdir_p
 from apps._tasks.helper.tasks import delete_from_disk
@@ -220,27 +221,8 @@ def snapshot_basecamp(backup):
                                     else:
                                         log_file.write(f"Unable to download file: {upload_name} \n")
 
-        # Update Permissions
-        execstr = f"sudo chown ubuntu:ubuntu ../{backup.uuid_str} -R"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=43200,
-            shell=True,
-            cwd=local_dir,
-        )
-
         # ZIP all downloaded files.
-        execstr = rf"/usr/bin/zip -y -r ../{backup.uuid_str} . -i \*"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=43200,
-            shell=True,
-            cwd=local_dir,
-        )
+        create_zip(local_dir, local_zip, timeout=43200)
 
         # Generate Report
         try:
@@ -259,11 +241,10 @@ def snapshot_basecamp(backup):
         except Exception as e:
             capture_exception(e)
 
-        if os.path.exists(local_zip):
-            backup.size = os.stat(local_zip).st_size
-            backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
-            backup.save()
-            log_file.write(f"Size (compressed): {backup.size_display()} \n")
+        backup.size = os.stat(local_zip).st_size
+        backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
+        backup.save()
+        log_file.write(f"Size (compressed): {backup.size_display()} \n")
 
         """
         Delete directory because no need for it now that we have zip

@@ -582,6 +582,15 @@ LOG_RETENTION_DAYS = int(config.get("LOG_RETENTION_DAYS", 30))
 # the protection story.
 S3_DOWNLOAD_URL_EXPIRES = int(config.get("S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))
 
+# Paramiko and the system SSH client both require a verified host key for SSH/SFTP
+# backup sources.  Keep the file under the persistent _storage volume by default so
+# operators can mount a reviewed known_hosts file into the worker containers.
+SSH_KNOWN_HOSTS_PATH = os.path.expanduser(
+    str(config.get("SSH_KNOWN_HOSTS_PATH", os.path.join(BASE_DIR, "_storage", "ssh_known_hosts")))
+)
+if not os.path.isabs(SSH_KNOWN_HOSTS_PATH):
+    SSH_KNOWN_HOSTS_PATH = os.path.join(BASE_DIR, SSH_KNOWN_HOSTS_PATH)
+
 # Periodic maintenance fired by Celery beat. The DatabaseScheduler syncs these entries
 # into django-celery-beat's PeriodicTask table on startup.
 from celery.schedules import crontab

@@ -80,7 +80,7 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             "nodes": websites.count(),
             "backups": CoreWebsiteBackup.objects.filter(
                 website__in=websites,
-                status=UtilBackup.Status.COMPLETE
+                status__in=UtilBackup.SUCCESS_STATUSES
             ).count(),
             "storage": 0,
             "in_progress": CoreNode.objects.filter(
