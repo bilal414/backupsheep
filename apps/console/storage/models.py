@@ -2644,8 +2644,6 @@ class CoreStorageLocal(TimeStampedModel):
         return target
 
     def validate(self, data=None, raise_exp=None):
-        import time
-
         if data is not None:
             path = data.get("path")
         else:
@@ -2654,7 +2652,10 @@ class CoreStorageLocal(TimeStampedModel):
         target_dir = self.resolve_path(path)
         os.makedirs(target_dir, exist_ok=True)
 
-        filename = f"backupsheep_test_{int(time.time())}.txt"
+        # Validation can run concurrently when duplicate Celery deliveries race
+        # through backup_initiate. A second-resolution timestamp lets one probe
+        # delete another probe's file and falsely report the storage as invalid.
+        filename = f"backupsheep_test_{uuid.uuid4().hex}.txt"
         test_file = os.path.join(target_dir, filename)
 
         with open(test_file, "w") as fh:

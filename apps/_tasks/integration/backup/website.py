@@ -173,15 +173,40 @@ def _normalize_ssh_key(path, passphrase):
     parse the key but not re-write it (paramiko's Ed25519Key cannot serialize private
     keys), falls back to the system `ssh-keygen -p` to strip the passphrase in place
     (only when a passphrase was supplied -- without one, ssh would not do better).
-    If everything fails, the original key is left in place for ssh to try."""
+    Normalization is staged through a temporary file: some Paramiko versions can
+    truncate or corrupt the destination before raising, which would turn a valid
+    Ed25519 key into an unusable `error in libcrypto` key for lftp. If everything
+    fails, the original key is left in place for ssh to try."""
+    os.chmod(path, 0o600)
+
+    # An unencrypted key is already usable by the system ssh. In particular, do
+    # not round-trip Ed25519 through Paramiko just to rewrite it: older Paramiko
+    # releases may mutate the file before reporting that serialization failed.
+    if not passphrase:
+        return
+
+    normalized_path = f"{path}.normalized"
+    try:
+        os.remove(normalized_path)
+    except FileNotFoundError:
+        pass
+
     for key_cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
         try:
-            key = key_cls.from_private_key_file(path, password=passphrase or None)
-            key.write_private_key_file(path)
-            os.chmod(path, 0o600)
+            key = key_cls.from_private_key_file(path, password=passphrase)
+            key.write_private_key_file(normalized_path)
+            os.chmod(normalized_path, 0o600)
+            # Do not replace the source until the staged result can be parsed
+            # without the passphrase.
+            key_cls.from_private_key_file(normalized_path)
+            os.replace(normalized_path, path)
             return
         except Exception:
-            continue
+            try:
+                os.remove(normalized_path)
+            except FileNotFoundError:
+                pass
+
     if passphrase:
         # The passphrase travels only on the argv of this local subprocess and is
         # never logged; stdin is closed so ssh-keygen can never prompt.
@@ -375,7 +400,10 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
             )
 
         if auth.use_private_key:
-            ssh_key_path = f"_storage/ssh_{backup.uuid}"
+            # lftp starts the system ssh from its own process context. Use an
+            # absolute path so a relative `_storage/...` key cannot resolve
+            # against an unexpected working directory and fail authentication.
+            ssh_key_path = os.path.abspath(f"_storage/ssh_{backup.uuid}")
             with open(ssh_key_path, "w") as fh:
                 fh.write(bs_decrypt(auth.private_key, encryption_key) or "")
             os.chmod(ssh_key_path, 0o600)

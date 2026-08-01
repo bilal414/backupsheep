@@ -1,6 +1,7 @@
 import os
 import tempfile
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -262,6 +263,15 @@ class LocalStorageModelTests(BaseTestCase):
             self.assertTrue(os.path.isdir(target_dir))
             # the write/read test file is cleaned up afterwards
             self.assertEqual(os.listdir(target_dir), [])
+
+    def test_concurrent_validation_probes_do_not_collide(self):
+        with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
+            local = CoreStorageLocal(path="concurrent")
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _unused: local.validate(), range(8)))
+
+            self.assertEqual(results, [True] * 8)
+            self.assertEqual(os.listdir(os.path.join(tmp, "concurrent")), [])
 
     def test_validate_via_storage_dispatch_chain(self):
         storage = make_local_storage(self.account, self.member, path="server1")

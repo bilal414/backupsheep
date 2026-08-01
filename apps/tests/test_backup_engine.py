@@ -2,6 +2,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import stat
 import tempfile
 import time
@@ -35,7 +36,12 @@ from apps.console.backup.models import (
     CoreWebsiteBackup,
     CoreWebsiteBackupStoragePoints,
 )
-from apps.console.connection.models import CoreAuthDatabase, CoreAuthWebsite, CoreConnection
+from apps.console.connection.models import (
+    CoreAuthDatabase,
+    CoreAuthDigitalOcean,
+    CoreAuthWebsite,
+    CoreConnection,
+)
 from apps.console.node.models import CoreDatabase, CoreNode, CoreWebsite
 from apps.console.storage.models import CoreStorageLocal
 from apps.console.utils.models import UtilBackup
@@ -200,7 +206,7 @@ class ProviderPollStatusResilienceTests(BaseTestCase):
         not_found = SimpleNamespace(status_code=404, json=lambda: {})
         empty_list = SimpleNamespace(
             status_code=200,
-            json=lambda: {"snapshots": [], "meta": {"total": 0}},
+            json=lambda: {"snapshots": None, "meta": {"total": 0}},
         )
         with mock.patch(
             "apps.console.connection.models.CoreAuthDigitalOcean.get_client",
@@ -210,6 +216,47 @@ class ProviderPollStatusResilienceTests(BaseTestCase):
             side_effect=[not_found, empty_list],
         ):
             self.assertEqual(backup.poll_status(), UtilBackup.Status.IN_PROGRESS)
+
+
+class DigitalOceanSnapshotCreateTests(BaseTestCase):
+    def test_volume_create_treats_null_snapshot_list_as_empty(self):
+        node = factories.make_cloud_node(
+            self.account,
+            self.member,
+            code="digitalocean",
+            node_type=CoreNode.Type.VOLUME,
+        )
+        CoreAuthDigitalOcean.objects.create(
+            connection=node.connection,
+            api_key=bs_encrypt("test-token", self.account.get_encryption_key()),
+        )
+        backup = CoreDigitalOceanBackup.objects.create(
+            digitalocean=node.digitalocean,
+            uuid="null-safe-volume-backup",
+            status=UtilBackup.Status.IN_PROGRESS,
+            attempt_no=1,
+            type=UtilBackup.Type.ON_DEMAND,
+        )
+        empty_catalog = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"snapshots": None, "meta": {"total": 0}},
+        )
+        created_snapshot = SimpleNamespace(
+            status_code=201,
+            json=lambda: {
+                "snapshot": {"id": "volume-snapshot-1", "min_disk_size": 1}
+            },
+        )
+        with mock.patch(
+            "apps.console.node.models.requests.get", return_value=empty_catalog
+        ), mock.patch(
+            "apps.console.node.models.requests.post", return_value=created_snapshot
+        ):
+            node.digitalocean.create_snapshot(backup)
+
+        backup.refresh_from_db()
+        self.assertEqual(backup.unique_id, "volume-snapshot-1")
+        self.assertEqual(backup.size_gigabytes, 1)
 
 
 class LftpScriptBuilderTests(TestCase):
@@ -484,6 +531,32 @@ class WebsiteMirrorOptsTests(WebsiteEngineBase):
         self.assertIn("--ignore-size", s)
         self.assertNotIn("--delete", s)
 
+    def test_sftp_private_key_path_is_absolute_for_lftp(self):
+        node, backup = self._make_backup(use_private_key=True)
+        auth = node.connection.auth_website
+        auth.protocol = CoreAuthWebsite.Protocol.SFTP
+        auth.private_key = bs_encrypt(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\ndummy\n-----END OPENSSH PRIVATE KEY-----\n",
+            self.account.get_encryption_key(),
+        )
+        auth.save()
+        scripts = []
+
+        def fake_run(cmd, **kwargs):
+            if cmd == ["lftp"]:
+                scripts.append(kwargs.get("input") or "")
+            return SimpleNamespace(stdout="", returncode=0)
+
+        with mock.patch.object(CoreAuthWebsite, "check_connection", lambda *a, **k: None), \
+             mock.patch.object(W.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(W, "_normalize_ssh_key"), \
+             mock.patch.object(W, "delete_from_disk"), \
+             mock.patch.object(W, "_finalize_zip"):
+            W._snapshot_lftp(backup, base_dir=f"_storage/{backup.uuid}/", incremental=False)
+
+        line = next(line for line in scripts[0].splitlines() if "connect-program" in line)
+        self.assertIn(os.path.abspath(f"_storage/ssh_{backup.uuid}"), line)
+
 
 class CacheFingerprintTests(TestCase):
     """_cache_fingerprint(website, auth, username) -> stable sha256 hex."""
@@ -605,6 +678,26 @@ class NormalizeSshKeyTests(TestCase):
         with ed, rsa, ec, mock.patch.object(W.subprocess, "run") as run:
             W._normalize_ssh_key(path, "")
         run.assert_not_called()
+
+    def test_unencrypted_ed25519_key_is_not_round_tripped(self):
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, True)
+        path = os.path.join(tmp_dir, "id_ed25519")
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", path],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with open(path, "rb") as fh:
+            original = fh.read()
+
+        W._normalize_ssh_key(path, "")
+
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), original)
+        W.paramiko.Ed25519Key.from_private_key_file(path)
 
 
 class GetSftpClientKeyTests(BaseTestCase):

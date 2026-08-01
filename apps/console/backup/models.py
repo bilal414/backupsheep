@@ -219,7 +219,9 @@ class CoreDigitalOceanBackup(UtilBackup):
                 if result.status_code != 200:
                     return UtilBackup.Status.IN_PROGRESS
                 payload = result.json()
-                snapshots.extend(payload.get("snapshots", []))
+                # An empty DigitalOcean catalog may be encoded as null rather
+                # than an empty array. It is still a successful empty page.
+                snapshots.extend(payload.get("snapshots") or [])
                 total = (payload.get("meta") or {}).get("total", len(snapshots))
                 if len(snapshots) >= total:
                     break
@@ -277,8 +279,10 @@ class CoreDigitalOceanBackup(UtilBackup):
                         verify=True,
                     )
                     if result.status_code == 200:
-                        snapshots += result.json()["snapshots"]
-                        if len(snapshots) >= result.json()["meta"]["total"]:
+                        payload = result.json()
+                        snapshots.extend(payload.get("snapshots") or [])
+                        total = (payload.get("meta") or {}).get("total", len(snapshots))
+                        if len(snapshots) >= total:
                             next_page = None
                         else:
                             next_page += 1

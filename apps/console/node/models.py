@@ -116,7 +116,10 @@ class CoreDigitalOcean(UtilCloud):
                             "Unable to verify existing DigitalOcean snapshots before creating a new one.",
                         )
                     payload = response.json()
-                    snapshots.extend(payload.get("snapshots", []))
+                    # DigitalOcean returns ``snapshots: null`` when the account
+                    # has no snapshots of the requested resource type. Treat
+                    # that valid empty response exactly like ``[]``.
+                    snapshots.extend(payload.get("snapshots") or [])
                     total = (payload.get("meta") or {}).get("total", len(snapshots))
                     if len(snapshots) >= total:
                         break
