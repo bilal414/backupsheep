@@ -74,7 +74,8 @@ class CoreVolumeOVHEUView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             "nodes": nodes.count(),
             "backups": CoreOVHEUBackup.objects.filter(ovh_eu__in=nodes, status=UtilBackup.Status.COMPLETE).count(),
             "storage": 0,
-            "in_progress": 0,
+            "in_progress": CoreOVHEUBackup.objects.filter(
+                ovh_eu__in=nodes, status__in=UtilBackup.ACTIVE_STATUSES
+            ).count(),
         }
         return Response(all_totals)
-

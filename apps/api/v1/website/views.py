@@ -83,8 +83,8 @@ class CoreWebsiteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 status__in=UtilBackup.SUCCESS_STATUSES
             ).count(),
             "storage": 0,
-            "in_progress": CoreNode.objects.filter(
-                website__in=websites, status=CoreNode.Status.BACKUP_IN_PROGRESS
+            "in_progress": CoreWebsiteBackup.objects.filter(
+                website__in=websites, status__in=UtilBackup.ACTIVE_STATUSES
             ).count(),
         }
         return Response(all_totals)

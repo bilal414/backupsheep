@@ -50,6 +50,12 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
+    # Celery uses durable queues and persistent delivery, but RabbitMQ still needs
+    # its own data directory persisted across container recreation. Without this,
+    # `docker compose down && up` can discard queued backups before the database
+    # recovery sweep gets a chance to republish them.
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
@@ -203,6 +209,7 @@ services:
 
 volumes:
   pgdata:
+  rabbitmq_data:
   backup_workdir:
   # This is where 'Local Storage' backups live (mounted at /backups in the app and
   # worker containers). To keep backups on a big disk or an NFS share instead of the

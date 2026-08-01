@@ -75,7 +75,8 @@ class CoreCloudHetznerView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             "nodes": nodes.count(),
             "backups": CoreHetznerBackup.objects.filter(hetzner__in=nodes, status=UtilBackup.Status.COMPLETE).count(),
             "storage": 0,
-            "in_progress": 0,
+            "in_progress": CoreHetznerBackup.objects.filter(
+                hetzner__in=nodes, status__in=UtilBackup.ACTIVE_STATUSES
+            ).count(),
         }
         return Response(all_totals)
-

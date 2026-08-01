@@ -41,6 +41,7 @@ def backup_website(
     schedule_id=None,
     storage_ids=None,
     notes=None,
+    resume=False,
 ):
     # self.request.id = "cdbf7603-c262-4eec-b38f-80bc1055f200"
 
@@ -51,7 +52,7 @@ def backup_website(
     # treat this as scheduled backup
     if schedule_id:
         backup_type = UtilBackup.Type.SCHEDULED
-        if CoreSchedule.objects.filter(id=schedule_id, status=CoreSchedule.Status.ACTIVE).exists():
+        if resume or CoreSchedule.objects.filter(id=schedule_id, status=CoreSchedule.Status.ACTIVE).exists():
             schedule_check = True
     # treat this as on-demand backup
     else:

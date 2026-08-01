@@ -36,6 +36,7 @@ def backup_digitalocean(
     schedule_id=None,
     storage_ids=None,
     notes=None,
+    resume=False,
 ):
     attempt_no = self.request.retries + 1
 
@@ -44,7 +45,7 @@ def backup_digitalocean(
     # treat this as scheduled backup
     if schedule_id:
         backup_type = UtilBackup.Type.SCHEDULED
-        if CoreSchedule.objects.filter(id=schedule_id, status=CoreSchedule.Status.ACTIVE).exists():
+        if resume or CoreSchedule.objects.filter(id=schedule_id, status=CoreSchedule.Status.ACTIVE).exists():
             schedule_check = True
     # treat this as on-demand backup
     else:
@@ -96,11 +97,21 @@ def backup_digitalocean(
             which means a snapshot for this backup is already running.
             """
             if node.type == CoreNode.Type.CLOUD:
-                if not backup.action_id:
-                    node.digitalocean.create_snapshot(backup)
+                if not backup.action_id and not backup.unique_id:
+                    from apps._tasks.helper.tasks import run_provider_create
+
+                    if run_provider_create(
+                        backup, self.request.id, node.digitalocean.create_snapshot
+                    ) is None:
+                        return
             elif node.type == CoreNode.Type.VOLUME:
                 if not backup.unique_id:
-                    node.digitalocean.create_snapshot(backup)
+                    from apps._tasks.helper.tasks import run_provider_create
+
+                    if run_provider_create(
+                        backup, self.request.id, node.digitalocean.create_snapshot
+                    ) is None:
+                        return
 
             """
             Hand off to async polling instead of blocking the worker. poll_cloud_backup

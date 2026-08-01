@@ -39,6 +39,7 @@ def backup_wordpress(
     schedule_id=None,
     storage_ids=None,
     notes=None,
+    resume=False,
 ):
     # capture_message('Executing task id {0.id}, args: {0.args!r} kwargs: {0.kwargs!r}'.format(self.request))
     # print('Executing task id {0.id}, args: {0.args!r} kwargs: {0.kwargs!r}'.format(self.request))
@@ -50,7 +51,7 @@ def backup_wordpress(
     # treat this as scheduled backup
     if schedule_id:
         backup_type = UtilBackup.Type.SCHEDULED
-        if CoreSchedule.objects.filter(id=schedule_id, status=CoreSchedule.Status.ACTIVE).exists():
+        if resume or CoreSchedule.objects.filter(id=schedule_id, status=CoreSchedule.Status.ACTIVE).exists():
             schedule_check = True
     # treat this as on-demand backup
     else:

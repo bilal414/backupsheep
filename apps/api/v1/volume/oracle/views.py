@@ -74,7 +74,8 @@ class CoreVolumeOracleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             "nodes": nodes.count(),
             "backups": CoreOracleBackup.objects.filter(oracle__in=nodes, status=UtilBackup.Status.COMPLETE).count(),
             "storage": 0,
-            "in_progress": 0,
+            "in_progress": CoreOracleBackup.objects.filter(
+                oracle__in=nodes, status__in=UtilBackup.ACTIVE_STATUSES
+            ).count(),
         }
         return Response(all_totals)
-

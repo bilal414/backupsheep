@@ -9,10 +9,12 @@ the real celery tasks (provider calls mocked), and concurrently (threads).
 """
 import threading
 import uuid
+from datetime import timedelta
 from unittest import mock
 
 from django.db import close_old_connections
 from django.test import TransactionTestCase
+from django.utils import timezone
 
 from apps._tasks.helper import tasks as helper_tasks
 from apps._tasks.integration.digitalocean import backup_digitalocean
@@ -100,6 +102,17 @@ class BackupInitiateGuardTests(BaseTestCase):
         self.assertIsNone(self._initiate(node, "task-new", storage_ids=[]))
         self.assertEqual(node.website.backups.count(), 1)
 
+    def test_same_task_reuses_persisted_local_upload_phase(self):
+        node = factories.make_website_node(self.account, self.member)
+        first = CoreWebsiteBackup.objects.create(
+            website=node.website,
+            status=UtilBackup.Status.UPLOAD_IN_PROGRESS,
+            celery_task_id="task-1",
+        )
+        resumed = self._initiate(node, "task-1", storage_ids=[])
+        self.assertEqual(resumed.id, first.id)
+        self.assertEqual(resumed.status, UtilBackup.Status.UPLOAD_IN_PROGRESS)
+
 
 class CloudTaskDuplicateTests(BaseTestCase):
     """The real backup_digitalocean task, with the provider API + poller mocked."""
@@ -147,6 +160,106 @@ class CloudTaskDuplicateTests(BaseTestCase):
         snapshot2.assert_called_once()
         poll2.assert_called_once()
         self.assertEqual(CoreDigitalOceanBackup.objects.count(), 2)
+
+
+class RecoverySweepTests(BaseTestCase):
+    def test_provider_create_lease_blocks_a_second_creator(self):
+        node = factories.make_cloud_node(self.account, self.member, code="digitalocean")
+        backup = CoreDigitalOceanBackup.objects.create(
+            digitalocean=node.digitalocean,
+            status=UtilBackup.Status.IN_PROGRESS,
+            celery_task_id="create-task-1",
+        )
+
+        self.assertIsNotNone(
+            helper_tasks._claim_provider_create(backup, "create-task-1")
+        )
+        self.assertIsNone(
+            helper_tasks._claim_provider_create(backup, "create-task-2")
+        )
+        # A duplicate delivery can carry the same Celery id. The lease must
+        # still be exclusive while the original provider request is in flight.
+        self.assertIsNone(
+            helper_tasks._claim_provider_create(backup, "create-task-1")
+        )
+
+        helper_tasks._release_backup_lease(backup, "create-task-1", "create")
+        self.assertIsNotNone(
+            helper_tasks._claim_provider_create(backup, "create-task-2")
+        )
+
+    def test_retry_reset_keeps_unknown_provider_create_lease(self):
+        node = factories.make_cloud_node(self.account, self.member, code="digitalocean")
+        backup = CoreDigitalOceanBackup.objects.create(
+            digitalocean=node.digitalocean,
+            status=UtilBackup.Status.IN_PROGRESS,
+            celery_task_id="create-task-1",
+        )
+
+        self.assertIsNotNone(
+            helper_tasks._claim_provider_create(backup, "create-task-1")
+        )
+        node.backup_retrying_reset("create-task-1")
+
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.RETRYING)
+        self.assertIsNone(
+            helper_tasks._claim_provider_create(backup, "create-task-1")
+        )
+
+    def test_provider_timeout_stays_recoverable_while_create_is_leased(self):
+        node = factories.make_cloud_node(self.account, self.member, code="digitalocean")
+        backup = CoreDigitalOceanBackup.objects.create(
+            digitalocean=node.digitalocean,
+            status=UtilBackup.Status.IN_PROGRESS,
+            celery_task_id="create-task-1",
+        )
+        self.assertIsNotNone(
+            helper_tasks._claim_provider_create(backup, "create-task-1")
+        )
+
+        node.backup_timeout_reset("create-task-1")
+
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.RETRYING)
+
+    def test_stale_create_is_requeued_with_original_task_id(self):
+        node = factories.make_cloud_node(self.account, self.member, code="digitalocean")
+        backup = CoreDigitalOceanBackup.objects.create(
+            digitalocean=node.digitalocean,
+            status=UtilBackup.Status.IN_PROGRESS,
+            celery_task_id="lost-create-task",
+        )
+        CoreDigitalOceanBackup.objects.filter(pk=backup.pk).update(
+            modified=timezone.now() - timedelta(hours=1)
+        )
+        with mock.patch.object(helper_tasks.current_app, "send_task") as send_task:
+            helper_tasks.resume_in_progress_backups.apply()
+
+        send_task.assert_called_once()
+        self.assertEqual(send_task.call_args.args[0], "backup_digitalocean")
+        self.assertEqual(send_task.call_args.kwargs["task_id"], "lost-create-task")
+        self.assertTrue(send_task.call_args.kwargs["kwargs"]["resume"])
+
+    def test_recovery_uses_persisted_on_demand_storage_ids(self):
+        node = factories.make_website_node(self.account, self.member)
+        backup = CoreWebsiteBackup.objects.create(
+            website=node.website,
+            status=UtilBackup.Status.DOWNLOAD_IN_PROGRESS,
+            celery_task_id="lost-local-task",
+            metadata={"_backup_storage_ids": [101, 202]},
+        )
+        CoreWebsiteBackup.objects.filter(pk=backup.pk).update(
+            modified=timezone.now() - timedelta(hours=1)
+        )
+
+        with mock.patch.object(helper_tasks.current_app, "send_task") as send_task:
+            helper_tasks.resume_in_progress_backups.apply()
+
+        send_task.assert_called_once()
+        self.assertEqual(
+            send_task.call_args.kwargs["kwargs"]["storage_ids"], [101, 202]
+        )
 
 
 class WebsiteTaskDuplicateTests(BaseTestCase):

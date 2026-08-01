@@ -63,8 +63,12 @@ class VultrVolumeCreateSnapshotTests(BaseTestCase):
             "state": "PENDING",
             "size": 10737418240,
         }
-        with mock.patch("apps.console.node.models.requests.post",
-                        return_value=_response(201, payload)) as post:
+        empty_listing = _response(200, {"snapshots": [], "meta": {"total": 0}})
+        with mock.patch("apps.console.node.models.requests.get",
+                        return_value=empty_listing), mock.patch(
+            "apps.console.node.models.requests.post",
+            return_value=_response(201, payload),
+        ) as post:
             node.vultr.create_snapshot(backup)
         backup.refresh_from_db()
         self.assertEqual(backup.unique_id, "bs-snap-1")
@@ -79,8 +83,12 @@ class VultrVolumeCreateSnapshotTests(BaseTestCase):
     def test_volume_create_api_error_raises_node_backup_failed(self):
         node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
         backup = make_vultr_backup(node)
-        with mock.patch("apps.console.node.models.requests.post",
-                        return_value=_response(500)):
+        empty_listing = _response(200, {"snapshots": [], "meta": {"total": 0}})
+        with mock.patch("apps.console.node.models.requests.get",
+                        return_value=empty_listing), mock.patch(
+            "apps.console.node.models.requests.post",
+            return_value=_response(500),
+        ):
             with self.assertRaises(NodeBackupFailedError):
                 node.vultr.create_snapshot(backup)
         backup.refresh_from_db()
@@ -94,8 +102,12 @@ class VultrInstanceCreateSnapshotTests(BaseTestCase):
         node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
         backup = make_vultr_backup(node)
         payload = {"snapshot": {"id": "snap-1", "status": "pending"}}
-        with mock.patch("apps.console.node.models.requests.post",
-                        return_value=_response(201, payload)) as post:
+        empty_listing = _response(200, {"snapshots": [], "meta": {"total": 0}})
+        with mock.patch("apps.console.node.models.requests.get",
+                        return_value=empty_listing), mock.patch(
+            "apps.console.node.models.requests.post",
+            return_value=_response(201, payload),
+        ) as post:
             node.vultr.create_snapshot(backup)
         backup.refresh_from_db()
         self.assertEqual(backup.unique_id, "snap-1")
@@ -104,7 +116,7 @@ class VultrInstanceCreateSnapshotTests(BaseTestCase):
         self.assertEqual(post.call_args.args[0], f"{settings.VULTR_API}/v2/snapshots")
         self.assertEqual(
             post.call_args.kwargs["json"],
-            {"instance_id": "instance-1", "description": node.name},
+            {"instance_id": "instance-1", "description": backup.uuid_str},
         )
         self.assertNotIn("data", post.call_args.kwargs)
 

@@ -157,69 +157,81 @@ class CoreDigitalOceanBackup(UtilBackup):
         """
         from ..node.models import CoreNode
 
-        if CoreNode.Type.CLOUD == self.digitalocean.node.type:
-            try:
-                client = (
-                    self.digitalocean.node.connection.auth_digitalocean.get_client()
+        try:
+            client = self.digitalocean.node.connection.auth_digitalocean.get_client()
+            resource_type = (
+                "droplet"
+                if CoreNode.Type.CLOUD == self.digitalocean.node.type
+                else "volume"
+            )
+
+            def record_snapshot(snapshot):
+                state = str(snapshot.get("state") or snapshot.get("status") or "").lower()
+                if snapshot.get("id"):
+                    self.unique_id = snapshot["id"]
+                if snapshot.get("size_gigabytes") is not None:
+                    self.size_gigabytes = snapshot["size_gigabytes"]
+                if state and state not in {"available", "completed", "complete"}:
+                    self.save(update_fields=["unique_id", "size_gigabytes", "modified"])
+                    return UtilBackup.Status.IN_PROGRESS
+                self.status = UtilBackup.Status.COMPLETE
+                self.save()
+                return UtilBackup.Status.COMPLETE
+
+            # A persisted snapshot id is the strongest recovery pointer. This also
+            # handles a worker dying after the provider returned the id but before
+            # action_id/metadata was written locally.
+            if self.unique_id:
+                result = requests.get(
+                    f"{settings.DIGITALOCEAN_API}/v2/snapshots/{self.unique_id}",
+                    headers=client,
+                    verify=True,
                 )
+                if result.status_code == 200:
+                    payload = result.json()
+                    return record_snapshot(payload.get("snapshot", payload))
+
+            if CoreNode.Type.CLOUD == self.digitalocean.node.type and self.action_id:
                 result = requests.get(
                     f"{settings.DIGITALOCEAN_API}/v2/actions/{self.action_id}",
                     headers=client,
                     verify=True,
                 )
                 if result.status_code == 200:
-                    action = result.json()["action"]
-                    if action.get("status") == "completed":
-                        data = {
-                            "resource_type": "droplet",
-                            "per_page": 200,
-                            "page": 1,
-                        }
-                        result = requests.get(
-                            f"{settings.DIGITALOCEAN_API}/v2/snapshots/",
-                            headers=client,
-                            params=data,
-                            verify=True,
-                        )
-                        if result.status_code == 200:
-                            snapshots = result.json()["snapshots"]
-                            snapshots_total = result.json()["meta"]["total"]
-                            while len(snapshots) < snapshots_total:
-                                data["page"] += 1
-                                result = requests.get(
-                                    f"{settings.DIGITALOCEAN_API}/v2/snapshots/",
-                                    headers=client,
-                                    params=data,
-                                    verify=True,
-                                )
-                                if result.status_code == 200:
-                                    snapshots = (
-                                            snapshots + result.json()["snapshots"]
-                                    )
-                                else:
-                                    raise NodeBackupStatusCheckCallError(
-                                        self.digitalocean.node, self.uuid_str
-                                    )
-                            for snapshot in snapshots:
-                                if snapshot["name"] == self.uuid_str:
-                                    self.unique_id = snapshot["id"]
-                                    self.size_gigabytes = snapshot["size_gigabytes"]
-                                    self.status = UtilBackup.Status.COMPLETE
-                                    self.save()
-                            return UtilBackup.Status.COMPLETE
-                        else:
-                            raise NodeBackupStatusCheckCallError(
-                                self.digitalocean.node, self.uuid_str
-                            )
-                    elif action.get("status") == "errored":
+                    action = result.json().get("action", {})
+                    action_status = action.get("status")
+                    if action_status in {"errored", "canceled"}:
                         return UtilBackup.Status.FAILED
-                return UtilBackup.Status.IN_PROGRESS
-            except Exception as e:
-                return UtilBackup.Status.IN_PROGRESS
-        elif CoreNode.Type.VOLUME == self.digitalocean.node.type:
-            self.status = UtilBackup.Status.COMPLETE
-            self.save()
-            return UtilBackup.Status.COMPLETE
+                    if action_status != "completed":
+                        return UtilBackup.Status.IN_PROGRESS
+
+            # The action may have completed while the worker was down and before its
+            # id was saved. Search by the deterministic name before declaring success.
+            params = {"resource_type": resource_type, "per_page": 200, "page": 1}
+            snapshots = []
+            while True:
+                result = requests.get(
+                    f"{settings.DIGITALOCEAN_API}/v2/snapshots",
+                    headers=client,
+                    params=params,
+                    verify=True,
+                )
+                if result.status_code != 200:
+                    return UtilBackup.Status.IN_PROGRESS
+                payload = result.json()
+                snapshots.extend(payload.get("snapshots", []))
+                total = (payload.get("meta") or {}).get("total", len(snapshots))
+                if len(snapshots) >= total:
+                    break
+                params["page"] += 1
+            snapshot = next(
+                (item for item in snapshots if item.get("name") == self.uuid_str),
+                None,
+            )
+            if snapshot:
+                return record_snapshot(snapshot)
+        except Exception as e:
+            return UtilBackup.Status.IN_PROGRESS
         return UtilBackup.Status.IN_PROGRESS
 
     def delete_requested(self):
@@ -366,34 +378,65 @@ class CoreHetznerBackup(UtilBackup):
         if CoreNode.Type.CLOUD == self.hetzner.node.type:
             try:
                 client = self.hetzner.node.connection.auth_hetzner.get_client()
-                result = requests.get(
-                    f"{settings.HETZNER_API}/v1/actions/{self.action_id}",
-                    headers=client,
-                    verify=True,
-                )
-                if result.status_code == 200:
-                    action = result.json()["action"]
+                if self.action_id:
+                    result = requests.get(
+                        f"{settings.HETZNER_API}/v1/actions/{self.action_id}",
+                        headers=client,
+                        verify=True,
+                    )
+                    if result.status_code == 200:
+                        action = result.json().get("action", {})
+                        if action.get("status") == "error":
+                            return UtilBackup.Status.FAILED
+                        if action.get("status") not in ("success", "running"):
+                            return UtilBackup.Status.IN_PROGRESS
+                        if action.get("status") == "running" and self.unique_id:
+                            return UtilBackup.Status.IN_PROGRESS
 
-                    if action["status"] == "success":
-                        snapshot_id = self.unique_id
-                        result = requests.get(
-                            f"{settings.HETZNER_API}/v1/images/{snapshot_id}",
-                            headers=client,
-                            verify=True,
-                        )
-                        if result.status_code == 200:
-                            image = result.json()["image"]
-                            self.size_gigabytes = image["disk_size"]
+                if self.unique_id:
+                    result = requests.get(
+                        f"{settings.HETZNER_API}/v1/images/{self.unique_id}",
+                        headers=client,
+                        verify=True,
+                    )
+                    if result.status_code == 200:
+                        image = result.json().get("image", {})
+                        if image.get("status") == "error":
+                            return UtilBackup.Status.FAILED
+                        if image.get("status") == "available":
+                            self.size_gigabytes = image.get("disk_size")
                             self.status = UtilBackup.Status.COMPLETE
                             self.metadata = image
                             self.save()
                             return UtilBackup.Status.COMPLETE
-                        else:
-                            raise NodeBackupStatusCheckCallError(
-                                self.hetzner.node, self.uuid_str
-                            )
-                    elif action.get("status") == "error":
-                        return UtilBackup.Status.FAILED
+                        return UtilBackup.Status.IN_PROGRESS
+
+                # Recover an image when the create response was received but neither
+                # the action nor image id made it into the database.
+                result = requests.get(
+                    f"{settings.HETZNER_API}/v1/images",
+                    params={"type": "snapshot", "per_page": 50},
+                    headers=client,
+                    verify=True,
+                )
+                if result.status_code == 200:
+                    image = next(
+                        (
+                            item
+                            for item in result.json().get("images", [])
+                            if item.get("description") == self.uuid_str
+                        ),
+                        None,
+                    )
+                    if image:
+                        self.unique_id = image.get("id")
+                        self.size_gigabytes = image.get("disk_size")
+                        self.metadata = image
+                        if image.get("status") == "available":
+                            self.status = UtilBackup.Status.COMPLETE
+                            self.save()
+                            return UtilBackup.Status.COMPLETE
+                        self.save(update_fields=["unique_id", "size_gigabytes", "metadata", "modified"])
                 return UtilBackup.Status.IN_PROGRESS
             except Exception as e:
                 return UtilBackup.Status.IN_PROGRESS
@@ -634,7 +677,7 @@ class CoreOracleBackup(UtilBackup):
                 config = self.oracle.node.connection.auth_oracle.get_client()
                 block_storage_client = oci.core.BlockstorageClient(config)
 
-                if self.oracle.metadata.get("_bs_vol_type") == "boot":
+                if (self.oracle.metadata or {}).get("_bs_vol_type") == "boot":
                     request = block_storage_client.get_boot_volume_backup(boot_volume_backup_id=self.unique_id)
                     if request.status == 200:
                         if request.data.lifecycle_state == BootVolumeBackup.LIFECYCLE_STATE_AVAILABLE:
@@ -653,7 +696,7 @@ class CoreOracleBackup(UtilBackup):
                             BootVolumeBackup.LIFECYCLE_STATE_TERMINATING,
                         ):
                             return UtilBackup.Status.FAILED
-                elif self.oracle.metadata.get("_bs_vol_type") == "block":
+                elif (self.oracle.metadata or {}).get("_bs_vol_type") == "block":
                     request = block_storage_client.get_volume_backup(volume_backup_id=self.unique_id)
                     if request.status == 200:
                         if request.data.lifecycle_state == VolumeBackup.LIFECYCLE_STATE_AVAILABLE:
@@ -699,13 +742,13 @@ class CoreOracleBackup(UtilBackup):
                 config = self.oracle.node.connection.auth_oracle.get_client()
                 block_storage_client = oci.core.BlockstorageClient(config)
 
-                if self.oracle.metadata.get("_bs_vol_type") == "boot":
+                if (self.oracle.metadata or {}).get("_bs_vol_type") == "boot":
                     response = block_storage_client.delete_boot_volume_backup(boot_volume_backup_id=self.unique_id)
                     if response.status == 204:
                         self.status = UtilBackup.Status.DELETE_COMPLETED
                     else:
                         self.status = UtilBackup.Status.DELETE_FAILED
-                elif self.oracle.metadata.get("_bs_vol_type") == "block":
+                elif (self.oracle.metadata or {}).get("_bs_vol_type") == "block":
                     response = block_storage_client.delete_volume_backup(volume_backup_id=self.unique_id)
                     if response.status == 204:
                         self.status = UtilBackup.Status.DELETE_COMPLETED
@@ -783,13 +826,16 @@ class CoreOVHCABackup(UtilBackup):
             try:
                 client = self.ovh_ca.node.connection.auth_ovh_ca.get_client()
                 snapshots = client.get(
-                    f"/cloud/project/{self.ovh_ca.project_id}/snapshot"
+                    self.ovh_ca._ovh_snapshot_path(client, "instance")
                 )
                 ovh_snapshot = next(
                     (
                         item
                         for item in snapshots
-                        if item["name"] == self.unique_id and item["status"] == "active"
+                        if (
+                            item.get("id") == self.unique_id
+                            or item.get("name") == self.unique_id
+                        ) and item.get("status") == "active"
                     ),
                     None,
                 )
@@ -806,13 +852,16 @@ class CoreOVHCABackup(UtilBackup):
             try:
                 client = self.ovh_ca.node.connection.auth_ovh_ca.get_client()
                 snapshots = client.get(
-                    f"/cloud/project/{self.ovh_ca.project_id}/volume/snapshot"
+                    self.ovh_ca._ovh_snapshot_path(client, "volume")
                 )
                 ovh_snapshot = next(
                     (
                         item
                         for item in snapshots
-                        if item["name"] == self.unique_id and item["status"] == "available"
+                        if (
+                            item.get("id") == self.unique_id
+                            or item.get("name") == self.unique_id
+                        ) and item.get("status") == "available"
                     ),
                     None,
                 )
@@ -849,11 +898,15 @@ class CoreOVHCABackup(UtilBackup):
         try:
             if CoreNode.Type.CLOUD == self.ovh_ca.node.type:
                 client.delete(
-                    f"/cloud/project/{self.ovh_ca.project_id}/snapshot/{self.unique_id}"
+                    self.ovh_ca._ovh_snapshot_path(
+                        client, "instance", self.unique_id
+                    )
                 )
             elif CoreNode.Type.VOLUME == self.ovh_ca.node.type:
                 client.delete(
-                    f"/cloud/project/{self.ovh_ca.project_id}/volume/snapshot/{self.unique_id}"
+                    self.ovh_ca._ovh_snapshot_path(
+                        client, "volume", self.unique_id
+                    )
                 )
             self.status = UtilBackup.Status.DELETE_COMPLETED
             self.save()
@@ -926,13 +979,16 @@ class CoreOVHEUBackup(UtilBackup):
             try:
                 client = self.ovh_eu.node.connection.auth_ovh_eu.get_client()
                 snapshots = client.get(
-                    f"/cloud/project/{self.ovh_eu.project_id}/snapshot"
+                    self.ovh_eu._ovh_snapshot_path(client, "instance")
                 )
                 ovh_snapshot = next(
                     (
                         item
                         for item in snapshots
-                        if item["name"] == self.unique_id and item["status"] == "active"
+                        if (
+                            item.get("id") == self.unique_id
+                            or item.get("name") == self.unique_id
+                        ) and item.get("status") == "active"
                     ),
                     None,
                 )
@@ -949,13 +1005,16 @@ class CoreOVHEUBackup(UtilBackup):
             try:
                 client = self.ovh_eu.node.connection.auth_ovh_eu.get_client()
                 snapshots = client.get(
-                    f"/cloud/project/{self.ovh_eu.project_id}/volume/snapshot"
+                    self.ovh_eu._ovh_snapshot_path(client, "volume")
                 )
                 ovh_snapshot = next(
                     (
                         item
                         for item in snapshots
-                        if item["name"] == self.unique_id and item["status"] == "available"
+                        if (
+                            item.get("id") == self.unique_id
+                            or item.get("name") == self.unique_id
+                        ) and item.get("status") == "available"
                     ),
                     None,
                 )
@@ -990,11 +1049,15 @@ class CoreOVHEUBackup(UtilBackup):
         try:
             if CoreNode.Type.CLOUD == self.ovh_eu.node.type:
                 client.delete(
-                    f"/cloud/project/{self.ovh_eu.project_id}/snapshot/{self.unique_id}"
+                    self.ovh_eu._ovh_snapshot_path(
+                        client, "instance", self.unique_id
+                    )
                 )
             elif CoreNode.Type.VOLUME == self.ovh_eu.node.type:
                 client.delete(
-                    f"/cloud/project/{self.ovh_eu.project_id}/volume/snapshot/{self.unique_id}"
+                    self.ovh_eu._ovh_snapshot_path(
+                        client, "volume", self.unique_id
+                    )
                 )
             self.status = UtilBackup.Status.DELETE_COMPLETED
             self.save()
@@ -1061,13 +1124,16 @@ class CoreOVHUSBackup(UtilBackup):
             try:
                 client = self.ovh_us.node.connection.auth_ovh_us.get_client()
                 snapshots = client.get(
-                    f"/cloud/project/{self.ovh_us.project_id}/snapshot"
+                    self.ovh_us._ovh_snapshot_path(client, "instance")
                 )
                 ovh_snapshot = next(
                     (
                         item
                         for item in snapshots
-                        if item["name"] == self.unique_id and item["status"] == "active"
+                        if (
+                            item.get("id") == self.unique_id
+                            or item.get("name") == self.unique_id
+                        ) and item.get("status") == "active"
                     ),
                     None,
                 )
@@ -1084,13 +1150,16 @@ class CoreOVHUSBackup(UtilBackup):
             try:
                 client = self.ovh_us.node.connection.auth_ovh_us.get_client()
                 snapshots = client.get(
-                    f"/cloud/project/{self.ovh_us.project_id}/volume/snapshot"
+                    self.ovh_us._ovh_snapshot_path(client, "volume")
                 )
                 ovh_snapshot = next(
                     (
                         item
                         for item in snapshots
-                        if item["name"] == self.unique_id and item["status"] == "available"
+                        if (
+                            item.get("id") == self.unique_id
+                            or item.get("name") == self.unique_id
+                        ) and item.get("status") == "available"
                     ),
                     None,
                 )
@@ -1125,11 +1194,15 @@ class CoreOVHUSBackup(UtilBackup):
         try:
             if CoreNode.Type.CLOUD == self.ovh_us.node.type:
                 client.delete(
-                    f"/cloud/project/{self.ovh_us.project_id}/snapshot/{self.unique_id}"
+                    self.ovh_us._ovh_snapshot_path(
+                        client, "instance", self.unique_id
+                    )
                 )
             elif CoreNode.Type.VOLUME == self.ovh_us.node.type:
                 client.delete(
-                    f"/cloud/project/{self.ovh_us.project_id}/volume/snapshot/{self.unique_id}"
+                    self.ovh_us._ovh_snapshot_path(
+                        client, "volume", self.unique_id
+                    )
                 )
             self.status = UtilBackup.Status.DELETE_COMPLETED
             self.save()
@@ -3349,14 +3422,17 @@ class CoreAWSRDSBackup(UtilBackup):
         try:
             client = self.aws_rds.node.connection.auth_aws_rds.get_client()
             result = client.describe_db_snapshots(
-                DBSnapshotIdentifier=str(self.uuid_str),
+                DBSnapshotIdentifier=str(self.unique_id or self.uuid_str),
             )
             if len(result["DBSnapshots"]) > 0:
-                if result["DBSnapshots"][0]["Status"] == "available":
+                snapshot = result["DBSnapshots"][0]
+                self.size_gigabytes = snapshot.get("AllocatedStorage")
+                self.metadata = snapshot
+                if snapshot["Status"] == "available":
                     self.status = UtilBackup.Status.COMPLETE
                     self.save()
                     return UtilBackup.Status.COMPLETE
-                elif result["DBSnapshots"][0]["Status"] == "failed":
+                elif snapshot["Status"] == "failed":
                     return UtilBackup.Status.FAILED
             return UtilBackup.Status.IN_PROGRESS
         except Exception as e:

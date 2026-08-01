@@ -82,6 +82,8 @@ class CoreVolumeGoogleCloudView(ReadWriteSerializerMixin, viewsets.ModelViewSet)
                 google_cloud__in=nodes, status=UtilBackup.Status.COMPLETE
             ).count(),
             "storage": 0,
-            "in_progress": 0,
+            "in_progress": CoreGoogleCloudBackup.objects.filter(
+                google_cloud__in=nodes, status__in=UtilBackup.ACTIVE_STATUSES
+            ).count(),
         }
         return Response(all_totals)

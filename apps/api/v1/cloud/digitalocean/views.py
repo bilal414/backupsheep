@@ -75,7 +75,8 @@ class CoreCloudDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet)
             "nodes": nodes.count(),
             "backups": CoreDigitalOceanBackup.objects.filter(digitalocean__in=nodes, status=UtilBackup.Status.COMPLETE).count(),
             "storage": 0,
-            "in_progress": 0,
+            "in_progress": CoreDigitalOceanBackup.objects.filter(
+                digitalocean__in=nodes, status__in=UtilBackup.ACTIVE_STATUSES
+            ).count(),
         }
         return Response(all_totals)
-

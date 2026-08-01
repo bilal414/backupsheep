@@ -84,7 +84,9 @@ class CoreBasecampView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 basecamp__in=nodes, status=UtilBackup.Status.COMPLETE
             ).count(),
             "storage": 0,
-            "in_progress": 0,
+            "in_progress": CoreBasecampBackup.objects.filter(
+                basecamp__in=nodes, status__in=UtilBackup.ACTIVE_STATUSES
+            ).count(),
         }
         return Response(all_totals)
 

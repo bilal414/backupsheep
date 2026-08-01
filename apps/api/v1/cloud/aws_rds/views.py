@@ -76,7 +76,8 @@ class CoreCloudAWSRDSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             "nodes": nodes.count(),
             "backups": CoreAWSRDSBackup.objects.filter(aws_rds__in=nodes, status=UtilBackup.Status.COMPLETE).count(),
             "storage": 0,
-            "in_progress": 0,
+            "in_progress": CoreAWSRDSBackup.objects.filter(
+                aws_rds__in=nodes, status__in=UtilBackup.ACTIVE_STATUSES
+            ).count(),
         }
         return Response(all_totals)
-

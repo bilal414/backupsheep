@@ -76,6 +76,8 @@ class CoreCloudAWSView(ReadWriteSerializerMixin, viewsets.GenericViewSet):
             "nodes": nodes.count(),
             "backups": CoreAWSBackup.objects.filter(aws__in=nodes, status=UtilBackup.Status.COMPLETE).count(),
             "storage": 0,
-            "in_progress": 0,
+            "in_progress": CoreAWSBackup.objects.filter(
+                aws__in=nodes, status__in=UtilBackup.ACTIVE_STATUSES
+            ).count(),
         }
         return Response(all_totals)

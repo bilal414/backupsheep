@@ -51,5 +51,8 @@ per host: raise `worker-cloud` (I/O-bound on provider APIs) freely; keep
 ## Health & restarts
 
 `db`, `rabbitmq`, and `app` have healthchecks; all services use `restart: unless-stopped`.
+The Compose RabbitMQ service uses the persistent `rabbitmq_data` volume, so queued
+backup messages survive a broker/container recreation. Keep that volume and the
+PostgreSQL volume when upgrading; deleting either is a data-loss operation.
 The one-shot `migrate` service runs to completion on every `up` (idempotent) before the
 app/workers/beat start, so they never serve an unmigrated schema.

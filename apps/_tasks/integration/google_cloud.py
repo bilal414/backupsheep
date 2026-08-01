@@ -34,6 +34,7 @@ def backup_google_cloud(
     schedule_id=None,
     storage_ids=None,
     notes=None,
+    resume=False,
 ):
     # self.request.id = "cdbf7603-c262-4eec-b38f-80bc1055f287"
 
@@ -44,7 +45,7 @@ def backup_google_cloud(
     # treat this as scheduled backup
     if schedule_id:
         backup_type = UtilBackup.Type.SCHEDULED
-        if CoreSchedule.objects.filter(id=schedule_id, status=CoreSchedule.Status.ACTIVE).exists():
+        if resume or CoreSchedule.objects.filter(id=schedule_id, status=CoreSchedule.Status.ACTIVE).exists():
             schedule_check = True
     # treat this as on-demand backup
     else:
@@ -95,7 +96,11 @@ def backup_google_cloud(
             Connect with website and generate snapshot 
             """
             if not backup.unique_id:
-                node.google_cloud.create_snapshot(backup)
+                from apps._tasks.helper.tasks import run_provider_create
+                if run_provider_create(
+                    backup, self.request.id, node.google_cloud.create_snapshot
+                ) is None:
+                    return
 
             """
             Hand off to async polling instead of blocking the worker. poll_cloud_backup

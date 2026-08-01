@@ -33,9 +33,11 @@ from apps.console.backup.models import (
     CoreDatabaseBackup,
     CoreDigitalOceanBackup,
     CoreWebsiteBackup,
+    CoreWebsiteBackupStoragePoints,
 )
 from apps.console.connection.models import CoreAuthDatabase, CoreAuthWebsite, CoreConnection
 from apps.console.node.models import CoreDatabase, CoreNode, CoreWebsite
+from apps.console.storage.models import CoreStorageLocal
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -80,6 +82,21 @@ class PollCloudBackupTests(BaseTestCase):
         requeue.assert_called_once()
         self.assertIn("countdown", requeue.call_args.kwargs)
 
+    def test_second_poller_is_blocked_by_database_lease(self):
+        node, backup = self._backup()
+        with mock.patch.object(
+            CoreDigitalOceanBackup,
+            "poll_status",
+            return_value=UtilBackup.Status.IN_PROGRESS,
+        ) as poll, mock.patch.object(helper_tasks.poll_cloud_backup, "apply_async"):
+            helper_tasks.poll_cloud_backup.apply(
+                args=[node.id, backup.id], task_id="poll-task-1"
+            )
+            helper_tasks.poll_cloud_backup.apply(
+                args=[node.id, backup.id], task_id="poll-task-2"
+            )
+        poll.assert_called_once()
+
     def test_timeout_marks_timeout(self):
         node, backup = self._backup()
         long_ago = time.time() - (86400 + 60)
@@ -98,6 +115,65 @@ class PollCloudBackupTests(BaseTestCase):
             helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
         poll.assert_not_called()
 
+    def test_terminal_poll_repairs_stale_node_status(self):
+        node, backup = self._backup(status=UtilBackup.Status.COMPLETE)
+        node.status = CoreNode.Status.BACKUP_IN_PROGRESS
+        node.save(update_fields=["status", "modified"])
+
+        helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+
+        node.refresh_from_db()
+        self.assertEqual(node.status, CoreNode.Status.ACTIVE)
+
+    def test_terminal_poll_does_not_reset_node_with_another_active_backup(self):
+        node, terminal_backup = self._backup(status=UtilBackup.Status.COMPLETE)
+        CoreDigitalOceanBackup.objects.create(
+            digitalocean=node.digitalocean,
+            status=UtilBackup.Status.IN_PROGRESS,
+            celery_task_id="another-task",
+        )
+        node.status = CoreNode.Status.BACKUP_IN_PROGRESS
+        node.save(update_fields=["status", "modified"])
+
+        helper_tasks.poll_cloud_backup.apply(args=[node.id, terminal_backup.id])
+
+        node.refresh_from_db()
+        self.assertEqual(node.status, CoreNode.Status.BACKUP_IN_PROGRESS)
+
+
+class LocalFinalizerTests(BaseTestCase):
+    def test_finalizer_keeps_terminal_state_and_cleans_after_notification_error(self):
+        node = factories.make_website_node(self.account, self.member)
+        storage = factories.make_storage(self.account, self.member, code="local")
+        CoreStorageLocal.objects.create(storage=storage, path=None)
+        backup = CoreWebsiteBackup.objects.create(
+            website=node.website,
+            uuid=f"t{uuid.uuid4().hex}",
+            status=UtilBackup.Status.UPLOAD_IN_PROGRESS,
+            attempt_no=1,
+            type=UtilBackup.Type.ON_DEMAND,
+        )
+        CoreWebsiteBackupStoragePoints.objects.create(
+            backup=backup,
+            storage=storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+        )
+
+        with mock.patch.object(
+            CoreNode,
+            "notify_backup_success",
+            side_effect=RuntimeError("notification transport unavailable"),
+        ), mock.patch(
+            "apps._tasks.helper.tasks.delete_from_disk.apply_async"
+        ) as cleanup:
+            from apps._tasks.integration.storage.tasks import finalize_backup
+
+            finalize_backup.apply(args=[node.id, backup.id])
+
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.COMPLETE)
+        cleanup.assert_called_once_with(args=[backup.uuid_str, "both"])
+
 
 class ProviderPollStatusResilienceTests(BaseTestCase):
     def test_poll_status_never_raises_on_api_error(self):
@@ -108,6 +184,32 @@ class ProviderPollStatusResilienceTests(BaseTestCase):
             digitalocean=node.digitalocean, status=UtilBackup.Status.IN_PROGRESS, action_id="A1",
         )
         self.assertEqual(backup.poll_status(), UtilBackup.Status.IN_PROGRESS)
+
+    def test_digitalocean_volume_waits_for_snapshot(self):
+        node = factories.make_cloud_node(
+            self.account,
+            self.member,
+            code="digitalocean",
+            node_type=CoreNode.Type.VOLUME,
+        )
+        backup = CoreDigitalOceanBackup.objects.create(
+            digitalocean=node.digitalocean,
+            status=UtilBackup.Status.IN_PROGRESS,
+            unique_id="snapshot-1",
+        )
+        not_found = SimpleNamespace(status_code=404, json=lambda: {})
+        empty_list = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"snapshots": [], "meta": {"total": 0}},
+        )
+        with mock.patch(
+            "apps.console.connection.models.CoreAuthDigitalOcean.get_client",
+            return_value={},
+        ), mock.patch(
+            "apps.console.backup.models.requests.get",
+            side_effect=[not_found, empty_list],
+        ):
+            self.assertEqual(backup.poll_status(), UtilBackup.Status.IN_PROGRESS)
 
 
 class LftpScriptBuilderTests(TestCase):
@@ -162,6 +264,7 @@ class CeleryRoutingTests(TestCase):
         self.assertEqual(q("finalize_backup"), "storage")
         self.assertEqual(q("delete_from_disk"), "storage")
         self.assertEqual(q("poll_cloud_backup"), "cloud")
+        self.assertEqual(q("resume_in_progress_backups"), "default")
         self.assertEqual(q("send_log_to_db"), "logs")
 
     def test_celery_imports_register_all_backup_tasks(self):
@@ -177,7 +280,7 @@ class CeleryRoutingTests(TestCase):
         for name in ["backup_website", "backup_database", "backup_digitalocean",
                      "backup_hetzner", "backup_aws", "storage_upload", "finalize_backup",
                      "delete_from_disk", "poll_cloud_backup", "delete_old_logs",
-                     "run_scheduled_backup"]:
+                     "run_scheduled_backup", "resume_in_progress_backups"]:
             self.assertIn(name, app.tasks)
 
 

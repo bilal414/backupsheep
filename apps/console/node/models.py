@@ -1,8 +1,13 @@
 import datetime
+import fcntl
 import json
 import humanfriendly
+import os
 import pytz
 import requests
+import shutil
+import uuid
+from contextlib import contextmanager
 from celery import chord
 from django.conf import settings
 from django.db import models, transaction
@@ -92,7 +97,45 @@ class CoreDigitalOcean(UtilCloud):
         try:
             client = self.node.connection.auth_digitalocean.get_client()
 
+            def existing_snapshot(resource_type):
+                params = {"resource_type": resource_type, "per_page": 200, "page": 1}
+                snapshots = []
+                while True:
+                    response = requests.get(
+                        f"{settings.DIGITALOCEAN_API}/v2/snapshots",
+                        headers=client,
+                        params=params,
+                        verify=True,
+                    )
+                    if response.status_code != 200:
+                        raise NodeBackupFailedError(
+                            self.node,
+                            backup.uuid_str,
+                            backup.attempt_no,
+                            backup.type,
+                            "Unable to verify existing DigitalOcean snapshots before creating a new one.",
+                        )
+                    payload = response.json()
+                    snapshots.extend(payload.get("snapshots", []))
+                    total = (payload.get("meta") or {}).get("total", len(snapshots))
+                    if len(snapshots) >= total:
+                        break
+                    params["page"] += 1
+                return next(
+                    (item for item in snapshots if item.get("name") == backup.uuid_str),
+                    None,
+                )
+
             if self.node.type == CoreNode.Type.CLOUD:
+                # The create request can succeed before Celery persists action_id.
+                # Snapshot names are unique per BackupSheep backup, so recover it
+                # before sending another droplet action.
+                existing = existing_snapshot("droplet")
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.size_gigabytes = existing.get("size_gigabytes")
+                    backup.save()
+                    return
                 result = requests.get(
                     f"{settings.DIGITALOCEAN_API}/v2/droplets/{self.unique_id}",
                     headers=client,
@@ -105,7 +148,7 @@ class CoreDigitalOcean(UtilCloud):
                         result = requests.post(
                             f"{settings.DIGITALOCEAN_API}/v2/droplets/{self.unique_id}/actions",
                             headers=client,
-                            data=json.dumps(droplet_data),
+                            json=droplet_data,
                             verify=True,
                         )
                         if result.status_code == 201:
@@ -149,10 +192,19 @@ class CoreDigitalOcean(UtilCloud):
             elif self.node.type == CoreNode.Type.VOLUME:
                 volume_data = {"name": backup.uuid_str}
 
+                existing = existing_snapshot("volume")
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.size_gigabytes = existing.get(
+                        "min_disk_size", existing.get("size_gigabytes")
+                    )
+                    backup.save()
+                    return
+
                 result = requests.post(
                     f"{settings.DIGITALOCEAN_API}/v2/volumes/{self.unique_id}/snapshots",
                     headers=client,
-                    data=json.dumps(volume_data),
+                    json=volume_data,
                     verify=True,
                 )
 
@@ -178,6 +230,12 @@ class CoreDigitalOcean(UtilCloud):
                         self.node,
                         backup.uuid_str, backup.attempt_no, backup.type,
                         "Unable to connect to your DigitalOcean account. Please reconnect your account to refresh authentication token.",
+                    )
+                else:
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str, backup.attempt_no, backup.type,
+                        f"API call returned with status {result.status_code}",
                     )
         except Exception as e:
             raise NodeBackupFailedError(
@@ -321,10 +379,51 @@ class CoreHetzner(UtilCloud):
             client = self.node.connection.auth_hetzner.get_client()
 
             if self.node.type == CoreNode.Type.CLOUD:
+                # create_image is not idempotent at the HTTP layer. Recover an image
+                # returned before the worker persisted its ids by its description.
+                page = 1
+                existing = None
+                while True:
+                    response = requests.get(
+                        f"{settings.HETZNER_API}/v1/images",
+                        params={"type": "snapshot", "page": page, "per_page": 50},
+                        headers=client,
+                        verify=True,
+                    )
+                    if response.status_code != 200:
+                        raise NodeBackupFailedError(
+                            self.node,
+                            backup.uuid_str,
+                            backup.attempt_no,
+                            backup.type,
+                            "Unable to verify existing Hetzner images before creating a new one.",
+                        )
+                    payload = response.json()
+                    existing = next(
+                        (
+                            image
+                            for image in payload.get("images", [])
+                            if image.get("description") == backup.uuid_str
+                        ),
+                        None,
+                    )
+                    if existing:
+                        break
+                    next_page = payload.get("meta", {}).get("pagination", {}).get("next_page")
+                    if not next_page:
+                        break
+                    page = next_page
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.size_gigabytes = existing.get("disk_size")
+                    backup.metadata = existing
+                    backup.save()
+                    return
+
                 server_data = {"description": backup.uuid_str, "type": "snapshot"}
                 result = requests.post(
                     f"{settings.HETZNER_API}/v1/servers/{self.unique_id}/actions/create_image",
-                    data=json.dumps(server_data),
+                    json=server_data,
                     headers=client,
                     verify=True,
                 )
@@ -355,8 +454,13 @@ class CoreHetzner(UtilCloud):
                     )
 
             elif self.node.type == CoreNode.Type.VOLUME:
-                # Hetzner Cloud Doesn't offer Volume backup
-                pass
+                raise NodeBackupFailedError(
+                    self.node,
+                    backup.uuid_str,
+                    backup.attempt_no,
+                    backup.type,
+                    "Hetzner Cloud does not provide native volume snapshots.",
+                )
         except Exception as e:
             raise NodeBackupFailedError(
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
@@ -469,9 +573,48 @@ class CoreUpCloud(UtilCloud):
 
             if self.node.type == CoreNode.Type.VOLUME:
                 server_data = {"storage": {"title": backup.uuid_str}}
+                # UpCloud returns the backup storage UUID immediately, but a worker
+                # can die before saving it. Search the backup-storage collection by
+                # the deterministic title and source UUID before creating another.
+                existing_response = requests.get(
+                    f"{settings.UPCLOUD_API}/storage/backup",
+                    auth=client,
+                    verify=True,
+                    headers={"content-type": "application/json"},
+                )
+                if existing_response.status_code != 200:
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str,
+                        backup.attempt_no,
+                        backup.type,
+                        "Unable to verify existing UpCloud backups before creating a new one.",
+                    )
+                payload = existing_response.json()
+                payload = payload.get("storages", payload)
+                storages = payload.get("storage", []) if isinstance(payload, dict) else payload
+                if isinstance(storages, dict):
+                    storages = [storages]
+                existing = next(
+                    (
+                        item for item in (storages or [])
+                        if item.get("title") == backup.uuid_str
+                        and (
+                            not item.get("origin")
+                            or item.get("origin") == self.unique_id
+                        )
+                    ),
+                    None,
+                )
+                if existing:
+                    backup.unique_id = existing.get("uuid")
+                    backup.size_gigabytes = existing.get("size")
+                    backup.metadata = existing
+                    backup.save()
+                    return
                 result = requests.post(
                     f"{settings.UPCLOUD_API}/storage/{self.unique_id}/backup",
-                    data=json.dumps(server_data),
+                    json=server_data,
                     auth=client,
                     verify=True,
                     headers={"content-type": "application/json"}
@@ -495,8 +638,13 @@ class CoreUpCloud(UtilCloud):
                         f"API call returned with status {result.status_code}"
                     )
             elif self.node.type == CoreNode.Type.CLOUD:
-                # UpCloud Doesn't offer Server backup
-                pass
+                raise NodeBackupFailedError(
+                    self.node,
+                    backup.uuid_str,
+                    backup.attempt_no,
+                    backup.type,
+                    "UpCloud does not provide native server snapshots; only volumes are supported.",
+                )
         except Exception as e:
             raise NodeBackupFailedError(
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
@@ -569,7 +717,96 @@ class CoreUpCloud(UtilCloud):
         return CoreCloudRestore.Status.IN_PROGRESS
 
 
-class CoreOVHCA(UtilCloud):
+class _OVHRegionMixin:
+    """Build region-scoped OVH Public Cloud API paths.
+
+    OVH's current Public Cloud API scopes compute, volume, and snapshot
+    resources by region. Older BackupSheep rows may not have the region in
+    their metadata, so resolve it once by probing the project's regions and
+    persist the result before making a mutating request.
+    """
+
+    def _metadata_region(self):
+        metadata = self.metadata if isinstance(self.metadata, dict) else {}
+        for key in ("_bs_region", "region"):
+            region = metadata.get(key)
+            if isinstance(region, dict):
+                region = region.get("name") or region.get("region") or region.get("id")
+            if region:
+                return str(region)
+        return None
+
+    def _persist_region(self, region):
+        region = str(region)
+        metadata = dict(self.metadata) if isinstance(self.metadata, dict) else {}
+        if metadata.get("_bs_region") == region:
+            return region
+        metadata["_bs_region"] = region
+        self.metadata = metadata
+        self.save(update_fields=["metadata", "modified"])
+        return region
+
+    @staticmethod
+    def _region_name(value):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            value = value.get("name") or value.get("region") or value.get("id")
+            if value:
+                return str(value)
+        return None
+
+    def _ovh_region(self, client, resource_type):
+        region = self._metadata_region()
+        if region:
+            return region
+
+        project_path = f"/cloud/project/{self.project_id}"
+        try:
+            regions = client.get(f"{project_path}/region")
+        except Exception:
+            regions = []
+        for region_value in regions if isinstance(regions, list) else []:
+            region = self._region_name(region_value)
+            if not region:
+                continue
+            try:
+                resource = client.get(
+                    f"{project_path}/region/{region}/{resource_type}/{self.unique_id}"
+                )
+            except Exception:
+                continue
+            if resource:
+                return self._persist_region(resource.get("region") or region)
+
+        # Last-chance compatibility lookup for rows created before OVH added
+        # region-qualified routes. This path is never used for new rows once
+        # the region has been discovered and persisted.
+        try:
+            resource = client.get(f"{project_path}/{resource_type}/{self.unique_id}")
+        except Exception:
+            resource = None
+        if resource:
+            region = resource.get("region")
+            if region:
+                return self._persist_region(region)
+        raise ValueError(
+            f"Unable to determine the OVH region for {resource_type} {self.unique_id}."
+        )
+
+    def _ovh_resource_path(self, client, resource_type, resource_id=None):
+        region = self._ovh_region(client, resource_type)
+        resource_id = resource_id or self.unique_id
+        return f"/cloud/project/{self.project_id}/region/{region}/{resource_type}/{resource_id}"
+
+    def _ovh_snapshot_path(self, client, resource_type, snapshot_id=None):
+        region = self._ovh_region(client, resource_type)
+        snapshot_path = "snapshot" if resource_type == "instance" else "volume/snapshot"
+        path = f"/cloud/project/{self.project_id}/region/{region}/{snapshot_path}"
+        return f"{path}/{snapshot_id}" if snapshot_id else path
+
+
+class CoreOVHCA(_OVHRegionMixin, UtilCloud):
     node = models.OneToOneField(
         "CoreNode", related_name="ovh_ca", on_delete=models.CASCADE
     )
@@ -583,26 +820,38 @@ class CoreOVHCA(UtilCloud):
         db_table = "core_ovh_ca"
 
     def validate(self):
-        node_ok = False
-        client = self.node.connection.auth_ovh_ca.get_client()
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            ovh_response = client.get(f"/cloud/project/{self.project_id}/instance/{self.unique_id}")
-            if ovh_response.get("status") == "ACTIVE":
-                node_ok = True
-        elif self.node.type == CoreNode.Type.VOLUME:
-            ovh_response = client.get(f"/cloud/project/{self.project_id}/volume/{self.unique_id}")
-            if ovh_response.get("status") == "available" or ovh_response.get("status") == "in-use":
-                node_ok = True
-        return node_ok
+        try:
+            client = self.node.connection.auth_ovh_ca.get_client()
+            if self.node.type == CoreNode.Type.CLOUD:
+                ovh_response = client.get(self._ovh_resource_path(client, "instance"))
+                return ovh_response.get("status") == "ACTIVE"
+            if self.node.type == CoreNode.Type.VOLUME:
+                ovh_response = client.get(self._ovh_resource_path(client, "volume"))
+                return ovh_response.get("status") in {"available", "in-use"}
+        except Exception:
+            return False
+        return False
 
     def create_snapshot(self, backup):
         client = self.node.connection.auth_ovh_ca.get_client()
 
         if self.node.type == CoreNode.Type.CLOUD:
             try:
+                snapshots = client.get(self._ovh_snapshot_path(client, "instance"))
+                existing = next(
+                    (
+                        item for item in (snapshots if isinstance(snapshots, list) else [])
+                        if item.get("name") == backup.uuid_str
+                    ),
+                    None,
+                )
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.size_gigabytes = existing.get("size")
+                    backup.save()
+                    return
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/instance/{self.unique_id}/snapshot",
+                    f"{self._ovh_resource_path(client, 'instance')}/snapshot",
                     snapshotName=backup.uuid_str,
                 )
                 # This unique_id will be updated in poll_status() with actual ID from OVH
@@ -635,8 +884,21 @@ class CoreOVHCA(UtilCloud):
                 )
         elif self.node.type == CoreNode.Type.VOLUME:
             try:
+                snapshots = client.get(self._ovh_snapshot_path(client, "volume"))
+                existing = next(
+                    (
+                        item for item in (snapshots if isinstance(snapshots, list) else [])
+                        if item.get("name") == backup.uuid_str
+                    ),
+                    None,
+                )
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.size_gigabytes = existing.get("size")
+                    backup.save()
+                    return
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/volume/{self.unique_id}/snapshot",
+                    f"{self._ovh_resource_path(client, 'volume')}/snapshot",
                     name=backup.uuid_str,
                 )
                 backup.unique_id = backup.uuid_str
@@ -683,18 +945,20 @@ class CoreOVHCA(UtilCloud):
                 # the snapshot can only be restored in the region it was taken in
                 if not flavor_id or not region:
                     ovh_instance = client.get(
-                        f"/cloud/project/{self.project_id}/instance/{self.unique_id}"
+                        self._ovh_resource_path(client, "instance")
                     )
                     flavor_id = flavor_id or ovh_instance.get("flavorId")
                     region = region or ovh_instance.get("region")
+                params["region"] = region
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/instance",
+                    f"/cloud/project/{self.project_id}/region/{region}/instance",
                     flavorId=flavor_id,
                     name=restore.name,
                     region=region,
                     imageId=backup.unique_id,
                 )
                 restore.resource_id = ovh_response["id"]
+                restore.params = params
                 restore.save()
             except InvalidCredential:
                 raise RestoreCreateError(
@@ -713,7 +977,7 @@ class CoreOVHCA(UtilCloud):
                 # Fall back to the source volume when options are not supplied
                 if not region or not size or not volume_type:
                     ovh_volume = client.get(
-                        f"/cloud/project/{self.project_id}/volume/{self.unique_id}"
+                        self._ovh_resource_path(client, "volume")
                     )
                     region = region or ovh_volume.get("region")
                     size = size or ovh_volume.get("size")
@@ -721,8 +985,9 @@ class CoreOVHCA(UtilCloud):
                 # The new volume must be at least the size of the snapshot
                 if backup.size_gigabytes:
                     size = max(int(size), math.ceil(backup.size_gigabytes))
+                params["region"] = region
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/volume",
+                    f"/cloud/project/{self.project_id}/region/{region}/volume",
                     region=region,
                     size=size,
                     type=volume_type,
@@ -730,6 +995,7 @@ class CoreOVHCA(UtilCloud):
                     name=restore.name,
                 )
                 restore.resource_id = ovh_response["id"]
+                restore.params = params
                 restore.save()
             except InvalidCredential:
                 raise RestoreCreateError(
@@ -748,7 +1014,9 @@ class CoreOVHCA(UtilCloud):
 
         if self.node.type == CoreNode.Type.CLOUD:
             ovh_instance = client.get(
-                f"/cloud/project/{self.project_id}/instance/{restore.resource_id}"
+                f"/cloud/project/{self.project_id}/region/"
+                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'instance')}"
+                f"/instance/{restore.resource_id}"
             )
             status = ovh_instance.get("status")
             if status == "ACTIVE":
@@ -757,7 +1025,9 @@ class CoreOVHCA(UtilCloud):
                 return CoreCloudRestore.Status.FAILED
         elif self.node.type == CoreNode.Type.VOLUME:
             ovh_volume = client.get(
-                f"/cloud/project/{self.project_id}/volume/{restore.resource_id}"
+                f"/cloud/project/{self.project_id}/region/"
+                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'volume')}"
+                f"/volume/{restore.resource_id}"
             )
             status = ovh_volume.get("status")
             if status == "available":
@@ -767,7 +1037,7 @@ class CoreOVHCA(UtilCloud):
         return CoreCloudRestore.Status.IN_PROGRESS
 
 
-class CoreOVHEU(UtilCloud):
+class CoreOVHEU(_OVHRegionMixin, UtilCloud):
     node = models.OneToOneField(
         "CoreNode", related_name="ovh_eu", on_delete=models.CASCADE
     )
@@ -781,26 +1051,38 @@ class CoreOVHEU(UtilCloud):
         db_table = "core_ovh_eu"
 
     def validate(self):
-        node_ok = False
-        client = self.node.connection.auth_ovh_eu.get_client()
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            ovh_response = client.get(f"/cloud/project/{self.project_id}/instance/{self.unique_id}")
-            if ovh_response.get("status") == "ACTIVE":
-                node_ok = True
-        elif self.node.type == CoreNode.Type.VOLUME:
-            ovh_response = client.get(f"/cloud/project/{self.project_id}/volume/{self.unique_id}")
-            if ovh_response.get("status") == "available" or ovh_response.get("status") == "in-use":
-                node_ok = True
-        return node_ok
+        try:
+            client = self.node.connection.auth_ovh_eu.get_client()
+            if self.node.type == CoreNode.Type.CLOUD:
+                ovh_response = client.get(self._ovh_resource_path(client, "instance"))
+                return ovh_response.get("status") == "ACTIVE"
+            if self.node.type == CoreNode.Type.VOLUME:
+                ovh_response = client.get(self._ovh_resource_path(client, "volume"))
+                return ovh_response.get("status") in {"available", "in-use"}
+        except Exception:
+            return False
+        return False
 
     def create_snapshot(self, backup):
         client = self.node.connection.auth_ovh_eu.get_client()
 
         if self.node.type == CoreNode.Type.CLOUD:
             try:
+                snapshots = client.get(self._ovh_snapshot_path(client, "instance"))
+                existing = next(
+                    (
+                        item for item in (snapshots if isinstance(snapshots, list) else [])
+                        if item.get("name") == backup.uuid_str
+                    ),
+                    None,
+                )
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.size_gigabytes = existing.get("size")
+                    backup.save()
+                    return
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/instance/{self.unique_id}/snapshot",
+                    f"{self._ovh_resource_path(client, 'instance')}/snapshot",
                     snapshotName=backup.uuid_str,
                 )
                 # This unique_id will be updated in poll_status() with actual ID from OVH
@@ -833,8 +1115,21 @@ class CoreOVHEU(UtilCloud):
                 )
         elif self.node.type == CoreNode.Type.VOLUME:
             try:
+                snapshots = client.get(self._ovh_snapshot_path(client, "volume"))
+                existing = next(
+                    (
+                        item for item in (snapshots if isinstance(snapshots, list) else [])
+                        if item.get("name") == backup.uuid_str
+                    ),
+                    None,
+                )
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.size_gigabytes = existing.get("size")
+                    backup.save()
+                    return
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/volume/{self.unique_id}/snapshot",
+                    f"{self._ovh_resource_path(client, 'volume')}/snapshot",
                     name=backup.uuid_str,
                 )
                 backup.unique_id = backup.uuid_str
@@ -881,18 +1176,20 @@ class CoreOVHEU(UtilCloud):
                 # the snapshot can only be restored in the region it was taken in
                 if not flavor_id or not region:
                     ovh_instance = client.get(
-                        f"/cloud/project/{self.project_id}/instance/{self.unique_id}"
+                        self._ovh_resource_path(client, "instance")
                     )
                     flavor_id = flavor_id or ovh_instance.get("flavorId")
                     region = region or ovh_instance.get("region")
+                params["region"] = region
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/instance",
+                    f"/cloud/project/{self.project_id}/region/{region}/instance",
                     flavorId=flavor_id,
                     name=restore.name,
                     region=region,
                     imageId=backup.unique_id,
                 )
                 restore.resource_id = ovh_response["id"]
+                restore.params = params
                 restore.save()
             except InvalidCredential:
                 raise RestoreCreateError(
@@ -911,7 +1208,7 @@ class CoreOVHEU(UtilCloud):
                 # Fall back to the source volume when options are not supplied
                 if not region or not size or not volume_type:
                     ovh_volume = client.get(
-                        f"/cloud/project/{self.project_id}/volume/{self.unique_id}"
+                        self._ovh_resource_path(client, "volume")
                     )
                     region = region or ovh_volume.get("region")
                     size = size or ovh_volume.get("size")
@@ -919,8 +1216,9 @@ class CoreOVHEU(UtilCloud):
                 # The new volume must be at least the size of the snapshot
                 if backup.size_gigabytes:
                     size = max(int(size), math.ceil(backup.size_gigabytes))
+                params["region"] = region
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/volume",
+                    f"/cloud/project/{self.project_id}/region/{region}/volume",
                     region=region,
                     size=size,
                     type=volume_type,
@@ -928,6 +1226,7 @@ class CoreOVHEU(UtilCloud):
                     name=restore.name,
                 )
                 restore.resource_id = ovh_response["id"]
+                restore.params = params
                 restore.save()
             except InvalidCredential:
                 raise RestoreCreateError(
@@ -946,7 +1245,9 @@ class CoreOVHEU(UtilCloud):
 
         if self.node.type == CoreNode.Type.CLOUD:
             ovh_instance = client.get(
-                f"/cloud/project/{self.project_id}/instance/{restore.resource_id}"
+                f"/cloud/project/{self.project_id}/region/"
+                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'instance')}"
+                f"/instance/{restore.resource_id}"
             )
             status = ovh_instance.get("status")
             if status == "ACTIVE":
@@ -955,7 +1256,9 @@ class CoreOVHEU(UtilCloud):
                 return CoreCloudRestore.Status.FAILED
         elif self.node.type == CoreNode.Type.VOLUME:
             ovh_volume = client.get(
-                f"/cloud/project/{self.project_id}/volume/{restore.resource_id}"
+                f"/cloud/project/{self.project_id}/region/"
+                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'volume')}"
+                f"/volume/{restore.resource_id}"
             )
             status = ovh_volume.get("status")
             if status == "available":
@@ -965,7 +1268,7 @@ class CoreOVHEU(UtilCloud):
         return CoreCloudRestore.Status.IN_PROGRESS
 
 
-class CoreOVHUS(UtilCloud):
+class CoreOVHUS(_OVHRegionMixin, UtilCloud):
     node = models.OneToOneField(
         "CoreNode", related_name="ovh_us", on_delete=models.CASCADE
     )
@@ -979,26 +1282,38 @@ class CoreOVHUS(UtilCloud):
         db_table = "core_ovh_us"
 
     def validate(self):
-        node_ok = False
-        client = self.node.connection.auth_ovh_us.get_client()
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            ovh_response = client.get(f"/cloud/project/{self.project_id}/instance/{self.unique_id}")
-            if ovh_response.get("status") == "ACTIVE":
-                node_ok = True
-        elif self.node.type == CoreNode.Type.VOLUME:
-            ovh_response = client.get(f"/cloud/project/{self.project_id}/volume/{self.unique_id}")
-            if ovh_response.get("status") == "available" or ovh_response.get("status") == "in-use":
-                node_ok = True
-        return node_ok
+        try:
+            client = self.node.connection.auth_ovh_us.get_client()
+            if self.node.type == CoreNode.Type.CLOUD:
+                ovh_response = client.get(self._ovh_resource_path(client, "instance"))
+                return ovh_response.get("status") == "ACTIVE"
+            if self.node.type == CoreNode.Type.VOLUME:
+                ovh_response = client.get(self._ovh_resource_path(client, "volume"))
+                return ovh_response.get("status") in {"available", "in-use"}
+        except Exception:
+            return False
+        return False
 
     def create_snapshot(self, backup):
         client = self.node.connection.auth_ovh_us.get_client()
 
         if self.node.type == CoreNode.Type.CLOUD:
             try:
+                snapshots = client.get(self._ovh_snapshot_path(client, "instance"))
+                existing = next(
+                    (
+                        item for item in (snapshots if isinstance(snapshots, list) else [])
+                        if item.get("name") == backup.uuid_str
+                    ),
+                    None,
+                )
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.size_gigabytes = existing.get("size")
+                    backup.save()
+                    return
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/instance/{self.unique_id}/snapshot",
+                    f"{self._ovh_resource_path(client, 'instance')}/snapshot",
                     snapshotName=backup.uuid_str,
                 )
                 # This unique_id will be updated in poll_status() with actual ID from OVH
@@ -1031,8 +1346,21 @@ class CoreOVHUS(UtilCloud):
                 )
         elif self.node.type == CoreNode.Type.VOLUME:
             try:
+                snapshots = client.get(self._ovh_snapshot_path(client, "volume"))
+                existing = next(
+                    (
+                        item for item in (snapshots if isinstance(snapshots, list) else [])
+                        if item.get("name") == backup.uuid_str
+                    ),
+                    None,
+                )
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.size_gigabytes = existing.get("size")
+                    backup.save()
+                    return
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/volume/{self.unique_id}/snapshot",
+                    f"{self._ovh_resource_path(client, 'volume')}/snapshot",
                     name=backup.uuid_str,
                 )
                 backup.unique_id = backup.uuid_str
@@ -1079,18 +1407,20 @@ class CoreOVHUS(UtilCloud):
                 # the snapshot can only be restored in the region it was taken in
                 if not flavor_id or not region:
                     ovh_instance = client.get(
-                        f"/cloud/project/{self.project_id}/instance/{self.unique_id}"
+                        self._ovh_resource_path(client, "instance")
                     )
                     flavor_id = flavor_id or ovh_instance.get("flavorId")
                     region = region or ovh_instance.get("region")
+                params["region"] = region
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/instance",
+                    f"/cloud/project/{self.project_id}/region/{region}/instance",
                     flavorId=flavor_id,
                     name=restore.name,
                     region=region,
                     imageId=backup.unique_id,
                 )
                 restore.resource_id = ovh_response["id"]
+                restore.params = params
                 restore.save()
             except InvalidCredential:
                 raise RestoreCreateError(
@@ -1109,7 +1439,7 @@ class CoreOVHUS(UtilCloud):
                 # Fall back to the source volume when options are not supplied
                 if not region or not size or not volume_type:
                     ovh_volume = client.get(
-                        f"/cloud/project/{self.project_id}/volume/{self.unique_id}"
+                        self._ovh_resource_path(client, "volume")
                     )
                     region = region or ovh_volume.get("region")
                     size = size or ovh_volume.get("size")
@@ -1117,8 +1447,9 @@ class CoreOVHUS(UtilCloud):
                 # The new volume must be at least the size of the snapshot
                 if backup.size_gigabytes:
                     size = max(int(size), math.ceil(backup.size_gigabytes))
+                params["region"] = region
                 ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/volume",
+                    f"/cloud/project/{self.project_id}/region/{region}/volume",
                     region=region,
                     size=size,
                     type=volume_type,
@@ -1126,6 +1457,7 @@ class CoreOVHUS(UtilCloud):
                     name=restore.name,
                 )
                 restore.resource_id = ovh_response["id"]
+                restore.params = params
                 restore.save()
             except InvalidCredential:
                 raise RestoreCreateError(
@@ -1144,7 +1476,9 @@ class CoreOVHUS(UtilCloud):
 
         if self.node.type == CoreNode.Type.CLOUD:
             ovh_instance = client.get(
-                f"/cloud/project/{self.project_id}/instance/{restore.resource_id}"
+                f"/cloud/project/{self.project_id}/region/"
+                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'instance')}"
+                f"/instance/{restore.resource_id}"
             )
             status = ovh_instance.get("status")
             if status == "ACTIVE":
@@ -1153,7 +1487,9 @@ class CoreOVHUS(UtilCloud):
                 return CoreCloudRestore.Status.FAILED
         elif self.node.type == CoreNode.Type.VOLUME:
             ovh_volume = client.get(
-                f"/cloud/project/{self.project_id}/volume/{restore.resource_id}"
+                f"/cloud/project/{self.project_id}/region/"
+                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'volume')}"
+                f"/volume/{restore.resource_id}"
             )
             status = ovh_volume.get("status")
             if status == "available":
@@ -1208,6 +1544,30 @@ class CoreAWS(UtilCloud):
             client = self.node.connection.auth_aws.get_client()
 
             if self.node.type == CoreNode.Type.CLOUD:
+                try:
+                    existing_response = client.describe_images(
+                        Owners=["self"],
+                        Filters=[{"Name": "name", "Values": [backup.uuid_str]}]
+                    )
+                    existing_images = (
+                        existing_response.get("Images", [])
+                        if isinstance(existing_response, dict)
+                        else []
+                    )
+                except ClientError:
+                    # A filtered describe returns an empty list when no image
+                    # exists. Any exception here is an auth/transport failure;
+                    # creating anyway could duplicate an image whose response was
+                    # lost after the provider accepted it.
+                    raise
+                existing = next(
+                    (image for image in existing_images if image.get("ImageId")),
+                    None,
+                )
+                if existing:
+                    backup.unique_id = existing["ImageId"]
+                    backup.save()
+                    return
                 response = client.create_image(
                     Description=backup.uuid_str,
                     InstanceId=self.unique_id,
@@ -1227,6 +1587,28 @@ class CoreAWS(UtilCloud):
                 backup.save()
 
             elif self.node.type == CoreNode.Type.VOLUME:
+                try:
+                    existing_response = client.describe_snapshots(
+                        Filters=[{"Name": "description", "Values": [backup.uuid_str]}]
+                    )
+                    existing_snapshots = (
+                        existing_response.get("Snapshots", [])
+                        if isinstance(existing_response, dict)
+                        else []
+                    )
+                except ClientError:
+                    raise
+                existing = next(
+                    (snapshot for snapshot in existing_snapshots if snapshot.get("SnapshotId")),
+                    None,
+                )
+                if existing:
+                    backup.unique_id = existing["SnapshotId"]
+                    backup.size_gigabytes = round(
+                        int(existing.get("VolumeSize", 0)), 2
+                    )
+                    backup.save()
+                    return
                 response = client.create_snapshot(
                     Description=backup.uuid_str,
                     VolumeId=self.unique_id,
@@ -1383,26 +1765,62 @@ class CoreLightsail(UtilCloud):
             client = self.node.connection.auth_lightsail.get_client()
 
             if self.node.type == CoreNode.Type.CLOUD:
+                try:
+                    existing = client.get_instance_snapshot(
+                        instanceSnapshotName=backup.uuid_str
+                    ).get("instanceSnapshot")
+                except ClientError as error:
+                    code = error.response.get("Error", {}).get("Code")
+                    if code not in {"NotFoundException", "ResourceNotFoundException"}:
+                        raise
+                    existing = None
+                if existing:
+                    backup.unique_id = backup.uuid_str
+                    backup.size_gigabytes = existing.get("sizeInGb")
+                    backup.metadata = existing
+                    backup.save()
+                    return
                 response = client.create_instance_snapshot(
                     instanceSnapshotName=backup.uuid_str, instanceName=self.unique_id
                 )
-                if response.get("operations"):
-                    operation = response["operations"][0]
-
-                    if operation["status"] != "Failed":
-                        backup.unique_id = backup.uuid_str
-                        backup.save()
+                operations = response.get("operations") or []
+                if not operations or operations[0].get("status") == "Failed":
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str, backup.attempt_no, backup.type,
+                        "Lightsail did not accept the instance snapshot request.",
+                    )
+                backup.unique_id = backup.uuid_str
+                backup.save()
             elif self.node.type == CoreNode.Type.VOLUME:
+                try:
+                    existing = client.get_disk_snapshot(
+                        diskSnapshotName=backup.uuid_str
+                    ).get("diskSnapshot")
+                except ClientError as error:
+                    code = error.response.get("Error", {}).get("Code")
+                    if code not in {"NotFoundException", "ResourceNotFoundException"}:
+                        raise
+                    existing = None
+                if existing:
+                    backup.unique_id = backup.uuid_str
+                    backup.size_gigabytes = existing.get("sizeInGb")
+                    backup.metadata = existing
+                    backup.save()
+                    return
                 response = client.create_disk_snapshot(
                     diskName=self.unique_id,
                     diskSnapshotName=backup.uuid_str,
                 )
-                if response.get("operations"):
-                    operation = response["operations"][0]
-
-                    if operation["status"] != "Failed":
-                        backup.unique_id = backup.uuid_str
-                        backup.save()
+                operations = response.get("operations") or []
+                if not operations or operations[0].get("status") == "Failed":
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str, backup.attempt_no, backup.type,
+                        "Lightsail did not accept the disk snapshot request.",
+                    )
+                backup.unique_id = backup.uuid_str
+                backup.save()
         except Exception as e:
             raise NodeBackupFailedError(
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
@@ -1515,6 +1933,27 @@ class CoreAWSRDS(UtilCloud):
 
     def create_snapshot(self, backup):
         client = self.node.connection.auth_aws_rds.get_client()
+        try:
+            existing_response = client.describe_db_snapshots(
+                DBSnapshotIdentifier=backup.uuid_str,
+            )
+            existing_snapshots = (
+                existing_response.get("DBSnapshots", [])
+                if isinstance(existing_response, dict)
+                else []
+            )
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            if code != "DBSnapshotNotFoundFault":
+                raise
+            existing_snapshots = []
+        if existing_snapshots:
+            existing = existing_snapshots[0]
+            backup.unique_id = existing.get("DBSnapshotIdentifier", backup.uuid_str)
+            backup.size_gigabytes = existing.get("AllocatedStorage")
+            backup.metadata = existing
+            backup.save()
+            return
         snapshot = client.create_db_snapshot(
             DBSnapshotIdentifier=backup.uuid_str, DBInstanceIdentifier=self.unique_id
         )
@@ -1629,12 +2068,52 @@ class CoreVultr(UtilCloud):
     def create_snapshot(self, backup):
         client = self.node.connection.auth_vultr.get_client()
 
+        def existing_snapshot(path):
+            params = {"per_page": 500, "page": 1}
+            snapshots = []
+            while True:
+                response = requests.get(
+                    f"{settings.VULTR_API}{path}",
+                    headers=client,
+                    params=params,
+                    verify=True,
+                )
+                if response.status_code != 200:
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str,
+                        backup.attempt_no,
+                        backup.type,
+                        "Unable to verify existing Vultr snapshots before creating a new one.",
+                    )
+                payload = response.json()
+                page_snapshots = payload.get("snapshots", [])
+                snapshots.extend(page_snapshots)
+                total = (payload.get("meta") or {}).get("total", len(snapshots))
+                if not page_snapshots or len(snapshots) >= total:
+                    break
+                params["page"] += 1
+            return next(
+                (
+                    snapshot
+                    for snapshot in snapshots
+                    if snapshot.get("description") == backup.uuid_str
+                ),
+                None,
+            )
+
         if self.node.type == CoreNode.Type.CLOUD:
             try:
+                existing = existing_snapshot("/v2/snapshots")
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.metadata = existing
+                    backup.save()
+                    return
                 result = requests.post(
                     f"{settings.VULTR_API}/v2/snapshots",
                     headers=client,
-                    json={"instance_id": self.unique_id, "description": self.node.name},
+                    json={"instance_id": self.unique_id, "description": backup.uuid_str},
                     verify=True,
                 )
                 if result.status_code == 201:
@@ -1671,6 +2150,15 @@ class CoreVultr(UtilCloud):
             try:
                 # Block storage snapshots are created under /v2/blocks/snapshots and
                 # the API returns the snapshot object at top level (no wrapper key).
+                existing = existing_snapshot("/v2/blocks/snapshots")
+                if existing:
+                    backup.unique_id = existing.get("id")
+                    backup.metadata = existing
+                    backup.size_gigabytes = round(
+                        int(existing.get("size", 0)) / (1000 ** 3), 2
+                    )
+                    backup.save()
+                    return
                 result = requests.post(
                     f"{settings.VULTR_API}/v2/blocks/snapshots",
                     headers=client,
@@ -1856,7 +2344,7 @@ class CoreOracle(UtilCloud):
             config = self.node.connection.auth_oracle.get_client()
             block_storage_client = oci.core.BlockstorageClient(config)
 
-            if self.metadata.get("_bs_vol_type") == "boot":
+            if (self.metadata or {}).get("_bs_vol_type") == "boot":
                 request = block_storage_client.get_boot_volume(self.unique_id)
                 if request.status == 200:
                     if (
@@ -1864,7 +2352,7 @@ class CoreOracle(UtilCloud):
                         and request.data.lifecycle_state == BootVolume.LIFECYCLE_STATE_AVAILABLE
                     ):
                         node_ok = True
-            elif self.metadata.get("_bs_vol_type") == "block":
+            elif (self.metadata or {}).get("_bs_vol_type") == "block":
                 request = block_storage_client.get_volume(self.unique_id)
                 if request.status == 200:
                     if (
@@ -1883,7 +2371,44 @@ class CoreOracle(UtilCloud):
                 config = self.node.connection.auth_oracle.get_client()
                 block_storage_client = oci.core.BlockstorageClient(config)
 
-                if self.metadata.get("_bs_vol_type") == "boot":
+                def existing_backup(volume_type):
+                    if volume_type == "boot":
+                        source_volume = block_storage_client.get_boot_volume(self.unique_id).data
+                        response = oci.pagination.list_call_get_all_results(
+                            block_storage_client.list_boot_volume_backups,
+                            compartment_id=source_volume.compartment_id,
+                            boot_volume_id=self.unique_id,
+                            display_name=backup.uuid_str,
+                        )
+                    else:
+                        source_volume = block_storage_client.get_volume(self.unique_id).data
+                        response = oci.pagination.list_call_get_all_results(
+                            block_storage_client.list_volume_backups,
+                            compartment_id=source_volume.compartment_id,
+                            volume_id=self.unique_id,
+                            display_name=backup.uuid_str,
+                        )
+                    return next(iter(response.data or []), None)
+
+                def record_existing(existing):
+                    backup.unique_id = existing.id
+                    backup.size_gigabytes = getattr(
+                        existing,
+                        "size_in_gbs",
+                        getattr(existing, "size_in_gigabytes", None),
+                    )
+                    backup.metadata = {
+                        "display_name": existing.display_name,
+                        "lifecycle_state": existing.lifecycle_state,
+                        "id": existing.id,
+                    }
+                    backup.save()
+
+                if (self.metadata or {}).get("_bs_vol_type") == "boot":
+                    existing = existing_backup("boot")
+                    if existing:
+                        record_existing(existing)
+                        return
                     boot_volume_backup_details = CreateBootVolumeBackupDetails(
                         boot_volume_id=self.unique_id,
                         display_name=backup.uuid_str,
@@ -1894,7 +2419,7 @@ class CoreOracle(UtilCloud):
                     request = block_storage_client.create_boot_volume_backup(
                         create_boot_volume_backup_details=boot_volume_backup_details, opc_retry_token=backup.uuid_str
                     )
-                    if request.status == 200:
+                    if request.status in (200, 202):
                         backup.unique_id = request.data.id
                         backup.save()
                     else:
@@ -1905,7 +2430,11 @@ class CoreOracle(UtilCloud):
                             backup.type,
                             f"API call returned with status {request.status}",
                         )
-                elif self.metadata.get("_bs_vol_type") == "block":
+                elif (self.metadata or {}).get("_bs_vol_type") == "block":
+                    existing = existing_backup("block")
+                    if existing:
+                        record_existing(existing)
+                        return
                     volume_backup_details = CreateVolumeBackupDetails(
                         volume_id=self.unique_id,
                         display_name=backup.uuid_str,
@@ -1917,7 +2446,7 @@ class CoreOracle(UtilCloud):
                         create_volume_backup_details=volume_backup_details, opc_retry_token=backup.uuid_str
                     )
 
-                    if request.status == 200:
+                    if request.status in (200, 202):
                         backup.unique_id = request.data.id
                         backup.save()
                     else:
@@ -1947,7 +2476,7 @@ class CoreOracle(UtilCloud):
                 block_storage_client = oci.core.BlockstorageClient(config)
                 params = restore.params or {}
 
-                if self.metadata.get("_bs_vol_type") == "boot":
+                if (self.metadata or {}).get("_bs_vol_type") == "boot":
                     compartment_id = params.get("compartment_id")
                     availability_domain = params.get("availability_domain")
                     if not compartment_id or not availability_domain:
@@ -1970,7 +2499,7 @@ class CoreOracle(UtilCloud):
                         restore.save()
                     else:
                         raise Exception(f"API call returned with status {request.status}")
-                elif self.metadata.get("_bs_vol_type") == "block":
+                elif (self.metadata or {}).get("_bs_vol_type") == "block":
                     compartment_id = params.get("compartment_id")
                     availability_domain = params.get("availability_domain")
                     if not compartment_id or not availability_domain:
@@ -2002,14 +2531,14 @@ class CoreOracle(UtilCloud):
         config = self.node.connection.auth_oracle.get_client()
         block_storage_client = oci.core.BlockstorageClient(config)
 
-        if self.metadata.get("_bs_vol_type") == "boot":
+        if (self.metadata or {}).get("_bs_vol_type") == "boot":
             request = block_storage_client.get_boot_volume(restore.resource_id)
             if request.status == 200:
                 if request.data.lifecycle_state == BootVolume.LIFECYCLE_STATE_AVAILABLE:
                     return CoreCloudRestore.Status.COMPLETE
                 elif request.data.lifecycle_state == BootVolume.LIFECYCLE_STATE_FAULTY:
                     return CoreCloudRestore.Status.FAILED
-        elif self.metadata.get("_bs_vol_type") == "block":
+        elif (self.metadata or {}).get("_bs_vol_type") == "block":
             request = block_storage_client.get_volume(restore.resource_id)
             if request.status == 200:
                 if request.data.lifecycle_state == Volume.LIFECYCLE_STATE_AVAILABLE:
@@ -2077,6 +2606,32 @@ class CoreGoogleCloud(UtilCloud):
             try:
                 client = self.node.connection.auth_google_cloud.get_client()
 
+                existing_result = client.get(
+                    f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
+                    f"/projects/{self.node.google_cloud.project_id}"
+                    f"/global/machineImages/{backup.uuid_str}"
+                )
+                if existing_result.status_code == 200:
+                    image = existing_result.json()
+                elif existing_result.status_code == 404:
+                    image = None
+                else:
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str,
+                        backup.attempt_no,
+                        backup.type,
+                        "Unable to verify the existing Google Cloud machine image before creating a new one.",
+                    )
+                if image and image.get("name") == backup.uuid_str:
+                    backup.unique_id = image.get("id") or backup.uuid_str
+                    backup.size_gigabytes = int(
+                        image.get("totalStorageBytes", 0)
+                    ) / (1000 ** 3)
+                    backup.metadata = image
+                    backup.save()
+                    return
+
                 result = client.get(
                     f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
                     f"/projects/{self.node.google_cloud.project_id}"
@@ -2090,6 +2645,11 @@ class CoreGoogleCloud(UtilCloud):
                         f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
                         f"/projects/{self.node.google_cloud.project_id}"
                         f"/global/machineImages",
+                        params={
+                            "requestId": str(
+                                uuid.uuid5(uuid.NAMESPACE_URL, f"backupsheep:{backup.uuid_str}")
+                            )
+                        },
                         json={
                             "name": backup.uuid_str,
                             "sourceInstance": f"projects/{self.node.google_cloud.project_id}"
@@ -2099,7 +2659,7 @@ class CoreGoogleCloud(UtilCloud):
                     )
                     if result.status_code == 200:
                         image = result.json()
-                        backup.unique_id = image["id"]
+                        backup.unique_id = image.get("id") or image.get("name") or backup.uuid_str
                         backup.size_gigabytes = int(image.get("totalStorageBytes", 0))/(1000**3)
                         backup.metadata = image
                         backup.save()
@@ -2126,6 +2686,31 @@ class CoreGoogleCloud(UtilCloud):
         elif self.node.type == CoreNode.Type.VOLUME:
             try:
                 client = self.node.connection.auth_google_cloud.get_client()
+                existing_result = client.get(
+                    f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
+                    f"/projects/{self.node.google_cloud.project_id}"
+                    f"/global/snapshots/{backup.uuid_str}"
+                )
+                if existing_result.status_code == 200:
+                    snapshot = existing_result.json()
+                elif existing_result.status_code == 404:
+                    snapshot = None
+                else:
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str,
+                        backup.attempt_no,
+                        backup.type,
+                        "Unable to verify the existing Google Cloud snapshot before creating a new one.",
+                    )
+                if snapshot and snapshot.get("name") == backup.uuid_str:
+                    backup.unique_id = snapshot.get("id") or backup.uuid_str
+                    backup.size_gigabytes = int(
+                        snapshot.get("storageBytes", 0)
+                    ) / (1000 ** 3)
+                    backup.metadata = snapshot
+                    backup.save()
+                    return
                 result = client.get(
                     f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
                     f"/projects/{self.node.google_cloud.project_id}"
@@ -2134,16 +2719,27 @@ class CoreGoogleCloud(UtilCloud):
                 )
                 if result.status_code == 200:
                     disk = result.json()
+                    # The global snapshots.insert endpoint is the current Compute
+                    # Engine API and supports the full snapshot resource model.
                     result = client.post(
                         f"{settings.GOOGLE_COMPUTE_API}/compute/v1"
                         f"/projects/{self.node.google_cloud.project_id}"
-                        f"/zones/{self.node.google_cloud.zone}"
-                        f"/disks/{disk['name']}/createSnapshot",
-                        json={"name": backup.uuid_str},
+                        f"/global/snapshots",
+                        params={
+                            "requestId": str(
+                                uuid.uuid5(uuid.NAMESPACE_URL, f"backupsheep:{backup.uuid_str}")
+                            )
+                        },
+                        json={
+                            "name": backup.uuid_str,
+                            "sourceDisk": f"projects/{self.node.google_cloud.project_id}"
+                                           f"/zones/{self.node.google_cloud.zone}"
+                                           f"/disks/{disk['name']}",
+                        },
                     )
-                    if result.status_code == 200:
+                    if result.status_code in (200, 202):
                         snapshot = result.json()
-                        backup.unique_id = snapshot["id"]
+                        backup.unique_id = snapshot.get("id") or snapshot.get("name") or backup.uuid_str
                         backup.size_gigabytes = int(snapshot.get("storageBytes", 0)) / (1000 ** 3)
                         backup.metadata = snapshot
                         backup.save()
@@ -2329,6 +2925,115 @@ class CoreGoogleCloud(UtilCloud):
             return CoreCloudRestore.Status.IN_PROGRESS
 
 
+@contextmanager
+def _local_backup_phase_lock(backup):
+    """Serialize the dump/chord publication phase for one backup row.
+
+    A database status is not enough to distinguish a live long-running dump from a
+    worker that died mid-dump. A host-level flock gives us that distinction without a
+    short lease: a duplicate waits while the original is alive, and the lock is
+    released by the OS immediately when the worker process dies. This prevents two
+    workers from writing the same archive concurrently while still allowing restart
+    recovery without waiting for a fixed timeout.
+    """
+    storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
+    os.makedirs(storage_dir, exist_ok=True)
+    lock_path = os.path.join(storage_dir, f"{backup.uuid_str}.phase.lock")
+    with open(lock_path, "a+") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _clear_local_backup_artifacts(backup):
+    """Remove only incomplete dump artifacts before restarting a dump phase."""
+    storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
+    for name, is_dir in ((backup.uuid_str, True), (f"{backup.uuid_str}.zip", False)):
+        target = os.path.realpath(os.path.join(storage_dir, name))
+        if target == storage_dir or os.path.commonpath([storage_dir, target]) != storage_dir:
+            continue
+        if is_dir:
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            try:
+                os.remove(target)
+            except FileNotFoundError:
+                pass
+
+
+def _resume_local_backup(backup, node, snapshot_callback, storage_relation, point_status):
+    """Resume a local dump/upload pipeline from its persisted phase.
+
+    A worker can die after the dump has been created but before the chord is
+    published. Re-running the dump is wasteful and can produce a second upload;
+    the parent status and each storage-point status are the durable phase markers.
+    """
+    terminal = (
+        UtilBackup.Status.COMPLETE,
+        UtilBackup.Status.PARTIAL,
+        UtilBackup.Status.FAILED,
+        UtilBackup.Status.UPLOAD_FAILED,
+        UtilBackup.Status.TIMEOUT,
+        UtilBackup.Status.CANCELLED,
+        UtilBackup.Status.STORAGE_VALIDATION_FAILED,
+    )
+    upload_phase = (
+        UtilBackup.Status.DOWNLOAD_COMPLETE,
+        UtilBackup.Status.UPLOAD_READY,
+        UtilBackup.Status.UPLOAD_IN_PROGRESS,
+        UtilBackup.Status.UPLOAD_VALIDATION,
+        UtilBackup.Status.UPLOAD_COMPLETE,
+    )
+    with _local_backup_phase_lock(backup):
+        # The caller can have waited behind a live worker or arrived after a worker
+        # crash. Always re-read the phase marker after acquiring the lock. Refresh
+        # in place so callers that retain the model instance observe the same
+        # durable phase without silently changing object identity.
+        backup.refresh_from_db()
+        if backup.status in terminal:
+            return backup
+
+        if backup.status not in upload_phase:
+            # IN_PROGRESS/RETRYING/DOWNLOAD_IN_PROGRESS means the archive is not a
+            # durable upload input yet. Remove partial files before rebuilding it;
+            # otherwise an SSH-streamed dump could be appended to a truncated file.
+            _clear_local_backup_artifacts(backup)
+            backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
+            backup.save(update_fields=["status", "modified"])
+            snapshot_callback(backup)
+            backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
+            backup.save(update_fields=["status", "modified"])
+
+        stored_backups = getattr(backup, storage_relation)
+        pending_statuses = (
+            point_status.UPLOAD_READY,
+            point_status.UPLOAD_RETRY,
+            point_status.UPLOAD_IN_PROGRESS,
+            point_status.UPLOAD_VALIDATION,
+        )
+        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
+
+        storage_upload_task_list = [
+            storage_upload.s(node.id, backup.id, stored_backup.id).set()
+            for stored_backup in stored_backups.filter(status__in=pending_statuses)
+        ]
+
+        if storage_upload_task_list:
+            backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
+            backup.save(update_fields=["status", "modified"])
+            chord(
+                storage_upload_task_list,
+                finalize_backup.si(node.id, backup.id),
+            ).apply_async()
+        else:
+            # All points are already complete, or there are no accepted destinations.
+            # The finalizer makes the correct COMPLETE/PARTIAL/UPLOAD_FAILED decision.
+            finalize_backup.apply_async(args=[node.id, backup.id])
+        return backup
+
+
 class CoreWebsite(TimeStampedModel):
     class BackupType(models.IntegerChoices):
         FULL = 1, "Full"
@@ -2361,51 +3066,14 @@ class CoreWebsite(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from apps._tasks.integration.backup.website import snapshot_website
-        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreWebsiteBackupStoragePoints
-
-        backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
-        backup.save()
-
-        """
-        Run a website backup. snapshot_website dispatches internally: incremental
-        mode mirrors into the per-node persistent cache, key-based FULL_V2 sources
-        use the server-side tar transport, and everything else is a full lftp
-        re-download.
-        """
-        snapshot_website(backup)
-
-        backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
-        backup.save()
-
-        try:
-            """
-            Upload Website Backup
-            """
-            storage_upload_task_list = []
-            for stored_website_backup in backup.stored_website_backups.filter(
-                    status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_READY
-            ):
-                storage_upload_task_list.append(
-                    storage_upload.s(
-                        self.node.id, backup.id, stored_website_backup.id
-                    ).set()
-                )
-
-            if storage_upload_task_list:
-                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
-                backup.save()
-                chord(
-                    storage_upload_task_list,
-                    finalize_backup.si(self.node.id, backup.id),
-                ).apply_async()
-            else:
-                # No storage destination accepted the backup; finalize_backup will
-                # mark it failed and clean up rather than silently discarding it.
-                finalize_backup.apply_async(args=[self.node.id, backup.id])
-        except Exception as e:
-            capture_exception(e)
-        return backup
+        return _resume_local_backup(
+            backup,
+            self.node,
+            snapshot_website,
+            "stored_website_backups",
+            CoreWebsiteBackupStoragePoints.Status,
+        )
 
 
 class CoreDatabase(TimeStampedModel):
@@ -2443,77 +3111,34 @@ class CoreDatabase(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from ..connection.models import CoreAuthDatabase
-        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from apps._tasks.integration.backup.mariadb import snapshot_mariadb
         from apps._tasks.integration.backup.mysql import snapshot_mysql
         from apps._tasks.integration.backup.postgresql import snapshot_postgresql
 
-        """
-        Run Database Backup
-        """
-        backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
-        backup.save()
-
-        if (
-                self.node.connection.auth_database.type
-                == CoreAuthDatabase.DatabaseType.MYSQL
-        ):
-            snapshot_mysql(backup)
-        elif (
-                self.node.connection.auth_database.type
-                == CoreAuthDatabase.DatabaseType.MARIADB
-        ):
-            snapshot_mariadb(backup)
-        elif (
-                self.node.connection.auth_database.type
-                == CoreAuthDatabase.DatabaseType.POSTGRESQL
-        ):
-            snapshot_postgresql(backup)
-        else:
-            # Unknown/unsupported engine type: fail loudly instead of silently
-            # uploading an empty zip.
-            raise NodeBackupFailedError(
-                self.node,
-                backup.uuid_str,
-                backup.attempt_no,
-                backup.type,
-                message=f"Unsupported database engine type: "
-                        f"{self.node.connection.auth_database.type}",
-            )
-
-        backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
-        backup.save()
-
-        try:
-            """
-            Upload Database Backup
-            """
-            storage_upload_task_list = []
-            for stored_database_backup in backup.stored_database_backups.filter(
-                    status=CoreDatabaseBackupStoragePoints.Status.UPLOAD_READY
-            ):
-                storage_upload_task_list.append(
-                    storage_upload.s(
-                        self.node.id, backup.id, stored_database_backup.id
-                    ).set()
+        def snapshot_database(current_backup):
+            if self.node.connection.auth_database.type == CoreAuthDatabase.DatabaseType.MYSQL:
+                snapshot_mysql(current_backup)
+            elif self.node.connection.auth_database.type == CoreAuthDatabase.DatabaseType.MARIADB:
+                snapshot_mariadb(current_backup)
+            elif self.node.connection.auth_database.type == CoreAuthDatabase.DatabaseType.POSTGRESQL:
+                snapshot_postgresql(current_backup)
+            else:
+                raise NodeBackupFailedError(
+                    self.node,
+                    current_backup.uuid_str,
+                    current_backup.attempt_no,
+                    current_backup.type,
+                    message=f"Unsupported database engine type: "
+                            f"{self.node.connection.auth_database.type}",
                 )
 
-            if storage_upload_task_list:
-                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
-                backup.save()
-                chord(
-                    storage_upload_task_list,
-                    finalize_backup.si(self.node.id, backup.id),
-                ).apply_async()
-            else:
-                # No storage destination accepted the backup; finalize_backup will
-                # mark it failed and clean up rather than silently discarding it.
-                finalize_backup.apply_async(args=[self.node.id, backup.id])
-        except Exception as e:
-            raise NodeBackupFailedError(
-                self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
-            )
-        return backup
+        return _resume_local_backup(
+            backup,
+            self.node,
+            snapshot_database,
+            "stored_database_backups",
+            CoreDatabaseBackupStoragePoints.Status,
+        )
 
 
 class CoreWordPress(TimeStampedModel):
@@ -2534,48 +3159,14 @@ class CoreWordPress(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from apps._tasks.integration.backup.wordpress import snapshot_wordpress
-        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreWordPressBackupStoragePoints
-
-        backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
-        backup.save()
-
-        """
-        Run WordPress Backup
-        """
-        snapshot_wordpress(backup)
-
-        backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
-        backup.save()
-
-        try:
-            """
-            Upload Wordpress Backup
-            """
-            storage_upload_task_list = []
-            for stored_wordpress_backup in backup.stored_wordpress_backups.filter(
-                    status=CoreWordPressBackupStoragePoints.Status.UPLOAD_READY
-            ):
-                storage_upload_task_list.append(
-                    storage_upload.s(
-                        self.node.id, backup.id, stored_wordpress_backup.id
-                    ).set()
-                )
-
-            if storage_upload_task_list:
-                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
-                backup.save()
-                chord(
-                    storage_upload_task_list,
-                    finalize_backup.si(self.node.id, backup.id),
-                ).apply_async()
-            else:
-                # No storage destination accepted the backup; finalize_backup will
-                # mark it failed and clean up rather than silently discarding it.
-                finalize_backup.apply_async(args=[self.node.id, backup.id])
-        except Exception as e:
-            capture_exception(e)
-        return backup
+        return _resume_local_backup(
+            backup,
+            self.node,
+            snapshot_wordpress,
+            "stored_wordpress_backups",
+            CoreWordPressBackupStoragePoints.Status,
+        )
 
 
 class CoreBasecamp(TimeStampedModel):
@@ -2592,48 +3183,14 @@ class CoreBasecamp(TimeStampedModel):
 
     def create_snapshot(self, backup):
         from apps._tasks.integration.backup.basecamp import snapshot_basecamp
-        from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
         from ..backup.models import CoreBasecampBackupStoragePoints
-
-        backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
-        backup.save()
-
-        """
-        Run Basecamp Backup
-        """
-        snapshot_basecamp(backup)
-
-        backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
-        backup.save()
-
-        try:
-            """
-            Upload Basecamp Backup
-            """
-            storage_upload_task_list = []
-            for stored_basecamp_backup in backup.stored_basecamp_backups.filter(
-                    status=CoreBasecampBackupStoragePoints.Status.UPLOAD_READY
-            ):
-                storage_upload_task_list.append(
-                    storage_upload.s(
-                        self.node.id, backup.id, stored_basecamp_backup.id
-                    ).set()
-                )
-
-            if storage_upload_task_list:
-                backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
-                backup.save()
-                chord(
-                    storage_upload_task_list,
-                    finalize_backup.si(self.node.id, backup.id),
-                ).apply_async()
-            else:
-                # No storage destination accepted the backup; finalize_backup will
-                # mark it failed and clean up rather than silently discarding it.
-                finalize_backup.apply_async(args=[self.node.id, backup.id])
-        except Exception as e:
-            capture_exception(e)
-        return backup
+        return _resume_local_backup(
+            backup,
+            self.node,
+            snapshot_basecamp,
+            "stored_basecamp_backups",
+            CoreBasecampBackupStoragePoints.Status,
+        )
 
 
 class CoreSchedule(TimeStampedModel):
@@ -3048,11 +3605,33 @@ class CoreNode(TimeStampedModel):
                 )
                 return None
             backup, created = node_type_object.backups.get_or_create(celery_task_id=celery_task_id)
-            backup.status = UtilBackup.Status.IN_PROGRESS
+            # A redelivered/recovered task must continue the persisted phase. In
+            # particular, DOWNLOAD_COMPLETE and UPLOAD_IN_PROGRESS mean that the
+            # local dump already exists and only storage work remains; resetting the
+            # row to IN_PROGRESS would cause a worker restart to create the dump again.
+            if created or backup.status in (
+                UtilBackup.Status.PENDING,
+                UtilBackup.Status.STARTED,
+                UtilBackup.Status.RETRYING,
+            ):
+                backup.status = UtilBackup.Status.IN_PROGRESS
             backup.type = backup_type
             backup.attempt_no = attempt_no
             backup.schedule_id = schedule_id
             backup.notes = notes
+
+            # Celery is not the source of truth after a worker crash. Persist the
+            # caller's immutable destination selection before storage-point setup so
+            # DB-only recovery can rebuild an on-demand local backup even if the
+            # original message is gone. Keep the value on retries; a retry may carry
+            # no storage_ids after the recovery sweep has reconstructed the task.
+            if (
+                self.type in (self.Type.DATABASE, self.Type.WEBSITE, self.Type.SAAS)
+                and storage_ids is not None
+            ):
+                metadata = dict(backup.metadata) if isinstance(backup.metadata, dict) else {}
+                metadata["_backup_storage_ids"] = list(storage_ids)
+                backup.metadata = metadata
 
             # Only setup UUID if it's new backup. No need to generate same UUID on retry
             if created:
@@ -3064,10 +3643,27 @@ class CoreNode(TimeStampedModel):
                 n_and_s = f"{self.name} - {schedule_slug}"
                 n_and_s_trimmed = (n_and_s[:24]) if len(n_and_s) > 24 else n_and_s
                 backup.uuid = slugify(f"bs-{n_and_s_trimmed}-n{self.id}-b{backup.id}").replace("_", "-")
+            # A recovery message has reached the provider/local task. Clear only
+            # the enqueue lease; the poller will establish its own lease later.
+            if isinstance(backup.metadata, dict):
+                metadata = dict(backup.metadata)
+                control = metadata.get("_backup_control")
+                if isinstance(control, dict) and (
+                    "recovery_task_id" in control or "recovery_lease_until" in control
+                ):
+                    control = dict(control)
+                    control.pop("recovery_task_id", None)
+                    control.pop("recovery_lease_until", None)
+                    metadata["_backup_control"] = control
+                    backup.metadata = metadata
             backup.save()
 
         # Cloud servers and volumes don't have storage points for now
-        if self.type == self.Type.DATABASE or self.type == self.Type.WEBSITE or self.type == self.Type.SAAS:
+        if (
+            self.type == self.Type.DATABASE
+            or self.type == self.Type.WEBSITE
+            or self.type == self.Type.SAAS
+        ) and (created or not backup.storage_points.exists()):
             schedule = CoreSchedule.objects.filter(id=schedule_id).first() if schedule_id else None
             air_gapped_copy_required = bool(
                 schedule and schedule.require_air_gapped_copy
@@ -3132,14 +3728,38 @@ class CoreNode(TimeStampedModel):
         if celery_task_id:
             backup = self.get_backup_from_celery_task_id(celery_task_id)
             if backup:
-                backup.status = UtilBackup.Status.TIMEOUT
+                # A soft time limit during a provider create is ambiguous: the
+                # remote API may have accepted the request even though this worker
+                # stopped waiting. Keep the row recoverable and retain the create
+                # lease so the recovery sweep performs a deterministic lookup after
+                # the lease expires. Local dump/upload tasks have no create lease and
+                # retain the terminal TIMEOUT behavior.
+                metadata = backup.metadata if isinstance(backup.metadata, dict) else {}
+                control = metadata.get("_backup_control")
+                if isinstance(control, dict) and control.get("create_lease_until"):
+                    backup.status = UtilBackup.Status.RETRYING
+                else:
+                    backup.status = UtilBackup.Status.TIMEOUT
                 backup.save()
 
     def backup_retrying_reset(self, celery_task_id):
         backup = self.get_backup_from_celery_task_id(celery_task_id)
         if backup:
             backup.status = UtilBackup.Status.RETRYING
-            backup.save()
+            # Do not clear a provider-create lease here. An exception may represent
+            # an accepted remote request whose response was lost; releasing the
+            # lease would let the immediate retry overlap that unknown request.
+            # Successful provider calls release the lease in run_provider_create,
+            # while the recovery sweep takes over after the conservative lease
+            # expires and performs the provider-specific deterministic lookup.
+            metadata = backup.metadata if isinstance(backup.metadata, dict) else {}
+            control = metadata.get("_backup_control")
+            if isinstance(control, dict):
+                metadata = dict(metadata)
+                control = dict(control)
+                metadata["_backup_control"] = control
+                backup.metadata = metadata
+            backup.save(update_fields=["status", "metadata", "modified"])
 
     def backup_max_retries_reached(self, celery_task_id):
         # 2022-June - don't do max paused retry. This creates more problem.

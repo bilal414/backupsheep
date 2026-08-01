@@ -540,6 +540,22 @@ CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
+# Backup tasks perform remote side effects. A worker must acknowledge them only after
+# the task has committed its provider id/status, otherwise a worker crash can lose the
+# task while leaving an IN_PROGRESS row that nobody resumes. RabbitMQ redelivers late-
+# acknowledged tasks when the worker connection disappears.
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_DEFAULT_DELIVERY_MODE = "persistent"
+# Keep workers connected through normal broker restarts/reboots. Combined with
+# RabbitMQ's persistent volume in docker-compose.yml and the DB recovery sweep,
+# this prevents a transient broker outage from turning an in-progress backup into
+# an orphaned row.
+CELERY_BROKER_CONNECTION_RETRY = True
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_BROKER_CONNECTION_MAX_RETRIES = None
+CELERY_BROKER_HEARTBEAT = 60
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -577,6 +593,28 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 # any external bucket) and pruned by the delete_old_logs task after this many days.
 LOG_RETENTION_DAYS = int(config.get("LOG_RETENTION_DAYS", 30))
 
+# A periodic recovery sweep catches tasks that were lost before late-ack redelivery
+# (for example during broker/server maintenance) and stale ETA poll messages. The
+# provider backup UUID/name is deterministic, so recovery can look up an already
+# created remote snapshot before issuing another create request.
+BACKUP_RECOVERY_STALE_SECONDS = int(
+    config.get("BACKUP_RECOVERY_STALE_SECONDS", 15 * 60)
+)
+BACKUP_RECOVERY_BATCH_SIZE = int(config.get("BACKUP_RECOVERY_BATCH_SIZE", 100))
+BACKUP_POLL_INTERVAL = int(config.get("BACKUP_POLL_INTERVAL", 120))
+# Lease the provider-create phase separately from polling. This closes the race in
+# which a duplicate delivery or recovery sweep enters the same create call while the
+# first worker is still waiting on the provider API.
+BACKUP_CREATE_LEASE_SECONDS = int(
+    config.get("BACKUP_CREATE_LEASE_SECONDS", 60 * 60)
+)
+# A storage upload can legitimately run much longer than the general recovery
+# interval. Keep a separate claimant lease so a duplicate chord does not take over
+# a healthy long-running upload and invoke the finalizer too early.
+BACKUP_STORAGE_STALE_SECONDS = int(
+    config.get("BACKUP_STORAGE_STALE_SECONDS", 6 * 60 * 60)
+)
+
 # Lifetime (seconds) of presigned download URLs generated for backup archives. 24h by
 # default; lower it for immutable/compliance destinations where long-lived URLs weaken
 # the protection story.
@@ -610,6 +648,13 @@ CELERY_BEAT_SCHEDULE = {
     "retry-protected-storage-deletes": {
         "task": "retry_protected_storage_deletes",
         "schedule": crontab(minute=15, hour="*/6"),  # every 6 hours
+    },
+    # Resume backup rows whose task/poller disappeared without changing them to a
+    # terminal state. This is deliberately frequent; the database lease in
+    # poll_cloud_backup prevents duplicate pollers while a healthy poll is queued.
+    "resume-in-progress-backups": {
+        "task": "resume_in_progress_backups",
+        "schedule": 60.0,
     },
 }
 
@@ -658,6 +703,7 @@ CELERY_TASK_ROUTES = {
     "backup_ovh_us": {"queue": "cloud"},
     # Async snapshot status polling (re-queues itself); API-only, no local disk.
     "poll_cloud_backup": {"queue": "cloud"},
+    "resume_in_progress_backups": {"queue": "default"},
     # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram/Firebase
     # fan-out, and on-disk run-log retention.
     "send_log_to_db": {"queue": "logs"},

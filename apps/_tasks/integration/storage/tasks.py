@@ -4,7 +4,10 @@ from billiard.exceptions import SoftTimeLimitExceeded
 from boto3.exceptions import S3UploadFailedError
 from celery import current_app
 from celery.exceptions import MaxRetriesExceededError
+from django.conf import settings
+from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from sentry_sdk import capture_exception, capture_message
 
 from apps._tasks.exceptions import (
@@ -103,6 +106,35 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     else:
         raise TaskParamsNotProvided()
 
+    # Chord publication and worker acknowledgement are separate events. A storage
+    # task can therefore be delivered twice, or be recovered after a worker loss.
+    # Claim the storage-point row before touching the remote backend and skip a
+    # healthy in-flight claimant. A stale claimant is safe to resume because each
+    # backend uses the deterministic backup UUID/file key.
+    with transaction.atomic():
+        locked = stored_backup.__class__.objects.select_for_update().get(pk=stored_backup.pk)
+        if locked.status == locked.Status.UPLOAD_COMPLETE:
+            return
+        if locked.status == locked.Status.UPLOAD_IN_PROGRESS:
+            stale_after = int(
+                getattr(
+                    settings,
+                    "BACKUP_STORAGE_STALE_SECONDS",
+                    getattr(settings, "BACKUP_RECOVERY_STALE_SECONDS", 900),
+                )
+            )
+            if (timezone.now() - locked.modified).total_seconds() < stale_after:
+                # This task may be a duplicate header from a redelivered parent
+                # chord, including a duplicate with the same Celery id. Keep the
+                # header slot pending until the claimant completes; returning here
+                # would let the duplicate chord finalize the backup while the real
+                # upload is still running.
+                raise self.retry(countdown=60)
+        locked.status = locked.Status.UPLOAD_IN_PROGRESS
+        locked.celery_task_id = self.request.id
+        locked.save(update_fields=["status", "celery_task_id", "modified"])
+        stored_backup = locked
+
     log_file_path = f"_storage/{backup.uuid_str}.log"
     log_file = open(log_file_path, "a+")
 
@@ -112,10 +144,6 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     log_file.write(f"{storage_type_name}: {stored_backup.storage.name} \n")
 
     try:
-        stored_backup.status = stored_backup.Status.UPLOAD_IN_PROGRESS
-        stored_backup.celery_task_id = self.request.id
-        stored_backup.save()
-
         if stored_backup.storage.type.code == "dropbox":
             storage_dropbox(stored_backup)
         elif stored_backup.storage.type.code == "google_drive":
@@ -332,62 +360,145 @@ def finalize_backup(self, node_id, backup_id):
     else:
         raise TaskParamsNotProvided()
 
-    try:
-        uploaded_count = backup.storage_points_uploaded()
-        all_uploaded = backup.all_storage_points_uploaded()
-        storage_point_count = backup.stored_website_backups.all().count() if node.type == CoreNode.Type.WEBSITE else (
-            backup.stored_database_backups.all().count() if node.type == CoreNode.Type.DATABASE else (
-                backup.stored_wordpress_backups.all().count()
-                if node.connection.integration.code == "wordpress"
-                else backup.stored_basecamp_backups.all().count()
-            )
-        )
+    relation_name = {
+        CoreNode.Type.WEBSITE: "stored_website_backups",
+        CoreNode.Type.DATABASE: "stored_database_backups",
+        CoreNode.Type.SAAS: (
+            "stored_wordpress_backups"
+            if node.connection.integration.code == "wordpress"
+            else "stored_basecamp_backups"
+        ),
+    }[node.type]
 
+    # The callback is normally invoked by a chord, but it can also be published by
+    # recovery or be duplicated by broker redelivery. Lock both the backup row and
+    # all of its storage points so a second finalizer cannot tally a moving upload
+    # set or send a second completion notification.
+    with transaction.atomic():
+        backup = backup.__class__.objects.select_for_update().get(pk=backup.pk)
+        storage_relation = getattr(backup, relation_name)
+        point_model = storage_relation.model
+        storage_points = list(storage_relation.select_for_update().all())
+        pending_statuses = {
+            point_model.Status.UPLOAD_READY,
+            point_model.Status.UPLOAD_RETRY,
+            point_model.Status.UPLOAD_IN_PROGRESS,
+            point_model.Status.UPLOAD_VALIDATION,
+        }
+        if any(point.status in pending_statuses for point in storage_points):
+            # A duplicate/early callback must not turn an in-flight upload into a
+            # false PARTIAL or UPLOAD_FAILED result.
+            raise self.retry(countdown=60)
+
+        uploaded_count = sum(
+            point.status == point.Status.UPLOAD_COMPLETE
+            for point in storage_points
+        )
+        storage_point_count = len(storage_points)
+        all_uploaded = uploaded_count == storage_point_count
         if uploaded_count > 0:
             final_status = (
                 UtilBackup.Status.COMPLETE
                 if all_uploaded
                 else UtilBackup.Status.PARTIAL
             )
-            metadata = dict(backup.metadata or {})
+        else:
+            # Nothing was stored anywhere -> failure (do not silently mark complete).
+            final_status = UtilBackup.Status.UPLOAD_FAILED
+
+        metadata = dict(backup.metadata or {})
+        finalization = metadata.get("_backup_finalization")
+        finalization = dict(finalization) if isinstance(finalization, dict) else {}
+        status_changed = backup.status != final_status
+        if status_changed:
+            finalization = {
+                "success_notified": False,
+                "partial_logged": False,
+                "retention_applied": False,
+            }
+        metadata["_backup_finalization"] = finalization
+        if uploaded_count > 0:
             metadata["storage_upload_summary"] = {
                 "uploaded": uploaded_count,
                 "configured": storage_point_count,
                 "partial": final_status == UtilBackup.Status.PARTIAL,
             }
-            status_changed = backup.status != final_status
-            backup.status = final_status
-            backup.metadata = metadata
-            backup.save()
+        backup.status = final_status
+        backup.metadata = metadata
+        backup.save(update_fields=["status", "metadata", "modified"])
 
-            if status_changed and final_status == UtilBackup.Status.COMPLETE:
-                node.notify_backup_success(backup)
-            elif status_changed:
-                message = (
-                    f"Backup {backup.uuid_str} completed partially: "
-                    f"{uploaded_count}/{storage_point_count} storage destinations succeeded."
-                )
-                node.connection.account.create_backup_log(message, node, backup)
-                capture_message(message)
+    should_notify_success = (
+        final_status == UtilBackup.Status.COMPLETE
+        and not finalization.get("success_notified")
+    )
+    should_log_partial = (
+        final_status == UtilBackup.Status.PARTIAL
+        and not finalization.get("partial_logged")
+    )
+    should_apply_retention = (
+        final_status in UtilBackup.SUCCESS_STATUSES
+        and not finalization.get("retention_applied")
+        and backup.schedule_id
+        and (backup.schedule.keep_last or 0) > 0
+    )
 
-            # Retention includes partial runs: they occupy destination space and
-            # must not bypass the schedule's keep_last policy.
-            if backup.schedule and (backup.schedule.keep_last or 0) > 0:
-                keep_last = backup.schedule.keep_last
-                successful = list(
-                    backup.__class__.objects.filter(
-                        schedule=backup.schedule,
-                        status__in=UtilBackup.SUCCESS_STATUSES,
-                    ).order_by("created")
-                )
-                for old_backup in successful[:-keep_last]:
-                    old_backup.soft_delete()
-        else:
-            # Nothing was stored anywhere -> failure (do not silently mark complete).
-            backup.status = UtilBackup.Status.UPLOAD_FAILED
-            backup.save(update_fields=["status", "modified"])
-    except Exception as e:
-        capture_exception(e)
+    try:
+        if should_notify_success:
+            node.notify_backup_success(backup)
+            finalization_flag = "success_notified"
+            with transaction.atomic():
+                fresh = backup.__class__.objects.select_for_update().get(pk=backup.pk)
+                metadata = dict(fresh.metadata or {})
+                state = dict(metadata.get("_backup_finalization") or {})
+                state[finalization_flag] = True
+                metadata["_backup_finalization"] = state
+                fresh.metadata = metadata
+                fresh.save(update_fields=["metadata", "modified"])
+        elif should_log_partial:
+            message = (
+                f"Backup {backup.uuid_str} completed partially: "
+                f"{uploaded_count}/{storage_point_count} storage destinations succeeded."
+            )
+            node.connection.account.create_backup_log(message, node, backup)
+            capture_message(message)
+            with transaction.atomic():
+                fresh = backup.__class__.objects.select_for_update().get(pk=backup.pk)
+                metadata = dict(fresh.metadata or {})
+                state = dict(metadata.get("_backup_finalization") or {})
+                state["partial_logged"] = True
+                metadata["_backup_finalization"] = state
+                fresh.metadata = metadata
+                fresh.save(update_fields=["metadata", "modified"])
+
+        # Retention includes partial runs: they occupy destination space and must
+        # not bypass the schedule's keep_last policy. The metadata flag makes a
+        # redelivered finalizer resume an interrupted retention pass rather than
+        # starting it from scratch on every delivery.
+        if should_apply_retention:
+            keep_last = backup.schedule.keep_last
+            successful = list(
+                backup.__class__.objects.filter(
+                    schedule=backup.schedule,
+                    status__in=UtilBackup.SUCCESS_STATUSES,
+                ).order_by("created")
+            )
+            for old_backup in successful[:-keep_last]:
+                old_backup.soft_delete()
+            with transaction.atomic():
+                fresh = backup.__class__.objects.select_for_update().get(pk=backup.pk)
+                metadata = dict(fresh.metadata or {})
+                state = dict(metadata.get("_backup_finalization") or {})
+                state["retention_applied"] = True
+                metadata["_backup_finalization"] = state
+                fresh.metadata = metadata
+                fresh.save(update_fields=["metadata", "modified"])
+    except Exception as error:
+        # The terminal DB state is already durable. Keep the files cleanup below,
+        # but record side-effect failures so a support operator can distinguish a
+        # completed backup from a missed notification/retention pass.
+        capture_exception(error)
     finally:
-        # Local working files are no longer needed once uploads are settled.
+        # Local working files are no longer needed once the terminal DB decision is
+        # committed. If the DB transaction above failed, control never reaches this
+        # block, preserving the files for recovery.
         delete_from_disk.apply_async(args=[backup.uuid_str, "both"])

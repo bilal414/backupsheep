@@ -626,6 +626,25 @@ class CoreAuthAWSRDS(TimeStampedModel):
             return False
 
 
+def _ovh_region_name(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("region") or value.get("id")
+        if value:
+            return str(value)
+    return None
+
+
+def _ovh_project_regions(client, project_id):
+    regions = client.get(f"/cloud/project/{project_id}/region")
+    return [
+        region
+        for region in (_ovh_region_name(item) for item in regions)
+        if region
+    ] if isinstance(regions, list) else []
+
+
 class CoreAuthOVHCA(TimeStampedModel):
     connection = models.OneToOneField("CoreConnection", related_name="auth_ovh_ca", on_delete=models.CASCADE)
     consumer_key = models.BinaryField(null=True)
@@ -660,27 +679,32 @@ class CoreAuthOVHCA(TimeStampedModel):
         if object_type == "cloud":
             for project in projects:
                 project_details = client.get(f"/cloud/project/{project}")
-                servers = client.get(f"/cloud/project/{project}/instance")
-
-                for cloud_server in servers:
-                    cloud_server["project"] = project_details
-                    cloud_server["_bs_unique_id"] = cloud_server.get("id", None)
-                    cloud_server["_bs_name"] = cloud_server.get("name", None)
-                    cloud_server["_bs_region"] = cloud_server.get("region", None)
-                    cloud_server["_bs_size"] = cloud_server.get("size", None)
-                    eligible_objects.append(cloud_server)
+                for region in _ovh_project_regions(client, project):
+                    servers = client.get(
+                        f"/cloud/project/{project}/region/{region}/instance"
+                    )
+                    for cloud_server in servers:
+                        cloud_server["project"] = project_details
+                        cloud_server["_bs_unique_id"] = cloud_server.get("id", None)
+                        cloud_server["_bs_name"] = cloud_server.get("name", None)
+                        cloud_server["_bs_region"] = cloud_server.get("region") or region
+                        cloud_server["_bs_size"] = cloud_server.get("size", None)
+                        eligible_objects.append(cloud_server)
             return eligible_objects
         elif object_type == "volume":
             for project in projects:
                 project_details = client.get(f"/cloud/project/{project}")
-                volumes = client.get(f"/cloud/project/{project}/volume")
-                for cloud_volume in volumes:
-                    cloud_volume["project"] = project_details
-                    cloud_volume["_bs_unique_id"] = cloud_volume.get("id", None)
-                    cloud_volume["_bs_name"] = cloud_volume.get("name", None)
-                    cloud_volume["_bs_region"] = cloud_volume.get("region", None)
-                    cloud_volume["_bs_size"] = cloud_volume.get("size", None)
-                    eligible_objects.append(cloud_volume)
+                for region in _ovh_project_regions(client, project):
+                    volumes = client.get(
+                        f"/cloud/project/{project}/region/{region}/volume"
+                    )
+                    for cloud_volume in volumes:
+                        cloud_volume["project"] = project_details
+                        cloud_volume["_bs_unique_id"] = cloud_volume.get("id", None)
+                        cloud_volume["_bs_name"] = cloud_volume.get("name", None)
+                        cloud_volume["_bs_region"] = cloud_volume.get("region") or region
+                        cloud_volume["_bs_size"] = cloud_volume.get("size", None)
+                        eligible_objects.append(cloud_volume)
             return eligible_objects
 
     def validate(self, check_errors=None, raise_exp=None):
@@ -726,26 +750,32 @@ class CoreAuthOVHEU(TimeStampedModel):
         if object_type == "cloud":
             for project in projects:
                 project_details = client.get(f"/cloud/project/{project}")
-                servers = client.get(f"/cloud/project/{project}/instance")
-                for cloud_server in servers:
-                    cloud_server["project"] = project_details
-                    cloud_server["_bs_unique_id"] = cloud_server.get("id", None)
-                    cloud_server["_bs_name"] = cloud_server.get("name", None)
-                    cloud_server["_bs_region"] = cloud_server.get("region", None)
-                    cloud_server["_bs_size"] = cloud_server.get("size", None)
-                    eligible_objects.append(cloud_server)
+                for region in _ovh_project_regions(client, project):
+                    servers = client.get(
+                        f"/cloud/project/{project}/region/{region}/instance"
+                    )
+                    for cloud_server in servers:
+                        cloud_server["project"] = project_details
+                        cloud_server["_bs_unique_id"] = cloud_server.get("id", None)
+                        cloud_server["_bs_name"] = cloud_server.get("name", None)
+                        cloud_server["_bs_region"] = cloud_server.get("region") or region
+                        cloud_server["_bs_size"] = cloud_server.get("size", None)
+                        eligible_objects.append(cloud_server)
             return eligible_objects
         elif object_type == "volume":
             for project in projects:
                 project_details = client.get(f"/cloud/project/{project}")
-                volumes = client.get(f"/cloud/project/{project}/volume")
-                for cloud_volume in volumes:
-                    cloud_volume["project"] = project_details
-                    cloud_volume["_bs_unique_id"] = cloud_volume.get("id", None)
-                    cloud_volume["_bs_name"] = cloud_volume.get("name", None)
-                    cloud_volume["_bs_region"] = cloud_volume.get("region", None)
-                    cloud_volume["_bs_size"] = cloud_volume.get("size", None)
-                    eligible_objects.append(cloud_volume)
+                for region in _ovh_project_regions(client, project):
+                    volumes = client.get(
+                        f"/cloud/project/{project}/region/{region}/volume"
+                    )
+                    for cloud_volume in volumes:
+                        cloud_volume["project"] = project_details
+                        cloud_volume["_bs_unique_id"] = cloud_volume.get("id", None)
+                        cloud_volume["_bs_name"] = cloud_volume.get("name", None)
+                        cloud_volume["_bs_region"] = cloud_volume.get("region") or region
+                        cloud_volume["_bs_size"] = cloud_volume.get("size", None)
+                        eligible_objects.append(cloud_volume)
             return eligible_objects
 
     def validate(self, check_errors=None, raise_exp=None):
@@ -791,26 +821,32 @@ class CoreAuthOVHUS(TimeStampedModel):
         if object_type == "cloud":
             for project in projects:
                 project_details = client.get(f"/cloud/project/{project}")
-                servers = client.get(f"/cloud/project/{project}/instance")
-                for cloud_server in servers:
-                    cloud_server["project"] = project_details
-                    cloud_server["_bs_unique_id"] = cloud_server.get("id", None)
-                    cloud_server["_bs_name"] = cloud_server.get("name", None)
-                    cloud_server["_bs_region"] = cloud_server.get("region", None)
-                    cloud_server["_bs_size"] = cloud_server.get("size", None)
-                    eligible_objects.append(cloud_server)
+                for region in _ovh_project_regions(client, project):
+                    servers = client.get(
+                        f"/cloud/project/{project}/region/{region}/instance"
+                    )
+                    for cloud_server in servers:
+                        cloud_server["project"] = project_details
+                        cloud_server["_bs_unique_id"] = cloud_server.get("id", None)
+                        cloud_server["_bs_name"] = cloud_server.get("name", None)
+                        cloud_server["_bs_region"] = cloud_server.get("region") or region
+                        cloud_server["_bs_size"] = cloud_server.get("size", None)
+                        eligible_objects.append(cloud_server)
             return eligible_objects
         elif object_type == "volume":
             for project in projects:
                 project_details = client.get(f"/cloud/project/{project}")
-                volumes = client.get(f"/cloud/project/{project}/volume")
-                for cloud_volume in volumes:
-                    cloud_volume["project"] = project_details
-                    cloud_volume["_bs_unique_id"] = cloud_volume.get("id", None)
-                    cloud_volume["_bs_name"] = cloud_volume.get("name", None)
-                    cloud_volume["_bs_region"] = cloud_volume.get("region", None)
-                    cloud_volume["_bs_size"] = cloud_volume.get("size", None)
-                    eligible_objects.append(cloud_volume)
+                for region in _ovh_project_regions(client, project):
+                    volumes = client.get(
+                        f"/cloud/project/{project}/region/{region}/volume"
+                    )
+                    for cloud_volume in volumes:
+                        cloud_volume["project"] = project_details
+                        cloud_volume["_bs_unique_id"] = cloud_volume.get("id", None)
+                        cloud_volume["_bs_name"] = cloud_volume.get("name", None)
+                        cloud_volume["_bs_region"] = cloud_volume.get("region") or region
+                        cloud_volume["_bs_size"] = cloud_volume.get("size", None)
+                        eligible_objects.append(cloud_volume)
             return eligible_objects
 
     def validate(self, check_errors=None, raise_exp=None):
