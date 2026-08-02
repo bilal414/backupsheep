@@ -787,7 +787,6 @@ class CoreStorageDoSpaces(TimeStampedModel):
 
     def validate(self, data=None, raise_exp=None):
         import boto3
-        import time
         from botocore.client import Config
 
         if data:
@@ -819,7 +818,10 @@ class CoreStorageDoSpaces(TimeStampedModel):
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"
 
-        filename = f"{prefix}backupsheep_test_{int(time.time())}.txt"
+        # Storage validation can run concurrently when duplicate backup tasks
+        # race through backup_initiate. A second-resolution timestamp lets one
+        # probe overwrite/delete another and report a false validation failure.
+        filename = f"{prefix}backupsheep_test_{uuid.uuid4().hex}.txt"
 
         result = s3_client.put_object(
             Body=filename, Bucket=bucket_name, Key=filename

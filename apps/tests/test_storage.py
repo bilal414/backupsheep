@@ -15,7 +15,14 @@ from apps._tasks.integration.storage.aws_s3 import storage_aws_s3
 from apps._tasks.integration.storage.local import storage_local
 from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.backup.models import CoreWebsiteBackup, CoreWebsiteBackupStoragePoints
-from apps.console.storage.models import CoreStorage, CoreStorageAWSS3, CoreStorageLocal, CoreStorageType
+from apps.console.connection.models import CoreDoSpacesRegion
+from apps.console.storage.models import (
+    CoreStorage,
+    CoreStorageAWSS3,
+    CoreStorageDoSpaces,
+    CoreStorageLocal,
+    CoreStorageType,
+)
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -69,6 +76,36 @@ class StorageValidateTests(BaseTestCase):
         client.put_object.return_value = {}  # no ETag -> failure
         with mock.patch("boto3.client", return_value=client):
             self.assertFalse(storage.storage_aws_s3.validate())
+
+    def test_do_spaces_validation_probes_are_unique(self):
+        storage = CoreStorage.objects.create(
+            account=self.account,
+            type=CoreStorageType.objects.get(code="do_spaces"),
+            name="spaces-store",
+            added_by=self.member,
+        )
+        spaces = CoreStorageDoSpaces.objects.create(
+            storage=storage,
+            region=CoreDoSpacesRegion.objects.get(code="nyc3"),
+            access_key=bs_encrypt("access", self.account.get_encryption_key()),
+            secret_key=bs_encrypt("secret", self.account.get_encryption_key()),
+            bucket_name="test-bucket",
+            prefix="probe",
+            no_delete=False,
+        )
+        client = mock.MagicMock()
+        client.put_object.return_value = {"ETag": "abc"}
+        client.get_object.return_value = {"ETag": "abc"}
+        client.delete_object.return_value = {"ResponseMetadata": {"HTTPStatusCode": 204}}
+
+        with mock.patch("boto3.client", return_value=client):
+            self.assertTrue(spaces.validate())
+            self.assertTrue(spaces.validate())
+
+        keys = [call.kwargs["Key"] for call in client.put_object.call_args_list]
+        self.assertEqual(len(keys), 2)
+        self.assertNotEqual(keys[0], keys[1])
+        self.assertTrue(all(key.startswith("probe/") for key in keys))
 
     def test_aws_s3_object_lock_validation_does_not_create_a_test_object(self):
         storage = factories.make_storage(self.account, self.member, code="aws_s3")
