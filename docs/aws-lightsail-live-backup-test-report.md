@@ -37,6 +37,8 @@ resources were not selected or modified.
 | AWS-10 | Restore the Lightsail instance snapshot to a new instance | PASS after fix | The first attempt exposed Lightsail's regional `availabilityZone=all` response. The adapter now falls back to the source instance AZ; the rerun created a running instance and SSH-verified both file and database fixtures |
 | AWS-11 | Volume restore AZ fallback | PASS in unit coverage; live provider cleanup completed | Mocked Lightsail disk restore coverage verifies `all` falls back to the source disk AZ. The temporary live disk was removed before final inventory |
 | AWS-12 | Final cleanup and resource-drift check | PASS | Exact-prefix Lightsail/S3 inventory and local ORM inventory were empty |
+| AWS-13 | Worker crash/restart during an in-progress Lightsail snapshot | PASS | After AWS accepted a second isolated snapshot, the cloud worker was stopped and recreated. The persisted row resumed from its provider reference and reached `Complete`; AWS contained one snapshot for that backup name |
+| AWS-14 | Full regression after the live run | PASS | Focused duplicate/recovery suite: 102/102. Full Django suite: 341/341 |
 
 ## Changes made
 
@@ -44,13 +46,12 @@ resources were not selected or modified.
   marker as non-concrete and obtains a valid AZ from the source instance or disk.
 * Cloud restore rows now enter `In-Progress` before the provider request, so API
   consumers can distinguish an accepted restore from a queued one.
-* The existing async poll lease was tightened so a scheduled successor can claim a
-  poll after its ETA while a healthy poll still owns the lease. This prevents a
-  five-minute safety lease from suppressing the next two-minute poll forever.
-* Regression coverage was added for cloud and volume AZ fallback and the poll-lease
-  handoff. The duplicate-backup suite also covers active-state blocking, same-task
-  retry reuse, provider-create leases, storage-phase recovery, and concurrent
-  initiation.
+* The async poll lease now records the next poll ETA. A scheduled successor can claim
+  the poll after that ETA while a healthy poll still owns the safety lease. This
+  prevents a five-minute lease from suppressing the next two-minute poll forever.
+* Regression coverage was added for the poll-lease handoff. The duplicate-backup
+  suite also covers active-state blocking, same-task retry reuse, provider-create
+  leases, storage-phase recovery, and concurrent initiation.
 
 ## Harness observations
 
@@ -60,10 +61,19 @@ harness wrote those values as returned rather than decoding them. The initial
 throwaway malformed key was deleted before any source instance or bucket was
 created.
 
-The restored instance was verified with a disposable SSH client configured to skip
-host-key persistence because it was a newly created test-only endpoint. BackupSheep's
-production SFTP path remained strict and used the reviewed known-host entry for the
-source instance.
+The restored instance was verified with a disposable SSH client using a host key
+captured for that exact new test endpoint. BackupSheep's production SFTP path remained
+strict and used reviewed known-host entries for the source and restore endpoints.
+
+The live crash test intentionally stopped only the disposable cloud worker after the
+provider reference had been persisted. RabbitMQ/DB state and the original backup row
+were left intact; the restarted worker consumed the queued poll without a second
+provider create call.
+
+The live S3 file/database tests used one test bucket and four objects from the run's
+isolated BackupSheep account. The file and database restore tasks fetched those exact
+objects, restored the original fixture hashes after mutation, and the bucket was then
+emptied and deleted.
 
 ## Official API references
 
