@@ -568,6 +568,31 @@ class CoreAuthLightsail(TimeStampedModel):
                 if not next_page_token:
                     more_objects = False
 
+        elif object_type in {"database", "relational_database"}:
+            next_page_token = None
+
+            while True:
+                request = {"pageToken": next_page_token} if next_page_token else {}
+                response = client.get_relational_databases(**request)
+                response = response if isinstance(response, dict) else {}
+
+                for database in response.get("relationalDatabases") or []:
+                    if not isinstance(database, dict):
+                        continue
+                    database["_bs_unique_id"] = database.get("name")
+                    database["_bs_name"] = database.get("name")
+                    database["_bs_region"] = (database.get("location") or {}).get(
+                        "regionName"
+                    )
+                    database["_bs_size"] = (database.get("hardware") or {}).get(
+                        "diskSizeInGb"
+                    )
+                    eligible_objects.append(database)
+
+                next_page_token = response.get("nextPageToken")
+                if not next_page_token:
+                    break
+
         return eligible_objects
 
     def validate(self, check_errors=None, raise_exp=None):

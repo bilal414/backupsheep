@@ -40,6 +40,7 @@ class CoreCloudLightsailView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
         query &= Q(node__type=CoreNode.Type.CLOUD)
         query &= Q(node__connection__integration__code="lightsail")
+        query &= Q(resource_type=CoreLightsail.ResourceType.INSTANCE)
         queryset = CoreLightsail.objects.filter(query)
         return queryset
 
@@ -71,6 +72,7 @@ class CoreCloudLightsailView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query &= Q(node__connection__integration__code="lightsail")
         query &= Q(node__type=CoreNode.Type.CLOUD)
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
+        query &= Q(resource_type=CoreLightsail.ResourceType.INSTANCE)
         nodes = CoreLightsail.objects.filter(query)
         all_totals = {
             "nodes": nodes.count(),

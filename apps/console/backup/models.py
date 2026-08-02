@@ -3303,9 +3303,29 @@ class CoreLightsailBackup(UtilBackup):
     def poll_status(self):
         """Single snapshot status check (no blocking loop); used by poll_cloud_backup.
         Returns COMPLETE / IN_PROGRESS / FAILED; transient API errors return IN_PROGRESS."""
-        from ..node.models import CoreNode
+        from ..node.models import CoreLightsail, CoreNode
 
-        if CoreNode.Type.CLOUD == self.lightsail.node.type:
+        if self.lightsail.resource_type == CoreLightsail.ResourceType.DATABASE:
+            try:
+                client = self.lightsail.node.connection.auth_lightsail.get_client()
+                snapshot = self.lightsail._find_relational_database_snapshot(
+                    client, self.unique_id or self.uuid_str
+                )
+                if snapshot:
+                    self.size_gigabytes = snapshot.get("sizeInGb")
+                    self.metadata = snapshot
+                    state = str(snapshot.get("state") or "").lower()
+                    if state == "available":
+                        self.status = UtilBackup.Status.COMPLETE
+                        self.save()
+                        return UtilBackup.Status.COMPLETE
+                    self.save(update_fields=["size_gigabytes", "metadata", "modified"])
+                    if state in {"failed", "error"}:
+                        return UtilBackup.Status.FAILED
+                return UtilBackup.Status.IN_PROGRESS
+            except Exception:
+                return UtilBackup.Status.IN_PROGRESS
+        elif CoreNode.Type.CLOUD == self.lightsail.node.type:
             try:
                 client = self.lightsail.node.connection.auth_lightsail.get_client()
                 response = client.get_instance_snapshot(
@@ -3350,7 +3370,7 @@ class CoreLightsailBackup(UtilBackup):
         return self.lightsail.node
 
     def soft_delete(self):
-        from ..node.models import CoreNode
+        from ..node.models import CoreLightsail, CoreNode
 
         client = self.lightsail.node.connection.auth_lightsail.get_client()
 
@@ -3360,7 +3380,11 @@ class CoreLightsailBackup(UtilBackup):
         )
 
         try:
-            if CoreNode.Type.CLOUD == self.lightsail.node.type:
+            if self.lightsail.resource_type == CoreLightsail.ResourceType.DATABASE:
+                client.delete_relational_database_snapshot(
+                    relationalDatabaseSnapshotName=self.unique_id
+                )
+            elif CoreNode.Type.CLOUD == self.lightsail.node.type:
                 client.delete_instance_snapshot(instanceSnapshotName=self.unique_id)
             elif CoreNode.Type.VOLUME == self.lightsail.node.type:
                 client.delete_disk_snapshot(diskSnapshotName=self.unique_id)

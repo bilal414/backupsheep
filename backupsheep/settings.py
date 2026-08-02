@@ -574,6 +574,7 @@ CELERY_IMPORTS = (
     "apps._tasks.integration.google_cloud",
     "apps._tasks.integration.hetzner",
     "apps._tasks.integration.lightsail",
+    "apps._tasks.integration.lightsail_bucket",
     "apps._tasks.integration.oracle",
     "apps._tasks.integration.ovh_ca",
     "apps._tasks.integration.ovh_eu",
@@ -657,6 +658,20 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_in_progress_backups",
         "schedule": 60.0,
     },
+    # Bucket replication uses durable run/object leases and can resume after a
+    # worker or server restart without issuing duplicate transfers.
+    "sync-lightsail-bucket-replications": {
+        "task": "sync_lightsail_bucket_replications",
+        "schedule": 60.0,
+    },
+    "resume-lightsail-bucket-replications": {
+        "task": "resume_lightsail_bucket_replications",
+        "schedule": 60.0,
+    },
+    "resume-lightsail-bucket-restores": {
+        "task": "resume_lightsail_bucket_restores",
+        "schedule": 60.0,
+    },
 }
 
 # Task routing across the worker types (see docker-compose.yml):
@@ -689,6 +704,13 @@ CELERY_TASK_ROUTES = {
     # S3 lifecycle rule application + deferred Object Lock delete retries.
     "storage_aws_s3_sync_lifecycle": {"queue": "storage"},
     "retry_protected_storage_deletes": {"queue": "storage"},
+    "sync_lightsail_bucket_replications": {"queue": "storage"},
+    "resume_lightsail_bucket_replications": {"queue": "storage"},
+    "resume_lightsail_bucket_restores": {"queue": "storage"},
+    "start_lightsail_bucket_replication": {"queue": "storage"},
+    "replicate_lightsail_bucket": {"queue": "storage"},
+    "finalize_lightsail_bucket_replication": {"queue": "storage"},
+    "restore_lightsail_bucket_replication": {"queue": "storage"},
     # Cloud/volume provider snapshots — API-only, no local disk.
     "backup_digitalocean": {"queue": "cloud"},
     "backup_hetzner": {"queue": "cloud"},

@@ -1725,11 +1725,23 @@ class CoreAWS(UtilCloud):
 
 
 class CoreLightsail(UtilCloud):
+    class ResourceType(models.TextChoices):
+        # Existing Lightsail rows represented instances (or disks, which are
+        # still distinguished by CoreNode.Type). Keep that value as the model
+        # default so adding managed relational databases is backward compatible.
+        INSTANCE = "instance", "Instance"
+        DATABASE = "database", "Relational Database"
+
     node = models.OneToOneField(
         "CoreNode", related_name="lightsail", on_delete=models.CASCADE
     )
     name = models.CharField(max_length=255)
     unique_id = models.CharField(max_length=255)
+    resource_type = models.CharField(
+        max_length=32,
+        choices=ResourceType.choices,
+        default=ResourceType.INSTANCE,
+    )
     notes = models.TextField(null=True, blank=True)
     metadata = models.JSONField(null=True)
 
@@ -1741,7 +1753,13 @@ class CoreLightsail(UtilCloud):
         try:
             client = self.node.connection.auth_lightsail.get_client()
 
-            if self.node.type == CoreNode.Type.CLOUD:
+            if self.resource_type == self.ResourceType.DATABASE:
+                response = client.get_relational_database(
+                    relationalDatabaseName=self.unique_id
+                )
+                database = response.get("relationalDatabase") or {}
+                node_ok = database.get("state") in {"available", "stopped"}
+            elif self.node.type == CoreNode.Type.CLOUD:
                 response = client.get_instance(
                     instanceName=self.unique_id
                 )
@@ -1754,7 +1772,7 @@ class CoreLightsail(UtilCloud):
                 response = client.get_disk(
                     diskName=self.unique_id
                 )
-                disk = response.get("disk")
+                disk = response.get("disk") or {}
                 if disk.get("state") == "available" or disk.get("state") == "in-use":
                     node_ok = True
             return node_ok
@@ -1767,7 +1785,33 @@ class CoreLightsail(UtilCloud):
         try:
             client = self.node.connection.auth_lightsail.get_client()
 
-            if self.node.type == CoreNode.Type.CLOUD:
+            if self.resource_type == self.ResourceType.DATABASE:
+                existing = self._find_relational_database_snapshot(
+                    client, backup.uuid_str
+                )
+                if existing:
+                    backup.unique_id = existing.get("name", backup.uuid_str)
+                    backup.size_gigabytes = existing.get("sizeInGb")
+                    backup.metadata = existing
+                    backup.save()
+                    return
+
+                response = client.create_relational_database_snapshot(
+                    relationalDatabaseName=self.unique_id,
+                    relationalDatabaseSnapshotName=backup.uuid_str,
+                )
+                operations = response.get("operations") or []
+                if self._lightsail_operation_failed(operations):
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str,
+                        backup.attempt_no,
+                        backup.type,
+                        "Lightsail did not accept the relational database snapshot request.",
+                    )
+                backup.unique_id = backup.uuid_str
+                backup.save()
+            elif self.node.type == CoreNode.Type.CLOUD:
                 try:
                     existing = client.get_instance_snapshot(
                         instanceSnapshotName=backup.uuid_str
@@ -1824,6 +1868,8 @@ class CoreLightsail(UtilCloud):
                     )
                 backup.unique_id = backup.uuid_str
                 backup.save()
+        except NodeBackupFailedError:
+            raise
         except Exception as e:
             raise NodeBackupFailedError(
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
@@ -1839,12 +1885,110 @@ class CoreLightsail(UtilCloud):
             return None
         return value
 
+    @staticmethod
+    def _lightsail_operation_failed(operations):
+        """True when Lightsail did not accept an asynchronous request."""
+        if not operations or not isinstance(operations[0], dict):
+            return True
+        return str(operations[0].get("status") or "").lower() == "failed"
+
+    @staticmethod
+    def _find_relational_database_snapshot(client, snapshot_name):
+        """Find one relational-database snapshot by exact name across all pages.
+
+        Lightsail does not expose a single-snapshot read API for relational
+        databases. An exact, paginated lookup is therefore required before a
+        retry sends another create request and before a restore derives its
+        source settings.
+        """
+        page_token = None
+        while True:
+            request = {"pageToken": page_token} if page_token else {}
+            response = client.get_relational_database_snapshots(**request)
+            response = response if isinstance(response, dict) else {}
+            snapshots = response.get("relationalDatabaseSnapshots") or []
+            for snapshot in snapshots:
+                if isinstance(snapshot, dict) and snapshot.get("name") == snapshot_name:
+                    return snapshot
+
+            next_page_token = response.get("nextPageToken")
+            # Do not spin forever on a malformed/repeated pagination token.
+            if not next_page_token or next_page_token == page_token:
+                return None
+            page_token = next_page_token
+
     def restore_snapshot(self, backup, restore):
         try:
             client = self.node.connection.auth_lightsail.get_client()
             params = restore.params or {}
 
-            if self.node.type == CoreNode.Type.CLOUD:
+            if self.resource_type == self.ResourceType.DATABASE:
+                snapshot = self._find_relational_database_snapshot(
+                    client, backup.unique_id
+                )
+                if not snapshot:
+                    raise Exception(
+                        f"Unable to find Lightsail relational database snapshot "
+                        f"{backup.unique_id}."
+                    )
+
+                availability_zone = self._concrete_availability_zone(
+                    params.get("availability_zone") or params.get("availabilityZone")
+                ) or self._concrete_availability_zone(
+                    (snapshot.get("location") or {}).get("availabilityZone")
+                )
+                bundle_id = (
+                    params.get("bundle_id")
+                    or params.get("relationalDatabaseBundleId")
+                    or snapshot.get(
+                        "fromRelationalDatabaseBundleId"
+                    )
+                )
+
+                # Snapshot locations can be regional and older snapshots can omit
+                # their source bundle. The source database provides the concrete
+                # values required by create_relational_database_from_snapshot.
+                if not availability_zone or not bundle_id:
+                    response = client.get_relational_database(
+                        relationalDatabaseName=self.unique_id
+                    )
+                    source_database = response.get("relationalDatabase") or {}
+                    availability_zone = availability_zone or self._concrete_availability_zone(
+                        (source_database.get("location") or {}).get("availabilityZone")
+                    )
+                    bundle_id = bundle_id or source_database.get(
+                        "relationalDatabaseBundleId"
+                    )
+
+                if not availability_zone:
+                    raise Exception(
+                        "Unable to determine a concrete Lightsail availability zone."
+                    )
+                if not bundle_id:
+                    raise Exception(
+                        "Unable to determine a Lightsail relational database bundle."
+                    )
+
+                request = {
+                    "relationalDatabaseName": restore.name,
+                    "relationalDatabaseSnapshotName": backup.unique_id,
+                    "availabilityZone": availability_zone,
+                    "relationalDatabaseBundleId": bundle_id,
+                }
+                publicly_accessible = params.get("publicly_accessible")
+                if publicly_accessible is None:
+                    publicly_accessible = params.get("publiclyAccessible")
+                if publicly_accessible is not None:
+                    request["publiclyAccessible"] = publicly_accessible
+
+                response = client.create_relational_database_from_snapshot(**request)
+                if self._lightsail_operation_failed(response.get("operations") or []):
+                    raise Exception(
+                        "Lightsail did not accept the relational database restore request."
+                    )
+                restore.resource_id = restore.name
+                restore.save()
+            elif self.node.type == CoreNode.Type.CLOUD:
                 availability_zone = self._concrete_availability_zone(
                     params.get("availability_zone")
                 )
@@ -1928,7 +2072,33 @@ class CoreLightsail(UtilCloud):
 
         client = self.node.connection.auth_lightsail.get_client()
 
-        if self.node.type == CoreNode.Type.CLOUD:
+        if self.resource_type == self.ResourceType.DATABASE:
+            try:
+                response = client.get_relational_database(
+                    relationalDatabaseName=restore.resource_id
+                )
+            except ClientError as error:
+                code = error.response.get("Error", {}).get("Code")
+                if code in {"NotFoundException", "ResourceNotFoundException"}:
+                    # A just-accepted create can take a short time to appear.
+                    return CoreCloudRestore.Status.IN_PROGRESS
+                raise
+
+            database = response.get("relationalDatabase") or {}
+            state = str(database.get("state") or "").lower()
+            if state == "available":
+                return CoreCloudRestore.Status.COMPLETE
+            if state in {
+                "failed",
+                "error",
+                "restore-error",
+                "incompatible-network",
+                "incompatible-parameters",
+                "storage-full",
+            }:
+                return CoreCloudRestore.Status.FAILED
+            return CoreCloudRestore.Status.IN_PROGRESS
+        elif self.node.type == CoreNode.Type.CLOUD:
             response = client.get_instance(
                 instanceName=restore.resource_id
             )

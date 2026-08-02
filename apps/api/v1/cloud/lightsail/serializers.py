@@ -28,6 +28,11 @@ class CoreCloudLightsailReadSerializer(serializers.ModelSerializer):
 
 class CoreCloudLightsailWriteSerializer(serializers.ModelSerializer):
     node = CoreCloudNodeWriteSerializer(write_only=True)
+    # The legacy Lightsail cloud endpoint owns instances. Keep callers from
+    # creating relational-database rows through this surface.
+    resource_type = serializers.HiddenField(
+        default=CoreLightsail.ResourceType.INSTANCE
+    )
 
     class Meta:
         model = CoreLightsail
@@ -40,7 +45,8 @@ class CoreCloudLightsailWriteSerializer(serializers.ModelSerializer):
         return instance
 
     def update(self, instance, validated_data):
-        node = validated_data.pop("node", [])
-        super().update(instance.node, node)
+        node = validated_data.pop("node", None)
+        if node is not None:
+            super().update(instance.node, node)
         instance = super().update(instance, validated_data)
         return instance

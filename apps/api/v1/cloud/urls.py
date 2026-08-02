@@ -19,6 +19,8 @@ urlpatterns += [
                 path("", include("apps.api.v1.cloud.ovh_us.urls")),
                 path("", include("apps.api.v1.cloud.aws_rds.urls")),
                 path("", include("apps.api.v1.cloud.lightsail.urls")),
+                path("", include("apps.api.v1.cloud.lightsail_database.urls")),
+                path("", include("apps.api.v1.cloud.lightsail_bucket_replication.urls")),
                 path("", include("apps.api.v1.cloud.hetzner.urls")),
                 path("", include("apps.api.v1.cloud.google_cloud.urls")),
             ]

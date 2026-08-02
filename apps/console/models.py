@@ -4,6 +4,7 @@ from apps.console.log.models import *
 from apps.console.notification.models import *
 from apps.console.connection.models import *
 from apps.console.backup.models import *
+from apps.console.backup.replication_models import *
 from apps.console.node.models import *
 from apps.console.storage.models import *
 from apps.console.invite.models import *

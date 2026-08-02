@@ -6,6 +6,7 @@ class CoreLightsailBackupFilter(filters.FilterSet):
     location_code = filters.CharFilter(field_name="lightsail__node__connection__location__code")
     integration = filters.CharFilter(field_name="lightsail__node__connection__integration__code")
     lightsail = filters.CharFilter(field_name="lightsail__id")
+    resource_type = filters.CharFilter(field_name="lightsail__resource_type")
 
     class Meta:
         model = CoreLightsailBackup
