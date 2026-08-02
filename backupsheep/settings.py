@@ -651,7 +651,8 @@ CELERY_BEAT_SCHEDULE = {
     },
     # Resume backup rows whose task/poller disappeared without changing them to a
     # terminal state. This is deliberately frequent; the database lease in
-    # poll_cloud_backup prevents duplicate pollers while a healthy poll is queued.
+    # poll_cloud_backup prevents duplicate pollers while a healthy poll is queued,
+    # and the poll ETA lets the scheduled successor claim the next check.
     "resume-in-progress-backups": {
         "task": "resume_in_progress_backups",
         "schedule": 60.0,

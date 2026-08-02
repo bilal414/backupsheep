@@ -10,7 +10,9 @@ from apps._tasks.exceptions import IntegrationValidationError
 from apps.api.v1.node.views import CoreNodeView
 from apps.console.backup.models import CoreCloudRestore
 from apps.console.connection.models import CoreAuthDatabase
+from apps.console.connection.models import CoreAuthLightsail, CoreLightsailRegion
 from apps.console.node.models import CoreNode
+from apps.console.node.models import CoreLightsail
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -195,6 +197,83 @@ class DigitalOceanRestoreTests(BaseTestCase):
             with self._patch_client(), \
                     mock.patch("apps.console.node.models.requests.get", return_value=get_resp):
                 self.assertEqual(node.digitalocean.check_restore(restore), expected)
+
+
+class LightsailRestoreTests(BaseTestCase):
+    def _make_node_with_auth(self, node_type=CoreNode.Type.CLOUD):
+        connection = factories.make_connection(self.account, self.member, code="lightsail")
+        CoreAuthLightsail.objects.create(
+            connection=connection,
+            region=CoreLightsailRegion.objects.get(code="us-east-1"),
+        )
+        node = CoreNode.objects.create(
+            connection=connection,
+            type=node_type,
+            name="server",
+            added_by=self.member,
+        )
+        CoreLightsail.objects.create(node=node, name="server", unique_id="source")
+        return node
+
+    @staticmethod
+    def _backup(node):
+        return node.lightsail.backups.create(
+            status=UtilBackup.Status.COMPLETE,
+            type=UtilBackup.Type.ON_DEMAND,
+            unique_id="snapshot",
+            size_gigabytes=20,
+        )
+
+    def test_restore_cloud_falls_back_from_regional_snapshot_to_source_zone(self):
+        node = self._make_node_with_auth()
+        backup = self._backup(node)
+        restore = CoreCloudRestore.objects.create(node=node, backup_id=backup.id, name="restored")
+        client = mock.MagicMock()
+        client.get_instance_snapshot.return_value = {
+            "instanceSnapshot": {"location": {"availabilityZone": "all"}}
+        }
+        client.get_instance.return_value = {
+            "instance": {
+                "bundleId": "nano_3_0",
+                "location": {"availabilityZone": "us-east-1a"},
+            }
+        }
+
+        with mock.patch.object(CoreAuthLightsail, "get_client", return_value=client):
+            node.lightsail.restore_snapshot(backup, restore)
+
+        client.create_instances_from_snapshot.assert_called_once_with(
+            instanceNames=["restored"],
+            instanceSnapshotName="snapshot",
+            availabilityZone="us-east-1a",
+            bundleId="nano_3_0",
+        )
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, "restored")
+
+    def test_restore_volume_falls_back_from_regional_snapshot_to_source_zone(self):
+        node = self._make_node_with_auth(node_type=CoreNode.Type.VOLUME)
+        backup = self._backup(node)
+        restore = CoreCloudRestore.objects.create(node=node, backup_id=backup.id, name="restored-disk")
+        client = mock.MagicMock()
+        client.get_disk_snapshot.return_value = {
+            "diskSnapshot": {"location": {"availabilityZone": "all"}}
+        }
+        client.get_disk.return_value = {
+            "disk": {"location": {"availabilityZone": "us-east-1a"}}
+        }
+
+        with mock.patch.object(CoreAuthLightsail, "get_client", return_value=client):
+            node.lightsail.restore_snapshot(backup, restore)
+
+        client.create_disk_from_snapshot.assert_called_once_with(
+            diskName="restored-disk",
+            diskSnapshotName="snapshot",
+            availabilityZone="us-east-1a",
+            sizeInGb=20,
+        )
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, "restored-disk")
 
 
 class AuthDatabaseDirectConnectRobustnessTests(BaseTestCase):

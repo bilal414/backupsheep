@@ -34,6 +34,7 @@ def restore_cloud_backup(self, node_id=None, backup_id=None, restore_id=None):
     restore = CoreCloudRestore.objects.get(id=restore_id, node=node)
     backup = node.get_cloud_backup(backup_id)
 
+    restore.status = CoreCloudRestore.Status.IN_PROGRESS
     restore.celery_task_id = self.request.id
     restore.save()
 

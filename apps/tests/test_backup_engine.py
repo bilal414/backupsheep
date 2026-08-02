@@ -103,6 +103,28 @@ class PollCloudBackupTests(BaseTestCase):
             )
         poll.assert_called_once()
 
+    def test_scheduled_successor_can_claim_after_poll_eta(self):
+        node, backup = self._backup()
+        control = dict((backup.metadata or {}).get("_backup_control") or {})
+        control.update({
+            "poll_task_id": "poll-task-1",
+            "poll_lease_until": time.time() + 300,
+            "poll_next_run_at": time.time() - 1,
+        })
+        backup.metadata = {"_backup_control": control}
+        backup.save(update_fields=["metadata", "modified"])
+
+        with mock.patch.object(
+            CoreDigitalOceanBackup,
+            "poll_status",
+            return_value=UtilBackup.Status.IN_PROGRESS,
+        ) as poll, mock.patch.object(helper_tasks.poll_cloud_backup, "apply_async"):
+            helper_tasks.poll_cloud_backup.apply(
+                args=[node.id, backup.id], task_id="poll-task-2"
+            )
+
+        poll.assert_called_once()
+
     def test_timeout_marks_timeout(self):
         node, backup = self._backup()
         long_ago = time.time() - (86400 + 60)

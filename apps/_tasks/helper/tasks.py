@@ -167,8 +167,19 @@ def _claim_cloud_poll(backup, task_id, interval):
             active_until = float(control.get("poll_lease_until") or 0)
         except (TypeError, ValueError):
             active_until = 0
+        try:
+            next_poll_at = float(control.get("poll_next_run_at") or 0)
+        except (TypeError, ValueError):
+            next_poll_at = 0
         if active_until > now:
-            return None
+            # The lease covers the gap between publishing the next ETA message
+            # and the recovery sweep taking over after a worker loss.  Once the
+            # ETA is due, the scheduled successor is the rightful claimant and
+            # must be allowed through; otherwise the first poll's five-minute
+            # safety lease can swallow the next two-minute poll forever.
+            if not next_poll_at or next_poll_at > now:
+                return None
+        control.pop("poll_next_run_at", None)
         control["poll_task_id"] = task_id
         control["poll_lease_until"] = now + max(int(interval) * 2, 300)
         # A recovery message has reached a worker; its enqueue lease no longer
@@ -693,7 +704,12 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
     # Keep the lease alive until just after the ETA message. If the worker dies
     # before publishing it, the lease expires and the periodic recovery task takes
     # over; if it is healthy, the next invocation uses the same task row.
-    if _update_poll_control(backup, task_id=task_id, started_at=started_at) is None:
+    if _update_poll_control(
+        backup,
+        task_id=task_id,
+        started_at=started_at,
+        poll_next_run_at=time.time() + max(int(interval), 1),
+    ) is None:
         return
     poll_cloud_backup.apply_async(
         args=[node_id, backup_id, started_at, interval, timeout], countdown=interval

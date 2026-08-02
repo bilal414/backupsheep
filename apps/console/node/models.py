@@ -1829,19 +1829,48 @@ class CoreLightsail(UtilCloud):
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
             )
 
+    @staticmethod
+    def _concrete_availability_zone(value):
+        """Return a usable AZ, ignoring Lightsail's regional ``all`` marker."""
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        if not value or value.lower() in {"all", "global"}:
+            return None
+        return value
+
     def restore_snapshot(self, backup, restore):
         try:
             client = self.node.connection.auth_lightsail.get_client()
             params = restore.params or {}
 
             if self.node.type == CoreNode.Type.CLOUD:
-                availability_zone = params.get("availability_zone")
+                availability_zone = self._concrete_availability_zone(
+                    params.get("availability_zone")
+                )
                 if not availability_zone:
                     response = client.get_instance_snapshot(
                         instanceSnapshotName=backup.unique_id
                     )
-                    availability_zone = response.get("instanceSnapshot", {}).get("location", {}).get(
-                        "availabilityZone")
+                    availability_zone = self._concrete_availability_zone(
+                        response.get("instanceSnapshot", {})
+                        .get("location", {})
+                        .get("availabilityZone")
+                    )
+
+                # Regional Lightsail snapshots report availabilityZone=all. The
+                # restore API needs the concrete AZ of the source instance.
+                if not availability_zone:
+                    response = client.get_instance(instanceName=self.unique_id)
+                    availability_zone = self._concrete_availability_zone(
+                        response.get("instance", {})
+                        .get("location", {})
+                        .get("availabilityZone")
+                    )
+                if not availability_zone:
+                    raise Exception(
+                        "Unable to determine a concrete Lightsail availability zone."
+                    )
 
                 bundle_id = params.get("bundle_id")
                 if not bundle_id:
@@ -1859,12 +1888,29 @@ class CoreLightsail(UtilCloud):
                 restore.resource_id = restore.name
                 restore.save()
             elif self.node.type == CoreNode.Type.VOLUME:
-                availability_zone = params.get("availability_zone")
+                availability_zone = self._concrete_availability_zone(
+                    params.get("availability_zone")
+                )
                 if not availability_zone:
                     response = client.get_disk_snapshot(
                         diskSnapshotName=backup.unique_id
                     )
-                    availability_zone = response.get("diskSnapshot", {}).get("location", {}).get("availabilityZone")
+                    availability_zone = self._concrete_availability_zone(
+                        response.get("diskSnapshot", {})
+                        .get("location", {})
+                        .get("availabilityZone")
+                    )
+                if not availability_zone:
+                    response = client.get_disk(diskName=self.unique_id)
+                    availability_zone = self._concrete_availability_zone(
+                        response.get("disk", {})
+                        .get("location", {})
+                        .get("availabilityZone")
+                    )
+                if not availability_zone:
+                    raise Exception(
+                        "Unable to determine a concrete Lightsail availability zone."
+                    )
 
                 client.create_disk_from_snapshot(
                     diskName=restore.name,
