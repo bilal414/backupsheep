@@ -13,7 +13,7 @@ credentials in `.env` (see [Configuration](configuration.md)).
 | Provider | Code |
 |----------|------|
 | DigitalOcean | `digitalocean` |
-| Amazon Web Services — EC2 | `aws` |
+| Amazon Web Services — EC2/EBS, S3, DynamoDB | `aws` |
 | Amazon Web Services — RDS | `aws_rds` |
 | Amazon Lightsail | `lightsail` |
 | Hetzner Cloud | `hetzner` |

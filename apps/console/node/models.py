@@ -1503,11 +1503,22 @@ class CoreOVHUS(_OVHRegionMixin, UtilCloud):
 
 
 class CoreAWS(UtilCloud):
+    class ResourceType(models.TextChoices):
+        INSTANCE = "instance", "EC2 Instance"
+        VOLUME = "volume", "EBS Volume"
+        S3 = "s3", "S3 Bucket"
+        DYNAMODB = "dynamodb", "DynamoDB Table"
+
     node = models.OneToOneField(
         "CoreNode", related_name="aws", on_delete=models.CASCADE
     )
     name = models.CharField(max_length=255)
     unique_id = models.CharField(max_length=255)
+    resource_type = models.CharField(
+        max_length=32,
+        choices=ResourceType.choices,
+        default=ResourceType.INSTANCE,
+    )
     no_reboot = models.BooleanField(default=True)
     notes = models.TextField(null=True, blank=True)
     metadata = models.JSONField(null=True)
@@ -1518,9 +1529,19 @@ class CoreAWS(UtilCloud):
     def validate(self):
         node_ok = False
         try:
-            client = self.node.connection.auth_aws.get_client()
+            auth = self.node.connection.auth_aws
 
-            if self.node.type == CoreNode.Type.CLOUD:
+            if self.resource_type == self.ResourceType.S3:
+                client = auth.get_client("s3")
+                client.head_bucket(Bucket=self.unique_id)
+                versioning = client.get_bucket_versioning(Bucket=self.unique_id)
+                node_ok = versioning.get("Status") == "Enabled"
+            elif self.resource_type == self.ResourceType.DYNAMODB:
+                client = auth.get_client("dynamodb")
+                table = client.describe_table(TableName=self.unique_id).get("Table") or {}
+                node_ok = table.get("TableStatus") in {"ACTIVE", "UPDATING"}
+            elif self.node.type == CoreNode.Type.CLOUD:
+                client = auth.get_client()
                 response = client.describe_instances(
                     InstanceIds=[self.unique_id],
                 )
@@ -1530,6 +1551,7 @@ class CoreAWS(UtilCloud):
                             "Name") == "stopped":
                         node_ok = True
             elif self.node.type == CoreNode.Type.VOLUME:
+                client = auth.get_client()
                 response = client.describe_volumes(
                     VolumeIds=[self.unique_id],
                 )
@@ -1544,7 +1566,51 @@ class CoreAWS(UtilCloud):
 
     def create_snapshot(self, backup):
         try:
-            client = self.node.connection.auth_aws.get_client()
+            auth = self.node.connection.auth_aws
+
+            if self.resource_type in {self.ResourceType.S3, self.ResourceType.DYNAMODB}:
+                from apps._tasks.integration.aws_backup import (
+                    idempotency_token,
+                    resource_arn,
+                    start_backup_job,
+                )
+
+                response = start_backup_job(
+                    auth,
+                    self.resource_type,
+                    self.unique_id,
+                    auth.backup_vault_name,
+                    idempotency_token("backup", backup.uuid_str),
+                    {"BackupSheepBackup": backup.uuid_str},
+                )
+                job_id = response.get("BackupJobId")
+                if not job_id:
+                    raise NodeBackupFailedError(
+                        self.node,
+                        backup.uuid_str,
+                        backup.attempt_no,
+                        backup.type,
+                        "AWS Backup did not return a BackupJobId.",
+                    )
+                metadata = dict(backup.metadata) if isinstance(backup.metadata, dict) else {}
+                aws_backup = dict(metadata.get("_aws_backup") or {})
+                aws_backup.update(
+                    {
+                        "job_id": job_id,
+                        "resource_type": self.resource_type,
+                        "resource_arn": resource_arn(
+                            auth, self.resource_type, self.unique_id
+                        ),
+                        "vault_name": auth.backup_vault_name or "Default",
+                    }
+                )
+                metadata["_aws_backup"] = aws_backup
+                backup.unique_id = job_id
+                backup.metadata = metadata
+                backup.save(update_fields=["unique_id", "metadata", "modified"])
+                return
+
+            client = auth.get_client()
 
             if self.node.type == CoreNode.Type.CLOUD:
                 try:
@@ -1632,8 +1698,138 @@ class CoreAWS(UtilCloud):
             )
 
     def restore_snapshot(self, backup, restore):
-        client = self.node.connection.auth_aws.get_client()
+        auth = self.node.connection.auth_aws
         params = restore.params or {}
+
+        if self.resource_type in {self.ResourceType.S3, self.ResourceType.DYNAMODB}:
+            from apps._tasks.integration.aws_backup import (
+                idempotency_token,
+                start_restore_job,
+            )
+
+            backup_metadata = backup.metadata if isinstance(backup.metadata, dict) else {}
+            aws_backup = backup_metadata.get("_aws_backup") or {}
+            recovery_point_arn = aws_backup.get("recovery_point_arn")
+            if not recovery_point_arn:
+                raise ValueError(
+                    "AWS Backup has not published a recovery point for this backup yet."
+                )
+
+            if self.resource_type == self.ResourceType.S3:
+                destination = str(params.get("destination_bucket_name") or "").strip()
+                if not destination:
+                    raise ValueError(
+                        "destination_bucket_name is required for an S3 restore."
+                    )
+                s3 = auth.get_client("s3")
+                s3.head_bucket(Bucket=destination)
+                if (
+                    s3.get_bucket_versioning(Bucket=destination).get("Status")
+                    != "Enabled"
+                ):
+                    raise ValueError(
+                        "The S3 restore destination must have versioning enabled."
+                    )
+                restore_metadata = {"DestinationBucketName": destination}
+                for key in (
+                    "EncryptionType",
+                    "KMSKey",
+                    "ItemsToRestore",
+                    "RestoreLatestVersionsUpTo",
+                    "RestoreTime",
+                ):
+                    if key in params and params[key] is not None:
+                        value = params[key]
+                        restore_metadata[key] = (
+                            json.dumps(value)
+                            if isinstance(value, (list, dict))
+                            else str(value)
+                        )
+                requested_restore_acls = params.get("RestoreACLs")
+                if str(requested_restore_acls).lower() in {"true", "1"}:
+                    try:
+                        ownership = s3.get_bucket_ownership_controls(
+                            Bucket=destination
+                        ).get("OwnershipControls") or {}
+                        ownership_enforced = any(
+                            rule.get("ObjectOwnership") == "BucketOwnerEnforced"
+                            for rule in ownership.get("Rules") or []
+                        )
+                    except ClientError as error:
+                        # A bucket without an OwnershipControls configuration
+                        # supports ACLs. If the caller cannot read this optional
+                        # setting, let AWS Backup make the final authorization
+                        # decision rather than requiring an extra permission.
+                        if error.response.get("Error", {}).get("Code") in {
+                            "OwnershipControlsNotFoundError",
+                            "NoSuchOwnershipControls",
+                            "AccessDenied",
+                            "AccessDeniedException",
+                        }:
+                            ownership_enforced = False
+                        else:
+                            raise
+                    if ownership_enforced:
+                        raise ValueError(
+                            "RestoreACLs=true requires an S3 destination with ACLs enabled."
+                        )
+                    restore_metadata["RestoreACLs"] = "true"
+                else:
+                    # AWS Backup otherwise attempts to restore ACLs by default,
+                    # which is rejected by common BucketOwnerEnforced buckets.
+                    # Preserve ACLs only when the caller explicitly opts in.
+                    restore_metadata["RestoreACLs"] = "false"
+                resource_id = destination
+            else:
+                import re
+
+                resource_id = str(
+                    params.get("target_table_name") or restore.name or ""
+                ).strip()
+                resource_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", resource_id)
+                if not 3 <= len(resource_id) <= 255:
+                    raise ValueError(
+                        "target_table_name must be between 3 and 255 characters."
+                    )
+                dynamodb = auth.get_client("dynamodb")
+                try:
+                    dynamodb.describe_table(TableName=resource_id)
+                except ClientError as error:
+                    if error.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
+                        raise
+                else:
+                    raise ValueError(
+                        f"DynamoDB restore target '{resource_id}' already exists. "
+                        "Choose a new table name."
+                    )
+                restore_metadata = {"TargetTableName": resource_id}
+                for key in ("EncryptionType", "KmsMasterKeyArn"):
+                    if key in params and params[key] is not None:
+                        restore_metadata[key] = str(params[key])
+
+            response = start_restore_job(
+                auth,
+                self.resource_type,
+                recovery_point_arn,
+                restore_metadata,
+                idempotency_token("restore", restore.id),
+            )
+            restore.provider_job_id = response.get("RestoreJobId")
+            if not restore.provider_job_id:
+                raise ValueError("AWS Backup did not return a RestoreJobId.")
+            restore.resource_id = resource_id
+            restore.params = dict(params, _aws_backup_restore_metadata=restore_metadata)
+            restore.save(
+                update_fields=[
+                    "provider_job_id",
+                    "resource_id",
+                    "params",
+                    "modified",
+                ]
+            )
+            return
+
+        client = auth.get_client()
 
         if self.node.type == CoreNode.Type.CLOUD:
             instance_type = params.get("instance_type")
@@ -1696,7 +1892,34 @@ class CoreAWS(UtilCloud):
     def check_restore(self, restore):
         from apps.console.backup.models import CoreCloudRestore
 
-        client = self.node.connection.auth_aws.get_client()
+        auth = self.node.connection.auth_aws
+
+        if self.resource_type in {self.ResourceType.S3, self.ResourceType.DYNAMODB}:
+            from apps._tasks.integration.aws_backup import describe_restore_job
+
+            if not restore.provider_job_id:
+                return CoreCloudRestore.Status.IN_PROGRESS
+            result = describe_restore_job(auth, restore.provider_job_id)
+            state = str(result.get("Status") or "").upper()
+            if state == "COMPLETED":
+                if self.resource_type == self.ResourceType.S3:
+                    auth.get_client("s3").head_bucket(Bucket=restore.resource_id)
+                else:
+                    table = auth.get_client("dynamodb").describe_table(
+                        TableName=restore.resource_id
+                    ).get("Table") or {}
+                    if table.get("TableStatus") != "ACTIVE":
+                        return CoreCloudRestore.Status.IN_PROGRESS
+                return CoreCloudRestore.Status.COMPLETE
+            if state in {"FAILED", "ABORTED", "EXPIRED"}:
+                restore.error = result.get("StatusMessage") or (
+                    f"AWS Backup restore job ended in {state}."
+                )
+                restore.save(update_fields=["error", "modified"])
+                return CoreCloudRestore.Status.FAILED
+            return CoreCloudRestore.Status.IN_PROGRESS
+
+        client = auth.get_client()
 
         if self.node.type == CoreNode.Type.CLOUD:
             response = client.describe_instances(
@@ -2163,11 +2386,20 @@ class CoreAWSRDS(UtilCloud):
             )
         except ClientError as error:
             code = error.response.get("Error", {}).get("Code")
-            if code != "DBSnapshotNotFoundFault":
+            if code not in {"DBSnapshotNotFoundFault", "DBSnapshotNotFound"}:
                 raise
             existing_snapshots = []
         if existing_snapshots:
-            existing = existing_snapshots[0]
+            # RDS includes datetime values in snapshot responses. Normalize
+            # the provider payload before persisting it in JSONField; this
+            # path is used when a worker retries after AWS accepted a snapshot
+            # request but the first response was not persisted.
+            from django.core.serializers.json import DjangoJSONEncoder
+            import json
+
+            existing = json.loads(
+                json.dumps(existing_snapshots[0], cls=DjangoJSONEncoder)
+            )
             backup.unique_id = existing.get("DBSnapshotIdentifier", backup.uuid_str)
             backup.size_gigabytes = existing.get("AllocatedStorage")
             backup.metadata = existing
@@ -2210,6 +2442,8 @@ class CoreAWSRDS(UtilCloud):
             request["MultiAZ"] = params["multi_az"]
         if params.get("publicly_accessible") is not None:
             request["PubliclyAccessible"] = params["publicly_accessible"]
+        if params.get("vpc_security_group_ids"):
+            request["VpcSecurityGroupIds"] = params["vpc_security_group_ids"]
         if params.get("storage_type"):
             request["StorageType"] = params["storage_type"]
 

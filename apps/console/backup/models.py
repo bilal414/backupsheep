@@ -1,3 +1,4 @@
+import json
 import subprocess
 import time
 
@@ -8,6 +9,7 @@ import paramiko
 import requests
 from botocore.exceptions import ClientError
 from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models, IntegrityError
 from django.db.models import UniqueConstraint
 from django.urls import reverse
@@ -3153,6 +3155,56 @@ class CoreAWSBackup(UtilBackup):
         Returns COMPLETE / IN_PROGRESS / FAILED; transient API errors return IN_PROGRESS."""
         from ..node.models import CoreNode
 
+        if self.aws.resource_type in {"s3", "dynamodb"}:
+            try:
+                from apps._tasks.integration.aws_backup import describe_backup_job
+
+                metadata = self.metadata if isinstance(self.metadata, dict) else {}
+                aws_backup = dict(metadata.get("_aws_backup") or {})
+                job_id = self.unique_id or aws_backup.get("job_id")
+                if not job_id:
+                    return UtilBackup.Status.IN_PROGRESS
+
+                result = describe_backup_job(
+                    self.aws.node.connection.auth_aws,
+                    job_id,
+                )
+                aws_backup.update(
+                    {
+                        "job_id": job_id,
+                        # boto3 returns datetime values in the provider
+                        # response; normalize before persisting to JSONField.
+                        "backup_job": json.loads(
+                            json.dumps(result, cls=DjangoJSONEncoder)
+                        ),
+                    }
+                )
+                recovery_point_arn = result.get("RecoveryPointArn")
+                if recovery_point_arn:
+                    aws_backup["recovery_point_arn"] = recovery_point_arn
+                backup_size = result.get("BackupSizeInBytes")
+                if backup_size is not None:
+                    self.size_gigabytes = float(backup_size) / 1000**3
+                metadata["_aws_backup"] = aws_backup
+                self.metadata = metadata
+
+                state = str(result.get("State") or "").upper()
+                if state in {"COMPLETED", "COMPLETE"}:
+                    self.status = UtilBackup.Status.COMPLETE
+                    self.save()
+                    return UtilBackup.Status.COMPLETE
+                # PARTIAL is a terminal provider result, not an in-progress
+                # state. AWS Backup may complete a job with a warning for some
+                # resource types, but a partial recovery point is not a fully
+                # verified BackupSheep backup.
+                if state in {"FAILED", "ABORTED", "EXPIRED", "PARTIAL"}:
+                    self.save(update_fields=["metadata", "size_gigabytes", "modified"])
+                    return UtilBackup.Status.FAILED
+                self.save(update_fields=["metadata", "size_gigabytes", "modified"])
+                return UtilBackup.Status.IN_PROGRESS
+            except Exception:
+                return UtilBackup.Status.IN_PROGRESS
+
         if CoreNode.Type.CLOUD == self.aws.node.type:
             try:
                 client = self.aws.node.connection.auth_aws.get_client()
@@ -3221,7 +3273,7 @@ class CoreAWSBackup(UtilBackup):
     def soft_delete(self):
         from ..node.models import CoreNode
 
-        client = self.aws.node.connection.auth_aws.get_client()
+        auth = self.aws.node.connection.auth_aws
 
         msg = (
             f"Backup {self.uuid_str} of node {self.aws.node.name} "
@@ -3229,7 +3281,22 @@ class CoreAWSBackup(UtilBackup):
         )
 
         try:
-            if CoreNode.Type.CLOUD == self.aws.node.type:
+            if self.aws.resource_type in {"s3", "dynamodb"}:
+                metadata = self.metadata if isinstance(self.metadata, dict) else {}
+                aws_backup = metadata.get("_aws_backup") or {}
+                recovery_point_arn = aws_backup.get("recovery_point_arn")
+                if not recovery_point_arn:
+                    raise ValueError(
+                        "AWS Backup recovery point is not available for deletion."
+                    )
+                auth.get_client("backup").delete_recovery_point(
+                    BackupVaultName=aws_backup.get("vault_name")
+                    or auth.backup_vault_name
+                    or "Default",
+                    RecoveryPointArn=recovery_point_arn,
+                )
+            elif CoreNode.Type.CLOUD == self.aws.node.type:
+                client = auth.get_client()
                 image_to_delete = client.describe_images(ImageIds=[self.unique_id])[
                     "Images"
                 ][0]
@@ -3243,6 +3310,7 @@ class CoreAWSBackup(UtilBackup):
                         continue
                     client.delete_snapshot(SnapshotId=snapshots_to_delete_id)
             elif CoreNode.Type.VOLUME == self.aws.node.type:
+                client = auth.get_client()
                 client.delete_snapshot(SnapshotId=self.unique_id)
 
             self.status = UtilBackup.Status.DELETE_COMPLETED
@@ -3453,7 +3521,14 @@ class CoreAWSRDSBackup(UtilBackup):
                 DBSnapshotIdentifier=str(self.unique_id or self.uuid_str),
             )
             if len(result["DBSnapshots"]) > 0:
-                snapshot = result["DBSnapshots"][0]
+                # RDS responses include datetime values. Normalize the
+                # provider payload before storing it in JSONField; otherwise
+                # the save raises a serialization error and the broad
+                # provider-error guard incorrectly leaves the backup polling
+                # forever in IN_PROGRESS.
+                snapshot = json.loads(
+                    json.dumps(result["DBSnapshots"][0], cls=DjangoJSONEncoder)
+                )
                 self.size_gigabytes = snapshot.get("AllocatedStorage")
                 self.metadata = snapshot
                 if snapshot["Status"] == "available":
@@ -3538,6 +3613,10 @@ class CoreCloudRestore(TimeStampedModel):
     name = models.CharField(max_length=255)
     params = models.JSONField(null=True, blank=True)
     resource_id = models.CharField(max_length=255, null=True, blank=True)
+    # AWS Backup restores are asynchronous.  Keep the provider job id separate
+    # from resource_id so a worker restart can resume polling without starting a
+    # second restore request.
+    provider_job_id = models.CharField(max_length=255, null=True, blank=True)
     status = models.IntegerField(choices=Status.choices, default=Status.PENDING)
     error = models.TextField(null=True, blank=True)
     celery_task_id = models.CharField(max_length=255, null=True, blank=True)

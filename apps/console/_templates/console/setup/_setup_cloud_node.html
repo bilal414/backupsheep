@@ -15,6 +15,18 @@
                     <span x-bind:class="object_type === 'volume' ? 'bg-indigo-500' : 'bg-transparent'" aria-hidden="true" class="absolute inset-x-0 bottom-0 h-0.5"></span>
                 </a>
             {% endif %}
+            {% if integration.code == "aws" %}
+                <a x-bind:class="object_type === 's3' ? 'text-gray-700' : 'text-gray-700 hover:text-gray-700'" href="{% url 'console:setup:integration_create_node' integration.code connection.id 's3' %}"
+                   class="group relative min-w-0 flex-1 overflow-hidden bg-white py-4 px-4 text-sm font-medium text-center hover:bg-gray-50 focus:z-10">
+                    <span>S3 Buckets</span>
+                    <span x-bind:class="object_type === 's3' ? 'bg-indigo-500' : 'bg-transparent'" aria-hidden="true" class="absolute inset-x-0 bottom-0 h-0.5"></span>
+                </a>
+                <a x-bind:class="object_type === 'dynamodb' ? 'text-gray-700' : 'text-gray-700 hover:text-gray-700'" href="{% url 'console:setup:integration_create_node' integration.code connection.id 'dynamodb' %}"
+                   class="rounded-r-lg group relative min-w-0 flex-1 overflow-hidden bg-white py-4 px-4 text-sm font-medium text-center hover:bg-gray-50 focus:z-10">
+                    <span>DynamoDB Tables</span>
+                    <span x-bind:class="object_type === 'dynamodb' ? 'bg-indigo-500' : 'bg-transparent'" aria-hidden="true" class="absolute inset-x-0 bottom-0 h-0.5"></span>
+                </a>
+            {% endif %}
         </nav>
     </div>
     <div class="flex flex-col mt-4">
@@ -117,6 +129,9 @@
                                                     <svg x-show="object_type==='volume'" xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 rounded-full text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                                               d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+                                                    </svg>
+                                                    <svg x-show="object_type==='s3' || object_type==='dynamodb'" xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 rounded-full text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h16M4 12h16M4 17h16"></path>
                                                     </svg>
                                                 </div>
                                                 <div class="ml-4">
@@ -223,7 +238,9 @@
 
             async linkObject(object) {
                 Alpine.store('showLoading').toggle();
-                let url = "/api/v1/{{object_code}}s/" + this.integration_code + "/";
+                let endpointObjectCode = (this.integration_code === "aws" &&
+                    (this.object_type === "s3" || this.object_type === "dynamodb")) ? "cloud" : "{{object_code}}";
+                let url = "/api/v1/" + endpointObjectCode + "s/" + this.integration_code + "/";
 
                 let project_id = null;
                 let zone = null;
@@ -250,6 +267,7 @@
                     location: this.location_id,
                     name: object._bs_name,
                     unique_id: object._bs_unique_id,
+                    resource_type: object._bs_resource_type || this.object_type,
                     project_id: project_id,
                     zone: zone,
                     metadata: object

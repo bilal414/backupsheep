@@ -14,7 +14,7 @@
         {% include "console/setup/_setup_wordpress_node.html" %}
     {% elif integration_code == "database" %}
         {% include "console/setup/_setup_database_node.html" %}
-    {% elif object_code == "cloud" or object_code == "volume" %}
+    {% elif object_code == "cloud" or object_code == "volume" or object_code == "s3" or object_code == "dynamodb" %}
         {% include "console/setup/_setup_cloud_node.html" %}
     {% endif %}
 {% endblock %}

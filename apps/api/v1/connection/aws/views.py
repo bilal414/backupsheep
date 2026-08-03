@@ -98,11 +98,20 @@ class CoreAWSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     def objects(self, request, pk=None):
         try:
             connection = self.get_object()
-            object_type = self.request.query_params.get("object_type")
+            object_type = self.request.query_params.get("object_type") or "cloud"
             eligible_objects = connection.auth_aws.get_eligible_objects(
                 object_type=object_type
             )
-            if object_type == "cloud" or object_type is None:
+            if object_type in {"s3", "dynamodb"}:
+                for eligible_object in eligible_objects:
+                    unique_id = eligible_object.get("_bs_unique_id")
+                    if unique_id and CoreAWS.objects.filter(
+                        unique_id=unique_id,
+                        resource_type=object_type,
+                        node__connection=connection,
+                    ).exclude(node__status=CoreNode.Status.DELETE_REQUESTED).exists():
+                        eligible_object["_bs_attached"] = True
+            elif object_type == "cloud" or object_type is None:
                 for eligible_object in eligible_objects:
                     query = Q(
                         unique_id=eligible_object["InstanceId"],

@@ -35,6 +35,8 @@ class CoreAuthAWSReadSerializer(serializers.ModelSerializer):
             "region",
             "access_key",
             "secret_key",
+            "backup_vault_name",
+            "backup_role_arn",
         )
         datatables_always_serialize = (
             "id",
@@ -121,13 +123,16 @@ class CoreAuthAWSWriteSerializer(serializers.ModelSerializer):
             secret_key = data["secret_key"]
 
             client = boto3.client(
-                "ec2",
+                "sts",
                 region_name=region.code,
                 aws_access_key_id=access_key,
                 aws_secret_access_key=secret_key,
             )
 
-            client.describe_instances()
+            # The same AWS connection can be restricted to S3/DynamoDB and
+            # need not have EC2 list permission. STS validates the credentials
+            # without coupling connection setup to one source type.
+            client.get_caller_identity()
             data["access_key"] = bs_encrypt(access_key, self.context["encryption_key"])
             data["secret_key"] = bs_encrypt(secret_key, self.context["encryption_key"])
         except Exception as e:

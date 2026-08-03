@@ -815,6 +815,34 @@
                             </div>
                         </div>
 
+                        <div class="sm:col-span-6" x-show="integrationCode === 'aws'">
+                            <label for="backup_vault_name" class="block text-sm font-medium text-gray-700">
+                                AWS Backup Vault
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.backup_vault_name" type="text" name="backup_vault_name" id="backup_vault_name"
+                                       placeholder="Default" autocomplete="off"
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p class="mt-1 text-xs text-gray-500">Used for S3 and DynamoDB AWS Backup jobs.</p>
+                                <p x-show="connectionErrors.auth?.backup_vault_name" class="mt-2 text-sm text-red-600"
+                                   x-text="connectionErrors.auth?.backup_vault_name"></p>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-6" x-show="integrationCode === 'aws'">
+                            <label for="backup_role_arn" class="block text-sm font-medium text-gray-700">
+                                AWS Backup IAM Role ARN (optional)
+                            </label>
+                            <div class="mt-1">
+                                <input x-model="selectedAuth.backup_role_arn" type="text" name="backup_role_arn" id="backup_role_arn"
+                                       placeholder="Uses AWSBackupDefaultServiceRole when empty" autocomplete="off"
+                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
+                                <p class="mt-1 text-xs text-gray-500">The role needs AWS Backup and, for S3, the S3 backup/restore managed policies.</p>
+                                <p x-show="connectionErrors.auth?.backup_role_arn" class="mt-2 text-sm text-red-600"
+                                   x-text="connectionErrors.auth?.backup_role_arn"></p>
+                            </div>
+                        </div>
+
                         <div class="sm:col-span-6" x-show="integrationCode === 'upcloud'">
                             <label for="username" class="block text-sm font-medium text-gray-700">
                                 API User Name

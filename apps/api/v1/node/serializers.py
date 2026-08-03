@@ -238,7 +238,14 @@ class CoreCloudRestoreSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreCloudRestore
         fields = "__all__"
-        read_only_fields = ("node", "resource_id", "status", "error", "celery_task_id")
+        read_only_fields = (
+            "node",
+            "resource_id",
+            "provider_job_id",
+            "status",
+            "error",
+            "celery_task_id",
+        )
         datatables_always_serialize = ("id",)
 
     @staticmethod

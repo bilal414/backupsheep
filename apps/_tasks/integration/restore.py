@@ -34,6 +34,35 @@ def restore_cloud_backup(self, node_id=None, backup_id=None, restore_id=None):
     restore = CoreCloudRestore.objects.get(id=restore_id, node=node)
     backup = node.get_cloud_backup(backup_id)
 
+    # AWS Backup returns a durable restore-job id before the target resource is
+    # ready.  A late-ack redelivery or recovery after a worker crash must resume
+    # polling that job instead of issuing a second restore request.
+    if restore.provider_job_id:
+        if restore.status not in (
+            CoreCloudRestore.Status.COMPLETE,
+            CoreCloudRestore.Status.FAILED,
+        ):
+            restore.status = CoreCloudRestore.Status.IN_PROGRESS
+            restore.celery_task_id = self.request.id
+            restore.save(update_fields=["status", "celery_task_id", "modified"])
+            poll_cloud_restore.apply_async(args=[node.id, restore.id], countdown=60)
+        return
+
+    # Native restores (for example RDS) persist the target resource id rather
+    # than a provider job id.  If the worker dies after the provider accepts the
+    # request but after the target id is committed, a redelivery must resume
+    # status polling instead of issuing a second restore request.
+    if restore.resource_id and node.connection.integration.code == "aws_rds":
+        if restore.status not in (
+            CoreCloudRestore.Status.COMPLETE,
+            CoreCloudRestore.Status.FAILED,
+        ):
+            restore.status = CoreCloudRestore.Status.IN_PROGRESS
+            restore.celery_task_id = self.request.id
+            restore.save(update_fields=["status", "celery_task_id", "modified"])
+            poll_cloud_restore.apply_async(args=[node.id, restore.id], countdown=60)
+        return
+
     restore.status = CoreCloudRestore.Status.IN_PROGRESS
     restore.celery_task_id = self.request.id
     restore.save()

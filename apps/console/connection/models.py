@@ -7,6 +7,7 @@ import requests
 from botocore.exceptions import ClientError
 from django.conf import settings
 from django.core.cache import cache
+from django.core.validators import RegexValidator
 from django.db import models
 import time
 
@@ -454,16 +455,30 @@ class CoreAuthAWS(TimeStampedModel):
     access_key = models.BinaryField(null=True)
     secret_key = models.BinaryField(null=True)
     region = models.ForeignKey(CoreAWSRegion, related_name="auth_aws", on_delete=models.PROTECT)
+    # AWS Backup is used for resource types that do not have a simple snapshot
+    # API (currently S3 and DynamoDB).  Keep these as connection-level settings
+    # so every linked resource uses the same vault and least-privilege role.
+    backup_vault_name = models.CharField(
+        max_length=255,
+        default="Default",
+        validators=[
+            RegexValidator(
+                regex=r"^[A-Za-z0-9_-]{2,50}$",
+                message="AWS Backup vault names must be 2-50 letters, numbers, hyphens, or underscores.",
+            )
+        ],
+    )
+    backup_role_arn = models.CharField(max_length=2048, blank=True, default="")
     encryption_updated = models.BooleanField(default=False)
 
     class Meta:
         db_table = "core_auth_aws"
 
-    def get_client(self):
+    def get_client(self, service_name="ec2"):
         encryption_key = self.connection.account.get_encryption_key()
 
         client = boto3.client(
-            "ec2",
+            service_name,
             region_name=self.region.code,
             aws_access_key_id=bs_decrypt(self.access_key, encryption_key),
             aws_secret_access_key=bs_decrypt(self.secret_key, encryption_key),
@@ -472,7 +487,10 @@ class CoreAuthAWS(TimeStampedModel):
 
     def get_eligible_objects(self, object_type="cloud"):
         eligible_objects = []
-        client = self.get_client()
+        client = self.get_client(
+            "s3" if object_type == "s3" else
+            "dynamodb" if object_type == "dynamodb" else "ec2"
+        )
         if object_type == "cloud":
             reservations = client.describe_instances().get("Reservations")
             instances = [i for r in reservations for i in r["Instances"]]
@@ -483,6 +501,7 @@ class CoreAuthAWS(TimeStampedModel):
                 aws_instance["_bs_size"] = aws_instance.get("size_gigabytes", None)
                 if not aws_instance["_bs_name"]:
                     aws_instance["_bs_name"] = aws_instance.get("InstanceId", None)
+                aws_instance["_bs_resource_type"] = "instance"
                 eligible_objects.append(aws_instance)
         elif object_type == "volume":
             volumes = client.describe_volumes().get("Volumes")
@@ -491,13 +510,64 @@ class CoreAuthAWS(TimeStampedModel):
                 aws_volume["_bs_name"] = aws_volume.get("VolumeId", None)
                 aws_volume["_bs_region"] = aws_volume.get("AvailabilityZone", None)
                 aws_volume["_bs_size"] = aws_volume.get("Size", None)
+                aws_volume["_bs_resource_type"] = "volume"
                 eligible_objects.append(aws_volume)
+        elif object_type == "s3":
+            s3 = client
+            buckets = s3.list_buckets().get("Buckets") or []
+            for bucket in buckets:
+                bucket_name = bucket.get("Name")
+                if not bucket_name:
+                    continue
+                try:
+                    location = s3.get_bucket_location(Bucket=bucket_name).get(
+                        "LocationConstraint"
+                    )
+                    # AWS returns null for us-east-1 and the legacy EU token for
+                    # eu-west-1. Normalize both to the SDK region spelling.
+                    region = "us-east-1" if not location else location
+                    if region == "EU":
+                        region = "eu-west-1"
+                except Exception:
+                    # A bucket in another account or with a restrictive policy
+                    # should not prevent the remaining catalog from loading.
+                    continue
+                if region != self.region.code:
+                    continue
+                bucket["_bs_unique_id"] = bucket_name
+                bucket["_bs_name"] = bucket_name
+                bucket["_bs_region"] = region
+                bucket["_bs_size"] = None
+                bucket["_bs_resource_type"] = "s3"
+                eligible_objects.append(bucket)
+        elif object_type == "dynamodb":
+            dynamodb = client
+            paginator = dynamodb.get_paginator("list_tables")
+            for page in paginator.paginate():
+                for table_name in page.get("TableNames") or []:
+                    try:
+                        table = dynamodb.describe_table(TableName=table_name).get(
+                            "Table"
+                        ) or {}
+                    except Exception:
+                        continue
+                    table["_bs_unique_id"] = table_name
+                    table["_bs_name"] = table_name
+                    table["_bs_region"] = self.region.code
+                    table["_bs_size"] = (
+                        (table.get("TableSizeBytes") or 0) / 1000**3
+                    )
+                    table["_bs_resource_type"] = "dynamodb"
+                    eligible_objects.append(table)
         return eligible_objects
 
     def validate(self, check_errors=None, raise_exp=None):
         try:
-            client = self.get_client()
-            client.describe_instances()
+            # Validate the credentials themselves, not a single optional
+            # service. An AWS connection may be used only for S3/DynamoDB and
+            # therefore legitimately lack EC2 list permission; each selected
+            # resource is validated by CoreAWS.validate.
+            self.get_client("sts").get_caller_identity()
             return True
         except ClientError as e:
             return False
