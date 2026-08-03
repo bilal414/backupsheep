@@ -25,10 +25,11 @@ def restore_cloud_backup(self, node_id=None, backup_id=None, restore_id=None):
     """Initiate a restore of a completed cloud/volume snapshot.
 
     Delegates the provider API call to the node's restore_snapshot(), which must
-    set restore.resource_id on success (or raise). No automatic retries: if the
-    provider accepted the request but the response was lost, retrying could create
-    duplicate resources, so a failure simply marks the restore FAILED and the user
-    can request a new one.
+    set restore.resource_id on success (or raise). Provider adapters persist a
+    durable target/job pointer or recover one by an exact provider-side marker;
+    redeliveries with that pointer resume polling instead of issuing a duplicate
+    create request. A provider failure without a durable pointer marks the
+    restore FAILED.
     """
     node = CoreNode.objects.get(id=node_id)
     restore = CoreCloudRestore.objects.get(id=restore_id, node=node)
@@ -48,11 +49,15 @@ def restore_cloud_backup(self, node_id=None, backup_id=None, restore_id=None):
             poll_cloud_restore.apply_async(args=[node.id, restore.id], countdown=60)
         return
 
-    # Native restores (for example RDS) persist the target resource id rather
-    # than a provider job id.  If the worker dies after the provider accepts the
-    # request but after the target id is committed, a redelivery must resume
-    # status polling instead of issuing a second restore request.
-    if restore.resource_id and node.connection.integration.code == "aws_rds":
+    # Native restores persist the target resource id rather than a provider job
+    # id. If the worker dies after the provider accepts the request but after the
+    # target id is committed, a redelivery must resume status polling instead of
+    # issuing a second restore request. Hetzner, DigitalOcean, Vultr, Lightsail,
+    # AWS EC2, and the other cloud adapters all use this durable target pointer.
+    if restore.resource_id and (
+        node.connection.integration.code == "aws_rds"
+        or node.type in (CoreNode.Type.CLOUD, CoreNode.Type.VOLUME)
+    ):
         if restore.status not in (
             CoreCloudRestore.Status.COMPLETE,
             CoreCloudRestore.Status.FAILED,

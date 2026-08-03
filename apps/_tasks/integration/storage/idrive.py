@@ -21,15 +21,12 @@ def storage_idrive(stored_backup):
             aws_secret_access_key=bs_decrypt(storage.storage_idrive.secret_key, encryption_key),
         )
 
-        # Allow a full URL (e.g. http://minio:9000) for S3-compatible/self-hosted
-        # endpoints; bare hostnames keep the original https:// default.
-        endpoint = storage.storage_idrive.endpoint
         config = Config(
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
         )
         s3 = session.resource(
-            "s3", endpoint_url=endpoint if "://" in endpoint else f"https://{endpoint}",
+            "s3", endpoint_url=storage.storage_idrive.endpoint_url,
             config=config,
         )
 

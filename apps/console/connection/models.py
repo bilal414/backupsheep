@@ -337,6 +337,8 @@ class CoreAuthDigitalOcean(TimeStampedModel):
 
 
 class CoreAuthHetzner(TimeStampedModel):
+    API_PAGE_SIZE = 50
+
     connection = models.OneToOneField("CoreConnection", related_name="auth_hetzner", on_delete=models.CASCADE)
     api_key = models.BinaryField(null=True)
     token_refresh_failed = models.BooleanField(default=False)
@@ -354,30 +356,60 @@ class CoreAuthHetzner(TimeStampedModel):
         }
         return client
 
-    # Todo: deal with more than 50 items later
     def get_eligible_objects(self, object_type="cloud"):
-        eligible_objects = []
-        client = self.get_client()
-        payload = {"per_page": 50}
+        """List the Hetzner resources that BackupSheep can link as sources.
 
-        if object_type == "cloud":
+        Hetzner Cloud only offers native backups for a server's primary disk.
+        Volumes are intentionally rejected instead of being presented as a
+        backupable resource: the provider documents that it has no native volume
+        backup/snapshot API and server snapshots do not include attached volumes.
+        """
+        object_type = object_type or "cloud"
+        if object_type != "cloud":
+            raise APIException(
+                detail=(
+                    "Hetzner Cloud native backups are available for server primary "
+                    "disks only; attached volumes do not support provider snapshots."
+                )
+            )
+
+        client = self.get_client()
+        eligible_objects = []
+        page = 1
+        while True:
             result = requests.get(
                 settings.HETZNER_API + "/v1/servers",
                 headers=client,
-                params=payload,
+                params={"page": page, "per_page": self.API_PAGE_SIZE},
                 verify=True,
             )
             if result.status_code == 200:
-                servers = result.json()["servers"]
+                payload = result.json()
+                servers = payload.get("servers") or []
                 for server in servers:
                     server["_bs_unique_id"] = server.get("id", None)
                     server["_bs_name"] = server.get("name", None)
-                    server["_bs_region"] = server.get("location", {}).get("description", None)
+                    server["_bs_region"] = (
+                        server.get("location", {}).get("description")
+                        or server.get("location", {}).get("name")
+                    )
                     server["_bs_size"] = server.get("primary_disk_size", None)
+                    server["_bs_resource_type"] = "server"
                     eligible_objects.append(server)
             else:
-                raise APIException(detail=result.json()["error"]["message"])
+                try:
+                    detail = result.json().get("error", {}).get("message")
+                except Exception:
+                    detail = None
+                raise APIException(
+                    detail=detail or f"Hetzner API returned status {result.status_code}."
+                )
             result.close()
+            pagination = (payload.get("meta") or {}).get("pagination") or {}
+            next_page = pagination.get("next_page")
+            if not next_page:
+                break
+            page = next_page
         return eligible_objects
 
     def validate(self, check_errors=None, raise_exp=None):

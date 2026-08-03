@@ -1963,6 +1963,16 @@ class CoreStorageIDrive(TimeStampedModel):
     class Meta:
         db_table = "core_storage_idrive"
 
+    @staticmethod
+    def build_endpoint_url(endpoint):
+        """Normalize a bare S3-compatible host or an explicit URL once."""
+        endpoint = (endpoint or "").strip().rstrip("/")
+        return endpoint if "://" in endpoint else f"https://{endpoint}"
+
+    @property
+    def endpoint_url(self):
+        return self.build_endpoint_url(self.endpoint)
+
     def validate(self, data=None, raise_exp=None):
 
         import boto3
@@ -1989,7 +1999,7 @@ class CoreStorageIDrive(TimeStampedModel):
         # endpoints; bare hostnames keep the original https:// default.
         s3_client = boto3.client(
             "s3", aws_access_key_id=access_key, aws_secret_access_key=secret_key,
-            endpoint_url=endpoint if "://" in endpoint else f"https://{endpoint}",
+            endpoint_url=self.build_endpoint_url(endpoint),
             config=Config(
                 signature_version='s3v4',
                 request_checksum_calculation="when_required",

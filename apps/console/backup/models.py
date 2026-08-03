@@ -380,6 +380,7 @@ class CoreHetznerBackup(UtilBackup):
         """Single snapshot status check (no blocking loop); used by poll_cloud_backup.
         Returns COMPLETE / IN_PROGRESS / FAILED; transient API errors return IN_PROGRESS."""
         from ..node.models import CoreNode
+        from ..node.models import CoreHetzner
 
         if CoreNode.Type.CLOUD == self.hetzner.node.type:
             try:
@@ -406,7 +407,11 @@ class CoreHetznerBackup(UtilBackup):
                         verify=True,
                     )
                     if result.status_code == 200:
-                        image = result.json().get("image", {})
+                        image = result.json().get("image") or {}
+                        if image.get("type") and image.get("type") != "snapshot":
+                            return UtilBackup.Status.FAILED
+                        if image.get("description") and image.get("description") != self.uuid_str:
+                            return UtilBackup.Status.FAILED
                         if image.get("status") == "error":
                             return UtilBackup.Status.FAILED
                         if image.get("status") == "available":
@@ -419,30 +424,23 @@ class CoreHetznerBackup(UtilBackup):
 
                 # Recover an image when the create response was received but neither
                 # the action nor image id made it into the database.
-                result = requests.get(
-                    f"{settings.HETZNER_API}/v1/images",
-                    params={"type": "snapshot", "per_page": 50},
-                    headers=client,
-                    verify=True,
-                )
-                if result.status_code == 200:
-                    image = next(
-                        (
-                            item
-                            for item in result.json().get("images", [])
-                            if item.get("description") == self.uuid_str
-                        ),
-                        None,
-                    )
-                    if image:
-                        self.unique_id = image.get("id")
-                        self.size_gigabytes = image.get("disk_size")
-                        self.metadata = image
-                        if image.get("status") == "available":
-                            self.status = UtilBackup.Status.COMPLETE
-                            self.save()
-                            return UtilBackup.Status.COMPLETE
-                        self.save(update_fields=["unique_id", "size_gigabytes", "metadata", "modified"])
+                # The create response can be lost before either provider id is
+                # persisted. Search every image page by the exact BackupSheep
+                # description before allowing a retry to create another snapshot.
+                image = CoreHetzner._find_snapshot_by_description(client, self.uuid_str)
+                if image:
+                    self.unique_id = image.get("id")
+                    self.size_gigabytes = image.get("disk_size")
+                    self.metadata = image
+                    if image.get("status") == "error":
+                        self.status = UtilBackup.Status.FAILED
+                        self.save()
+                        return UtilBackup.Status.FAILED
+                    if image.get("status") == "available":
+                        self.status = UtilBackup.Status.COMPLETE
+                        self.save()
+                        return UtilBackup.Status.COMPLETE
+                    self.save(update_fields=["unique_id", "size_gigabytes", "metadata", "modified"])
                 return UtilBackup.Status.IN_PROGRESS
             except Exception as e:
                 return UtilBackup.Status.IN_PROGRESS
@@ -458,6 +456,7 @@ class CoreHetznerBackup(UtilBackup):
 
     def soft_delete(self):
         from ..node.models import CoreNode
+        from ..node.models import CoreHetzner
 
         client = self.hetzner.node.connection.auth_hetzner.get_client()
 
@@ -468,52 +467,60 @@ class CoreHetznerBackup(UtilBackup):
 
         try:
             if CoreNode.Type.CLOUD == self.hetzner.node.type:
-                """
-                If unique ID is not available then find image using name.
-                """
-                if not self.unique_id:
-                    next_page = 1
-                    while next_page is not None:
-                        data = {
-                            "page": next_page,
-                            "per_page": 50,
-                            "type": "snapshot",
-                            "status": "available",
-                        }
-                        result = requests.get(
-                            f"{settings.HETZNER_API}/v1/images/",
-                            headers=client,
-                            params=data,
-                            verify=True,
-                        )
-                        if result.status_code == 200:
-                            next_page = result.json()["meta"]["pagination"]["next_page"]
-                            images = result.json()["images"]
-                            image_found = next(
-                                (
-                                    item
-                                    for item in images
-                                    if item.get("description") == self.uuid_str
-                                ),
-                                None,
+                image = None
+                if self.unique_id:
+                    result = requests.get(
+                        f"{settings.HETZNER_API}/v1/images/{self.unique_id}",
+                        headers=client,
+                        verify=True,
+                    )
+                    if result.status_code == 200:
+                        image = result.json().get("image") or {}
+                        if not image.get("id"):
+                            image = None
+                        # A persisted provider id is not sufficient authority to
+                        # delete: verify this is still the exact Snapshot owned by
+                        # this BackupSheep row before issuing DELETE.
+                        if image is not None and (
+                            image.get("type") != "snapshot"
+                            or image.get("description") != self.uuid_str
+                        ):
+                            raise ValueError(
+                                "Refusing to delete a Hetzner image that is not owned by this backup."
                             )
-                            if image_found:
-                                self.unique_id = image_found["id"]
-                                self.save()
-                                next_page = None
-                        else:
-                            raise ValueError("Invalid response from Hetzner APIs")
+                    elif result.status_code != 404:
+                        raise ValueError(
+                            f"Unable to verify Hetzner snapshot ownership (status {result.status_code})."
+                        )
 
+                if image is None:
+                    image = CoreHetzner._find_snapshot_by_description(client, self.uuid_str)
+
+                if not image:
+                    self.status = UtilBackup.Status.DELETE_FAILED_NOT_FOUND
+                    self.save()
+                    msg = (
+                        f"Backup {self.uuid_str} was already absent from Hetzner using "
+                        f"connection {self.hetzner.node.connection.name}"
+                    )
+                    return
+
+                self.unique_id = str(image["id"])
+                self.save(update_fields=["unique_id", "modified"])
                 result = requests.delete(
                     f"{settings.HETZNER_API}/v1/images/{self.unique_id}",
                     headers=client,
                     verify=True,
                 )
-                if not (result.status_code == 204 or result.status_code == 200):
+                if result.status_code not in (204, 200, 404):
+                    try:
+                        detail = result.json().get("error", {}).get("message")
+                    except Exception:
+                        detail = None
                     raise NodeSnapshotDeleteFailed(
                         self.hetzner.node,
                         self.uuid_str,
-                        message=result.json().get("error").get("message"),
+                        message=detail or f"Hetzner API returned status {result.status_code}",
                     )
             self.status = UtilBackup.Status.DELETE_COMPLETED
             self.save()
@@ -2067,7 +2074,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
         elif self.storage.type.code == "idrive":
             s3_client = boto3.client(
                 "s3",
-                endpoint_url=f"https://{self.storage.storage_idrive.endpoint}",
+                endpoint_url=self.storage.storage_idrive.endpoint_url,
                 aws_access_key_id=bs_decrypt(self.storage.storage_idrive.access_key, encryption_key),
                 aws_secret_access_key=bs_decrypt(
                     self.storage.storage_idrive.secret_key, encryption_key
@@ -2471,7 +2478,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 elif self.storage.type.code == "idrive":
                     s3_client = boto3.client(
                         "s3",
-                        endpoint_url=f"https://{self.storage.storage_idrive.endpoint}",
+                        endpoint_url=self.storage.storage_idrive.endpoint_url,
                         aws_access_key_id=bs_decrypt(self.storage.storage_idrive.access_key, encryption_key),
                         aws_secret_access_key=bs_decrypt(self.storage.storage_idrive.secret_key, encryption_key),
                         config=Config(signature_version='s3v4')

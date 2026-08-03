@@ -350,6 +350,12 @@ class CoreDigitalOcean(UtilCloud):
 
 
 class CoreHetzner(UtilCloud):
+    # This is deliberately a BackupSheep-owned label.  It lets a retry recover a
+    # server that Hetzner created when the HTTP response was lost before Django
+    # persisted ``restore.resource_id``.  The prefix is not reserved by Hetzner.
+    RESTORE_LABEL_KEY = "backupsheep.restore"
+    API_PAGE_SIZE = 50
+
     node = models.OneToOneField(
         "CoreNode", related_name="hetzner", on_delete=models.CASCADE
     )
@@ -360,6 +366,78 @@ class CoreHetzner(UtilCloud):
 
     class Meta:
         db_table = "core_hetzner"
+
+    @classmethod
+    def _next_page(cls, payload):
+        pagination = (payload.get("meta") or {}).get("pagination") or {}
+        return pagination.get("next_page")
+
+    @classmethod
+    def _list_resources(cls, client, path, resource_key, params=None):
+        """Return all pages for a Hetzner collection endpoint.
+
+        Hetzner's Cloud API caps ``per_page`` at 50.  The old integration only
+        inspected the first page, which could miss a matching snapshot and either
+        surface incomplete inventory or create a duplicate backup.
+        """
+        items = []
+        page = 1
+        request_params = dict(params or {})
+        while True:
+            request_params.update({"page": page, "per_page": cls.API_PAGE_SIZE})
+            response = requests.get(
+                f"{settings.HETZNER_API}/v1/{path}",
+                params=request_params,
+                headers=client,
+                verify=True,
+            )
+            if response.status_code != 200:
+                try:
+                    error = response.json().get("error") or {}
+                    detail = error.get("message") or f"API status code was: {response.status_code}"
+                except Exception:
+                    detail = f"API status code was: {response.status_code}"
+                raise ValueError(detail)
+            payload = response.json()
+            items.extend(payload.get(resource_key) or [])
+            next_page = cls._next_page(payload)
+            if not next_page:
+                return items
+            page = next_page
+
+    @classmethod
+    def _find_snapshot_by_description(cls, client, description):
+        matches = [
+            image
+            for image in cls._list_resources(
+                client,
+                "images",
+                "images",
+                {"type": "snapshot"},
+            )
+            if image.get("description") == description
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                f"Hetzner returned multiple snapshots for BackupSheep backup {description}; "
+                "refusing to guess which resource to use."
+            )
+        return matches[0] if matches else None
+
+    @classmethod
+    def _find_restore_server(cls, client, restore_id):
+        servers = cls._list_resources(
+            client,
+            "servers",
+            "servers",
+            {"label_selector": f"{cls.RESTORE_LABEL_KEY}={restore_id}"},
+        )
+        if len(servers) > 1:
+            raise ValueError(
+                f"Hetzner returned multiple servers for BackupSheep restore {restore_id}; "
+                "refusing to guess which resource to adopt."
+            )
+        return servers[0] if servers else None
 
     def validate(self):
         node_ok = False
@@ -373,7 +451,10 @@ class CoreHetzner(UtilCloud):
             r_json = result.json()
             if r_json.get("server"):
                 server = r_json.get("server")
-                if server.get("status") == "running" and not server.get("locked"):
+                # Snapshots can be taken from a powered-on or powered-off server.
+                # A validation check must reject transitional/locked servers, but
+                # should not make a valid powered-off source impossible to back up.
+                if server.get("status") in {"running", "off"} and not server.get("locked"):
                     node_ok = True
         return node_ok
 
@@ -383,39 +464,9 @@ class CoreHetzner(UtilCloud):
 
             if self.node.type == CoreNode.Type.CLOUD:
                 # create_image is not idempotent at the HTTP layer. Recover an image
-                # returned before the worker persisted its ids by its description.
-                page = 1
-                existing = None
-                while True:
-                    response = requests.get(
-                        f"{settings.HETZNER_API}/v1/images",
-                        params={"type": "snapshot", "page": page, "per_page": 50},
-                        headers=client,
-                        verify=True,
-                    )
-                    if response.status_code != 200:
-                        raise NodeBackupFailedError(
-                            self.node,
-                            backup.uuid_str,
-                            backup.attempt_no,
-                            backup.type,
-                            "Unable to verify existing Hetzner images before creating a new one.",
-                        )
-                    payload = response.json()
-                    existing = next(
-                        (
-                            image
-                            for image in payload.get("images", [])
-                            if image.get("description") == backup.uuid_str
-                        ),
-                        None,
-                    )
-                    if existing:
-                        break
-                    next_page = payload.get("meta", {}).get("pagination", {}).get("next_page")
-                    if not next_page:
-                        break
-                    page = next_page
+                # returned before the worker persisted its ids by its exact immutable
+                # BackupSheep UUID description before sending another request.
+                existing = self._find_snapshot_by_description(client, backup.uuid_str)
                 if existing:
                     backup.unique_id = existing.get("id")
                     backup.size_gigabytes = existing.get("disk_size")
@@ -431,18 +482,30 @@ class CoreHetzner(UtilCloud):
                     verify=True,
                 )
                 if result.status_code == 201:
-                    image = result.json()["image"]
-                    action = result.json()["action"]
-                    if action["status"] == "running":
-                        backup.action_id = action["id"]
-                        backup.unique_id = image["id"]
-                        backup.metadata = result.json()
-                        backup.save()
-                    else:
+                    payload = result.json()
+                    image = payload.get("image") or {}
+                    action = payload.get("action") or {}
+                    if action.get("status") == "error":
                         raise NodeBackupFailedError(
                             self.node,
-                            backup.uuid_str, backup.attempt_no, backup.type, f"Status code was: {action['status']}",
+                            backup.uuid_str,
+                            backup.attempt_no,
+                            backup.type,
+                            "Hetzner reported an error while creating the snapshot.",
                         )
+                    if not image.get("id"):
+                        raise NodeBackupFailedError(
+                            self.node,
+                            backup.uuid_str,
+                            backup.attempt_no,
+                            backup.type,
+                            "Hetzner did not return a snapshot image id.",
+                        )
+                    backup.action_id = action.get("id")
+                    backup.unique_id = image["id"]
+                    backup.size_gigabytes = image.get("disk_size")
+                    backup.metadata = payload
+                    backup.save()
                 elif result.status_code == 429:
                     raise NodeBackupFailedError(
                         self.node,
@@ -474,12 +537,35 @@ class CoreHetzner(UtilCloud):
             client = self.node.connection.auth_hetzner.get_client()
             params = restore.params or {}
 
+            # A redelivered task must never create a second server after the first
+            # create request has already been committed locally.
+            if restore.resource_id:
+                return
+
+            # If the worker died after Hetzner accepted POST /servers but before the
+            # response was persisted, adopt the server by its BackupSheep-owned
+            # label instead of issuing a second non-idempotent request.
+            existing = self._find_restore_server(client, restore.id)
+            if existing:
+                restore.resource_id = str(existing["id"])
+                existing_params = dict(params)
+                if existing.get("status"):
+                    existing_params["provider_status"] = existing["status"]
+                restore.params = existing_params
+                restore.save()
+                return
+
             server_data = {
                 "name": restore.name,
                 "image": int(backup.unique_id),
+                "labels": {
+                    **(params.get("labels") or {}),
+                    self.RESTORE_LABEL_KEY: str(restore.id),
+                },
             }
 
             server_type = params.get("server_type")
+            source_server = None
             if not server_type:
                 # Fall back to the source server's server type
                 result = requests.get(
@@ -488,7 +574,8 @@ class CoreHetzner(UtilCloud):
                     verify=True,
                 )
                 if result.status_code == 200:
-                    server_type = result.json()["server"]["server_type"]["name"]
+                    source_server = result.json()["server"]
+                    server_type = source_server["server_type"]["name"]
                 else:
                     raise Exception(
                         f"Unable to determine server type from source server. "
@@ -498,14 +585,16 @@ class CoreHetzner(UtilCloud):
 
             if params.get("location"):
                 server_data["location"] = params.get("location")
+            elif source_server and source_server.get("location", {}).get("name"):
+                # Keep the restore in the source network zone unless the caller
+                # explicitly selects another location.
+                server_data["location"] = source_server["location"]["name"]
             if params.get("ssh_keys"):
                 server_data["ssh_keys"] = params.get("ssh_keys")
-            if params.get("labels"):
-                server_data["labels"] = params.get("labels")
 
             result = requests.post(
                 f"{settings.HETZNER_API}/v1/servers",
-                data=json.dumps(server_data),
+                json=server_data,
                 headers=client,
                 verify=True,
             )
@@ -513,7 +602,8 @@ class CoreHetzner(UtilCloud):
                 server = result.json()["server"]
                 action = result.json()["action"]
                 restore.resource_id = server["id"]
-                params["action_id"] = action["id"]
+                if action.get("id"):
+                    params["action_id"] = action["id"]
                 restore.params = params
                 restore.save()
             elif result.status_code == 429:
@@ -526,7 +616,25 @@ class CoreHetzner(UtilCloud):
     def check_restore(self, restore):
         from apps.console.backup.models import CoreCloudRestore
 
+        if not restore.resource_id:
+            return CoreCloudRestore.Status.IN_PROGRESS
+
         client = self.node.connection.auth_hetzner.get_client()
+
+        action_id = (restore.params or {}).get("action_id")
+        if action_id:
+            action_result = requests.get(
+                f"{settings.HETZNER_API}/v1/actions/{action_id}",
+                headers=client,
+                verify=True,
+            )
+            if action_result.status_code == 200:
+                action = action_result.json().get("action") or {}
+                if action.get("status") == "error":
+                    return CoreCloudRestore.Status.FAILED
+                if action.get("status") != "success":
+                    return CoreCloudRestore.Status.IN_PROGRESS
+
         result = requests.get(
             f"{settings.HETZNER_API}/v1/servers/{restore.resource_id}",
             headers=client,
@@ -536,6 +644,8 @@ class CoreHetzner(UtilCloud):
             server = result.json()["server"]
             if server.get("status") == "running":
                 return CoreCloudRestore.Status.COMPLETE
+            if server.get("status") in {"deleting", "unknown"}:
+                return CoreCloudRestore.Status.FAILED
         # Hetzner servers have no definitive error state; anything else
         # (initializing, non-200 response) is treated as still in progress
         return CoreCloudRestore.Status.IN_PROGRESS
