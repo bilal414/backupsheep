@@ -1,6 +1,7 @@
 import json
 import subprocess
 import time
+import uuid
 
 import dropbox
 import humanfriendly
@@ -34,6 +35,14 @@ from ..utils.models import UtilBackup
 from apps._tasks.helper.tasks import delete_from_disk
 from backupsheep.celery import app
 from botocore.config import Config
+from ..vultr import (
+    is_terminal_snapshot_failure,
+    provider_classification,
+    record_provider_result,
+    snapshot_matches,
+    snapshot_state,
+    vultr_request_timeout,
+)
 
 
 def _presigned_url_expiry():
@@ -1279,48 +1288,102 @@ class CoreVultrBackup(UtilBackup):
         db_table = "core_vultr_backup"
 
     def poll_status(self):
-        """Single snapshot status check (no blocking loop); used by poll_cloud_backup.
-        Returns COMPLETE / IN_PROGRESS; transient API errors return IN_PROGRESS (Vultr
-        does not surface an errored state, so failure is detected via the timeout)."""
+        """Perform one ownership-checked, resumable snapshot status check."""
         from ..node.models import CoreNode
+
+        source_key = "block_id" if CoreNode.Type.VOLUME == self.vultr.node.type else "instance_id"
+        path = (
+            f"/v2/blocks/snapshots/{self.unique_id}"
+            if CoreNode.Type.VOLUME == self.vultr.node.type
+            else f"/v2/snapshots/{self.unique_id}"
+        )
+
+        def record(classification, status_code=None, error=None):
+            self.metadata = record_provider_result(
+                self.metadata,
+                classification=classification,
+                status_code=status_code,
+                error=error,
+            )
+            self.save()
 
         try:
             client = self.vultr.node.connection.auth_vultr.get_client()
-            if CoreNode.Type.VOLUME == self.vultr.node.type:
-                # Block storage snapshots live under /v2/blocks/snapshots, return the
-                # snapshot object at top level, and report state/COMPLETE (instance
-                # snapshots report status/complete instead).
-                r = requests.get(
-                    f"{settings.VULTR_API}/v2/blocks/snapshots/{self.unique_id}",
-                    headers=client,
-                    verify=True,
-                )
-                if r.status_code == 200:
-                    snapshot = r.json()
-                    if snapshot["state"] == "COMPLETE":
-                        self.size_gigabytes = round(int(snapshot.get("size", 0)) / (1000 ** 3), 2)
-                        self.status = UtilBackup.Status.COMPLETE
-                        self.save()
-                        r.close()
-                        return UtilBackup.Status.COMPLETE
-                r.close()
-                return UtilBackup.Status.IN_PROGRESS
             r = requests.get(
-                f"{settings.VULTR_API}/v2/snapshots/{self.unique_id}",
+                f"{settings.VULTR_API}{path}",
                 headers=client,
                 verify=True,
+                timeout=vultr_request_timeout(),
             )
-            if r.status_code == 200:
-                snapshot = r.json()["snapshot"]
-                if snapshot["status"] == "complete":
+            try:
+                if r.status_code == 404:
+                    record("missing", 404, "Vultr snapshot was not found.")
+                    self.status = UtilBackup.Status.FAILED
+                    self.save()
+                    return self.status
+                if r.status_code != 200:
+                    classification = provider_classification(r.status_code)
+                    record(classification, r.status_code, "Vultr snapshot status request failed.")
+                    if classification in {"rate_limited", "transient_provider_error"}:
+                        self.status = UtilBackup.Status.IN_PROGRESS
+                        self.save()
+                        return UtilBackup.Status.IN_PROGRESS
+                    self.status = UtilBackup.Status.FAILED
+                    self.save()
+                    return self.status
+
+                payload = r.json()
+                snapshot = payload if CoreNode.Type.VOLUME == self.vultr.node.type else payload.get("snapshot")
+                if not snapshot_matches(
+                    snapshot,
+                    provider_id=self.unique_id,
+                    source_id=self.vultr.unique_id,
+                    description=self.uuid_str,
+                    source_key=source_key,
+                ):
+                    record("ownership_mismatch", 200, "Vultr snapshot ownership verification failed.")
+                    self.status = UtilBackup.Status.FAILED
+                    self.save()
+                    return self.status
+
+                metadata = dict(self.metadata or {})
+                metadata["vultr_ownership_verified"] = True
+                metadata = record_provider_result(metadata, classification="in_progress")
+                self.metadata = metadata
+                state = snapshot_state(snapshot)
+                if is_terminal_snapshot_failure(snapshot):
+                    self.status = UtilBackup.Status.FAILED
+                    self.metadata = record_provider_result(
+                        metadata,
+                        classification="provider_terminal_failure",
+                        error="Vultr reported a terminal snapshot failure.",
+                    )
+                    self.save()
+                    return self.status
+                if state in {"complete", "completed"}:
                     self.size_gigabytes = round(int(snapshot.get("size", 0)) / (1000 ** 3), 2)
                     self.status = UtilBackup.Status.COMPLETE
+                    self.metadata = record_provider_result(metadata, classification="complete")
                     self.save()
-                    r.close()
-                    return UtilBackup.Status.COMPLETE
-            r.close()
-            return UtilBackup.Status.IN_PROGRESS
+                    return self.status
+                if state in {"pending", "creating", "in_progress", "processing", "running"}:
+                    self.status = UtilBackup.Status.IN_PROGRESS
+                    self.save()
+                    return self.status
+
+                self.status = UtilBackup.Status.FAILED
+                self.metadata = record_provider_result(
+                    metadata, classification="malformed_provider_state",
+                    error="Vultr returned an unrecognized snapshot state.",
+                )
+                self.save()
+                return self.status
+            finally:
+                r.close()
         except Exception as e:
+            record("transient_client_error", error="Vultr snapshot status request timed out or failed.")
+            self.status = UtilBackup.Status.IN_PROGRESS
+            self.save()
             return UtilBackup.Status.IN_PROGRESS
 
     def delete_requested(self):
@@ -1341,36 +1404,115 @@ class CoreVultrBackup(UtilBackup):
             f"Backup {self.uuid_str} of node {self.vultr.node.name} "
             f"is being deleted using connection {self.vultr.node.connection.name}"
         )
+        failure_classification = "delete_failed"
         try:
-            if CoreNode.Type.VOLUME == self.vultr.node.type:
-                r = requests.delete(
-                    f"{settings.VULTR_API}/v2/blocks/snapshots/{self.unique_id}",
-                    headers=client,
-                    verify=True,
+            source_key = "block_id" if CoreNode.Type.VOLUME == self.vultr.node.type else "instance_id"
+            path = (
+                f"/v2/blocks/snapshots/{self.unique_id}"
+                if CoreNode.Type.VOLUME == self.vultr.node.type
+                else f"/v2/snapshots/{self.unique_id}"
+            )
+            get_result = requests.get(
+                f"{settings.VULTR_API}{path}",
+                headers=client,
+                verify=True,
+                timeout=vultr_request_timeout(),
+            )
+            try:
+                if get_result.status_code == 404:
+                    if not (self.metadata or {}).get("vultr_ownership_verified"):
+                        raise NodeSnapshotDeleteFailed(
+                            self.vultr.node, self.uuid_str,
+                            message="Unable to prove ownership of the missing Vultr snapshot.",
+                        )
+                    self.status = UtilBackup.Status.DELETE_COMPLETED
+                    self.metadata = record_provider_result(
+                        self.metadata, classification="missing_after_ownership_proof",
+                        status_code=404, error="Vultr snapshot was already absent.",
+                    )
+                    self.save()
+                    return
+                if get_result.status_code != 200:
+                    failure_classification = provider_classification(get_result.status_code)
+                    raise NodeSnapshotDeleteFailed(
+                        self.vultr.node, self.uuid_str,
+                        message="Unable to verify Vultr snapshot ownership before deletion.",
+                    )
+                payload = get_result.json()
+                snapshot = payload if CoreNode.Type.VOLUME == self.vultr.node.type else payload.get("snapshot")
+                if not snapshot_matches(
+                    snapshot,
+                    provider_id=self.unique_id,
+                    source_id=self.vultr.unique_id,
+                    description=self.uuid_str,
+                    source_key=source_key,
+                ):
+                    raise NodeSnapshotDeleteFailed(
+                        self.vultr.node, self.uuid_str,
+                        message="Vultr snapshot ownership verification failed; refusing deletion.",
+                    )
+                self.metadata = record_provider_result(
+                    {**(self.metadata or {}), "vultr_ownership_verified": True},
+                    classification="ownership_verified",
                 )
-            else:
-                r = requests.delete(
-                    f"{settings.VULTR_API}/v2/snapshots/{self.unique_id}",
-                    headers=client,
-                    verify=True,
-                )
-
-            if r.status_code == 204:
-                self.status = UtilBackup.Status.DELETE_COMPLETED
                 self.save()
-                msg = (
-                    f"Backup {self.uuid_str} of node {self.vultr.node.name} "
-                    f"deleted successfully using connection {self.vultr.node.connection.name}"
-                )
-            else:
+            finally:
+                get_result.close()
+
+            r = requests.delete(
+                f"{settings.VULTR_API}{path}",
+                headers=client,
+                verify=True,
+                timeout=vultr_request_timeout(),
+            )
+            try:
+                if r.status_code == 404:
+                    self.status = UtilBackup.Status.DELETE_COMPLETED
+                    self.metadata = record_provider_result(
+                        self.metadata, classification="missing_after_ownership_proof",
+                        status_code=404, error="Vultr snapshot was already absent.",
+                    )
+                    self.save()
+                    return
+                if r.status_code == 204:
+                    self.status = UtilBackup.Status.DELETE_COMPLETED
+                    self.metadata = record_provider_result(
+                        self.metadata, classification="delete_completed"
+                    )
+                    self.save()
+                    msg = (
+                        f"Backup {self.uuid_str} of node {self.vultr.node.name} "
+                        f"deleted successfully using connection {self.vultr.node.connection.name}"
+                    )
+                    return
+                failure_classification = provider_classification(r.status_code)
                 raise NodeSnapshotDeleteFailed(
                     self.vultr.node,
                     self.uuid_str,
-                    message="Unable to locate snapshot for deletion.",
+                    message="Unable to delete the verified Vultr snapshot.",
                 )
-            r.close()
+            finally:
+                r.close()
+        except requests.exceptions.Timeout as e:
+            failure_classification = "transient_client_error"
+            self.status = UtilBackup.Status.DELETE_FAILED
+            self.metadata = record_provider_result(
+                self.metadata,
+                classification=failure_classification,
+                error="Vultr snapshot deletion request timed out.",
+            )
+            self.save()
+            msg = (
+                f"Backup {self.uuid_str} of node {self.vultr.node.name} "
+                f"failed to using connection {self.vultr.node.connection.name}. Error: {e.__str__()}"
+            )
         except Exception as e:
             self.status = UtilBackup.Status.DELETE_FAILED
+            self.metadata = record_provider_result(
+                self.metadata,
+                classification=failure_classification,
+                error="Vultr snapshot deletion failed.",
+            )
             self.save()
             msg = (
                 f"Backup {self.uuid_str} of node {self.vultr.node.name} "
@@ -3597,6 +3739,170 @@ class CoreAWSRDSBackup(UtilBackup):
         self.aws_rds.node.backup_complete_reset()
 
 
+class CoreVultrDatabaseBackup(UtilBackup):
+    """A local record for a Vultr provider-managed database backup."""
+
+    vultr_database = models.ForeignKey(
+        "CoreVultrDatabase", related_name="backups", on_delete=models.CASCADE
+    )
+    schedule = models.ForeignKey(
+        "CoreSchedule",
+        related_name="vultr_database_backups",
+        null=True,
+        on_delete=models.SET_NULL,
+    )
+    region = models.CharField(max_length=255, null=True)
+    unique_id = models.CharField(max_length=255, null=True)
+    provider_backup_id = models.CharField(max_length=255, null=True)
+    provider_marker = models.CharField(max_length=512, null=True)
+    provider_state = models.CharField(max_length=64, default="")
+    provider_error_class = models.CharField(max_length=64, default="")
+    provider_http_status = models.PositiveIntegerField(null=True)
+    size_gigabytes = models.FloatField(null=True)
+    metadata = models.JSONField(null=True)
+
+    class Meta:
+        db_table = "core_vultr_database_backup"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("vultr_database", "provider_marker"),
+                condition=models.Q(provider_marker__isnull=False),
+                name="unique_vultr_database_provider_marker",
+            )
+        ]
+
+    def poll_status(self):
+        from apps.console.vultr_database import (
+            VultrDatabaseError,
+            provider_backup_id,
+            provider_backup_state,
+        )
+
+        try:
+            records = self.vultr_database.client.list_backup_records(
+                self.vultr_database.unique_id
+            )
+            record = next(
+                (
+                    item for item in records
+                    if self.provider_backup_id
+                    and provider_backup_id(item) == self.provider_backup_id
+                ),
+                None,
+            )
+            if record is None and self.provider_marker:
+                record = next(
+                    (
+                        item for item in records
+                        if f"vultr-db:{self.vultr_database.unique_id}:{provider_backup_id(item)}"
+                        == self.provider_marker
+                    ),
+                    None,
+                )
+            if record is None:
+                self.provider_error_class = "not_found"
+                self.provider_status = "not_found"
+                self.status = self.Status.FAILED
+                self.save()
+                return self.Status.FAILED
+
+            state = provider_backup_state(record)
+            self.provider_state = state
+            self.provider_error_class = ""
+            self.provider_backup_id = provider_backup_id(record) or self.provider_backup_id
+            self.metadata = {
+                "source_database_id": self.vultr_database.unique_id,
+                "provider_backup": record,
+            }
+            if state in {"complete", "completed", "available", "succeeded", "success"}:
+                self.provider_status = "complete"
+                self.status = self.Status.COMPLETE
+            elif state in {"failed", "failure", "error", "errored", "cancelled", "canceled"}:
+                self.provider_status = "terminal_failure"
+                self.provider_error_class = "terminal_failure"
+                self.status = self.Status.FAILED
+            else:
+                self.provider_status = "in_progress"
+                self.status = self.Status.IN_PROGRESS
+            self.save()
+            return self.status
+        except VultrDatabaseError as error:
+            self.provider_status = error.category
+            self.provider_error_class = error.category
+            self.provider_http_status = error.status_code
+            self.metadata = {
+                "source_database_id": self.vultr_database.unique_id,
+                "error": error.category,
+                "status_code": error.status_code,
+            }
+            self.status = (
+                self.Status.IN_PROGRESS
+                if error.category in {"rate_limited", "transient_outage"}
+                else self.Status.FAILED
+            )
+            self.save()
+            return self.status
+
+    @property
+    def node(self):
+        return self.vultr_database.node
+
+    def delete_requested(self):
+        self.status = self.Status.DELETE_REQUESTED
+        self.save(update_fields=["status", "modified"])
+
+    def soft_delete(self):
+        # Vultr-managed database backup metadata is provider-owned. Cleanup only
+        # removes the BackupSheep record; it never deletes or alters the provider
+        # backup retention policy.
+        self.status = self.Status.DELETE_COMPLETED
+        self.save(update_fields=["status", "modified"])
+        return True
+
+    def cancel(self):
+        app.control.revoke(self.celery_task_id, terminate=True)
+        self.status = self.Status.CANCELLED
+        self.save(update_fields=["status", "modified"])
+
+
+class CoreVultrDatabaseRestore(TimeStampedModel):
+    """Durable, database-specific fork/restore state.
+
+    ``resource_id`` is always a newly forked database. The source cluster is
+    never passed to an in-place restore endpoint.
+    """
+
+    class Status(models.IntegerChoices):
+        PENDING = 1, "Pending"
+        IN_PROGRESS = 2, "In-Progress"
+        COMPLETE = 3, "Complete"
+        FAILED = 4, "Failed"
+        CANCELLED = 5, "Cancelled"
+
+    backup = models.ForeignKey(
+        "CoreVultrDatabaseBackup", related_name="restores", on_delete=models.CASCADE
+    )
+    uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    name = models.CharField(max_length=255)
+    params = models.JSONField(null=True, blank=True)
+    resource_id = models.CharField(max_length=255, null=True, blank=True)
+    provider_job_id = models.CharField(max_length=255, null=True, blank=True)
+    provider_marker = models.CharField(max_length=255, null=True, blank=True)
+    provider_status = models.CharField(max_length=64, default="")
+    provider_http_status = models.PositiveIntegerField(null=True, blank=True)
+    status = models.IntegerField(choices=Status.choices, default=Status.PENDING)
+    metadata = models.JSONField(null=True, blank=True)
+    error = models.TextField(null=True, blank=True)
+    celery_task_id = models.CharField(max_length=255, null=True, blank=True)
+
+    class Meta:
+        db_table = "core_vultr_database_restore"
+
+    @property
+    def node(self):
+        return self.backup.vultr_database.node
+
+
 class CoreCloudRestore(TimeStampedModel):
     """Tracks a restore of a cloud / volume snapshot to a NEW provider resource.
 
@@ -3613,6 +3919,15 @@ class CoreCloudRestore(TimeStampedModel):
         COMPLETE = 3, "Complete"
         FAILED = 4, "Failed"
 
+    class OperationPhase(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RECONCILING = "reconciling", "Reconciling"
+        CREATE_UNKNOWN = "create_unknown", "Create outcome unknown"
+        POLLING = "polling", "Polling"
+        COMPLETE = "complete", "Complete"
+        FAILED = "failed", "Failed"
+        MANUAL_REVIEW = "manual_review", "Manual review"
+
     node = models.ForeignKey(
         "CoreNode", related_name="restores", on_delete=models.CASCADE
     )
@@ -3624,6 +3939,16 @@ class CoreCloudRestore(TimeStampedModel):
     # from resource_id so a worker restart can resume polling without starting a
     # second restore request.
     provider_job_id = models.CharField(max_length=255, null=True, blank=True)
+    # Native cloud restores have no provider idempotency key.  These fields are
+    # committed before a provider create request so a redelivered task can
+    # reconcile an accepted request whose response was lost.
+    restore_marker = models.CharField(max_length=128, blank=True, default="")
+    request_fingerprint = models.CharField(max_length=64, blank=True, default="")
+    operation_phase = models.CharField(
+        max_length=32,
+        choices=OperationPhase.choices,
+        default=OperationPhase.PENDING,
+    )
     status = models.IntegerField(choices=Status.choices, default=Status.PENDING)
     error = models.TextField(null=True, blank=True)
     celery_task_id = models.CharField(max_length=255, null=True, blank=True)

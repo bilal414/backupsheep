@@ -75,13 +75,30 @@ def restore_cloud_backup(self, node_id=None, backup_id=None, restore_id=None):
     notify_restore_started(node, backup, restore)
 
     try:
-        restore.node_type_object.restore_snapshot(backup, restore)
+        restore_result = restore.node_type_object.restore_snapshot(backup, restore)
     except Exception as error:
         capture_exception(error)
         restore.status = CoreCloudRestore.Status.FAILED
         restore.error = error.__str__()
         restore.save()
         notify_restore_failed(node, backup, restore, error)
+        return
+
+    # Vultr can return a transient error or a lost-response outcome before a
+    # provider resource id is known.  Its adapter commits an ownership marker
+    # first, so a later delivery can reconcile/adopt instead of creating again.
+    # Other providers retain their existing behavior.
+    if (
+        restore_result == CoreCloudRestore.Status.IN_PROGRESS
+        and not restore.resource_id
+        and node.connection.integration.code == "vultr"
+    ):
+        restore.status = CoreCloudRestore.Status.IN_PROGRESS
+        restore.celery_task_id = self.request.id
+        restore.save(update_fields=["status", "celery_task_id", "modified"])
+        restore_cloud_backup.apply_async(
+            args=[node.id, backup.id, restore.id], countdown=60
+        )
         return
 
     # Hand off to async polling instead of blocking the worker (same pattern as

@@ -8,6 +8,7 @@ import uuid
 from types import SimpleNamespace
 from unittest import mock
 
+import requests
 from django.conf import settings
 
 from apps._tasks.exceptions import NodeBackupFailedError
@@ -127,6 +128,7 @@ class VultrPollStatusTests(BaseTestCase):
         backup = make_vultr_backup(node, unique_id="bs-snap-1")
         payload = {
             "id": "bs-snap-1", "block_id": "block-1",
+            "description": backup.uuid_str,
             "state": "COMPLETE", "size": 10737418240,
         }
         with mock.patch("apps.console.backup.models.requests.get",
@@ -142,7 +144,10 @@ class VultrPollStatusTests(BaseTestCase):
     def test_volume_poll_pending_stays_in_progress(self):
         node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
         backup = make_vultr_backup(node, unique_id="bs-snap-1")
-        payload = {"id": "bs-snap-1", "block_id": "block-1", "state": "PENDING"}
+        payload = {
+            "id": "bs-snap-1", "block_id": "block-1",
+            "description": backup.uuid_str, "state": "PENDING",
+        }
         with mock.patch("apps.console.backup.models.requests.get",
                         return_value=_response(200, payload)):
             status = backup.poll_status()
@@ -153,7 +158,10 @@ class VultrPollStatusTests(BaseTestCase):
     def test_instance_poll_complete_unchanged(self):
         node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
         backup = make_vultr_backup(node, unique_id="snap-1")
-        payload = {"snapshot": {"id": "snap-1", "status": "complete", "size": 10737418240}}
+        payload = {"snapshot": {
+            "id": "snap-1", "instance_id": "instance-1",
+            "description": backup.uuid_str, "status": "complete", "size": 10737418240,
+        }}
         with mock.patch("apps.console.backup.models.requests.get",
                         return_value=_response(200, payload)) as get:
             status = backup.poll_status()
@@ -170,7 +178,12 @@ class VultrSoftDeleteTests(BaseTestCase):
         node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
         backup = make_vultr_backup(
             node, unique_id="bs-snap-1", status=UtilBackup.Status.DELETE_REQUESTED)
-        with mock.patch("apps.console.backup.models.requests.delete",
+        owned = _response(200, {
+            "id": "bs-snap-1", "block_id": "block-1",
+            "description": backup.uuid_str, "state": "COMPLETE",
+        })
+        with mock.patch("apps.console.backup.models.requests.get", return_value=owned), mock.patch(
+            "apps.console.backup.models.requests.delete",
                         return_value=_response(204)) as delete:
             backup.soft_delete()
         backup.refresh_from_db()
@@ -182,13 +195,144 @@ class VultrSoftDeleteTests(BaseTestCase):
         node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
         backup = make_vultr_backup(
             node, unique_id="snap-1", status=UtilBackup.Status.DELETE_REQUESTED)
-        with mock.patch("apps.console.backup.models.requests.delete",
+        owned = _response(200, {"snapshot": {
+            "id": "snap-1", "instance_id": "instance-1",
+            "description": backup.uuid_str, "status": "complete",
+        }})
+        with mock.patch("apps.console.backup.models.requests.get", return_value=owned), mock.patch(
+            "apps.console.backup.models.requests.delete",
                         return_value=_response(204)) as delete:
             backup.soft_delete()
         backup.refresh_from_db()
         self.assertEqual(backup.status, UtilBackup.Status.DELETE_COMPLETED)
         self.assertEqual(delete.call_args.args[0],
                          f"{settings.VULTR_API}/v2/snapshots/snap-1")
+
+
+class VultrSnapshotSafetyTests(BaseTestCase):
+    def test_create_follows_cursor_to_find_existing_snapshot(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
+        backup = make_vultr_backup(node)
+        first = _response(200, {"snapshots": [], "meta": {"links": {"next": "cursor-1"}}})
+        second = _response(200, {"snapshots": [{
+            "id": "bs-snap-1", "block_id": "block-1", "description": backup.uuid_str,
+        }], "meta": {"links": {"next": None}}})
+        with mock.patch("apps.console.node.models.requests.get", side_effect=[first, second]) as get, \
+                mock.patch("apps.console.node.models.requests.post") as post:
+            node.vultr.create_snapshot(backup)
+        self.assertEqual(backup.refresh_from_db() or backup.unique_id, "bs-snap-1")
+        post.assert_not_called()
+        self.assertEqual(get.call_args_list[1].kwargs["params"]["cursor"], "cursor-1")
+        self.assertIn("timeout", get.call_args_list[0].kwargs)
+
+    def test_create_rejects_repeated_cursor_and_does_not_post(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
+        backup = make_vultr_backup(node)
+        response = _response(200, {"snapshots": [], "meta": {"links": {"next": "same"}}})
+        with mock.patch("apps.console.node.models.requests.get", side_effect=[response, response]) as get, \
+                mock.patch("apps.console.node.models.requests.post") as post:
+            with self.assertRaises(NodeBackupFailedError):
+                node.vultr.create_snapshot(backup)
+        post.assert_not_called()
+        self.assertEqual(get.call_count, 2)
+
+    def test_create_rejects_duplicate_descriptions(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
+        backup = make_vultr_backup(node)
+        listing = _response(200, {"snapshots": [
+            {"id": "snap-1", "instance_id": "instance-1", "description": backup.uuid_str},
+            {"id": "snap-2", "instance_id": "instance-1", "description": backup.uuid_str},
+        ]})
+        with mock.patch("apps.console.node.models.requests.get", return_value=listing), \
+                mock.patch("apps.console.node.models.requests.post") as post:
+            with self.assertRaises(NodeBackupFailedError):
+                node.vultr.create_snapshot(backup)
+        post.assert_not_called()
+
+    def test_create_rejects_source_mismatch(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
+        backup = make_vultr_backup(node)
+        listing = _response(200, {"snapshots": [{
+            "id": "snap-1", "block_id": "foreign-block", "description": backup.uuid_str,
+        }]})
+        with mock.patch("apps.console.node.models.requests.get", return_value=listing), \
+                mock.patch("apps.console.node.models.requests.post") as post:
+            with self.assertRaises(NodeBackupFailedError):
+                node.vultr.create_snapshot(backup)
+        post.assert_not_called()
+
+    def test_poll_rejects_unowned_snapshot(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
+        backup = make_vultr_backup(node, unique_id="bs-snap-1")
+        response = _response(200, {
+            "id": "bs-snap-1", "block_id": "foreign-block", "description": backup.uuid_str,
+            "state": "COMPLETE",
+        })
+        with mock.patch("apps.console.backup.models.requests.get", return_value=response):
+            self.assertEqual(backup.poll_status(), UtilBackup.Status.FAILED)
+        backup.refresh_from_db()
+        self.assertEqual(backup.metadata["vultr_last_result"]["classification"], "ownership_mismatch")
+
+    def test_poll_404_is_terminal_missing(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
+        backup = make_vultr_backup(node, unique_id="snap-1")
+        with mock.patch("apps.console.backup.models.requests.get", return_value=_response(404)):
+            self.assertEqual(backup.poll_status(), UtilBackup.Status.FAILED)
+        backup.refresh_from_db()
+        self.assertEqual(backup.metadata["vultr_last_result"]["classification"], "missing")
+
+    def test_poll_rate_limit_and_provider_outage_remain_resumable(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
+        for code, classification in ((429, "rate_limited"), (503, "transient_provider_error")):
+            backup = make_vultr_backup(node, unique_id=f"snap-{code}")
+            with mock.patch("apps.console.backup.models.requests.get", return_value=_response(code)) as get:
+                self.assertEqual(backup.poll_status(), UtilBackup.Status.IN_PROGRESS)
+            self.assertEqual(get.call_args.kwargs["timeout"], (10, 60))
+            backup.refresh_from_db()
+            self.assertEqual(backup.metadata["vultr_last_result"]["classification"], classification)
+
+    def test_poll_timeout_is_resumable_and_classified(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
+        backup = make_vultr_backup(node, unique_id="snap-timeout")
+        with mock.patch("apps.console.backup.models.requests.get", side_effect=requests.Timeout):
+            self.assertEqual(backup.poll_status(), UtilBackup.Status.IN_PROGRESS)
+        backup.refresh_from_db()
+        self.assertEqual(
+            backup.metadata["vultr_last_result"]["classification"], "transient_client_error"
+        )
+
+    def test_delete_refuses_unowned_snapshot_without_delete_call(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
+        backup = make_vultr_backup(
+            node, unique_id="snap-1", status=UtilBackup.Status.DELETE_REQUESTED
+        )
+        response = _response(200, {"snapshot": {
+            "id": "snap-1", "instance_id": "foreign-instance", "description": backup.uuid_str,
+        }})
+        with mock.patch("apps.console.backup.models.requests.get", return_value=response), \
+                mock.patch("apps.console.backup.models.requests.delete") as delete:
+            backup.soft_delete()
+        delete.assert_not_called()
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.DELETE_FAILED)
+
+    def test_delete_404_is_idempotent_only_after_prior_ownership_proof(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
+        unproven = make_vultr_backup(
+            node, unique_id="snap-unproven", status=UtilBackup.Status.DELETE_REQUESTED
+        )
+        proven = make_vultr_backup(
+            node, unique_id="snap-proven", status=UtilBackup.Status.DELETE_REQUESTED,
+            metadata={"vultr_ownership_verified": True},
+        )
+        with mock.patch("apps.console.backup.models.requests.get", return_value=_response(404)):
+            unproven.soft_delete()
+        with mock.patch("apps.console.backup.models.requests.get", return_value=_response(404)):
+            proven.soft_delete()
+        unproven.refresh_from_db()
+        proven.refresh_from_db()
+        self.assertEqual(unproven.status, UtilBackup.Status.DELETE_FAILED)
+        self.assertEqual(proven.status, UtilBackup.Status.DELETE_COMPLETED)
 
 
 class VultrVolumeRestoreTests(BaseTestCase):
@@ -202,8 +346,11 @@ class VultrVolumeRestoreTests(BaseTestCase):
             node=node, backup_id=backup.id, name="restored-vol",
             params={"region": "ewr", "size_gb": 80},
         )
-        with mock.patch("apps.console.node.models.requests.post",
-                        return_value=_response(201, {"block": {"id": "block-new"}})) as post:
+        with mock.patch(
+            "apps.console.node.models.requests.get",
+            return_value=_response(200, {"blocks": [], "meta": {}}),
+        ), mock.patch("apps.console.node.models.requests.post",
+                      return_value=_response(201, {"block": {"id": "block-new"}})) as post:
             node.vultr.restore_snapshot(backup, restore)
         restore.refresh_from_db()
         self.assertEqual(restore.resource_id, "block-new")
@@ -211,7 +358,12 @@ class VultrVolumeRestoreTests(BaseTestCase):
         self.assertEqual(post.call_args.args[0], f"{settings.VULTR_API}/v2/blocks")
         self.assertEqual(
             post.call_args.kwargs["json"],
-            {"region": "ewr", "size_gb": 80, "snapshot_id": "bs-snap-1", "label": "restored-vol"},
+            {
+                "region": "ewr",
+                "size_gb": 80,
+                "snapshot_id": "bs-snap-1",
+                "label": restore.restore_marker,
+            },
         )
 
     def test_volume_restore_falls_back_to_source_block_details(self):
@@ -220,12 +372,17 @@ class VultrVolumeRestoreTests(BaseTestCase):
         restore = CoreCloudRestore.objects.create(
             node=node, backup_id=backup.id, name="restored-vol",
         )
-        with mock.patch("apps.console.node.models.requests.get",
-                        return_value=_response(200, {"block": {"region": "lax", "size_gb": 40}})) as get, \
+        with mock.patch("apps.console.node.models.requests.get", side_effect=[
+                    _response(200, {"block": {"region": "lax", "size_gb": 40}}),
+                    _response(200, {"blocks": [], "meta": {}}),
+                ]) as get, \
                 mock.patch("apps.console.node.models.requests.post",
                            return_value=_response(201, {"block": {"id": "block-new"}})) as post:
             node.vultr.restore_snapshot(backup, restore)
-        self.assertEqual(get.call_args.args[0], f"{settings.VULTR_API}/v2/blocks/block-1")
+        self.assertIn(
+            f"{settings.VULTR_API}/v2/blocks/block-1",
+            [call.args[0] for call in get.call_args_list],
+        )
         self.assertEqual(post.call_args.kwargs["json"]["region"], "lax")
         self.assertEqual(post.call_args.kwargs["json"]["size_gb"], 40)
 
@@ -236,8 +393,11 @@ class VultrVolumeRestoreTests(BaseTestCase):
             node=node, backup_id=backup.id, name="restored-vol",
             params={"region": "ewr", "size_gb": 80},
         )
-        with mock.patch("apps.console.node.models.requests.post",
-                        return_value=_response(400)):
+        with mock.patch(
+            "apps.console.node.models.requests.get",
+            return_value=_response(200, {"blocks": [], "meta": {}}),
+        ), mock.patch("apps.console.node.models.requests.post",
+                      return_value=_response(400)):
             with self.assertRaises(Exception):
                 node.vultr.restore_snapshot(backup, restore)
         restore.refresh_from_db()
