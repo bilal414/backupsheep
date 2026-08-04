@@ -39,7 +39,7 @@ from ..vultr import (
     is_terminal_snapshot_failure,
     provider_classification,
     record_provider_result,
-    snapshot_matches,
+    snapshot_matches_with_recorded_source,
     snapshot_state,
     vultr_request_timeout,
 )
@@ -1334,12 +1334,13 @@ class CoreVultrBackup(UtilBackup):
 
                 payload = r.json()
                 snapshot = payload if CoreNode.Type.VOLUME == self.vultr.node.type else payload.get("snapshot")
-                if not snapshot_matches(
+                if not snapshot_matches_with_recorded_source(
                     snapshot,
                     provider_id=self.unique_id,
                     source_id=self.vultr.unique_id,
                     description=self.uuid_str,
                     source_key=source_key,
+                    ownership=(self.metadata or {}).get("vultr_ownership"),
                 ):
                     record("ownership_mismatch", 200, "Vultr snapshot ownership verification failed.")
                     self.status = UtilBackup.Status.FAILED
@@ -1366,7 +1367,10 @@ class CoreVultrBackup(UtilBackup):
                     self.metadata = record_provider_result(metadata, classification="complete")
                     self.save()
                     return self.status
-                if state in {"pending", "creating", "in_progress", "processing", "running"}:
+                if state in {
+                    "pending", "pending_create", "creating", "in_progress",
+                    "processing", "running",
+                }:
                     self.status = UtilBackup.Status.IN_PROGRESS
                     self.save()
                     return self.status
@@ -1450,12 +1454,13 @@ class CoreVultrBackup(UtilBackup):
                     )
                 payload = get_result.json()
                 snapshot = payload if CoreNode.Type.VOLUME == self.vultr.node.type else payload.get("snapshot")
-                if not snapshot_matches(
+                if not snapshot_matches_with_recorded_source(
                     snapshot,
                     provider_id=self.unique_id,
                     source_id=self.vultr.unique_id,
                     description=self.uuid_str,
                     source_key=source_key,
+                    ownership=(self.metadata or {}).get("vultr_ownership"),
                 ):
                     raise NodeSnapshotDeleteFailed(
                         self.vultr.node, self.uuid_str,

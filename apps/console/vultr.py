@@ -91,6 +91,65 @@ def snapshot_matches(snapshot, *, provider_id, source_id, description, source_ke
     )
 
 
+VULTR_SNAPSHOT_OWNERSHIP_KEY = "vultr_ownership"
+
+
+def record_snapshot_ownership(metadata, *, source_id, source_key):
+    """Persist the source identity used in a snapshot create request.
+
+    Vultr's instance-snapshot response can omit ``instance_id`` after the
+    snapshot becomes complete.  The request identity is therefore retained in
+    the durable BackupSheep row so a later worker can reconcile that exact
+    provider object without weakening the foreign-source check.
+    """
+    updated = dict(metadata or {})
+    updated[VULTR_SNAPSHOT_OWNERSHIP_KEY] = {
+        "source_id": str(source_id),
+        "source_key": source_key,
+    }
+    return updated
+
+
+def snapshot_matches_with_recorded_source(
+    snapshot,
+    *,
+    provider_id,
+    source_id,
+    description,
+    source_key,
+    ownership=None,
+):
+    """Verify a snapshot, allowing Vultr's documented source omission safely.
+
+    A non-empty provider source must always match exactly.  The fallback is
+    allowed only when Vultr omits the source field and the local row contains
+    the exact source identity persisted before the provider request.  This is
+    deliberately narrower than accepting a description or provider ID alone.
+    """
+    if snapshot_matches(
+        snapshot,
+        provider_id=provider_id,
+        source_id=source_id,
+        description=description,
+        source_key=source_key,
+    ):
+        return True
+    if not isinstance(snapshot, dict) or not isinstance(ownership, dict):
+        return False
+    if not (
+        provider_id
+        and source_id
+        and snapshot.get("id") == provider_id
+        and snapshot.get("description") == description
+        and snapshot.get(source_key) in (None, "")
+    ):
+        return False
+    return (
+        ownership.get("source_key") == source_key
+        and str(ownership.get("source_id")) == str(source_id)
+    )
+
+
 def provider_classification(status_code):
     """Map a provider response to a stable, non-sensitive classification."""
     if status_code in (401, 403):
@@ -120,7 +179,14 @@ def record_provider_result(metadata, *, classification, status_code=None, error=
 
 def snapshot_state(snapshot):
     """Normalize Vultr's instance/block snapshot state fields."""
-    return str(snapshot.get("status", snapshot.get("state", ""))).lower()
+    value = snapshot.get("status")
+    if value is None or str(value).strip().lower() in {"", "none", "null", "unknown"}:
+        value = snapshot.get("state", "")
+    normalized = str(value).strip().lower()
+    # A newly accepted Vultr block-snapshot request can briefly return a
+    # structurally valid object without either state field.  It is a known
+    # asynchronous state, not evidence of a terminal provider failure.
+    return normalized if normalized not in {"", "none", "null", "unknown"} else "in_progress"
 
 
 def is_terminal_snapshot_failure(snapshot):

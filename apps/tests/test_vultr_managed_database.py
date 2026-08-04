@@ -73,6 +73,19 @@ class VultrManagedDatabaseClientTests(SimpleTestCase):
                 VultrManagedDatabaseClient(FakeAuth()).get_database("db-1")
         self.assertEqual(context.exception.category, "rate_limited")
 
+    def test_backup_metadata_uses_plural_backups_endpoint(self):
+        response = FakeResponse({
+            "latest_backup": {"date": "2026-08-04", "time": "12:00:00"},
+            "oldest_backup": {"date": "2026-08-02", "time": "12:00:00"},
+        })
+        with mock.patch(
+            "apps.console.vultr_database.requests.request", return_value=response
+        ) as request:
+            records = VultrManagedDatabaseClient(FakeAuth()).list_backup_records("db-1")
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(request.call_args.args[1], "https://api.vultr.com/v2/databases/db-1/backups")
+
     def test_capability_checks_are_explicit(self):
         with self.assertRaises(VultrDatabaseUnsupportedError):
             VultrDatabaseCapabilities("kafka", "startup").require_backup_support()
@@ -156,6 +169,16 @@ class VultrManagedDatabaseModelTests(BaseTestCase):
             self.assertEqual(backup.metadata["source_database_id"], "source-db")
             self.assertEqual(backup.poll_status(), UtilBackup.Status.COMPLETE)
 
+    def test_backup_time_metadata_without_state_is_available(self):
+        backup = self._backup()
+        record = {"date": "2026-08-04", "time": "12:00:00"}
+        with mock.patch.object(
+            VultrManagedDatabaseClient, "list_backup_records", return_value=[record]
+        ):
+            self.database.create_snapshot(backup)
+            self.assertEqual(backup.provider_state, "available")
+            self.assertEqual(backup.poll_status(), UtilBackup.Status.COMPLETE)
+
     def test_backup_state_mapping_preserves_rate_limit_transient_and_not_found(self):
         for category, expected_status, expected_class in (
             ("rate_limited", UtilBackup.Status.IN_PROGRESS, "rate_limited"),
@@ -204,6 +227,41 @@ class VultrManagedDatabaseModelTests(BaseTestCase):
         restore.refresh_from_db()
         self.assertEqual(restore.resource_id, "new-db")
         self.assertEqual(restore.provider_job_id, "fork-job")
+
+    def test_fork_restore_accepts_provider_region_case_normalization(self):
+        backup = self._backup()
+        backup.status = UtilBackup.Status.COMPLETE
+        backup.provider_backup_id = "provider-backup-1"
+        backup.provider_marker = "vultr-db:source-db:provider-backup-1"
+        backup.save()
+        restore = CoreVultrDatabaseRestore.objects.create(
+            backup=backup,
+            name="restore-region-case",
+            params={"region": "ewr", "plan": "vultr-dbaas-startup"},
+        )
+        with mock.patch.object(VultrManagedDatabaseClient, "list_databases", return_value=[]), mock.patch.object(
+            VultrManagedDatabaseClient,
+            "fork_database",
+            return_value={"database": {"id": "new-db"}},
+        ):
+            self.database.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        with mock.patch.object(
+            VultrManagedDatabaseClient,
+            "get_database",
+            return_value={
+                "id": "new-db",
+                "label": restore.provider_marker,
+                "region": "EWR",
+                "plan": "vultr-dbaas-startup",
+                "status": "Running",
+            },
+        ):
+            self.assertEqual(
+                self.database.check_restore(restore),
+                CoreVultrDatabaseRestore.Status.COMPLETE,
+            )
 
     def test_lost_fork_response_is_adopted_and_duplicate_candidates_fail_closed(self):
         backup = self._backup()

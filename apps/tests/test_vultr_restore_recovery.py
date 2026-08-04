@@ -69,6 +69,25 @@ class VultrRestoreRecoveryTests(BaseTestCase):
         self.assertIn(restore.restore_marker, post.call_args.kwargs["json"]["tags"])
         self.assertEqual(post.call_args.kwargs["json"]["snapshot_id"], "snapshot-1")
 
+    def test_async_202_restore_response_persists_provider_id(self):
+        node, backup, restore = self._restore(
+            region="ewr", plan="vc2-1c-1gb"
+        )
+        with mock.patch(
+            "apps.console.node.models.requests.get",
+            return_value=response(200, {"instances": [], "meta": {}}),
+        ), mock.patch(
+            "apps.console.node.models.requests.post",
+            return_value=response(202, {"instance": {"id": "instance-202"}}),
+        ):
+            node.vultr.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, "instance-202")
+        self.assertEqual(
+            restore.operation_phase, CoreCloudRestore.OperationPhase.POLLING
+        )
+
     def test_lost_response_is_adopted_on_next_delivery_without_duplicate_post(self):
         node, backup, restore = self._restore(
             region="ewr", plan="vc2-1c-1gb"

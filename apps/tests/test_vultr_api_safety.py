@@ -6,7 +6,9 @@ from django.test import SimpleTestCase
 from apps.console.vultr import (
     iter_vultr_collection,
     provider_classification,
+    record_snapshot_ownership,
     snapshot_matches,
+    snapshot_matches_with_recorded_source,
 )
 
 
@@ -70,6 +72,26 @@ class VultrApiSafetyHelperTests(SimpleTestCase):
         self.assertFalse(snapshot_matches(
             snapshot, provider_id="snap-1", source_id="instance-1",
             description="foreign", source_key="instance_id"
+        ))
+
+    def test_snapshot_identity_can_use_persisted_source_when_vultr_omits_it(self):
+        snapshot = {
+            "id": "snap-1", "instance_id": None, "description": "backup-1"
+        }
+        ownership = record_snapshot_ownership(
+            {}, source_id="instance-1", source_key="instance_id"
+        )["vultr_ownership"]
+        self.assertTrue(snapshot_matches_with_recorded_source(
+            snapshot, provider_id="snap-1", source_id="instance-1",
+            description="backup-1", source_key="instance_id", ownership=ownership
+        ))
+        self.assertFalse(snapshot_matches_with_recorded_source(
+            snapshot, provider_id="snap-1", source_id="foreign",
+            description="backup-1", source_key="instance_id", ownership=ownership
+        ))
+        self.assertFalse(snapshot_matches_with_recorded_source(
+            snapshot, provider_id="snap-1", source_id="instance-1",
+            description="backup-1", source_key="instance_id", ownership=None
         ))
 
     def test_provider_classification_is_stable(self):

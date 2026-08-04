@@ -34,7 +34,8 @@ from ..connection.models import CoreConnection
 from ..member.models import CoreMember
 from ..vultr import (
     iter_vultr_collection,
-    snapshot_matches,
+    record_snapshot_ownership,
+    snapshot_matches_with_recorded_source,
     vultr_request_timeout,
 )
 
@@ -2721,7 +2722,10 @@ class CoreVultrDatabase(UtilCloud):
             # The label is the durable idempotency marker.  Check the requested
             # placement and plan whenever Vultr includes those fields, while
             # remaining compatible with older list responses that omit them.
-            if database.get("region") not in (None, "") and str(database["region"]) != str(region):
+            if (
+                database.get("region") not in (None, "")
+                and str(database["region"]).casefold() != str(region).casefold()
+            ):
                 return False
             if database.get("plan") not in (None, "") and str(database["plan"]) != str(plan):
                 return False
@@ -2875,7 +2879,15 @@ class CoreVultrDatabase(UtilCloud):
             for field in ("region", "plan"):
                 expected = params.get(field)
                 actual = database.get(field)
-                if expected and actual not in (None, "") and str(actual) != str(expected):
+                if (
+                    expected
+                    and actual not in (None, "")
+                    and (
+                        str(actual).casefold() != str(expected).casefold()
+                        if field == "region"
+                        else str(actual) != str(expected)
+                    )
+                ):
                     restore.provider_status = "ownership_mismatch"
                     restore.error = "Vultr managed database restore target failed ownership verification."
                     restore.status = restore.Status.FAILED
@@ -2944,6 +2956,16 @@ class CoreVultr(UtilCloud):
 
     def create_snapshot(self, backup):
         client = self.node.connection.auth_vultr.get_client()
+        source_key = "instance_id" if self.node.type == CoreNode.Type.CLOUD else "block_id"
+        backup.metadata = record_snapshot_ownership(
+            backup.metadata,
+            source_id=self.unique_id,
+            source_key=source_key,
+        )
+        # Commit the source identity before the provider mutation.  If the
+        # worker dies after Vultr accepts the request, the next delivery can
+        # safely adopt a completed snapshot whose response omits instance_id.
+        backup.save(update_fields=["metadata", "modified"])
 
         def existing_snapshot(path, source_key):
             try:
@@ -2967,7 +2989,18 @@ class CoreVultr(UtilCloud):
                 snapshot for snapshot in snapshots
                 if snapshot.get("description") == backup.uuid_str
             ]
-            if any(snapshot.get(source_key) != self.unique_id for snapshot in described):
+            ownership = (backup.metadata or {}).get("vultr_ownership")
+            if any(
+                not snapshot_matches_with_recorded_source(
+                    snapshot,
+                    provider_id=snapshot.get("id"),
+                    source_id=self.unique_id,
+                    description=backup.uuid_str,
+                    source_key=source_key,
+                    ownership=ownership,
+                )
+                for snapshot in described
+            ):
                 raise NodeBackupFailedError(
                     self.node,
                     backup.uuid_str,
@@ -2989,19 +3022,24 @@ class CoreVultr(UtilCloud):
             try:
                 existing = existing_snapshot("/v2/snapshots", "instance_id")
                 if existing:
-                    if not snapshot_matches(
+                    if not snapshot_matches_with_recorded_source(
                         existing,
                         provider_id=existing.get("id"),
                         source_id=self.unique_id,
                         description=backup.uuid_str,
                         source_key="instance_id",
+                        ownership=(backup.metadata or {}).get("vultr_ownership"),
                     ):
                         raise NodeBackupFailedError(
                             self.node, backup.uuid_str, backup.attempt_no, backup.type,
                             "Existing Vultr snapshot failed ownership verification.",
                         )
                     backup.unique_id = existing.get("id")
-                    backup.metadata = existing
+                    backup.metadata = record_snapshot_ownership(
+                        existing,
+                        source_id=self.unique_id,
+                        source_key="instance_id",
+                    )
                     backup.save()
                     return
                 result = requests.post(
@@ -3014,7 +3052,11 @@ class CoreVultr(UtilCloud):
                 if result.status_code == 201:
                     snapshot = result.json()["snapshot"]
                     backup.unique_id = snapshot["id"]
-                    backup.metadata = snapshot
+                    backup.metadata = record_snapshot_ownership(
+                        snapshot,
+                        source_id=self.unique_id,
+                        source_key="instance_id",
+                    )
                     backup.save()
                 elif result.status_code == 502:
                     raise NodeBackupFailedError(
@@ -3047,19 +3089,24 @@ class CoreVultr(UtilCloud):
                 # the API returns the snapshot object at top level (no wrapper key).
                 existing = existing_snapshot("/v2/blocks/snapshots", "block_id")
                 if existing:
-                    if not snapshot_matches(
+                    if not snapshot_matches_with_recorded_source(
                         existing,
                         provider_id=existing.get("id"),
                         source_id=self.unique_id,
                         description=backup.uuid_str,
                         source_key="block_id",
+                        ownership=(backup.metadata or {}).get("vultr_ownership"),
                     ):
                         raise NodeBackupFailedError(
                             self.node, backup.uuid_str, backup.attempt_no, backup.type,
                             "Existing Vultr snapshot failed ownership verification.",
                         )
                     backup.unique_id = existing.get("id")
-                    backup.metadata = existing
+                    backup.metadata = record_snapshot_ownership(
+                        existing,
+                        source_id=self.unique_id,
+                        source_key="block_id",
+                    )
                     backup.size_gigabytes = round(
                         int(existing.get("size", 0)) / (1000 ** 3), 2
                     )
@@ -3075,7 +3122,11 @@ class CoreVultr(UtilCloud):
                 if result.status_code == 201:
                     snapshot = result.json()
                     backup.unique_id = snapshot["id"]
-                    backup.metadata = snapshot
+                    backup.metadata = record_snapshot_ownership(
+                        snapshot,
+                        source_id=self.unique_id,
+                        source_key="block_id",
+                    )
                     backup.save()
                 elif result.status_code == 502:
                     raise NodeBackupFailedError(
@@ -3461,7 +3512,7 @@ class CoreVultr(UtilCloud):
             return CoreCloudRestore.Status.IN_PROGRESS
 
         try:
-            if response.status_code == 201:
+            if response.status_code in (201, 202):
                 key = "instance" if self.node.type == CoreNode.Type.CLOUD else "block"
                 response_payload, malformed = _json_payload(response, "creating the restore")
                 created = response_payload.get(key) if response_payload else None
@@ -3519,8 +3570,15 @@ class CoreVultr(UtilCloud):
         def record(message, phase=None):
             if phase is not None:
                 restore.operation_phase = phase
+                if phase in {
+                    CoreCloudRestore.OperationPhase.FAILED,
+                    CoreCloudRestore.OperationPhase.MANUAL_REVIEW,
+                }:
+                    restore.status = CoreCloudRestore.Status.FAILED
+                else:
+                    restore.status = CoreCloudRestore.Status.IN_PROGRESS
             restore.error = message
-            restore.save(update_fields=["operation_phase", "error", "modified"])
+            restore.save(update_fields=["status", "operation_phase", "error", "modified"])
 
         if not restore.resource_id:
             record("Vultr restore has no provider resource id yet.", CoreCloudRestore.OperationPhase.RECONCILING)
@@ -3611,9 +3669,10 @@ class CoreVultr(UtilCloud):
 
             status = str(resource["status"]).lower()
             if status == "active":
+                restore.status = CoreCloudRestore.Status.COMPLETE
                 restore.operation_phase = CoreCloudRestore.OperationPhase.COMPLETE
                 restore.error = ""
-                restore.save(update_fields=["operation_phase", "error", "modified"])
+                restore.save(update_fields=["status", "operation_phase", "error", "modified"])
                 return CoreCloudRestore.Status.COMPLETE
             if status in {"suspended", "failed", "error", "destroyed", "terminated"}:
                 record(
@@ -3622,7 +3681,8 @@ class CoreVultr(UtilCloud):
                 )
                 return CoreCloudRestore.Status.FAILED
             restore.operation_phase = CoreCloudRestore.OperationPhase.POLLING
-            restore.save(update_fields=["operation_phase", "modified"])
+            restore.status = CoreCloudRestore.Status.IN_PROGRESS
+            restore.save(update_fields=["status", "operation_phase", "modified"])
             return CoreCloudRestore.Status.IN_PROGRESS
         finally:
             close = getattr(result, "close", None)

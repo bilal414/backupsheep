@@ -188,7 +188,9 @@ class VultrManagedDatabaseClient:
         return self._request("GET", f"/databases/{database_id}/usage")
 
     def get_backup_metadata(self, database_id):
-        return self._request("GET", f"/databases/{database_id}/backup")
+        # Vultr's managed-database API exposes this as the plural ``backups``
+        # collection.  The singular path may look intuitive but returns 404.
+        return self._request("GET", f"/databases/{database_id}/backups")
 
     def list_backup_records(self, database_id):
         """Normalize the provider's backup metadata into a list of records."""
@@ -261,7 +263,12 @@ def provider_backup_id(record):
 
 
 def provider_backup_state(record):
-    return str(record.get("state") or record.get("status") or "").strip().lower()
+    state = str(record.get("state") or record.get("status") or "").strip().lower()
+    # The documented ``/databases/{id}/backups`` response exposes
+    # ``latest_backup``/``oldest_backup`` as available date/time metadata and
+    # does not include a state field. Presence of that record is therefore an
+    # available provider backup, not an indeterminate in-progress operation.
+    return state or "available"
 
 
 def provider_database_id(payload):

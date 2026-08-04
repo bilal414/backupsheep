@@ -73,7 +73,11 @@ class VultrVolumeCreateSnapshotTests(BaseTestCase):
             node.vultr.create_snapshot(backup)
         backup.refresh_from_db()
         self.assertEqual(backup.unique_id, "bs-snap-1")
-        self.assertEqual(backup.metadata, payload)
+        self.assertEqual(backup.metadata["id"], payload["id"])
+        self.assertEqual(
+            backup.metadata["vultr_ownership"],
+            {"source_id": "block-1", "source_key": "block_id"},
+        )
         post.assert_called_once()
         self.assertEqual(post.call_args.args[0], f"{settings.VULTR_API}/v2/blocks/snapshots")
         self.assertEqual(
@@ -112,7 +116,11 @@ class VultrInstanceCreateSnapshotTests(BaseTestCase):
             node.vultr.create_snapshot(backup)
         backup.refresh_from_db()
         self.assertEqual(backup.unique_id, "snap-1")
-        self.assertEqual(backup.metadata, payload["snapshot"])
+        self.assertEqual(backup.metadata["id"], payload["snapshot"]["id"])
+        self.assertEqual(
+            backup.metadata["vultr_ownership"],
+            {"source_id": "instance-1", "source_key": "instance_id"},
+        )
         post.assert_called_once()
         self.assertEqual(post.call_args.args[0], f"{settings.VULTR_API}/v2/snapshots")
         self.assertEqual(
@@ -155,6 +163,56 @@ class VultrPollStatusTests(BaseTestCase):
         backup.refresh_from_db()
         self.assertEqual(backup.status, UtilBackup.Status.IN_PROGRESS)
 
+    def test_volume_poll_pending_create_stays_in_progress(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
+        backup = make_vultr_backup(node, unique_id="bs-snap-1")
+        payload = {
+            "id": "bs-snap-1", "block_id": "block-1",
+            "description": backup.uuid_str, "state": "PENDING_CREATE",
+        }
+        with mock.patch("apps.console.backup.models.requests.get",
+                        return_value=_response(200, payload)):
+            status = backup.poll_status()
+        self.assertEqual(status, UtilBackup.Status.IN_PROGRESS)
+
+    def test_volume_poll_uses_state_when_provider_status_is_null(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
+        backup = make_vultr_backup(node, unique_id="bs-snap-1")
+        payload = {
+            "id": "bs-snap-1", "block_id": "block-1",
+            "description": backup.uuid_str, "status": None,
+            "state": "COMPLETE", "size": 10737418240,
+        }
+        with mock.patch("apps.console.backup.models.requests.get",
+                        return_value=_response(200, payload)):
+            status = backup.poll_status()
+        self.assertEqual(status, UtilBackup.Status.COMPLETE)
+
+    def test_volume_poll_uses_state_when_provider_status_is_null_like_string(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
+        backup = make_vultr_backup(node, unique_id="bs-snap-1")
+        payload = {
+            "id": "bs-snap-1", "block_id": "block-1",
+            "description": backup.uuid_str, "status": "None",
+            "state": "COMPLETE", "size": 10737418240,
+        }
+        with mock.patch("apps.console.backup.models.requests.get",
+                        return_value=_response(200, payload)):
+            status = backup.poll_status()
+        self.assertEqual(status, UtilBackup.Status.COMPLETE)
+
+    def test_volume_poll_treats_missing_provider_state_as_in_progress(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
+        backup = make_vultr_backup(node, unique_id="bs-snap-1")
+        payload = {
+            "id": "bs-snap-1", "block_id": "block-1",
+            "description": backup.uuid_str,
+        }
+        with mock.patch("apps.console.backup.models.requests.get",
+                        return_value=_response(200, payload)):
+            status = backup.poll_status()
+        self.assertEqual(status, UtilBackup.Status.IN_PROGRESS)
+
     def test_instance_poll_complete_unchanged(self):
         node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
         backup = make_vultr_backup(node, unique_id="snap-1")
@@ -171,6 +229,29 @@ class VultrPollStatusTests(BaseTestCase):
         self.assertEqual(backup.size_gigabytes, 10.74)
         self.assertEqual(get.call_args.args[0],
                          f"{settings.VULTR_API}/v2/snapshots/snap-1")
+
+    def test_instance_poll_complete_accepts_vultr_omitted_source_after_create_proof(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.CLOUD)
+        backup = make_vultr_backup(
+            node,
+            unique_id="snap-1",
+            metadata={
+                "vultr_ownership": {
+                    "source_id": "instance-1",
+                    "source_key": "instance_id",
+                }
+            },
+        )
+        payload = {"snapshot": {
+            "id": "snap-1", "instance_id": None,
+            "description": backup.uuid_str, "status": "complete", "size": 10737418240,
+        }}
+        with mock.patch("apps.console.backup.models.requests.get",
+                        return_value=_response(200, payload)):
+            status = backup.poll_status()
+        self.assertEqual(status, UtilBackup.Status.COMPLETE)
+        backup.refresh_from_db()
+        self.assertTrue(backup.metadata["vultr_ownership_verified"])
 
 
 class VultrSoftDeleteTests(BaseTestCase):
