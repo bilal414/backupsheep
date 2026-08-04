@@ -37,6 +37,8 @@ class CoreNodeSerializer(serializers.ModelSerializer):
     def get_type_details(obj):
         if hasattr(obj, "database"):
             return {"name": "database", "id": obj.database.id}
+        elif hasattr(obj, "vultr_database"):
+            return {"name": "vultr_database", "id": obj.vultr_database.id}
         elif hasattr(obj, "website"):
             return {"name": "website", "id": obj.website.id}
         elif hasattr(obj, "wordpress"):

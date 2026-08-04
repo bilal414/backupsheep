@@ -456,6 +456,12 @@ DIGITALOCEAN_API = config.get("DIGITALOCEAN_API", "https://api.digitalocean.com"
 HETZNER_API = config.get("HETZNER_API", "https://api.hetzner.cloud")
 UPCLOUD_API = config.get("UPCLOUD_API", "https://api.upcloud.com/1.3")
 VULTR_API = config.get("VULTR_API", "https://api.vultr.com")
+# Requests to Vultr must have bounded connect/read timeouts so a worker can
+# recover an in-progress operation after a provider/network stall.
+VULTR_API_TIMEOUT = (
+    int(config.get("VULTR_API_CONNECT_TIMEOUT", 10)),
+    int(config.get("VULTR_API_READ_TIMEOUT", 60)),
+)
 # Public-IP lookup services used to detect this server's own outbound IPv4/IPv6 for the
 # self-hosted ("local") backup-server location, so users can allow-list them on their
 # firewalls. Any service returning a bare IP address as the response body works.
@@ -582,6 +588,7 @@ CELERY_IMPORTS = (
     "apps._tasks.integration.restore",
     "apps._tasks.integration.upcloud",
     "apps._tasks.integration.vultr",
+    "apps._tasks.integration.vultr_database",
     "apps._tasks.integration.website",
     "apps._tasks.integration.wordpress",
     "apps._tasks.integration.storage.tasks",
@@ -715,6 +722,10 @@ CELERY_TASK_ROUTES = {
     "backup_digitalocean": {"queue": "cloud"},
     "backup_hetzner": {"queue": "cloud"},
     "backup_vultr": {"queue": "cloud"},
+    "backup_vultr_database": {"queue": "cloud"},
+    "poll_vultr_database_backup": {"queue": "cloud"},
+    "restore_vultr_database": {"queue": "cloud"},
+    "poll_vultr_database_restore": {"queue": "cloud"},
     "backup_aws": {"queue": "cloud"},
     "backup_aws_rds": {"queue": "cloud"},
     "backup_lightsail": {"queue": "cloud"},

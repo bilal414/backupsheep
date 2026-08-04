@@ -14,6 +14,7 @@ urlpatterns += [
                 path("", include("apps.api.v1.cloud.digitalocean.urls")),
                 path("", include("apps.api.v1.cloud.aws.urls")),
                 path("", include("apps.api.v1.cloud.vultr.urls")),
+                path("", include("apps.api.v1.cloud.vultr_database.urls")),
                 path("", include("apps.api.v1.cloud.ovh_ca.urls")),
                 path("", include("apps.api.v1.cloud.ovh_eu.urls")),
                 path("", include("apps.api.v1.cloud.ovh_us.urls")),

@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.console.connection.models import CoreConnection, CoreConnectionLocation, CoreIntegration
 from apps.api.v1.utils.api_permissions import MemberPermissions
-from apps.console.node.models import CoreVultr, CoreNode
+from apps.console.node.models import CoreVultr, CoreVultrDatabase, CoreNode
 from .filters import CoreVultrFilter
 from .permissions import CoreVultrViewPermissions
 from .serializers import CoreVultrConnectionReadSerializer, CoreVultrConnectionWriteSerializer
@@ -86,7 +86,12 @@ class CoreVultrView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             for eligible_object in eligible_objects:
                 query = Q(unique_id=eligible_object["id"], node__connection=connection)
                 query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-                if CoreVultr.objects.filter(query).exists():
+                object_model = (
+                    CoreVultrDatabase
+                    if self.request.query_params.get("object_type") in {"database", "managed_database", "vultr_database"}
+                    else CoreVultr
+                )
+                if object_model.objects.filter(query).exists():
                     eligible_object["_bs_attached"] = True
             return Response(eligible_objects)
         except Exception as e:

@@ -18,6 +18,7 @@ from apps.console.node.models import CoreDatabase, CoreNode, CoreVultr
 from rest_framework import status
 
 from apps.console.utils.models import UtilBackup
+from apps.console.vultr_monitoring import VultrMonitoringError, list_instance_backups
 
 
 class CoreCloudVultrView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
@@ -79,3 +80,36 @@ class CoreCloudVultrView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             ).count(),
         }
         return Response(all_totals)
+
+    @action(detail=True, methods=["get"], url_path="automatic-backups")
+    def automatic_backups(self, request, pk=None):
+        """Return read-only status for Vultr-managed instance backups.
+
+        BackupSheep-owned snapshots remain in ``CoreVultrBackup``.  This endpoint
+        only observes provider-managed automatic backups and never changes their
+        schedule or retention.
+        """
+
+        instance = self.get_object()
+        if instance.node.type != CoreNode.Type.CLOUD:
+            return Response(
+                {"detail": "Automatic backups are only available for Vultr instances."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            backups = list_instance_backups(
+                instance.node.connection.auth_vultr,
+                instance_id=instance.unique_id,
+            )
+        except VultrMonitoringError as error:
+            payload = {"detail": str(error), "classification": error.classification}
+            if error.status_code == 429:
+                response_status = status.HTTP_429_TOO_MANY_REQUESTS
+            elif error.classification in {"transient_timeout", "transient_unavailable", "provider_unavailable"}:
+                response_status = status.HTTP_503_SERVICE_UNAVAILABLE
+            elif error.classification == "authentication":
+                response_status = status.HTTP_502_BAD_GATEWAY
+            else:
+                response_status = status.HTTP_502_BAD_GATEWAY
+            return Response(payload, status=response_status)
+        return Response({"instance_id": instance.unique_id, "backups": backups})

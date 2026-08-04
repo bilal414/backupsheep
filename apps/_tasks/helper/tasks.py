@@ -64,6 +64,7 @@ def _recovery_backup_models():
         from apps.console.backup.models import (
             CoreAWSBackup,
             CoreAWSRDSBackup,
+            CoreVultrDatabaseBackup,
             CoreDigitalOceanBackup,
             CoreGoogleCloudBackup,
             CoreHetznerBackup,
@@ -88,6 +89,7 @@ def _recovery_backup_models():
             CoreAWSBackup,
             CoreLightsailBackup,
             CoreAWSRDSBackup,
+            CoreVultrDatabaseBackup,
         )
     if _LOCAL_BACKUP_MODELS is None:
         from apps.console.backup.models import (
@@ -391,6 +393,29 @@ def resume_in_progress_backups(self):
                     CoreNode.Status.DELETE_REQUESTED,
                     CoreNode.Status.PAUSED,
                 ):
+                    continue
+
+                # Managed database backups use a provider-owned metadata record
+                # and a database-specific poller. They do not have a CoreVultr
+                # compute/volume backup relation, so routing them through the
+                # generic cloud poller would load the wrong model on recovery.
+                if model.__name__ == "CoreVultrDatabaseBackup":
+                    task_id = backup.celery_task_id or f"recover-vultr-db-{backup.pk}"
+                    task_name = (
+                        "poll_vultr_database_backup"
+                        if getattr(backup, "provider_marker", None)
+                        else "backup_vultr_database"
+                    )
+                    if task_name == "poll_vultr_database_backup":
+                        current_app.send_task(
+                            task_name, task_id=task_id, args=[backup.id]
+                        )
+                    else:
+                        current_app.send_task(
+                            task_name,
+                            task_id=task_id,
+                            kwargs=_backup_recovery_kwargs(backup, node),
+                        )
                     continue
 
                 if model in cloud_models and _backup_has_provider_reference(backup):

@@ -23,6 +23,23 @@ credentials in `.env` (see [Configuration](configuration.md)).
 | Google Cloud | `google_cloud` |
 | OVH Public Cloud — CA / EU / US | `ovh_ca` / `ovh_eu` / `ovh_us` |
 
+### Vultr Managed Databases
+
+Vultr Managed Database clusters are discovered through the existing `vultr`
+connection and exposed as the `vultr_database` source. Discovery records the
+engine, region, plan, status, detail, and usage metadata with cursor pagination.
+PostgreSQL, MySQL, and MariaDB are supported explicitly; other engines remain
+visible for monitoring but are rejected for backup/restore rather than guessed.
+Provider-managed backup metadata is adopted read-only. Fork/restore always uses
+Vultr's managed-database fork endpoint to create a new cluster, with deterministic
+labels and adoption on retry; the source cluster is never overwritten. Automatic
+backup schedules are monitored only and are not changed by BackupSheep.
+
+See Vultr's [Managed Database documentation](https://docs.vultr.com/products/storage/databases),
+[database backup reference](https://docs.vultr.com/reference/vultr-cli/database/backup),
+and [fork reference](https://docs.vultr.com/reference/vultr-cli/database/backup/fork)
+for provider-side retention and engine/plan capability details.
+
 ### Databases (offsite dumps)
 The **Database** source (`database`) dumps and stores your databases offsite:
 

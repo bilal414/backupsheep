@@ -1008,6 +1008,11 @@ class CoreAuthVultr(TimeStampedModel):
         eligible_objects = []
         client = self.get_client()
 
+        if object_type in {"database", "managed_database", "vultr_database"}:
+            from apps.console.vultr_database import VultrManagedDatabaseClient
+
+            return VultrManagedDatabaseClient(self).discover_databases()
+
         regions = list(iter_vultr_collection(
             requests.get,
             f"{settings.VULTR_API}/v2/regions",

@@ -34,6 +34,7 @@ def get_backup_models():
         CoreAWSBackup,
         CoreLightsailBackup,
         CoreAWSRDSBackup,
+        CoreVultrDatabaseBackup,
         CoreOracleBackup,
         CoreGoogleCloudBackup,
     )
@@ -53,6 +54,7 @@ def get_backup_models():
         (CoreAWSBackup, "aws"),
         (CoreLightsailBackup, "lightsail"),
         (CoreAWSRDSBackup, "aws_rds"),
+        (CoreVultrDatabaseBackup, "vultr_database"),
         (CoreOracleBackup, "oracle"),
         (CoreGoogleCloudBackup, "google_cloud"),
     )
