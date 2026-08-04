@@ -38,6 +38,7 @@ from model_utils.models import TimeStampedModel
 
 from ..member.models import CoreMember
 from ..utils.models import UtilBase
+from ..vultr import iter_vultr_collection, vultr_request_timeout
 
 
 def _configure_ssh_host_keys(ssh):
@@ -1006,83 +1007,62 @@ class CoreAuthVultr(TimeStampedModel):
     def get_eligible_objects(self, object_type="cloud"):
         eligible_objects = []
         client = self.get_client()
-        params = {"per_page": 500}
 
-        regions = []
-        more_objects = True
-        cursor = None
-        while more_objects is True:
-            region_params = dict(params)
-            if cursor:
-                region_params["cursor"] = cursor
-            result = requests.get(f"{settings.VULTR_API}/v2/regions", params=region_params, headers=client)
-            if result.status_code != 200:
-                raise ValueError(
-                    f"Unable to get list of regions. Received status code {result.status_code} from API."
-                )
-            regions.extend(result.json().get("regions", []))
-            cursor = result.json().get("meta", {}).get("links", {}).get("next")
-            if not cursor:
-                more_objects = False
-        result.close()
+        regions = list(iter_vultr_collection(
+            requests.get,
+            f"{settings.VULTR_API}/v2/regions",
+            headers=client,
+            item_key="regions",
+        ))
+        region_by_id = {region.get("id"): region for region in regions}
 
         if object_type == "cloud":
-            more_objects = True
-            cursor = None
-            while more_objects is True:
-                instance_params = dict(params)
-                if cursor:
-                    instance_params["cursor"] = cursor
-                result = requests.get(f"{settings.VULTR_API}/v2/instances", params=instance_params, headers=client)
-                if result.status_code == 200:
-                    for instance in result.json()["instances"]:
-                        instance["_bs_unique_id"] = instance.get("id", None)
-                        # `tag` is deprecated in favor of the `tags` list; prefer the first tag when present
-                        tags = instance.get("tags") or []
-                        instance_tag = tags[0] if tags else instance.get("tag", None)
-                        if (instance.get("hostname", None) == "vultr.guest") and instance_tag:
-                            instance["_bs_name"] = f"{instance_tag}"
-                        else:
-                            instance["_bs_name"] = f"{instance.get('hostname', None)}"
-
-                        _bs_region = next((x for x in regions if x["id"] == instance.get("region", None)), None)
-
-                        instance["_bs_region"] = f"{_bs_region['city']}, {_bs_region['country']}"
-                        instance["_bs_size"] = instance.get("disk", None)
-                        eligible_objects.append(instance)
-                    cursor = result.json().get("meta", {}).get("links", {}).get("next")
-                    if not cursor:
-                        more_objects = False
+            instances = iter_vultr_collection(
+                requests.get,
+                f"{settings.VULTR_API}/v2/instances",
+                headers=client,
+                item_key="instances",
+            )
+            for instance in instances:
+                instance["_bs_unique_id"] = instance.get("id")
+                # `tag` is deprecated in favor of the `tags` list; prefer the first tag when present.
+                tags = instance.get("tags") or []
+                instance_tag = tags[0] if tags else instance.get("tag")
+                if instance.get("hostname") == "vultr.guest" and instance_tag:
+                    instance["_bs_name"] = f"{instance_tag}"
                 else:
-                    more_objects = False
-            result.close()
+                    instance["_bs_name"] = f"{instance.get('hostname')}"
+                region = region_by_id.get(instance.get("region"))
+                if not region:
+                    raise ValueError("Vultr instance referenced an unknown region.")
+                instance["_bs_region"] = f"{region['city']}, {region['country']}"
+                instance["_bs_size"] = instance.get("disk")
+                eligible_objects.append(instance)
         elif object_type == "volume":
-            more_objects = True
-            cursor = None
-            while more_objects is True:
-                block_params = dict(params)
-                if cursor:
-                    block_params["cursor"] = cursor
-                result = requests.get(f"{settings.VULTR_API}/v2/blocks", params=block_params, headers=client)
-                if result.status_code == 200:
-                    for block in result.json()["blocks"]:
-                        block["_bs_unique_id"] = block.get("id", None)
-                        block["_bs_name"] = block.get("label", None)
-                        _bs_region = next((x for x in regions if x["id"] == block.get("region", None)), None)
-                        block["_bs_region"] = f"{_bs_region['city']}, {_bs_region['country']}"
-                        block["_bs_size"] = block.get("size_gb", None)
-                        eligible_objects.append(block)
-                    cursor = result.json().get("meta", {}).get("links", {}).get("next")
-                    if not cursor:
-                        more_objects = False
-                else:
-                    more_objects = False
-            result.close()
+            blocks = iter_vultr_collection(
+                requests.get,
+                f"{settings.VULTR_API}/v2/blocks",
+                headers=client,
+                item_key="blocks",
+            )
+            for block in blocks:
+                block["_bs_unique_id"] = block.get("id")
+                block["_bs_name"] = block.get("label")
+                region = region_by_id.get(block.get("region"))
+                if not region:
+                    raise ValueError("Vultr block referenced an unknown region.")
+                block["_bs_region"] = f"{region['city']}, {region['country']}"
+                block["_bs_size"] = block.get("size_gb")
+                eligible_objects.append(block)
         return eligible_objects
 
     def validate(self, check_errors=None, raise_exp=None):
         client = self.get_client()
-        result = requests.get(f"{settings.VULTR_API}/v2/account", headers=client)
+        result = requests.get(
+            f"{settings.VULTR_API}/v2/account",
+            headers=client,
+            timeout=vultr_request_timeout(),
+        )
         if result.status_code == 200:
             return True
         else:
