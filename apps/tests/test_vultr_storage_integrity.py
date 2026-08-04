@@ -223,3 +223,22 @@ class VultrStorageIntegrityTests(BaseTestCase):
         client.head_object.assert_called_once_with(
             Bucket="test-bucket", Key=key, VersionId="version-1"
         )
+
+    def test_versioned_object_download_uses_persisted_version_id(self):
+        self.point.storage_file_id = "backups/versioned.zip"
+        self.point.metadata = {
+            VULTR_OBJECT_METADATA_KEY: {"version_id": "version-7"}
+        }
+        self.point.save()
+        client = mock.MagicMock()
+        client.generate_presigned_url.return_value = "https://example.invalid/object"
+        with mock.patch(
+            "boto3.client", return_value=client
+        ):
+            self.assertEqual(
+                self.point.generate_download_url(), "https://example.invalid/object"
+            )
+        self.assertEqual(
+            client.generate_presigned_url.call_args.kwargs["Params"]["VersionId"],
+            "version-7",
+        )

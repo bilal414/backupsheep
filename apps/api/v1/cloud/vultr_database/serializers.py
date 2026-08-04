@@ -1,6 +1,9 @@
 from rest_framework import serializers
 
-from apps.api.v1.node.serializers import CoreCloudNodeWriteSerializer, CoreNodeReadSerializer
+from apps.api.v1.node.serializers import (
+    CoreDatabaseNodeWriteSerializer,
+    CoreNodeReadSerializer,
+)
 from apps.console.node.models import CoreNode, CoreSchedule, CoreVultrDatabase
 from apps.console.utils.models import UtilBackup
 
@@ -25,7 +28,11 @@ class CoreVultrDatabaseReadSerializer(serializers.ModelSerializer):
 
 
 class CoreVultrDatabaseWriteSerializer(serializers.ModelSerializer):
-    node = CoreCloudNodeWriteSerializer(write_only=True)
+    # A managed database has its own provider integration object and must be
+    # persisted as a DATABASE node.  Using the generic cloud serializer here
+    # makes schedules dispatch ``backup_vultr`` and leaves the database object
+    # unreachable through CoreNode's normal backup helpers.
+    node = CoreDatabaseNodeWriteSerializer(write_only=True)
 
     class Meta:
         model = CoreVultrDatabase

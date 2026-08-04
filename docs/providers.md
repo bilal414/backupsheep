@@ -28,8 +28,9 @@ credentials in `.env` (see [Configuration](configuration.md)).
 Vultr Managed Database clusters are discovered through the existing `vultr`
 connection and exposed as the `vultr_database` source. Discovery records the
 engine, region, plan, status, detail, and usage metadata with cursor pagination.
-PostgreSQL, MySQL, and MariaDB are supported explicitly; other engines remain
-visible for monitoring but are rejected for backup/restore rather than guessed.
+PostgreSQL, MySQL, MariaDB, and Valkey are supported explicitly; other engines
+remain visible for monitoring but are rejected for backup/restore rather than
+guessed. Valkey supports periodic-backup forks but not point-in-time recovery.
 Provider-managed backup metadata is adopted read-only. Fork/restore always uses
 Vultr's managed-database fork endpoint to create a new cluster, with deterministic
 labels and adoption on retry; the source cluster is never overwritten. Automatic
@@ -107,6 +108,12 @@ Storage** needs neither — backups stay on a disk path of the BackupSheep serve
 | Google Drive | `google_drive` | OAuth (`GOOGLE_CLIENT_*`) |
 | Microsoft OneDrive | `onedrive` | OAuth (`MS_*`) |
 | pCloud | `pcloud` | OAuth (`PCLOUD_CLIENT_*`) |
+
+Vultr Object Storage is S3-compatible, but Vultr does not provide bucket
+replication. BackupSheep persists the uploaded object's SHA-256, byte count,
+ETag, and version ID (when returned), and uses the version ID for downloads and
+targeted cleanup. Use a second independent destination for cross-region or
+ransomware-isolated copies.
 
 OAuth credentials and how to obtain them are listed in
 [Configuration → Storage-provider OAuth](configuration.md#storage-provider-oauth-only-for-the-providers-you-use).

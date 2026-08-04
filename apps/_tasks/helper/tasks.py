@@ -298,9 +298,9 @@ def _reset_node_if_no_active_backup(node, backup=None):
         ):
             return fresh_node
 
-        node_type_object = getattr(
-            fresh_node, fresh_node.connection.integration.code
-        )
+        node_type_object = fresh_node._integration_object()
+        if not node_type_object:
+            return fresh_node
         active_backups = node_type_object.backups.filter(
             status__in=UtilBackup.ACTIVE_STATUSES
         )
@@ -971,8 +971,8 @@ def node_delete_requested(self, node_id):
             for node in CoreNode.objects.filter(status=CoreNode.Status.DELETE_REQUESTED, id=node_id).order_by(
                 "-created"
             ):
-                if hasattr(node, node.connection.integration.code):
-                    node_type_object = getattr(node, node.connection.integration.code)
+                node_type_object = node._integration_object()
+                if node_type_object:
 
                     query = ~Q(status=UtilBackup.Status.DELETE_COMPLETED)
                     pending_backups = node_type_object.backups.filter(query).order_by("created")
@@ -1025,8 +1025,8 @@ def clean_delete_failed_backups(self):
 
     try:
         for node in CoreNode.objects.filter().order_by("-created"):
-            if hasattr(node, node.connection.integration.code):
-                node_type_object = getattr(node, node.connection.integration.code)
+            node_type_object = node._integration_object()
+            if node_type_object:
 
                 cleanup_statuses = (
                     UtilBackup.Status.DELETE_FAILED,

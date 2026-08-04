@@ -1380,8 +1380,18 @@ class CoreVultrBackup(UtilBackup):
                 return self.status
             finally:
                 r.close()
-        except Exception as e:
+        except requests.RequestException as e:
             record("transient_client_error", error="Vultr snapshot status request timed out or failed.")
+            self.status = UtilBackup.Status.IN_PROGRESS
+            self.save()
+            return UtilBackup.Status.IN_PROGRESS
+        except (TypeError, ValueError, KeyError) as e:
+            record("malformed_provider_response", error="Vultr returned malformed snapshot status data.")
+            self.status = UtilBackup.Status.FAILED
+            self.save()
+            return UtilBackup.Status.FAILED
+        except Exception as e:
+            record("transient_client_error", error="Vultr snapshot status client failed.")
             self.status = UtilBackup.Status.IN_PROGRESS
             self.save()
             return UtilBackup.Status.IN_PROGRESS
@@ -2011,11 +2021,19 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     self.storage.storage_vultr.secret_key, encryption_key
                 ),
             )
+            object_metadata = (self.metadata or {}).get("vultr_s3_object") or {}
+            version_id = object_metadata.get("version_id")
+            version_kwargs = (
+                {"VersionId": version_id}
+                if version_id and version_id != "null"
+                else {}
+            )
             response = s3_client.generate_presigned_url(
                 "get_object",
                 Params={
                     "Bucket": self.storage.storage_vultr.bucket_name,
                     "Key": f"{self.storage_file_id}",
+                    **version_kwargs,
                 },
                 ExpiresIn=_presigned_url_expiry(),
             )
@@ -2492,10 +2510,15 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         aws_access_key_id=bs_decrypt(self.storage.storage_vultr.access_key, encryption_key),
                         aws_secret_access_key=bs_decrypt(self.storage.storage_vultr.secret_key, encryption_key),
                     )
-                    s3_client.delete_object(
-                        Bucket=self.storage.storage_vultr.bucket_name,
-                        Key=f"{self.storage_file_id}",
-                    )
+                    object_metadata = (self.metadata or {}).get("vultr_s3_object") or {}
+                    version_id = object_metadata.get("version_id")
+                    delete_args = {
+                        "Bucket": self.storage.storage_vultr.bucket_name,
+                        "Key": f"{self.storage_file_id}",
+                    }
+                    if version_id and version_id != "null":
+                        delete_args["VersionId"] = version_id
+                    s3_client.delete_object(**delete_args)
                 elif self.storage.type.code == "upcloud":
                     s3_client = boto3.client(
                         "s3",
@@ -3809,6 +3832,7 @@ class CoreVultrDatabaseBackup(UtilBackup):
             state = provider_backup_state(record)
             self.provider_state = state
             self.provider_error_class = ""
+            self.provider_http_status = None
             self.provider_backup_id = provider_backup_id(record) or self.provider_backup_id
             self.metadata = {
                 "source_database_id": self.vultr_database.unique_id,
@@ -3962,7 +3986,7 @@ class CoreCloudRestore(TimeStampedModel):
 
     @property
     def node_type_object(self):
-        return getattr(self.node, self.node.connection.integration.code)
+        return self.node._integration_object()
 
     def poll_status(self):
         """Single restore status check, used by the poll_cloud_restore task.

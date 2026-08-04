@@ -101,6 +101,36 @@ class VultrRestoreRecoveryTests(BaseTestCase):
         self.assertEqual(restore.resource_id, "instance-1")
         post.assert_not_called()
 
+    def test_unknown_create_outcome_does_not_repost_before_target_is_visible(self):
+        node, backup, restore = self._restore(
+            region="ewr", plan="vc2-1c-1gb"
+        )
+        with mock.patch(
+            "apps.console.node.models.requests.get",
+            return_value=response(200, {"instances": [], "meta": {}}),
+        ), mock.patch(
+            "apps.console.node.models.requests.post",
+            side_effect=requests.Timeout("response lost"),
+        ):
+            self.assertEqual(
+                node.vultr.restore_snapshot(backup, restore),
+                CoreCloudRestore.Status.IN_PROGRESS,
+            )
+
+        with mock.patch(
+            "apps.console.node.models.requests.get",
+            return_value=response(200, {"instances": [], "meta": {}}),
+        ), mock.patch("apps.console.node.models.requests.post") as post:
+            self.assertEqual(
+                node.vultr.restore_snapshot(backup, restore),
+                CoreCloudRestore.Status.IN_PROGRESS,
+            )
+        post.assert_not_called()
+        restore.refresh_from_db()
+        self.assertEqual(
+            restore.operation_phase, CoreCloudRestore.OperationPhase.CREATE_UNKNOWN
+        )
+
     def test_database_save_crash_after_post_is_adopted_after_redelivery(self):
         node, backup, restore = self._restore(
             region="ewr", plan="vc2-1c-1gb"

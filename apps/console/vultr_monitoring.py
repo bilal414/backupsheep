@@ -12,6 +12,8 @@ from typing import Any
 import requests
 from django.conf import settings
 
+from apps.console.vultr import vultr_request_timeout
+
 
 DEFAULT_VULTR_TIMEOUT = (10, 60)
 
@@ -26,7 +28,7 @@ class VultrMonitoringError(Exception):
 
 
 def _request_timeout():
-    return getattr(settings, "VULTR_API_TIMEOUT", DEFAULT_VULTR_TIMEOUT)
+    return vultr_request_timeout()
 
 
 def _safe_backup(record: Any) -> dict[str, Any]:

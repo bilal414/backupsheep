@@ -35,6 +35,14 @@ def restore_cloud_backup(self, node_id=None, backup_id=None, restore_id=None):
     restore = CoreCloudRestore.objects.get(id=restore_id, node=node)
     backup = node.get_cloud_backup(backup_id)
 
+    # Failed/manual-review restores are terminal.  A late Celery redelivery
+    # must not turn them back into a provider create request.
+    if restore.status in (
+        CoreCloudRestore.Status.COMPLETE,
+        CoreCloudRestore.Status.FAILED,
+    ):
+        return
+
     # AWS Backup returns a durable restore-job id before the target resource is
     # ready.  A late-ack redelivery or recovery after a worker crash must resume
     # polling that job instead of issuing a second restore request.

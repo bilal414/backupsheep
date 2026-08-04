@@ -139,7 +139,10 @@ def restore_vultr_database(self, restore_id):
         restore.provider_http_status = error.status_code
         restore.error = str(error)
         restore.save(update_fields=["provider_status", "provider_http_status", "error", "modified"])
-        raise self.retry(exc=error)
+        if error.category in {"rate_limited", "transient_outage"}:
+            raise self.retry(exc=error)
+        restore.status = CoreVultrDatabaseRestore.Status.FAILED
+        restore.save(update_fields=["status", "modified"])
     except Exception as error:
         restore.error = str(error)
         restore.save(update_fields=["error", "modified"])
@@ -157,6 +160,42 @@ def poll_vultr_database_restore(self, restore_id):
         CoreVultrDatabaseRestore.Status.CANCELLED,
     }:
         return
+
+    # A fork response may contain only an asynchronous job id, or the worker
+    # may have crashed before saving the returned database id. Re-run the
+    # provider-side marker reconciliation before polling; the adapter refuses
+    # to issue a second fork once its outcome is unknown.
+    if not restore.resource_id:
+        try:
+            restore.backup.vultr_database.restore_snapshot(restore.backup, restore)
+        except VultrDatabaseDuplicateError as error:
+            restore.status = CoreVultrDatabaseRestore.Status.FAILED
+            restore.error = str(error)
+            restore.save(update_fields=["status", "error", "modified"])
+            return
+        except VultrDatabaseError as error:
+            restore.provider_status = error.category
+            restore.provider_http_status = error.status_code
+            restore.error = str(error)
+            restore.status = (
+                CoreVultrDatabaseRestore.Status.IN_PROGRESS
+                if error.category in {"rate_limited", "transient_outage"}
+                else CoreVultrDatabaseRestore.Status.FAILED
+            )
+            restore.save(
+                update_fields=[
+                    "provider_status", "provider_http_status", "error", "status", "modified"
+                ]
+            )
+            if restore.status == CoreVultrDatabaseRestore.Status.IN_PROGRESS:
+                poll_vultr_database_restore.apply_async(args=[restore.id], countdown=120)
+            return
+        restore.refresh_from_db()
+        if not restore.resource_id:
+            if restore.status == CoreVultrDatabaseRestore.Status.IN_PROGRESS:
+                poll_vultr_database_restore.apply_async(args=[restore.id], countdown=120)
+            return
+
     status = restore.backup.vultr_database.check_restore(restore)
     if status == CoreVultrDatabaseRestore.Status.IN_PROGRESS:
         poll_vultr_database_restore.apply_async(args=[restore.id], countdown=120)

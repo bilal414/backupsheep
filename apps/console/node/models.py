@@ -2692,56 +2692,170 @@ class CoreVultrDatabase(UtilCloud):
         backup.save()
 
     def restore_snapshot(self, backup, restore):
-        """Fork/restore to a new cluster and reconcile before retrying POST."""
+        """Fork to a new cluster with durable, single-create reconciliation.
+
+        The provider has no idempotency key for this operation.  A unique label
+        is persisted before the fork request, and ``create_unknown`` is persisted
+        before the request itself.  Once the outcome is unknown, later workers
+        may adopt a matching provider cluster but are never allowed to issue a
+        second fork request automatically.
+        """
         from apps.console.vultr_database import (
             VultrDatabaseDuplicateError,
+            VultrDatabaseError,
             provider_database_id,
         )
+        from apps.console.backup.models import CoreVultrDatabaseRestore
 
         params = dict(restore.params or {})
         mode = str(params.get("type") or "basebackup").lower()
         self.capabilities().require_fork_support(mode)
-        if restore.resource_id:
+        client = self.client
+        should_fork = False
+        body = None
+        duplicate_error = None
+
+        def matches(database, label, region, plan):
+            if database.get("label") != label or not database.get("id"):
+                return False
+            # The label is the durable idempotency marker.  Check the requested
+            # placement and plan whenever Vultr includes those fields, while
+            # remaining compatible with older list responses that omit them.
+            if database.get("region") not in (None, "") and str(database["region"]) != str(region):
+                return False
+            if database.get("plan") not in (None, "") and str(database["plan"]) != str(plan):
+                return False
+            return True
+
+        # Commit the marker and the pre-create state before any provider fork
+        # request.  The row lock also serializes two Celery deliveries for the
+        # same restore while their provider-side reconciliation is in flight.
+        with transaction.atomic():
+            locked = CoreVultrDatabaseRestore.objects.select_for_update().get(pk=restore.pk)
+            if locked.resource_id:
+                return
+
+            params = dict(locked.params or {})
+            mode = str(params.get("type") or "basebackup").lower()
+            self.capabilities().require_fork_support(mode)
+            label = locked.provider_marker or f"bs-restore-{locked.uuid.hex[:20]}"
+            region = params.get("region") or self.region
+            plan = params.get("plan") or self.plan
+            params.update({"region": region, "plan": plan, "type": mode})
+            locked.provider_marker = label
+            locked.params = params
+            locked.status = locked.Status.IN_PROGRESS
+
+            candidates = [
+                database for database in client.list_databases()
+                if database.get("label") == label
+            ]
+            if len(candidates) > 1:
+                duplicate_error = VultrDatabaseDuplicateError(
+                    f"Multiple Vultr managed databases match restore marker {label}."
+                )
+                locked.provider_status = duplicate_error.category
+                locked.status = locked.Status.FAILED
+                locked.error = str(duplicate_error)
+                locked.save(
+                    update_fields=[
+                        "provider_marker", "params", "provider_status", "status", "error", "modified"
+                    ]
+                )
+            elif candidates and not matches(candidates[0], label, region, plan):
+                duplicate_error = VultrDatabaseDuplicateError(
+                    f"Vultr managed database matched restore marker {label} but failed ownership checks."
+                )
+                locked.provider_status = duplicate_error.category
+                locked.status = locked.Status.FAILED
+                locked.error = str(duplicate_error)
+                locked.save(
+                    update_fields=[
+                        "provider_marker", "params", "provider_status", "status", "error", "modified"
+                    ]
+                )
+            elif candidates:
+                locked.resource_id = str(candidates[0]["id"])
+                locked.provider_status = "adopted"
+                locked.metadata = {"adopted_database": candidates[0]}
+                locked.save(
+                    update_fields=[
+                        "provider_marker", "params", "resource_id", "provider_status", "metadata",
+                        "status", "modified",
+                    ]
+                )
+            elif locked.provider_status in {"create_unknown", "in_progress"} or locked.provider_job_id:
+                # A prior fork may have been accepted but is not list-visible
+                # yet.  Reconcile again later; never issue another fork request.
+                locked.provider_status = "create_unknown"
+                locked.save(
+                    update_fields=["provider_marker", "params", "provider_status", "status", "modified"]
+                )
+            else:
+                locked.provider_status = "create_unknown"
+                locked.save(
+                    update_fields=["provider_marker", "params", "provider_status", "status", "modified"]
+                )
+                body = {
+                    "label": label,
+                    "region": region,
+                    "plan": plan,
+                    "type": mode,
+                }
+                if mode == "pitr":
+                    if params.get("date"):
+                        body["date"] = params["date"]
+                    if params.get("time"):
+                        body["time"] = params["time"]
+                should_fork = True
+
+        if duplicate_error:
+            raise duplicate_error
+        if not should_fork:
             return
 
-        label = restore.provider_marker or f"bs-restore-{restore.uuid.hex[:20]}"
-        restore.provider_marker = label
-        restore.save(update_fields=["provider_marker", "modified"])
+        try:
+            payload = client.fork_database(self.unique_id, body)
+            resource_id = provider_database_id(payload)
+            provider_job_id = payload.get("job_id") or payload.get("operation_id")
+            if not resource_id and not provider_job_id:
+                raise VultrDatabaseError(
+                    "Vultr fork response did not include a database or job identifier.",
+                    category="transient_outage",
+                )
+        except VultrDatabaseError as error:
+            with transaction.atomic():
+                locked = CoreVultrDatabaseRestore.objects.select_for_update().get(pk=restore.pk)
+                locked.provider_status = "create_unknown" if error.category in {
+                    "rate_limited", "transient_outage"
+                } else error.category
+                locked.provider_http_status = error.status_code
+                locked.error = str(error)
+                locked.status = (
+                    locked.Status.IN_PROGRESS
+                    if error.category in {"rate_limited", "transient_outage"}
+                    else locked.Status.FAILED
+                )
+                locked.save(
+                    update_fields=[
+                        "provider_status", "provider_http_status", "error", "status", "modified"
+                    ]
+                )
+            raise
 
-        candidates = [
-            database for database in self.client.list_databases()
-            if database.get("label") == label
-        ]
-        if len(candidates) > 1:
-            raise VultrDatabaseDuplicateError(
-                f"Multiple Vultr managed databases match restore marker {label}."
-            )
-        if candidates:
-            restore.resource_id = candidates[0].get("id")
-            restore.metadata = {"adopted_database": candidates[0]}
-            restore.status = restore.Status.IN_PROGRESS
-            restore.save()
-            return
-
-        body = {
-            "label": label,
-            "region": params.get("region") or self.region,
-            "plan": params.get("plan") or self.plan,
-            "type": mode,
-        }
-        if mode == "pitr":
-            if params.get("date"):
-                body["date"] = params["date"]
-            if params.get("time"):
-                body["time"] = params["time"]
-        payload = self.client.fork_database(self.unique_id, body)
-        restore.resource_id = provider_database_id(payload)
-        restore.provider_job_id = payload.get("job_id") or payload.get("operation_id")
-        restore.metadata = payload
-        restore.status = restore.Status.IN_PROGRESS
-        restore.save()
-        if not restore.resource_id and not restore.provider_job_id:
-            raise ValueError("Vultr fork response did not include a database or job identifier.")
+        with transaction.atomic():
+            locked = CoreVultrDatabaseRestore.objects.select_for_update().get(pk=restore.pk)
+            if not locked.resource_id:
+                locked.resource_id = resource_id
+                locked.provider_job_id = provider_job_id
+                locked.provider_status = "in_progress"
+                locked.metadata = payload
+                locked.status = locked.Status.IN_PROGRESS
+                locked.save(
+                    update_fields=[
+                        "resource_id", "provider_job_id", "provider_status", "metadata", "status", "modified"
+                    ]
+                )
 
     def check_restore(self, restore):
         from apps.console.vultr_database import VultrDatabaseError
@@ -2751,6 +2865,22 @@ class CoreVultrDatabase(UtilCloud):
                 return restore.Status.IN_PROGRESS
             database = self.client.get_database(restore.resource_id)
             state = str(database.get("status") or "").lower()
+            params = restore.params or {}
+            if restore.provider_marker and database.get("label") != restore.provider_marker:
+                restore.provider_status = "ownership_mismatch"
+                restore.error = "Vultr managed database restore target failed ownership verification."
+                restore.status = restore.Status.FAILED
+                restore.save(update_fields=["provider_status", "error", "status", "modified"])
+                return restore.status
+            for field in ("region", "plan"):
+                expected = params.get(field)
+                actual = database.get(field)
+                if expected and actual not in (None, "") and str(actual) != str(expected):
+                    restore.provider_status = "ownership_mismatch"
+                    restore.error = "Vultr managed database restore target failed ownership verification."
+                    restore.status = restore.Status.FAILED
+                    restore.save(update_fields=["provider_status", "error", "status", "modified"])
+                    return restore.status
             restore.metadata = database
             restore.provider_status = state
             if state in {"running", "active", "available"}:
@@ -2987,7 +3117,7 @@ class CoreVultr(UtilCloud):
         from apps.console.backup.models import CoreCloudRestore
 
         client = self.node.connection.auth_vultr.get_client()
-        timeout = (10, 60)
+        timeout = vultr_request_timeout()
         params = restore.params or {}
         source_snapshot_id = str(backup.unique_id)
 
@@ -3052,18 +3182,23 @@ class CoreVultr(UtilCloud):
             except (requests.Timeout, requests.ConnectionError) as error:
                 return None, None, (f"Vultr source lookup timed out: {error}", "transient")
 
-            if response.status_code != 200:
-                message, kind = _provider_error(response.status_code, "reading the source resource")
-                return None, None, (message, kind)
-            payload, malformed = _json_payload(response, "reading the source resource")
-            source = payload.get(resource_key) if payload else None
-            if malformed or not isinstance(source, dict):
-                return None, None, (malformed or "Malformed Vultr source response.", "terminal")
-            region = region or source.get("region")
-            plan = plan or source.get("plan") or source.get("size_gb")
-            if not region or not plan:
-                return None, None, ("Vultr source response omitted required restore parameters.", "terminal")
-            return region, plan, None
+            try:
+                if response.status_code != 200:
+                    message, kind = _provider_error(response.status_code, "reading the source resource")
+                    return None, None, (message, kind)
+                payload, malformed = _json_payload(response, "reading the source resource")
+                source = payload.get(resource_key) if payload else None
+                if malformed or not isinstance(source, dict):
+                    return None, None, (malformed or "Malformed Vultr source response.", "terminal")
+                region = region or source.get("region")
+                plan = plan or source.get("plan") or source.get("size_gb")
+                if not region or not plan:
+                    return None, None, ("Vultr source response omitted required restore parameters.", "terminal")
+                return region, plan, None
+            finally:
+                close = getattr(response, "close", None)
+                if close:
+                    close()
 
         region, target_size, source_error = _source_details()
         if source_error:
@@ -3112,7 +3247,8 @@ class CoreVultr(UtilCloud):
             else:
                 resolved_params["size_gb"] = target_size
             locked.params = resolved_params
-            locked.operation_phase = CoreCloudRestore.OperationPhase.RECONCILING
+            if locked.operation_phase != CoreCloudRestore.OperationPhase.CREATE_UNKNOWN:
+                locked.operation_phase = CoreCloudRestore.OperationPhase.RECONCILING
             locked.status = CoreCloudRestore.Status.IN_PROGRESS
             locked.save(
                 update_fields=[
@@ -3131,12 +3267,10 @@ class CoreVultr(UtilCloud):
         def _list_candidates(path, key):
             url = f"{settings.VULTR_API}{path}"
             request_params = {"per_page": 500}
+            cursor = None
             items = []
-            seen_urls = set()
-            while url:
-                if url in seen_urls:
-                    return None, "Vultr pagination repeated the same cursor.", "terminal"
-                seen_urls.add(url)
+            seen_cursors = set()
+            while True:
                 try:
                     response = requests.get(
                         url,
@@ -3147,22 +3281,36 @@ class CoreVultr(UtilCloud):
                     )
                 except (requests.Timeout, requests.ConnectionError) as error:
                     return None, f"Vultr reconciliation lookup timed out: {error}", "transient"
-                if response.status_code != 200:
-                    message, kind = _provider_error(response.status_code, "reconciling the restore")
-                    return None, message, kind
-                payload, malformed = _json_payload(response, "reconciling the restore")
-                if malformed:
-                    return None, malformed, "terminal"
-                page_items = payload.get(key)
-                if not isinstance(page_items, list):
-                    return None, f"Malformed Vultr reconciliation response: missing {key}.", "terminal"
-                items.extend(item for item in page_items if isinstance(item, dict))
-                next_url = ((payload.get("meta") or {}).get("links") or {}).get("next")
-                if next_url:
-                    url, request_params = next_url, None
-                else:
-                    url = None
-            return items, None, None
+                try:
+                    if response.status_code != 200:
+                        message, kind = _provider_error(response.status_code, "reconciling the restore")
+                        return None, message, kind
+                    payload, malformed = _json_payload(response, "reconciling the restore")
+                    if malformed:
+                        return None, malformed, "terminal"
+                    page_items = payload.get(key)
+                    if not isinstance(page_items, list) or any(
+                        not isinstance(item, dict) for item in page_items
+                    ):
+                        return None, f"Malformed Vultr reconciliation response: missing {key}.", "terminal"
+                    items.extend(page_items)
+                    links = (payload.get("meta") or {}).get("links") or {}
+                    if not isinstance(links, dict):
+                        return None, "Malformed Vultr reconciliation pagination links.", "terminal"
+                    next_cursor = links.get("next")
+                    if next_cursor in (None, ""):
+                        return items, None, None
+                    if not isinstance(next_cursor, str) or not next_cursor.strip():
+                        return None, "Malformed Vultr reconciliation pagination cursor.", "terminal"
+                    if next_cursor in seen_cursors:
+                        return None, "Vultr pagination repeated the same cursor.", "terminal"
+                    seen_cursors.add(next_cursor)
+                    cursor = next_cursor
+                    request_params = {"per_page": 500, "cursor": cursor}
+                finally:
+                    close = getattr(response, "close", None)
+                    if close:
+                        close()
 
         def _matches(resource):
             if self.node.type == CoreNode.Type.CLOUD:
@@ -3192,6 +3340,12 @@ class CoreVultr(UtilCloud):
 
         failure = None
         transient = None
+        create_request = None
+
+        # Reconcile while holding the restore-row lock.  If no target exists,
+        # commit CREATE_UNKNOWN before the external create request so a second
+        # worker can reconcile but cannot issue a duplicate POST while the first
+        # request is still in flight or its response is being persisted.
         with transaction.atomic():
             locked = CoreCloudRestore.objects.select_for_update().get(pk=restore.pk)
             if locked.resource_id:
@@ -3235,9 +3389,14 @@ class CoreVultr(UtilCloud):
                             ]
                         )
                         _copy_restore_state(locked)
+                elif locked.operation_phase == CoreCloudRestore.OperationPhase.CREATE_UNKNOWN:
+                    transient = "Vultr restore create outcome is unknown; waiting for provider reconciliation."
+                    locked.status = CoreCloudRestore.Status.IN_PROGRESS
+                    locked.error = transient
+                    locked.save(update_fields=["status", "error", "modified"])
                 else:
                     if self.node.type == CoreNode.Type.CLOUD:
-                        payload = {
+                        create_payload = {
                             "region": region,
                             "plan": target_size,
                             "snapshot_id": backup.unique_id,
@@ -3247,57 +3406,18 @@ class CoreVultr(UtilCloud):
                         }
                         endpoint = f"{settings.VULTR_API}/v2/instances"
                     else:
-                        payload = {
+                        create_payload = {
                             "region": region,
                             "size_gb": target_size,
                             "snapshot_id": backup.unique_id,
                             "label": marker,
                         }
                         endpoint = f"{settings.VULTR_API}/v2/blocks"
-                    try:
-                        response = requests.post(
-                            endpoint,
-                            headers=client,
-                            json=payload,
-                            verify=True,
-                            timeout=timeout,
-                        )
-                    except (requests.Timeout, requests.ConnectionError) as error:
-                        transient = f"Vultr restore create outcome is unknown after a network failure: {error}"
-                        locked.status = CoreCloudRestore.Status.IN_PROGRESS
-                        locked.operation_phase = CoreCloudRestore.OperationPhase.CREATE_UNKNOWN
-                        locked.error = transient
-                        locked.save(update_fields=["status", "operation_phase", "error", "modified"])
-                    else:
-                        if response.status_code == 201:
-                            key = "instance" if self.node.type == CoreNode.Type.CLOUD else "block"
-                            response_payload, malformed = _json_payload(response, "creating the restore")
-                            created = response_payload.get(key) if response_payload else None
-                            if malformed or not isinstance(created, dict) or not created.get("id"):
-                                failure = malformed or "Malformed Vultr restore create response."
-                            else:
-                                locked.resource_id = str(created["id"])
-                                locked.status = CoreCloudRestore.Status.IN_PROGRESS
-                                locked.operation_phase = CoreCloudRestore.OperationPhase.POLLING
-                                locked.error = ""
-                                locked.save(
-                                    update_fields=[
-                                        "resource_id", "status", "operation_phase", "error", "modified"
-                                    ]
-                                )
-                                _copy_restore_state(locked)
-                        else:
-                            provider_message, provider_kind = _provider_error(
-                                response.status_code, "creating the restore"
-                            )
-                            if provider_kind == "transient":
-                                transient = provider_message
-                                locked.status = CoreCloudRestore.Status.IN_PROGRESS
-                                locked.operation_phase = CoreCloudRestore.OperationPhase.CREATE_UNKNOWN
-                                locked.error = transient
-                                locked.save(update_fields=["status", "operation_phase", "error", "modified"])
-                            else:
-                                failure = provider_message
+                    locked.status = CoreCloudRestore.Status.IN_PROGRESS
+                    locked.operation_phase = CoreCloudRestore.OperationPhase.CREATE_UNKNOWN
+                    locked.error = "Vultr restore create request is in progress; waiting for its outcome."
+                    locked.save(update_fields=["status", "operation_phase", "error", "modified"])
+                    create_request = (endpoint, create_payload)
 
             if failure:
                 locked.status = CoreCloudRestore.Status.FAILED
@@ -3318,12 +3438,83 @@ class CoreVultr(UtilCloud):
             raise Exception(failure)
         if transient:
             return CoreCloudRestore.Status.IN_PROGRESS
+        if not create_request:
+            return None
+
+        endpoint, create_payload = create_request
+        try:
+            response = requests.post(
+                endpoint,
+                headers=client,
+                json=create_payload,
+                verify=True,
+                timeout=timeout,
+            )
+        except (requests.Timeout, requests.ConnectionError) as error:
+            transient = f"Vultr restore create outcome is unknown after a network failure: {error}"
+            with transaction.atomic():
+                locked = CoreCloudRestore.objects.select_for_update().get(pk=restore.pk)
+                locked.status = CoreCloudRestore.Status.IN_PROGRESS
+                locked.operation_phase = CoreCloudRestore.OperationPhase.CREATE_UNKNOWN
+                locked.error = transient
+                locked.save(update_fields=["status", "operation_phase", "error", "modified"])
+            return CoreCloudRestore.Status.IN_PROGRESS
+
+        try:
+            if response.status_code == 201:
+                key = "instance" if self.node.type == CoreNode.Type.CLOUD else "block"
+                response_payload, malformed = _json_payload(response, "creating the restore")
+                created = response_payload.get(key) if response_payload else None
+                if malformed or not isinstance(created, dict) or not created.get("id"):
+                    transient = malformed or "Malformed Vultr restore create response; outcome is unknown."
+                else:
+                    with transaction.atomic():
+                        locked = CoreCloudRestore.objects.select_for_update().get(pk=restore.pk)
+                        if not locked.resource_id:
+                            locked.resource_id = str(created["id"])
+                            locked.status = CoreCloudRestore.Status.IN_PROGRESS
+                            locked.operation_phase = CoreCloudRestore.OperationPhase.POLLING
+                            locked.error = ""
+                            locked.save(
+                                update_fields=[
+                                    "resource_id", "status", "operation_phase", "error", "modified"
+                                ]
+                            )
+                    return None
+            else:
+                provider_message, provider_kind = _provider_error(
+                    response.status_code, "creating the restore"
+                )
+                if provider_kind == "transient":
+                    transient = provider_message
+                else:
+                    failure = provider_message
+        finally:
+            close = getattr(response, "close", None)
+            if close:
+                close()
+
+        with transaction.atomic():
+            locked = CoreCloudRestore.objects.select_for_update().get(pk=restore.pk)
+            if failure:
+                locked.status = CoreCloudRestore.Status.FAILED
+                locked.operation_phase = CoreCloudRestore.OperationPhase.FAILED
+                locked.error = failure
+            else:
+                locked.status = CoreCloudRestore.Status.IN_PROGRESS
+                locked.operation_phase = CoreCloudRestore.OperationPhase.CREATE_UNKNOWN
+                locked.error = transient
+            locked.save(update_fields=["status", "operation_phase", "error", "modified"])
+
+        if failure:
+            raise Exception(failure)
+        return CoreCloudRestore.Status.IN_PROGRESS
 
     def check_restore(self, restore):
         from apps.console.backup.models import CoreCloudRestore
 
         client = self.node.connection.auth_vultr.get_client()
-        timeout = (10, 60)
+        timeout = vultr_request_timeout()
 
         def record(message, phase=None):
             if phase is not None:
@@ -3353,72 +3544,90 @@ class CoreVultr(UtilCloud):
             record(f"Vultr restore status check temporarily unavailable: {error}", CoreCloudRestore.OperationPhase.POLLING)
             return CoreCloudRestore.Status.IN_PROGRESS
 
-        if result.status_code in (429,) or result.status_code >= 500:
-            record(
-                f"Vultr restore status check returned transient HTTP {result.status_code}.",
-                CoreCloudRestore.OperationPhase.POLLING,
-            )
-            return CoreCloudRestore.Status.IN_PROGRESS
-        if result.status_code in (401, 403, 404):
-            record(
-                f"Vultr restore target is unavailable (HTTP {result.status_code}).",
-                CoreCloudRestore.OperationPhase.FAILED,
-            )
-            return CoreCloudRestore.Status.FAILED
-        if result.status_code != 200:
-            record(
-                f"Vultr restore status check returned HTTP {result.status_code}.",
-                CoreCloudRestore.OperationPhase.FAILED,
-            )
-            return CoreCloudRestore.Status.FAILED
-
         try:
-            payload = result.json()
-            resource = payload.get(key)
-        except (TypeError, ValueError, AttributeError) as error:
-            record(f"Malformed Vultr restore status response: {error}", CoreCloudRestore.OperationPhase.FAILED)
-            return CoreCloudRestore.Status.FAILED
-        if not isinstance(resource, dict) or not resource.get("status"):
-            record("Malformed Vultr restore status response.", CoreCloudRestore.OperationPhase.FAILED)
-            return CoreCloudRestore.Status.FAILED
-
-        # New restores must prove ownership on every status read. Legacy rows
-        # without a marker remain pollable so existing restores are not stranded.
-        if restore.restore_marker:
-            if self.node.type == CoreNode.Type.CLOUD:
-                tags = resource.get("tags") or []
-                if isinstance(tags, str):
-                    tags = [tags]
-                owned = (
-                    restore.restore_marker in tags
-                    and str(resource.get("snapshot_id")) == str(restore.backup.unique_id)
-                    and resource.get("region") == (restore.params or {}).get("region", resource.get("region"))
-                    and resource.get("plan") == (restore.params or {}).get("plan", resource.get("plan"))
+            if result.status_code in (429,) or result.status_code >= 500:
+                record(
+                    f"Vultr restore status check returned transient HTTP {result.status_code}.",
+                    CoreCloudRestore.OperationPhase.POLLING,
                 )
-            else:
-                params = restore.params or {}
-                owned = (
-                    resource.get("label") == restore.restore_marker
-                    and str(resource.get("snapshot_id")) == str(restore.backup.unique_id)
-                    and resource.get("region") == params.get("region", resource.get("region"))
-                    and str(resource.get("size_gb")) == str(params.get("size_gb", resource.get("size_gb")))
+                return CoreCloudRestore.Status.IN_PROGRESS
+            if result.status_code in (401, 403, 404):
+                record(
+                    f"Vultr restore target is unavailable (HTTP {result.status_code}).",
+                    CoreCloudRestore.OperationPhase.FAILED,
                 )
-            if not owned:
-                record("Vultr restore target failed ownership verification; manual review required.", CoreCloudRestore.OperationPhase.MANUAL_REVIEW)
+                return CoreCloudRestore.Status.FAILED
+            if result.status_code != 200:
+                record(
+                    f"Vultr restore status check returned HTTP {result.status_code}.",
+                    CoreCloudRestore.OperationPhase.FAILED,
+                )
                 return CoreCloudRestore.Status.FAILED
 
-        status = resource["status"]
-        if status == "active":
-            restore.operation_phase = CoreCloudRestore.OperationPhase.COMPLETE
-            restore.error = ""
-            restore.save(update_fields=["operation_phase", "error", "modified"])
-            return CoreCloudRestore.Status.COMPLETE
-        if status in {"suspended", "failed", "error", "destroyed", "terminated"}:
-            record(f"Vultr restore target entered terminal state: {status}.", CoreCloudRestore.OperationPhase.FAILED)
-            return CoreCloudRestore.Status.FAILED
-        restore.operation_phase = CoreCloudRestore.OperationPhase.POLLING
-        restore.save(update_fields=["operation_phase", "modified"])
-        return CoreCloudRestore.Status.IN_PROGRESS
+            try:
+                payload = result.json()
+                resource = payload.get(key)
+            except (TypeError, ValueError, AttributeError) as error:
+                record(
+                    f"Malformed Vultr restore status response: {error}",
+                    CoreCloudRestore.OperationPhase.FAILED,
+                )
+                return CoreCloudRestore.Status.FAILED
+            if not isinstance(resource, dict) or not resource.get("status"):
+                record(
+                    "Malformed Vultr restore status response.",
+                    CoreCloudRestore.OperationPhase.FAILED,
+                )
+                return CoreCloudRestore.Status.FAILED
+
+            # New restores must prove ownership on every status read. Legacy
+            # rows without a marker remain pollable so existing restores are
+            # not stranded.
+            if restore.restore_marker:
+                if self.node.type == CoreNode.Type.CLOUD:
+                    tags = resource.get("tags") or []
+                    if isinstance(tags, str):
+                        tags = [tags]
+                    owned = (
+                        restore.restore_marker in tags
+                        and str(resource.get("snapshot_id")) == str(restore.backup.unique_id)
+                        and resource.get("region") == (restore.params or {}).get("region", resource.get("region"))
+                        and resource.get("plan") == (restore.params or {}).get("plan", resource.get("plan"))
+                    )
+                else:
+                    params = restore.params or {}
+                    owned = (
+                        resource.get("label") == restore.restore_marker
+                        and str(resource.get("snapshot_id")) == str(restore.backup.unique_id)
+                        and resource.get("region") == params.get("region", resource.get("region"))
+                        and str(resource.get("size_gb")) == str(params.get("size_gb", resource.get("size_gb")))
+                    )
+                if not owned:
+                    record(
+                        "Vultr restore target failed ownership verification; manual review required.",
+                        CoreCloudRestore.OperationPhase.MANUAL_REVIEW,
+                    )
+                    return CoreCloudRestore.Status.FAILED
+
+            status = str(resource["status"]).lower()
+            if status == "active":
+                restore.operation_phase = CoreCloudRestore.OperationPhase.COMPLETE
+                restore.error = ""
+                restore.save(update_fields=["operation_phase", "error", "modified"])
+                return CoreCloudRestore.Status.COMPLETE
+            if status in {"suspended", "failed", "error", "destroyed", "terminated"}:
+                record(
+                    f"Vultr restore target entered terminal state: {status}.",
+                    CoreCloudRestore.OperationPhase.FAILED,
+                )
+                return CoreCloudRestore.Status.FAILED
+            restore.operation_phase = CoreCloudRestore.OperationPhase.POLLING
+            restore.save(update_fields=["operation_phase", "modified"])
+            return CoreCloudRestore.Status.IN_PROGRESS
+        finally:
+            close = getattr(result, "close", None)
+            if close:
+                close()
 
 
 class CoreOracle(UtilCloud):
@@ -4516,9 +4725,25 @@ class CoreNode(TimeStampedModel):
             ("create_schedule", "can create schedule for backup"),
         )
 
+    def _integration_object(self):
+        """Return the provider-specific object attached to this node.
+
+        Most integrations use the integration code as their reverse relation
+        name (for example ``node.vultr``).  Vultr managed databases are a
+        separate model, however, so their reverse relation is
+        ``node.vultr_database`` even though the connection integration code is
+        still ``vultr``.  Keeping this lookup in one place prevents generic
+        scheduling, recovery, and UI helpers from accidentally treating a
+        managed database as a compute node.
+        """
+        integration_code = self.connection.integration.code
+        if integration_code == "vultr" and hasattr(self, "vultr_database"):
+            return self.vultr_database
+        return getattr(self, integration_code, None)
+
     def validate(self):
-        if hasattr(self, self.connection.integration.code):
-            node_integration_object = getattr(self, self.connection.integration.code)
+        node_integration_object = self._integration_object()
+        if node_integration_object:
             return node_integration_object.validate()
 
     """
@@ -4547,6 +4772,8 @@ class CoreNode(TimeStampedModel):
     #     return super(CoreNode, self).save(*args, **kwargs)
 
     def backup_task_name(self):
+        if self.connection.integration.code == "vultr" and hasattr(self, "vultr_database"):
+            return "backup_vultr_database"
         return f"backup_{self.connection.integration.code}"
 
     def get_integration_alt_code(self):
@@ -4566,19 +4793,25 @@ class CoreNode(TimeStampedModel):
             return self.connection.integration.name
 
     def get_backup_from_celery_task_id(self, celery_task_id):
-        node_type_object = getattr(self, self.connection.integration.code)
+        node_type_object = self._integration_object()
+        if not node_type_object:
+            return None
         if node_type_object.backups.filter(celery_task_id=celery_task_id).exists() and celery_task_id:
             return node_type_object.backups.get(celery_task_id=celery_task_id)
 
     def get_cloud_backup(self, backup_id):
         """Return this node's provider-specific backup by id (used by the async
         poll_cloud_backup task to re-load a snapshot it is waiting on)."""
-        node_type_object = getattr(self, self.connection.integration.code)
+        node_type_object = self._integration_object()
+        if not node_type_object:
+            return None
         return node_type_object.backups.filter(id=backup_id).first()
 
     @property
     def get_node_url(self):
-        node_type_object = getattr(self, self.connection.integration.code)
+        node_type_object = self._integration_object()
+        if not node_type_object:
+            return None
         return f"/console/{self.get_type_display().lower()}s/{self.connection.integration.code}/{node_type_object.id}"
 
     @property
@@ -4604,7 +4837,9 @@ class CoreNode(TimeStampedModel):
                 self.status == self.Status.BACKUP_READY or\
                 self.status == self.Status.PAUSED_MAX_RETRIES or\
                 self.status == self.Status.BACKUP_IN_PROGRESS:
-            node_type_object = getattr(self, self.connection.integration.code)
+            node_type_object = self._integration_object()
+            if not node_type_object:
+                return True
 
             if node_type_object.backups.filter().count() > 0:
                 last_backup = node_type_object.backups.filter().order_by("-created").first()
@@ -4620,7 +4855,9 @@ class CoreNode(TimeStampedModel):
 
 
     def last_backup_date(self):
-        node_type_object = getattr(self, self.connection.integration.code)
+        node_type_object = self._integration_object()
+        if not node_type_object:
+            return None
         if node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).count() > 0:
             backup = node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).order_by('-created').first()
             timezone = str(get_current_timezone())
@@ -4632,7 +4869,7 @@ class CoreNode(TimeStampedModel):
 
     def list_backups(self, list_all_backups=None):
         from django.db.models import Q
-        node_type_object = getattr(self, self.connection.integration.code)
+        node_type_object = self._integration_object()
         if list_all_backups is True:
             return node_type_object.backups.filter()
         else:
@@ -4646,22 +4883,25 @@ class CoreNode(TimeStampedModel):
         return node_type_object.backups.filter(query)
 
     def total_backups(self):
-        node_type_object = getattr(self, self.connection.integration.code)
+        node_type_object = self._integration_object()
+        if not node_type_object:
+            return 0
         return node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).count()
 
     def total_storage(self):
         from django.db.models import Sum
 
+        node_type_object = self._integration_object()
+        if not node_type_object:
+            return humanfriendly.format_size(0)
+
         if self.connection.integration.code == "website" or self.connection.integration.code == "database":
-            node_type_object = getattr(self, self.connection.integration.code)
             node_stats = node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).aggregate(Sum("size"))
             return humanfriendly.format_size(node_stats["size__sum"] or 0)
         elif self.connection.integration.type == "saas":
-            node_type_object = getattr(self, self.connection.integration.code)
             node_stats = node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).aggregate(Sum("size"))
             return humanfriendly.format_size(node_stats["size__sum"] or 0)
         else:
-            node_type_object = getattr(self, self.connection.integration.code)
             node_stats = node_type_object.backups.filter(status__in=UtilBackup.SUCCESS_STATUSES).aggregate(
                 Sum("size_gigabytes"))
             return humanfriendly.format_size(1000 ** 3 * (node_stats["size_gigabytes__sum"] or 0))
@@ -4691,7 +4931,7 @@ class CoreNode(TimeStampedModel):
         """
         with transaction.atomic():
             CoreNode.objects.select_for_update().get(id=self.id)
-            node_type_object = getattr(self, self.connection.integration.code)
+            node_type_object = self._integration_object()
             active_backup = node_type_object.backups.filter(
                 status__in=UtilBackup.ACTIVE_STATUSES
             ).exclude(celery_task_id=celery_task_id).first()
@@ -5233,7 +5473,7 @@ class CoreNode(TimeStampedModel):
                 else:
                     backup_type = "n/a"
 
-                node_type_object = getattr(self, self.connection.integration.code)
+                node_type_object = self._integration_object()
 
                 action_url = f"https://backupsheep.com/console/nodes/{self.id}/"
 

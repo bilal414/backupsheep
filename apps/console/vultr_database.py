@@ -15,7 +15,7 @@ from django.conf import settings
 
 
 VULTR_DATABASE_API_TIMEOUT = (10, 60)
-SUPPORTED_ENGINES = {"postgresql", "mysql", "mariadb"}
+SUPPORTED_ENGINES = {"postgresql", "mysql", "mariadb", "valkey"}
 PITR_ENGINES = {"postgresql", "mysql", "mariadb"}
 
 
@@ -101,31 +101,46 @@ class VultrManagedDatabaseClient:
             ) from exc
 
         try:
-            payload = response.json() if response.content else {}
-        except (TypeError, ValueError) as exc:
-            raise VultrDatabaseError(
-                "Vultr managed database API returned malformed JSON.",
-                category="terminal_failure",
-                status_code=response.status_code,
-            ) from exc
+            status_code = response.status_code
+            try:
+                payload = response.json() if getattr(response, "content", b"") else {}
+            except (TypeError, ValueError) as exc:
+                raise VultrDatabaseError(
+                    "Vultr managed database API returned malformed JSON.",
+                    category="terminal_failure",
+                    status_code=status_code,
+                ) from exc
 
-        if response.status_code >= 400:
-            if response.status_code == 404:
-                category = "not_found"
-            elif response.status_code == 429:
-                category = "rate_limited"
-            elif response.status_code >= 500:
-                category = "transient_outage"
-            else:
-                category = "terminal_failure"
-            message = payload.get("error") or payload.get("message") or response.reason
-            raise VultrDatabaseError(
-                f"Vultr managed database API returned HTTP {response.status_code}: {message}",
-                category=category,
-                status_code=response.status_code,
-                payload=payload,
-            )
-        return payload
+            if not isinstance(payload, dict):
+                raise VultrDatabaseError(
+                    "Vultr managed database API returned a malformed response object.",
+                    category="terminal_failure",
+                    status_code=status_code,
+                )
+
+            if status_code >= 400:
+                if status_code == 404:
+                    category = "not_found"
+                elif status_code == 429:
+                    category = "rate_limited"
+                elif status_code >= 500:
+                    category = "transient_outage"
+                else:
+                    category = "terminal_failure"
+                message = payload.get("error") or payload.get("message") or getattr(
+                    response, "reason", "provider error"
+                )
+                raise VultrDatabaseError(
+                    f"Vultr managed database API returned HTTP {status_code}: {message}",
+                    category=category,
+                    status_code=status_code,
+                    payload=payload,
+                )
+            return payload
+        finally:
+            close = getattr(response, "close", None)
+            if close:
+                close()
 
     def list_databases(self):
         """Return every database using Vultr's cursor link, with loop protection."""
@@ -135,18 +150,36 @@ class VultrManagedDatabaseClient:
         while True:
             params = {"per_page": 500}
             if cursor:
-                if cursor in seen_cursors:
-                    raise VultrDatabaseError(
-                        "Vultr managed database pagination repeated a cursor.",
-                        category="terminal_failure",
-                    )
-                seen_cursors.add(cursor)
                 params["cursor"] = cursor
             payload = self._request("GET", "/databases", params=params)
-            databases.extend(payload.get("databases") or [])
-            cursor = ((payload.get("meta") or {}).get("links") or {}).get("next")
-            if not cursor:
+            page = payload.get("databases")
+            if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+                raise VultrDatabaseError(
+                    "Vultr managed database API returned malformed database inventory.",
+                    category="terminal_failure",
+                )
+            databases.extend(page)
+            links = (payload.get("meta") or {}).get("links") or {}
+            if not isinstance(links, dict):
+                raise VultrDatabaseError(
+                    "Vultr managed database API returned malformed pagination links.",
+                    category="terminal_failure",
+                )
+            next_cursor = links.get("next")
+            if next_cursor in (None, ""):
                 return databases
+            if not isinstance(next_cursor, str) or not next_cursor.strip():
+                raise VultrDatabaseError(
+                    "Vultr managed database API returned a malformed pagination cursor.",
+                    category="terminal_failure",
+                )
+            if next_cursor in seen_cursors:
+                raise VultrDatabaseError(
+                    "Vultr managed database pagination repeated a cursor.",
+                    category="terminal_failure",
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
 
     def get_database(self, database_id):
         return self._request("GET", f"/databases/{database_id}").get("database") or {}
@@ -162,6 +195,11 @@ class VultrManagedDatabaseClient:
         payload = self.get_backup_metadata(database_id)
         records = payload.get("backups")
         if isinstance(records, list):
+            if any(not isinstance(record, dict) for record in records):
+                raise VultrDatabaseError(
+                    "Vultr managed database API returned malformed backup metadata.",
+                    category="terminal_failure",
+                )
             return records
         records = []
         for key in ("latest_backup", "oldest_backup", "backup"):
@@ -175,9 +213,17 @@ class VultrManagedDatabaseClient:
         for database in self.list_databases():
             database_id = database.get("id")
             if not database_id:
-                continue
+                raise VultrDatabaseError(
+                    "Vultr managed database inventory contained a record without an id.",
+                    category="terminal_failure",
+                )
             detail = self.get_database(database_id)
             usage = self.get_usage(database_id)
+            if not isinstance(detail, dict) or not isinstance(usage, dict):
+                raise VultrDatabaseError(
+                    "Vultr managed database detail or usage response was malformed.",
+                    category="terminal_failure",
+                )
             merged = dict(database)
             merged.update(detail)
             merged["usage"] = usage

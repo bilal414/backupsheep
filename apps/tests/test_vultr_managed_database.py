@@ -79,6 +79,9 @@ class VultrManagedDatabaseClientTests(SimpleTestCase):
         with self.assertRaises(VultrDatabaseUnsupportedError):
             VultrDatabaseCapabilities("postgresql", "vultr-dbaas-hobbyist").require_fork_support()
         VultrDatabaseCapabilities("mysql", "vultr-dbaas-startup").require_fork_support()
+        VultrDatabaseCapabilities("valkey", "vultr-dbaas-startup").require_fork_support()
+        with self.assertRaises(VultrDatabaseUnsupportedError):
+            VultrDatabaseCapabilities("valkey", "vultr-dbaas-startup").require_fork_support("pitr")
 
 
 class VultrManagedDatabaseStateTests(SimpleTestCase):
@@ -113,7 +116,7 @@ class VultrManagedDatabaseModelTests(BaseTestCase):
         )
         node = CoreNode.objects.create(
             connection=connection,
-            type=CoreNode.Type.CLOUD,
+            type=CoreNode.Type.DATABASE,
             name="managed-db",
             added_by=self.member,
         )
@@ -125,6 +128,11 @@ class VultrManagedDatabaseModelTests(BaseTestCase):
             region="ewr",
             plan="vultr-dbaas-startup",
         )
+
+    def test_managed_database_uses_database_node_routing(self):
+        self.assertEqual(self.database.node.backup_task_name(), "backup_vultr_database")
+        self.assertIs(self.database.node._integration_object(), self.database)
+        self.assertEqual(self.database.node.get_node_url, f"/console/databases/vultr/{self.database.id}")
 
     def _backup(self):
         return CoreVultrDatabaseBackup.objects.create(
@@ -222,6 +230,29 @@ class VultrManagedDatabaseModelTests(BaseTestCase):
         ):
             with self.assertRaises(VultrDatabaseDuplicateError):
                 self.database.restore_snapshot(backup, duplicate)
+
+    def test_unknown_fork_outcome_never_reposts_without_adoption(self):
+        backup = self._backup()
+        backup.status = UtilBackup.Status.COMPLETE
+        backup.save()
+        restore = CoreVultrDatabaseRestore.objects.create(backup=backup, name="restore-request")
+        with mock.patch.object(VultrManagedDatabaseClient, "list_databases", return_value=[]), mock.patch.object(
+            VultrManagedDatabaseClient,
+            "fork_database",
+            side_effect=VultrDatabaseError("response lost", category="transient_outage"),
+        ) as fork:
+            with self.assertRaises(VultrDatabaseError):
+                self.database.restore_snapshot(backup, restore)
+            self.assertEqual(fork.call_count, 1)
+
+        with mock.patch.object(VultrManagedDatabaseClient, "list_databases", return_value=[]), mock.patch.object(
+            VultrManagedDatabaseClient, "fork_database"
+        ) as fork:
+            self.database.restore_snapshot(backup, restore)
+        fork.assert_not_called()
+        restore.refresh_from_db()
+        self.assertEqual(restore.provider_status, "create_unknown")
+        self.assertEqual(restore.status, CoreVultrDatabaseRestore.Status.IN_PROGRESS)
 
     def test_restore_task_redelivery_reuses_persisted_target(self):
         backup = self._backup()
