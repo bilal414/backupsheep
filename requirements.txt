@@ -60,7 +60,7 @@ ipaddress==1.0.23
 # Security & Authentication
 python-dotenv==1.2.2
 # oci 2.182.1 allows cryptography<50; 46.0.7 stays pinned for reproducibility.
-cryptography==46.0.7
+cryptography==50.0.0
 sentry-sdk==2.60.0
 firebase-admin==7.4.0
 
