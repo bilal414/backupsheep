@@ -1,18 +1,27 @@
 {% extends "console/onboarding/_base.html" %}
 {% block step %}
-    <h2 class="text-lg font-semibold text-slate-900 mb-1">Add your first backup source</h2>
-    <p class="text-sm text-slate-500 mb-5">Connect a server, cloud account, database, or website to back up. Opens in a new tab — optional, you can do this anytime.</p>
+    <div class="mb-6">
+        <h2 class="text-lg font-semibold tracking-tight text-slate-900">Add your first backup source</h2>
+        <p class="mt-1 text-sm text-slate-500">Connect a server, cloud account, database, or website to back up. Opens in a new tab — optional, you can do this anytime.</p>
+    </div>
 
     <a href="{% url 'console:setup:integration_select' %}" target="_blank" rel="noopener"
-       class="inline-flex items-center rounded-lg px-4 py-2.5 text-sm font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-50">
-        Browse integrations &rarr;
+       class="inline-flex w-full sm:w-auto items-center justify-center gap-x-2 rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 ring-1 ring-inset ring-slate-200 shadow-sm hover:bg-slate-50 transition-colors">
+        Browse integrations
+        <svg class="h-4 w-4 text-slate-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"/></svg>
     </a>
 
-    <div class="flex items-center justify-between mt-8 pt-5 border-t border-slate-100">
-        <a href="{% url 'console:onboarding:storage' %}" class="text-sm font-medium text-slate-500 hover:text-slate-700">&larr; Back</a>
+    <div class="mt-8 flex flex-col-reverse gap-3 border-t border-slate-100 pt-6 sm:flex-row sm:items-center sm:justify-between">
+        <a href="{% url 'console:onboarding:storage' %}" class="inline-flex items-center justify-center sm:justify-start gap-x-1.5 text-sm font-medium text-slate-500 hover:text-slate-700 transition-colors">
+            <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back
+        </a>
         <form method="post" action="{% url 'console:onboarding:finish' %}">
             {% csrf_token %}
-            <button type="submit" class="rounded-lg bg-green-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-green-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-green-600">Finish setup &rarr;</button>
+            <button type="submit" class="inline-flex w-full sm:w-auto items-center justify-center gap-x-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                Finish setup
+                <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>
+            </button>
         </form>
     </div>
 {% endblock %}

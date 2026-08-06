@@ -1,25 +1,39 @@
 {% extends "console/onboarding/_base.html" %}
 {% block step %}
-    <h2 class="text-lg font-semibold text-slate-900 mb-1">Create your admin account</h2>
-    <p class="text-sm text-slate-500 mb-5">This is the account owner. You'll sign in with this email address.</p>
+    <div class="mb-6">
+        <h2 class="text-lg font-semibold tracking-tight text-slate-900">Create your admin account</h2>
+        <p class="mt-1 text-sm text-slate-500">This is the account owner. You'll sign in with this email address.</p>
+    </div>
     <form method="post" novalidate>
         {% csrf_token %}
         {% if form.non_field_errors %}
-            <div class="rounded-lg bg-red-50 ring-1 ring-red-100 text-red-700 text-sm px-4 py-3 mb-4">{{ form.non_field_errors }}</div>
+            <div class="mb-5 flex items-start gap-x-3 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700 ring-1 ring-inset ring-rose-600/20">
+                <svg class="h-5 w-5 shrink-0 text-rose-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/></svg>
+                <div class="min-w-0">{{ form.non_field_errors }}</div>
+            </div>
         {% endif %}
-        <div class="rounded-lg bg-amber-50 ring-1 ring-amber-200 text-amber-800 text-sm px-4 py-3 mb-4">
-            The install token proves you have access to this server before the first admin
-            is created. Find it with:
-            <code class="font-mono text-xs">docker compose exec app cat /code/_storage/install_token</code>
+        <div class="mb-5 flex items-start gap-x-3 rounded-xl bg-amber-50 px-4 py-3 ring-1 ring-inset ring-amber-600/20">
+            <svg class="h-5 w-5 shrink-0 text-amber-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z"/></svg>
+            <div class="min-w-0 text-sm text-amber-800">
+                <p>The install token proves you have access to this server before the first admin is created. Find it with:</p>
+                <code class="mt-1.5 inline-block max-w-full overflow-x-auto rounded-md bg-amber-100/70 px-2 py-1 font-mono text-xs text-amber-900">docker compose exec app cat /code/_storage/install_token</code>
+            </div>
         </div>
         {% include "console/onboarding/_field.html" with field=form.install_token %}
-        {% include "console/onboarding/_field.html" with field=form.full_name %}
-        {% include "console/onboarding/_field.html" with field=form.organization %}
+        <div class="grid grid-cols-1 sm:grid-cols-2 sm:gap-x-4">
+            {% include "console/onboarding/_field.html" with field=form.full_name %}
+            {% include "console/onboarding/_field.html" with field=form.organization %}
+        </div>
         {% include "console/onboarding/_field.html" with field=form.email %}
-        {% include "console/onboarding/_field.html" with field=form.password1 %}
-        {% include "console/onboarding/_field.html" with field=form.password2 %}
-        <div class="flex justify-end mt-6">
-            <button type="submit" class="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Create account &rarr;</button>
+        <div class="grid grid-cols-1 sm:grid-cols-2 sm:gap-x-4">
+            {% include "console/onboarding/_field.html" with field=form.password1 %}
+            {% include "console/onboarding/_field.html" with field=form.password2 %}
+        </div>
+        <div class="mt-8 flex flex-col-reverse sm:flex-row sm:justify-end">
+            <button type="submit" class="inline-flex w-full sm:w-auto items-center justify-center gap-x-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                Create account
+                <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/></svg>
+            </button>
         </div>
     </form>
 {% endblock %}

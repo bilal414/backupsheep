@@ -1,73 +1,81 @@
 <div x-data="setupWebsiteNode()">
-    <div class="grid grid-cols-2 gap-4">
-        <div>
+    <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div class="space-y-6">
 
-            <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg">
-                <div class="px-2 py-3 sm:px-2 bg-indigo-600">
-                    <h3 class="text-md leading-6  text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                        </svg>
-                        Node Configurations
-                    </h3>
+            <div class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft">
+                <div class="border-b border-slate-100 px-5 py-4 sm:px-6">
+                    <div class="flex items-center gap-x-3">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"></path>
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                            </svg>
+                        </span>
+                        <div>
+                            <h3 class="text-sm font-semibold text-slate-900">Node Configuration</h3>
+                            <p class="mt-0.5 text-sm text-slate-500">A node is a group of files and directories.</p>
+                        </div>
+                    </div>
                 </div>
-                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
-                    <dl class="grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-2">
+                <div class="px-5 py-6 sm:px-6">
+                    <div class="grid grid-cols-1 gap-y-6">
 
-
-                        <div class="sm:col-span-2">
-                            <label for="name" class="block text-sm font-medium text-gray-700">
-                                Name <small>(A node is a group of files and directories.)</small>
+                        <div>
+                            <label for="name" class="block text-sm font-medium text-slate-700">
+                                Name
                             </label>
-                            <div class="mt-1">
+                            <div class="mt-1.5">
                                 <input x-model="website.name" type="text" name="name" id="name" autocomplete="name"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="websiteErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="websiteErrors?.name" class="mt-1.5 text-sm text-rose-600" id="name-error"
                                    x-text="websiteErrors?.name"></p>
                             </div>
                         </div>
 
-                        <div class="sm:col-span-2">
+                        <div>
                             {% if node.id %}
-                                <label class="block text-sm font-medium text-gray-700">
-                                    Backup Type <span class="text-indigo-600">(Cannot modify Backup Type settings after node creation.)</span>
+                                <label class="block text-sm font-medium text-slate-700">
+                                    Backup Type
                                 </label>
-                                <div class="relative mt-2">
-                                    <span x-text="website.backup_type?.id===4 ? 'Full (Server-Side Tar)' : 'Full'"></span>
+                                <p class="mt-1 text-xs text-slate-500">Backup Type settings cannot be modified after
+                                    node creation.</p>
+                                <div class="mt-2">
+                                    <span class="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/20"
+                                          x-text="website.backup_type?.id===4 ? 'Full (Server-Side Tar)' : 'Full'"></span>
                                 </div>
-                                <p x-show="websiteErrors?.backup_type" class="mt-2 text-sm text-red-600"
+                                <p x-show="websiteErrors?.backup_type" class="mt-1.5 text-sm text-rose-600"
                                    id="region-error" x-text="websiteErrors?.backup_type"></p>
 
-                                <div class="overflow-hidden rounded-md bg-white shadow-sm mt-4"
+                                <div class="mt-4 overflow-hidden rounded-lg bg-slate-50 ring-1 ring-inset ring-slate-200"
                                      x-show="website?.backup_type?.id===4">
-                                    <ul role="list" class="divide-y divide-gray-200">
-                                        <li class="px-2 py-2">
-                                            1. Full backup is generated on <strong>your server</strong> using <strong>Tar</strong>
+                                    <ul role="list" class="divide-y divide-slate-200">
+                                        <li class="px-4 py-2.5 text-sm text-slate-600">
+                                            1. Full backup is generated on <strong class="font-semibold text-slate-900">your
+                                            server</strong> using <strong class="font-semibold text-slate-900">Tar</strong>
                                         </li>
-                                        <li class="px-2 py-2">
+                                        <li class="px-4 py-2.5 text-sm text-slate-600">
                                             2. The backup file is downloaded to BackupSheep server.
                                         </li>
-                                        <li class="px-2 py-2">
+                                        <li class="px-4 py-2.5 text-sm text-slate-600">
                                             3. BackupSheep server upload backup to your storage accounts
                                         </li>
                                     </ul>
                                 </div>
-                                <div class="rounded-md bg-blue-50 p-4 mt-4" x-show="website?.backup_type?.id===4">
+                                <div class="mt-4 rounded-lg bg-sky-50 p-4 ring-1 ring-inset ring-sky-600/10"
+                                     x-show="website?.backup_type?.id===4">
                                     <div class="flex">
                                         <div class="shrink-0">
-                                            <svg class="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor"
-                                                 aria-hidden="true">
-                                                <path fill-rule="evenodd"
-                                                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a.75.75 0 000 1.5h.253a.25.25 0 01.244.304l-.459 2.066A1.75 1.75 0 0010.747 15H11a.75.75 0 000-1.5h-.253a.25.25 0 01-.244-.304l.459-2.066A1.75 1.75 0 009.253 9H9z"
-                                                      clip-rule="evenodd"></path>
+                                            <svg class="h-5 w-5 text-sky-500" fill="none" viewBox="0 0 24 24"
+                                                 stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                      d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"></path>
                                             </svg>
                                         </div>
                                         <div class="ml-3">
-                                            <p class="text-sm text-blue-700">
+                                            <p class="text-sm text-sky-800">
                                                 This node uses the legacy <strong>Full (Server-Side Tar)</strong>
                                                 backup type. Your server must have enough disk space to create a
                                                 temporary backup and the ability to create tar archives.
@@ -77,45 +85,48 @@
                                 </div>
                             {% endif %}
 
-                            <div class="{% if node.id %}mt-8{% endif %}">
-                                <label class="block text-sm font-medium text-gray-700">
+                            <div class="{% if node.id %}mt-6{% endif %}">
+                                <label class="block text-sm font-medium text-slate-700">
                                     Backup Mode
                                 </label>
-                                <div class="mt-2 space-y-4">
-                                    <label class="flex items-start">
+                                <div class="mt-2 space-y-3">
+                                    <label class="flex cursor-pointer items-start gap-x-3 rounded-xl bg-white p-4 ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50">
                                         <input x-model="website.incremental" :value="true" type="radio"
                                                name="backup_mode"
-                                               class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
-                                        <span class="ml-3">
-                                            <span class="block text-sm font-medium text-gray-700">Incremental (Recommended)</span>
-                                            <span class="block text-sm text-gray-700">After the first backup, only new and changed files are downloaded. Each backup is still a complete snapshot.</span>
+                                               class="mt-0.5 h-4 w-4 border-slate-300 text-indigo-600 focus:ring-indigo-500">
+                                        <span>
+                                            <span class="block text-sm font-medium text-slate-900">Incremental
+                                                <span class="ml-1 inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">Recommended</span>
+                                            </span>
+                                            <span class="mt-0.5 block text-sm text-slate-500">After the first backup, only new and changed files are downloaded. Each backup is still a complete snapshot.</span>
                                         </span>
                                     </label>
-                                    <label class="flex items-start">
+                                    <label class="flex cursor-pointer items-start gap-x-3 rounded-xl bg-white p-4 ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50">
                                         <input x-model="website.incremental" :value="false" type="radio"
                                                name="backup_mode"
-                                               class="mt-1 h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
-                                        <span class="ml-3">
-                                            <span class="block text-sm font-medium text-gray-700">Full</span>
-                                            <span class="block text-sm text-gray-700">Downloads all files on every backup.</span>
+                                               class="mt-0.5 h-4 w-4 border-slate-300 text-indigo-600 focus:ring-indigo-500">
+                                        <span>
+                                            <span class="block text-sm font-medium text-slate-900">Full</span>
+                                            <span class="mt-0.5 block text-sm text-slate-500">Downloads all files on every backup.</span>
                                         </span>
                                     </label>
                                 </div>
-                                <p x-show="websiteErrors?.incremental" class="mt-2 text-sm text-red-600"
+                                <p x-show="websiteErrors?.incremental" class="mt-1.5 text-sm text-rose-600"
                                    id="incremental-error" x-text="websiteErrors?.incremental"></p>
                             </div>
                         </div>
-                        <div class="sm:col-span-2" x-show="website?.backup_type?.id===4">
-                            <label for="custom_directory" class="block text-sm font-medium text-gray-700">
-                                Temporary Backup Directory<br/>
-                                <span class="text-indigo-600">(It must be outside any paths you wish to include in the backup)</span>
+                        <div x-show="website?.backup_type?.id===4">
+                            <label for="custom_directory" class="block text-sm font-medium text-slate-700">
+                                Temporary Backup Directory
                             </label>
-                            <div class="mt-1">
+                            <p class="mt-1 text-xs text-slate-500">It must be outside any paths you wish to include in
+                                the backup.</p>
+                            <div class="mt-1.5">
                                 <input x-model="website.tar_temp_backup_dir" type="text" name="custom_directory"
                                        id="custom_directory" placeholder="example: /var/log/backupsheep"
                                        autocomplete="custom_directory"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="websiteErrors?.tar_temp_backup_dir" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="websiteErrors?.tar_temp_backup_dir" class="mt-1.5 text-sm text-rose-600"
                                    id="name-error" x-text="websiteErrors?.tar_temp_backup_dir"></p>
                             </div>
                         </div>
@@ -159,23 +170,24 @@
                         {##}
                         {#                        </div>#}
 
-                        <div class="sm:col-span-2">
-                            <label for="parallel" class="block text-sm font-medium text-gray-700">
-                                Simultaneous Connections <span class="text-indigo-600">(set high number for faster download)</span>
+                        <div>
+                            <label for="parallel" class="block text-sm font-medium text-slate-700">
+                                Simultaneous Connections
                             </label>
-                            <div class="relative mt-2">
+                            <p class="mt-1 text-xs text-slate-500">Set a higher number for faster downloads.</p>
+                            <div class="relative mt-1.5" @click.outside="openParallel = false">
                                 <button @click="toggleParallelDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full cursor-default rounded-lg bg-white py-2.5 pl-3 pr-10 text-left text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
                                     <span class="block truncate"
                                           x-text="website.parallel||'--Simultaneous Connections--'"></span>
-                                    <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
-                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
-                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                              <path fill-rule="evenodd"
-                                                    d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
-                                                    clip-rule="evenodd"></path>
+                                    <span class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
+                                            <svg class="h-5 w-5 text-slate-400" xmlns="http://www.w3.org/2000/svg"
+                                                 fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                                                 stroke="currentColor" aria-hidden="true">
+                                              <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M8.25 15L12 18.75 15.75 15m-7.5-6L12 5.25 15.75 9"></path>
                                             </svg>
                                           </span>
                                 </button>
@@ -189,7 +201,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-20 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
+                                        class="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-xl bg-white py-1 text-base shadow-lg ring-1 ring-slate-900/5 focus:outline-none sm:text-sm"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -199,17 +211,17 @@
                                                 @click="website.parallel = parallel;toggleParallelDropdown()"
                                                 @mouseenter="parallelActiveIndex = index"
                                                 @mouseleave="parallelActiveIndex = null"
-                                                :class="{ 'text-white bg-indigo-600': parallelActiveIndex === index, 'text-gray-700': !(parallelActiveIndex === index) }"
-                                                class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                :class="{ 'text-white bg-indigo-600': parallelActiveIndex === index, 'text-slate-700': !(parallelActiveIndex === index) }"
+                                                class="relative cursor-default select-none py-2.5 pl-9 pr-4"
                                                 id="listbox-option-0" role="option">
-                                                <span class="font-normal block truncate">
+                                                <span class="block truncate font-normal">
                                                     <span x-text="parallel"></span>
                                                 </span>
 
                                             <span
                                                     x-show="website.parallel === parallel"
                                                     :class="{ 'text-indigo-600': (website.parallel === parallel) && (parallelActiveIndex !== index), 'text-white': (!(website.parallel === parallel) || (parallelActiveIndex === index)) }"
-                                                    class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                    class="absolute inset-y-0 left-0 flex items-center pl-2 text-indigo-600">
                                                   <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
                                                        viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                                     <path fill-rule="evenodd"
@@ -221,21 +233,21 @@
                                     </template>
                                 </ul>
                             </div>
-                            <p x-show="websiteErrors?.parallel" class="mt-2 text-sm text-red-600"
+                            <p x-show="websiteErrors?.parallel" class="mt-1.5 text-sm text-rose-600"
                                id="region-error" x-text="websiteErrors?.parallel"></p>
-                            <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 mt-3 mb-3"
+                            <div class="mt-3 rounded-lg bg-amber-50 p-4 ring-1 ring-inset ring-amber-600/20"
                                  x-show="website?.parallel>3">
                                 <div class="flex">
                                     <div class="shrink-0">
-                                        <svg class="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg"
-                                             viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                            <path fill-rule="evenodd"
-                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
-                                                  clip-rule="evenodd"></path>
+                                        <svg class="h-5 w-5 text-amber-500" xmlns="http://www.w3.org/2000/svg"
+                                             fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
+                                             aria-hidden="true">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                  d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"></path>
                                         </svg>
                                     </div>
                                     <div class="ml-3 flex-1 md:flex md:justify-between">
-                                        <p class="text-sm text-yellow-700">
+                                        <p class="text-sm text-amber-800">
                                             If you are using cPanel then setting higher simultaneous connections may result
                                             in
                                             <strong> 421 too many connections from this IP error</strong>.
@@ -243,19 +255,19 @@
                                     </div>
                                 </div>
                             </div>
-                            <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 mt-3 mb-3"
+                            <div class="mt-3 rounded-lg bg-amber-50 p-4 ring-1 ring-inset ring-amber-600/20"
                                  x-show="website?.parallel>5">
                                 <div class="flex">
                                     <div class="shrink-0">
-                                        <svg class="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg"
-                                             viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                            <path fill-rule="evenodd"
-                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
-                                                  clip-rule="evenodd"></path>
+                                        <svg class="h-5 w-5 text-amber-500" xmlns="http://www.w3.org/2000/svg"
+                                             fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
+                                             aria-hidden="true">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                  d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"></path>
                                         </svg>
                                     </div>
                                     <div class="ml-3 flex-1 md:flex md:justify-between">
-                                        <p class="text-sm text-yellow-700">
+                                        <p class="text-sm text-amber-800">
                                             Setting simultaneous connections to a high number can cause a high CPU load on a
                                             small server. Use caution, and don't run all your node backups from the same
                                             server simultaneously.
@@ -285,22 +297,22 @@
                         {#                        </div>#}
 
 
-                        <div class="sm:col-span-2">
-                            <label for="notes" class="block text-sm font-medium text-gray-700">
+                        <div>
+                            <label for="notes" class="block text-sm font-medium text-slate-700">
                                 Notes
                             </label>
-                            <div class="mt-1">
-                                          <textarea x-model="website.notes" id="notes" name="notes" rows="3"
-                                                    class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md mt-3"></textarea>
-                                <p x-show="websiteErrors?.notes" class="mt-2 text-sm text-red-600" id="notes-error"
+                            <div class="mt-1.5">
+                                <textarea x-model="website.notes" id="notes" name="notes" rows="3"
+                                          class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"></textarea>
+                                <p x-show="websiteErrors?.notes" class="mt-1.5 text-sm text-rose-600" id="notes-error"
                                    x-text="websiteErrors?.notes"></p>
                             </div>
                         </div>
 
 
-                    </dl>
+                    </div>
                     <button @click="saveWebsite()" type="button"
-                            class="mt-6 w-full justify-center inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-xs text-white bg-teal-600 hover:bg-teal-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            class="mt-6 inline-flex w-full items-center justify-center gap-x-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
                         {% if not node.id %}
                             <span>Create New Node</span>
                         {% elif node.id %}
@@ -316,241 +328,266 @@
 
 
         </div>
-        <div>
-            <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg">
-                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
-                    <h3 class="text-md leading-6  text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                  d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
-                        </svg>
-                        Backup Paths (Include & exclude rules apply to each path)
-                    </h3>
-                </div>
-
-                <div class="rounded-md bg-blue-50 p-4 ml-3 mr-3 mt-3 mb-3" x-show="website.paths?.length===0">
-                    <div class="flex">
-                        <div class="shrink-0">
-                            <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
-                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                <path fill-rule="evenodd"
-                                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
-                                      clip-rule="evenodd"></path>
+        <div class="space-y-6">
+            <div class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft">
+                <div class="border-b border-slate-100 px-5 py-4 sm:px-6">
+                    <div class="flex items-center gap-x-3">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z"></path>
                             </svg>
-                        </div>
-                        <div class="ml-3 flex-1 md:flex md:justify-between">
-                            <p class="text-sm text-blue-700">
-                                Add manual backup paths using <strong>Directory & File Paths</strong> or use <strong>Server
-                                File Explorer</strong> to browse & include
-                                files from your connected web server.
-                            </p>
+                        </span>
+                        <div>
+                            <h3 class="text-sm font-semibold text-slate-900">Backup Paths</h3>
+                            <p class="mt-0.5 text-sm text-slate-500">Include &amp; exclude rules apply to each
+                                path.</p>
                         </div>
                     </div>
                 </div>
-                <div class="rounded-md bg-blue-50 p-4 ml-3 mr-3 mt-3 mb-3" x-show="website.paths?.length===0">
-                    <div class="flex">
-                        <div class="shrink-0">
-                            <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
-                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                <path fill-rule="evenodd"
-                                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
-                                      clip-rule="evenodd"></path>
-                            </svg>
+
+                <div class="space-y-3 px-5 pt-5 sm:px-6" x-show="website.paths?.length===0">
+                    <div class="rounded-lg bg-sky-50 p-4 ring-1 ring-inset ring-sky-600/10">
+                        <div class="flex">
+                            <div class="shrink-0">
+                                <svg class="h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg"
+                                     fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
+                                     aria-hidden="true">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                          d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"></path>
+                                </svg>
+                            </div>
+                            <div class="ml-3 flex-1 md:flex md:justify-between">
+                                <p class="text-sm text-sky-800">
+                                    Add manual backup paths using <strong>Directory &amp; File Paths</strong> or use
+                                    <strong>Server
+                                        File Explorer</strong> to browse &amp; include
+                                    files from your connected web server.
+                                </p>
+                            </div>
                         </div>
-                        <div class="ml-3 flex-1 md:flex md:justify-between">
-                            <p class="text-sm text-blue-700">
-                                To backup everything in your user home/landing directory add dot <strong>.</strong> as
-                                directory path.
-                            </p>
+                    </div>
+                    <div class="rounded-lg bg-sky-50 p-4 ring-1 ring-inset ring-sky-600/10">
+                        <div class="flex">
+                            <div class="shrink-0">
+                                <svg class="h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg"
+                                     fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
+                                     aria-hidden="true">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                          d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"></path>
+                                </svg>
+                            </div>
+                            <div class="ml-3 flex-1 md:flex md:justify-between">
+                                <p class="text-sm text-sky-800">
+                                    To backup everything in your user home/landing directory add dot
+                                    <strong>.</strong> as
+                                    directory path.
+                                </p>
+                            </div>
                         </div>
                     </div>
                 </div>
                 <div x-show="website.paths?.length>0">
-                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
-                        <div class="sm:col-span-1">
-                            <div class="border-t border-gray-200">
-                                <div class="overflow-x-auto">
-                                    <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
-                                        <tbody class="bg-white divide-y divide-gray-200">
-                                        <template x-for="object in website.paths">
-                                            <tr>
-                                                <td class="px-2 py-2 whitespace-nowrap">
-                                                    <div class="flex items-center">
-                                                        <div class="shrink-0 h-6 w-6">
-                                                            <svg x-show="object.type==='file'"
-                                                                 xmlns="http://www.w3.org/2000/svg"
-                                                                 class="h-6 w-6 rounded-full text-indigo-600"
-                                                                 fill="none"
-                                                                 viewBox="0 0 24 24" stroke="currentColor">
-                                                                <path stroke-linecap="round" stroke-linejoin="round"
-                                                                      stroke-width="2"
-                                                                      d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"></path>
-                                                            </svg>
+                    <div class="overflow-x-auto">
+                        <table id="section-nodes" class="min-w-full divide-y divide-slate-100">
+                            <tbody class="divide-y divide-slate-100 bg-white">
+                            <template x-for="object in website.paths">
+                                <tr class="hover:bg-slate-50 transition-colors">
+                                    <td class="whitespace-nowrap px-5 py-3.5">
+                                        <div class="flex items-center">
+                                            <div class="h-5 w-5 shrink-0">
+                                                <svg x-show="object.type==='file'"
+                                                     xmlns="http://www.w3.org/2000/svg"
+                                                     class="h-5 w-5 text-slate-400"
+                                                     fill="none"
+                                                     viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                          d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"></path>
+                                                </svg>
 
-                                                            <svg x-show="object.type==='directory'"
-                                                                 xmlns="http://www.w3.org/2000/svg"
-                                                                 class="h-6 w-6 rounded-full text-indigo-600"
-                                                                 fill="none"
-                                                                 viewBox="0 0 24 24" stroke="currentColor">
-                                                                <path stroke-linecap="round" stroke-linejoin="round"
-                                                                      stroke-width="2"
-                                                                      d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
-                                                            </svg>
-                                                        </div>
-                                                        <div class="ml-2">
-                                                            <div class="text-sm font-medium text-gray-700">
-                                                                <a class="cursor-pointer"
-                                                                   @click="getObjects(object.path)"
-                                                                   x-text="object.name"></a>
-                                                            </div>
-                                                            <div class="text-xs text-gray-700"
-                                                                 x-text="object.path"></div>
-                                                        </div>
-                                                    </div>
-                                                </td>
+                                                <svg x-show="object.type==='directory'"
+                                                     xmlns="http://www.w3.org/2000/svg"
+                                                     class="h-5 w-5 text-indigo-500"
+                                                     fill="none"
+                                                     viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                          d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z"></path>
+                                                </svg>
+                                            </div>
+                                            <div class="ml-3">
+                                                <div class="text-sm font-medium text-slate-900">
+                                                    <a class="cursor-pointer hover:text-indigo-600"
+                                                       @click="getObjects(object.path)"
+                                                       x-text="object.name"></a>
+                                                </div>
+                                                <div class="text-xs text-slate-500"
+                                                     x-text="object.path"></div>
+                                            </div>
+                                        </div>
+                                    </td>
 
-                                                <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
-                                                    <button @click="removePath(object)" type="button"
-                                                            class="text-center justify-center inline-flex items-center  mx-auto px-2 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                                        Remove
-                                                    </button>
-                                                </td>
-                                            </tr>
-                                        </template>
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-                    </dl>
+                                    <td class="whitespace-nowrap px-5 py-3.5 text-right text-sm font-medium">
+                                        <button @click="removePath(object)" type="button"
+                                                class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-rose-600 shadow-sm ring-1 ring-inset ring-rose-200 hover:bg-rose-50 transition-colors">
+                                            Remove
+                                        </button>
+                                    </td>
+                                </tr>
+                            </template>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
+                <div class="px-5 pb-5 pt-3 sm:px-6" x-show="website.paths?.length===0"></div>
             </div>
 
-            <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg  mt-6">
-                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
-                    <h3 class="text-md leading-6  text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                        </svg>
-                        Include directory and file paths.
-                    </h3>
+            <div class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft">
+                <div class="border-b border-slate-100 px-5 py-4 sm:px-6">
+                    <div class="flex items-center gap-x-3">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M12 9v6m3-3H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                        </span>
+                        <div>
+                            <h3 class="text-sm font-semibold text-slate-900">Include Directory &amp; File Paths</h3>
+                            <p class="mt-0.5 text-sm text-slate-500">Add paths manually to include them in the
+                                backup.</p>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
-                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
-                        <div class="sm:col-span-1">
-                            <label for="custom_directory" class="block text-sm font-medium text-gray-700">
+                <div class="px-5 py-6 sm:px-6">
+                    <div class="grid grid-cols-1 gap-y-6">
+                        <div>
+                            <label for="custom_directory" class="block text-sm font-medium text-slate-700">
                                 Directory Path
                             </label>
-                            <div class="mt-1">
+                            <div class="mt-1.5 flex gap-x-3">
                                 <input x-model="custom_directory" type="text" name="custom_directory"
                                        id="custom_directory" placeholder="example: /home/websites/myblog.com/"
                                        autocomplete="custom_directory"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="websiteErrors?.custom_directory" class="mt-2 text-sm text-red-600"
-                                   id="name-error" x-text="websiteErrors?.custom_directory"></p>
+                                       class="block w-full min-w-0 flex-1 rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <button @click="addCustomObject(custom_directory, 'directory');custom_directory=null;"
+                                        type="button"
+                                        class="inline-flex shrink-0 items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none"
+                                         viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                              d="M12 4.5v15m7.5-7.5h-15"></path>
+                                    </svg>
+                                    <span>Add</span>
+                                </button>
                             </div>
-                        </div>
-                        <div class="sm:col-span-1">
-                            <button @click="addCustomObject(custom_directory, 'directory');custom_directory=null;"
-                                    type="button"
-                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                <span>Add</span>
-                            </button>
+                            <p x-show="websiteErrors?.custom_directory" class="mt-1.5 text-sm text-rose-600"
+                               id="name-error" x-text="websiteErrors?.custom_directory"></p>
                         </div>
 
-                        <div class="sm:col-span-1">
-                            <label for="custom_file" class="block text-sm font-medium text-gray-700">
+                        <div>
+                            <label for="custom_file" class="block text-sm font-medium text-slate-700">
                                 File Path
                             </label>
-                            <div class="mt-1">
+                            <div class="mt-1.5 flex gap-x-3">
                                 <input x-model="custom_file" type="text" name="custom_file"
                                        id="custom_file" placeholder="example: /home/websites/myblog.com/wp-config.php"
                                        autocomplete="custom_file"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="websiteErrors?.custom_file" class="mt-2 text-sm text-red-600"
-                                   id="name-error" x-text="websiteErrors?.custom_file"></p>
+                                       class="block w-full min-w-0 flex-1 rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <button @click="addCustomObject(custom_file, 'file');custom_file=null;"
+                                        type="button"
+                                        class="inline-flex shrink-0 items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none"
+                                         viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                              d="M12 4.5v15m7.5-7.5h-15"></path>
+                                    </svg>
+                                    <span>Add</span>
+                                </button>
                             </div>
+                            <p x-show="websiteErrors?.custom_file" class="mt-1.5 text-sm text-rose-600"
+                               id="name-error" x-text="websiteErrors?.custom_file"></p>
                         </div>
-                        <div class="sm:col-span-1">
-                            <button @click="addCustomObject(custom_file, 'file');custom_file=null;"
-                                    type="button"
-                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                <span>Add</span>
-                            </button>
-                        </div>
-                    </dl>
+                    </div>
                 </div>
             </div>
 
-            <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg  mt-6" x-show="website?.backup_type?.id===1">
-                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
-                    <h3 class="text-md leading-6  text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                        </svg>
-                        Regex Include Rules
-                    </h3>
+            <div class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft"
+                 x-show="website?.backup_type?.id===1">
+                <div class="border-b border-slate-100 px-5 py-4 sm:px-6">
+                    <div class="flex items-center gap-x-3">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5"></path>
+                            </svg>
+                        </span>
+                        <div>
+                            <h3 class="text-sm font-semibold text-slate-900">Regex Include Rules</h3>
+                            <p class="mt-0.5 text-sm text-slate-500">Only files matching these regular expressions are
+                                included.</p>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
-                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
+                <div class="px-5 py-6 sm:px-6">
+                    <div class="grid grid-cols-1 gap-y-6">
 
-                        <div class="sm:col-span-1">
-                            <label for="include_regex" class="block text-sm font-medium text-gray-700">
-                                Regex (Regular Expression) <a class="text-indigo-600"
+                        <div>
+                            <label for="include_regex" class="block text-sm font-medium text-slate-700">
+                                Regex (Regular Expression) <a class="font-medium text-indigo-600 hover:text-indigo-500"
                                                               href="https://support.backupsheep.com/docs/include-files-in-website-backup#using-regular-expression---regex"
                                                               target="_blank">learn more</a>
                             </label>
-                            <div class="mt-1">
+                            <div class="mt-1.5 flex gap-x-3">
                                 <input x-model="include_regex" type="text" name="include_regex"
                                        id="include_regex" placeholder="example: (.*)\/public_html\/wp-content\/wpvividbackups\/.*zip$
 "
                                        autocomplete="include_regex"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="websiteErrors?.include_regex" class="mt-2 text-sm text-red-600"
-                                   id="name-error" x-text="websiteErrors?.include_regex"></p>
+                                       class="block w-full min-w-0 flex-1 rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <button @click="addIncludeRegex(include_regex);include_regex=null;" type="button"
+                                        class="inline-flex shrink-0 items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none"
+                                         viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                              d="M12 4.5v15m7.5-7.5h-15"></path>
+                                    </svg>
+                                    <span>Add</span>
+                                </button>
                             </div>
+                            <p x-show="websiteErrors?.include_regex" class="mt-1.5 text-sm text-rose-600"
+                               id="name-error" x-text="websiteErrors?.include_regex"></p>
                         </div>
-                        <div class="sm:col-span-1">
-                            <button @click="addIncludeRegex(include_regex);include_regex=null;" type="button"
-                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                <span>Add</span>
-                            </button>
-                        </div>
-                        <div class="border-t border-gray-200 " x-show="website.includes_regex?.length>0">
+                        <div class="border-t border-slate-100 pt-4" x-show="website.includes_regex?.length>0">
                             <div class="overflow-x-auto">
-                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
-                                    <tbody class="bg-white divide-y divide-gray-200">
+                                <table id="section-nodes" class="min-w-full divide-y divide-slate-100">
+                                    <tbody class="divide-y divide-slate-100 bg-white">
                                     <template x-for="object in website.includes_regex">
-                                        <tr>
-                                            <td class="px-2 py-2 whitespace-nowrap">
+                                        <tr class="hover:bg-slate-50 transition-colors">
+                                            <td class="whitespace-nowrap px-5 py-3.5">
                                                 <div class="flex items-center">
-                                                    <div class="shrink-0 h-6 w-6">
+                                                    <div class="h-5 w-5 shrink-0">
                                                         <svg xmlns="http://www.w3.org/2000/svg"
-                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
-                                                             viewBox="0 0 24 24" stroke="currentColor">
+                                                             class="h-5 w-5 text-slate-400" fill="none"
+                                                             viewBox="0 0 24 24" stroke="currentColor"
+                                                             stroke-width="1.5">
                                                             <path stroke-linecap="round" stroke-linejoin="round"
-                                                                  stroke-width="2"
-                                                                  d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
+                                                                  d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5"></path>
                                                         </svg>
                                                     </div>
-                                                    <div class="ml-2">
-                                                        <div class="text-sm font-sm text-gray-700">
+                                                    <div class="ml-3">
+                                                        <div class="font-mono text-xs text-slate-700">
                                                             <a x-text="object"></a>
                                                         </div>
                                                     </div>
                                                 </div>
                                             </td>
 
-                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                            <td class="whitespace-nowrap px-5 py-3.5 text-right text-sm font-medium">
                                                 <button @click="removeIncludeRegex(object)" type="button"
-                                                        class="text-center justify-center inline-flex items-center  mx-auto px-2 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-rose-600 shadow-sm ring-1 ring-inset ring-rose-200 hover:bg-rose-50 transition-colors">
                                                     Remove
                                                 </button>
                                             </td>
@@ -561,74 +598,84 @@
                                 </table>
                             </div>
                         </div>
-                    </dl>
+                    </div>
                 </div>
             </div>
 
-            <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg  mt-6"  x-show="website?.backup_type?.id===1">
-                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
-                    <h3 class="text-md leading-6  text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                        </svg>
-                        Glob Include Rules
-                    </h3>
+            <div class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft"
+                 x-show="website?.backup_type?.id===1">
+                <div class="border-b border-slate-100 px-5 py-4 sm:px-6">
+                    <div class="flex items-center gap-x-3">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5"></path>
+                            </svg>
+                        </span>
+                        <div>
+                            <h3 class="text-sm font-semibold text-slate-900">Glob Include Rules</h3>
+                            <p class="mt-0.5 text-sm text-slate-500">Only files matching these glob patterns are
+                                included.</p>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
-                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
-                        <div class="sm:col-span-1">
-                            <label for="include_glob" class="block text-sm font-medium text-gray-700">
-                                Glob Patterns <a class="text-indigo-600"
+                <div class="px-5 py-6 sm:px-6">
+                    <div class="grid grid-cols-1 gap-y-6">
+                        <div>
+                            <label for="include_glob" class="block text-sm font-medium text-slate-700">
+                                Glob Patterns <a class="font-medium text-indigo-600 hover:text-indigo-500"
                                                  href="https://support.backupsheep.com/docs/include-files-in-website-backup#using-glob-pattern"
                                                  target="_blank">learn more</a>
                             </label>
-                            <div class="mt-1">
+                            <div class="mt-1.5 flex gap-x-3">
                                 <input x-model="include_glob" type="text" name="include_glob"
                                        id="include_glob"
                                        placeholder="example: */public_html/wp-content/wpvividbackups/*.zip"
                                        autocomplete="include_glob"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="websiteErrors?.include_glob" class="mt-2 text-sm text-red-600"
-                                   id="name-error" x-text="websiteErrors?.include_glob"></p>
+                                       class="block w-full min-w-0 flex-1 rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <button @click="addIncludeGlob(include_glob);include_glob=null;" type="button"
+                                        class="inline-flex shrink-0 items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none"
+                                         viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                              d="M12 4.5v15m7.5-7.5h-15"></path>
+                                    </svg>
+                                    <span>Add</span>
+                                </button>
                             </div>
+                            <p x-show="websiteErrors?.include_glob" class="mt-1.5 text-sm text-rose-600"
+                               id="name-error" x-text="websiteErrors?.include_glob"></p>
                         </div>
-                        <div class="sm:col-span-1">
-                            <button @click="addIncludeGlob(include_glob);include_glob=null;" type="button"
-                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                <span>Add</span>
-                            </button>
-                        </div>
-                        <div class="border-t border-gray-200 " x-show="website.includes_glob?.length>0">
+                        <div class="border-t border-slate-100 pt-4" x-show="website.includes_glob?.length>0">
                             <div class="overflow-x-auto">
-                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
-                                    <tbody class="bg-white divide-y divide-gray-200">
+                                <table id="section-nodes" class="min-w-full divide-y divide-slate-100">
+                                    <tbody class="divide-y divide-slate-100 bg-white">
                                     <template x-for="object in website.includes_glob">
-                                        <tr>
-                                            <td class="px-2 py-2 whitespace-nowrap">
+                                        <tr class="hover:bg-slate-50 transition-colors">
+                                            <td class="whitespace-nowrap px-5 py-3.5">
                                                 <div class="flex items-center">
-                                                    <div class="shrink-0 h-6 w-6">
+                                                    <div class="h-5 w-5 shrink-0">
                                                         <svg xmlns="http://www.w3.org/2000/svg"
-                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
-                                                             viewBox="0 0 24 24" stroke="currentColor">
+                                                             class="h-5 w-5 text-slate-400" fill="none"
+                                                             viewBox="0 0 24 24" stroke="currentColor"
+                                                             stroke-width="1.5">
                                                             <path stroke-linecap="round" stroke-linejoin="round"
-                                                                  stroke-width="2"
-                                                                  d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
+                                                                  d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5"></path>
                                                         </svg>
                                                     </div>
-                                                    <div class="ml-2">
-                                                        <div class="text-sm font-sm text-gray-700">
+                                                    <div class="ml-3">
+                                                        <div class="font-mono text-xs text-slate-700">
                                                             <a x-text="object"></a>
                                                         </div>
                                                     </div>
                                                 </div>
                                             </td>
 
-                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                            <td class="whitespace-nowrap px-5 py-3.5 text-right text-sm font-medium">
                                                 <button @click="removeIncludeGlob(object)" type="button"
-                                                        class="text-center justify-center inline-flex items-center  mx-auto px-2 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-rose-600 shadow-sm ring-1 ring-inset ring-rose-200 hover:bg-rose-50 transition-colors">
                                                     Remove
                                                 </button>
                                             </td>
@@ -639,72 +686,82 @@
                                 </table>
                             </div>
                         </div>
-                    </dl>
+                    </div>
                 </div>
             </div>
 
-            <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6"  x-show="website?.backup_type?.id===1">
-                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
-                    <h3 class="text-md leading-6  text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                        </svg>
-                        Regex Exclude Rules
-                    </h3>
+            <div class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft"
+                 x-show="website?.backup_type?.id===1">
+                <div class="border-b border-slate-100 px-5 py-4 sm:px-6">
+                    <div class="flex items-center gap-x-3">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-rose-50 text-rose-500">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                        </span>
+                        <div>
+                            <h3 class="text-sm font-semibold text-slate-900">Regex Exclude Rules</h3>
+                            <p class="mt-0.5 text-sm text-slate-500">Files matching these regular expressions are
+                                skipped.</p>
+                        </div>
+                    </div>
                 </div>
-                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
-                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
-                        <div class="sm:col-span-1">
-                            <label for="exclude_regex" class="block text-sm font-medium text-gray-700">
-                                Regex Pattern, e.g. ^\.svn <a class="text-indigo-600"
+                <div class="px-5 py-6 sm:px-6">
+                    <div class="grid grid-cols-1 gap-y-6">
+                        <div>
+                            <label for="exclude_regex" class="block text-sm font-medium text-slate-700">
+                                Regex Pattern, e.g. ^\.svn <a class="font-medium text-indigo-600 hover:text-indigo-500"
                                                               href="https://support.backupsheep.com/docs/exclude-files-from-website-backup#using-regular-expression---regex"
                                                               target="_blank">learn more</a>
                             </label>
-                            <div class="mt-1">
+                            <div class="mt-1.5 flex gap-x-3">
                                 <input x-model="exclude_regex" type="text" name="exclude_regex" id="exclude_regex"
                                        autocomplete="exclude_regex"
                                        placeholder="example: ^\.svn (to exclude .svn directory)"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="websiteErrors?.excludes_regex" class="mt-2 text-sm text-red-600"
-                                   id="name-error" x-text="websiteErrors?.excludes_regex"></p>
+                                       class="block w-full min-w-0 flex-1 rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <button @click="addExcludeRegex(exclude_regex);exclude_regex=null;" type="button"
+                                        class="inline-flex shrink-0 items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none"
+                                         viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                              d="M12 4.5v15m7.5-7.5h-15"></path>
+                                    </svg>
+                                    <span>Add</span>
+                                </button>
                             </div>
+                            <p x-show="websiteErrors?.excludes_regex" class="mt-1.5 text-sm text-rose-600"
+                               id="name-error" x-text="websiteErrors?.excludes_regex"></p>
                         </div>
-                        <div class="sm:col-span-1">
-                            <button @click="addExcludeRegex(exclude_regex);exclude_regex=null;" type="button"
-                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                <span>Add</span>
-                            </button>
-                        </div>
-                        <div class="border-t border-gray-200 " x-show="website.excludes_regex?.length>0">
+                        <div class="border-t border-slate-100 pt-4" x-show="website.excludes_regex?.length>0">
                             <div class="overflow-x-auto">
-                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
-                                    <tbody class="bg-white divide-y divide-gray-200">
+                                <table id="section-nodes" class="min-w-full divide-y divide-slate-100">
+                                    <tbody class="divide-y divide-slate-100 bg-white">
                                     <template x-for="object in website.excludes_regex">
-                                        <tr>
-                                            <td class="px-2 py-2 whitespace-nowrap">
+                                        <tr class="hover:bg-slate-50 transition-colors">
+                                            <td class="whitespace-nowrap px-5 py-3.5">
                                                 <div class="flex items-center">
-                                                    <div class="shrink-0 h-6 w-6">
+                                                    <div class="h-5 w-5 shrink-0">
                                                         <svg xmlns="http://www.w3.org/2000/svg"
-                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
-                                                             viewBox="0 0 24 24" stroke="currentColor">
+                                                             class="h-5 w-5 text-slate-400" fill="none"
+                                                             viewBox="0 0 24 24" stroke="currentColor"
+                                                             stroke-width="1.5">
                                                             <path stroke-linecap="round" stroke-linejoin="round"
-                                                                  stroke-width="2"
-                                                                  d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
+                                                                  d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5"></path>
                                                         </svg>
                                                     </div>
-                                                    <div class="ml-2">
-                                                        <div class="text-sm font-sm text-gray-700">
+                                                    <div class="ml-3">
+                                                        <div class="font-mono text-xs text-slate-700">
                                                             <a x-text="object"></a>
                                                         </div>
                                                     </div>
                                                 </div>
                                             </td>
 
-                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                            <td class="whitespace-nowrap px-5 py-3.5 text-right text-sm font-medium">
                                                 <button @click="removeExcludeRegex(object)" type="button"
-                                                        class="text-center justify-center inline-flex items-center  mx-auto px-2 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-rose-600 shadow-sm ring-1 ring-inset ring-rose-200 hover:bg-rose-50 transition-colors">
                                                     Remove
                                                 </button>
                                             </td>
@@ -715,179 +772,194 @@
                                 </table>
                             </div>
                         </div>
-                    </dl>
+                    </div>
                 </div>
             </div>
 
-            <div x-show="website?.backup_type?.id===4" class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6">
-                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
-                    <h3 class="text-md leading-6  text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                        </svg>
-                        Tar Exclude Rules
-                    </h3>
+            <div x-show="website?.backup_type?.id===4"
+                 class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft">
+                <div class="border-b border-slate-100 px-5 py-4 sm:px-6">
+                    <div class="flex items-center gap-x-3">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-rose-50 text-rose-500">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z"></path>
+                            </svg>
+                        </span>
+                        <div>
+                            <h3 class="text-sm font-semibold text-slate-900">Tar Exclude Rules</h3>
+                            <p class="mt-0.5 text-sm text-slate-500">Server-side tar exclude options.</p>
+                        </div>
+                    </div>
                 </div>
-                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
-                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1 overflow-hidden overflow-y-scroll h-64 max-h-full">
-                       <div class="sm:col-span-1">
-                           <label for="tar_exclude_vcs_ignores" class="block text-sm font-medium text-gray-700">
-                               --exclude-vcs-ignores
-                           </label>
-                           <div class="text-sm mt-2">
-                               Before archiving a directory, see if it contains any of the following files:
-                               ‘cvsignore’, ‘.gitignore’, ‘.bzrignore’, or ‘.hgignore’.
-                               If so, read ignore patterns from these files.
-                           </div>
-                            <div class="mt-4">
-                                <button type="button"
-                                        @click="website.tar_exclude_vcs_ignores = !website.tar_exclude_vcs_ignores;"
-                                        :class="{ 'bg-indigo-600': website.tar_exclude_vcs_ignores, 'bg-gray-200': !(website.tar_exclude_vcs_ignores) }"
-                                        class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
-                                    <span :class="{ 'translate-x-5': website.tar_exclude_vcs_ignores, 'translate-x-0': !(website.tar_exclude_vcs_ignores) }"
-                                          aria-hidden="true"
-                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
-                                </button>
-                                <p x-show="websiteErrors?.tar_exclude_vcs_ignores" class="mt-2 text-sm text-red-600"
+                <div class="px-5 py-6 sm:px-6">
+                    <div class="max-h-96 space-y-6 overflow-y-auto pr-1">
+                        <div class="flex items-start justify-between gap-x-4">
+                            <div>
+                                <label for="tar_exclude_vcs_ignores" class="block font-mono text-xs font-semibold text-slate-900">
+                                    --exclude-vcs-ignores
+                                </label>
+                                <p class="mt-1 text-xs text-slate-500">
+                                    Before archiving a directory, see if it contains any of the following files:
+                                    ‘cvsignore’, ‘.gitignore’, ‘.bzrignore’, or ‘.hgignore’.
+                                    If so, read ignore patterns from these files.
+                                </p>
+                                <p x-show="websiteErrors?.tar_exclude_vcs_ignores" class="mt-1.5 text-sm text-rose-600"
                                    id="name-error" x-text="websiteErrors?.tar_exclude_vcs_ignores"></p>
                             </div>
+                            <button type="button"
+                                    @click="website.tar_exclude_vcs_ignores = !website.tar_exclude_vcs_ignores;"
+                                    :class="{ 'bg-indigo-600': website.tar_exclude_vcs_ignores, 'bg-slate-200': !(website.tar_exclude_vcs_ignores) }"
+                                    class="relative mt-0.5 inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                                    role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                <span :class="{ 'translate-x-5': website.tar_exclude_vcs_ignores, 'translate-x-0': !(website.tar_exclude_vcs_ignores) }"
+                                      aria-hidden="true"
+                                      class="pointer-events-none inline-block h-5 w-5 translate-x-0 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                            </button>
                         </div>
-                       <div class="sm:col-span-1">
-                           <label for="tar_exclude_vcs" class="block text-sm font-medium text-gray-700">
-                               --exclude-vcs
-                           </label>
-                           <div class="text-sm mt-2">
-                                Exclude files and directories used by following version control
-                               systems: ‘CVS’, ‘RCS’, ‘SCCS’, ‘SVN’, ‘Arch’, ‘Bazaar’, ‘Mercurial’, and ‘Darcs’.
-                           </div>
-                            <div class="mt-4">
-                                <button type="button"
-                                        @click="website.tar_exclude_vcs = !website.tar_exclude_vcs;"
-                                        :class="{ 'bg-indigo-600': website.tar_exclude_vcs, 'bg-gray-200': !(website.tar_exclude_vcs) }"
-                                        class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
-                                    <span :class="{ 'translate-x-5': website.tar_exclude_vcs, 'translate-x-0': !(website.tar_exclude_vcs) }"
-                                          aria-hidden="true"
-                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
-                                </button>
-                                <p x-show="websiteErrors?.tar_exclude_vcs" class="mt-2 text-sm text-red-600"
+                        <div class="flex items-start justify-between gap-x-4">
+                            <div>
+                                <label for="tar_exclude_vcs" class="block font-mono text-xs font-semibold text-slate-900">
+                                    --exclude-vcs
+                                </label>
+                                <p class="mt-1 text-xs text-slate-500">
+                                    Exclude files and directories used by following version control
+                                    systems: ‘CVS’, ‘RCS’, ‘SCCS’, ‘SVN’, ‘Arch’, ‘Bazaar’, ‘Mercurial’, and ‘Darcs’.
+                                </p>
+                                <p x-show="websiteErrors?.tar_exclude_vcs" class="mt-1.5 text-sm text-rose-600"
                                    id="name-error" x-text="websiteErrors?.tar_exclude_vcs"></p>
                             </div>
+                            <button type="button"
+                                    @click="website.tar_exclude_vcs = !website.tar_exclude_vcs;"
+                                    :class="{ 'bg-indigo-600': website.tar_exclude_vcs, 'bg-slate-200': !(website.tar_exclude_vcs) }"
+                                    class="relative mt-0.5 inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                                    role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                <span :class="{ 'translate-x-5': website.tar_exclude_vcs, 'translate-x-0': !(website.tar_exclude_vcs) }"
+                                      aria-hidden="true"
+                                      class="pointer-events-none inline-block h-5 w-5 translate-x-0 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                            </button>
                         </div>
-                       <div class="sm:col-span-1">
-                           <label for="tar_exclude_backups" class="block text-sm font-medium text-gray-700">
-                               --exclude-backups
-                           </label>
-                           <div class="text-sm mt-2">
-                                Exclude backup and lock files. This option causes exclusion of files
-                               that match the following shell globbing patterns:.#*, *~, #*#
-                           </div>
-                            <div class="mt-4">
-                                <button type="button"
-                                        @click="website.tar_exclude_backups = !website.tar_exclude_backups;"
-                                        :class="{ 'bg-indigo-600': website.tar_exclude_backups, 'bg-gray-200': !(website.tar_exclude_backups) }"
-                                        class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
-                                    <span :class="{ 'translate-x-5': website.tar_exclude_backups, 'translate-x-0': !(website.tar_exclude_backups) }"
-                                          aria-hidden="true"
-                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
-                                </button>
-                                <p x-show="websiteErrors?.tar_exclude_backups" class="mt-2 text-sm text-red-600"
+                        <div class="flex items-start justify-between gap-x-4">
+                            <div>
+                                <label for="tar_exclude_backups" class="block font-mono text-xs font-semibold text-slate-900">
+                                    --exclude-backups
+                                </label>
+                                <p class="mt-1 text-xs text-slate-500">
+                                    Exclude backup and lock files. This option causes exclusion of files
+                                    that match the following shell globbing patterns:.#*, *~, #*#
+                                </p>
+                                <p x-show="websiteErrors?.tar_exclude_backups" class="mt-1.5 text-sm text-rose-600"
                                    id="name-error" x-text="websiteErrors?.tar_exclude_backups"></p>
                             </div>
+                            <button type="button"
+                                    @click="website.tar_exclude_backups = !website.tar_exclude_backups;"
+                                    :class="{ 'bg-indigo-600': website.tar_exclude_backups, 'bg-slate-200': !(website.tar_exclude_backups) }"
+                                    class="relative mt-0.5 inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                                    role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                <span :class="{ 'translate-x-5': website.tar_exclude_backups, 'translate-x-0': !(website.tar_exclude_backups) }"
+                                      aria-hidden="true"
+                                      class="pointer-events-none inline-block h-5 w-5 translate-x-0 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                            </button>
                         </div>
-                       <div class="sm:col-span-1">
-                           <label for="tar_exclude_caches" class="block text-sm font-medium text-gray-700">
-                               --exclude-caches
-                           </label>
-                           <div class="text-sm mt-2">
-                              Do not archive the contents of the directory,
-                               but archive the directory itself and the ‘CACHEDIR.TAG’ file.
-                           </div>
-                            <div class="mt-4">
-                                <button type="button"
-                                        @click="website.tar_exclude_caches = !website.tar_exclude_caches;"
-                                        :class="{ 'bg-indigo-600': website.tar_exclude_caches, 'bg-gray-200': !(website.tar_exclude_caches) }"
-                                        class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
-                                    <span :class="{ 'translate-x-5': website.tar_exclude_caches, 'translate-x-0': !(website.tar_exclude_caches) }"
-                                          aria-hidden="true"
-                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
-                                </button>
-                                <p x-show="websiteErrors?.tar_exclude_caches" class="mt-2 text-sm text-red-600"
+                        <div class="flex items-start justify-between gap-x-4">
+                            <div>
+                                <label for="tar_exclude_caches" class="block font-mono text-xs font-semibold text-slate-900">
+                                    --exclude-caches
+                                </label>
+                                <p class="mt-1 text-xs text-slate-500">
+                                    Do not archive the contents of the directory,
+                                    but archive the directory itself and the ‘CACHEDIR.TAG’ file.
+                                </p>
+                                <p x-show="websiteErrors?.tar_exclude_caches" class="mt-1.5 text-sm text-rose-600"
                                    id="name-error" x-text="websiteErrors?.tar_exclude_caches"></p>
                             </div>
+                            <button type="button"
+                                    @click="website.tar_exclude_caches = !website.tar_exclude_caches;"
+                                    :class="{ 'bg-indigo-600': website.tar_exclude_caches, 'bg-slate-200': !(website.tar_exclude_caches) }"
+                                    class="relative mt-0.5 inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                                    role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                <span :class="{ 'translate-x-5': website.tar_exclude_caches, 'translate-x-0': !(website.tar_exclude_caches) }"
+                                      aria-hidden="true"
+                                      class="pointer-events-none inline-block h-5 w-5 translate-x-0 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                            </button>
                         </div>
-                    </dl>
+                    </div>
                 </div>
             </div>
 
-            <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6">
-                <div class="px-2 py-3 sm:px-2  bg-indigo-600">
-                    <h3 class="text-md leading-6  text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                        </svg>
-                        Glob Exclude Rules
-                    </h3>
+            <div class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft">
+                <div class="border-b border-slate-100 px-5 py-4 sm:px-6">
+                    <div class="flex items-center gap-x-3">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-rose-50 text-rose-500">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                        </span>
+                        <div>
+                            <h3 class="text-sm font-semibold text-slate-900">Glob Exclude Rules</h3>
+                            <p class="mt-0.5 text-sm text-slate-500">Files matching these glob patterns are
+                                skipped.</p>
+                        </div>
+                    </div>
                 </div>
-                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
-                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
-                        <div class="sm:col-span-1">
-                            <label for="exclude_glob" class="block text-sm font-medium text-gray-700">
-                                Glob Pattern, e.g. *.zip <a class="text-indigo-600"
+                <div class="px-5 py-6 sm:px-6">
+                    <div class="grid grid-cols-1 gap-y-6">
+                        <div>
+                            <label for="exclude_glob" class="block text-sm font-medium text-slate-700">
+                                Glob Pattern, e.g. *.zip <a class="font-medium text-indigo-600 hover:text-indigo-500"
                                                             href="https://support.backupsheep.com/docs/exclude-files-from-website-backup#using-glob-pattern"
                                                             target="_blank">learn more</a>
                             </label>
-                            <div class="mt-1">
+                            <div class="mt-1.5 flex gap-x-3">
                                 <input x-model="exclude_glob" type="text" name="exclude_glob" id="exclude_glob"
                                        autocomplete="exclude_glob"
                                        placeholder="example: *.zip (all .zip files in all directories)"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="websiteErrors?.excludes_glob" class="mt-2 text-sm text-red-600"
-                                   id="name-error" x-text="websiteErrors?.excludes_glob"></p>
+                                       class="block w-full min-w-0 flex-1 rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <button @click="addExcludeGlob(exclude_glob);exclude_glob=null;" type="button"
+                                        class="inline-flex shrink-0 items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none"
+                                         viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                              d="M12 4.5v15m7.5-7.5h-15"></path>
+                                    </svg>
+                                    <span>Add</span>
+                                </button>
                             </div>
-                        </div>
-                        <div class="sm:col-span-1">
-                            <button @click="addExcludeGlob(exclude_glob);exclude_glob=null;" type="button"
-                                    class="w-full text-center justify-center inline-flex items-center  mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                <span>Add</span>
-                            </button>
+                            <p x-show="websiteErrors?.excludes_glob" class="mt-1.5 text-sm text-rose-600"
+                               id="name-error" x-text="websiteErrors?.excludes_glob"></p>
                         </div>
 
-                        <div class="border-t border-gray-200  " x-show="website.excludes_glob?.length>0">
-                            <div class="overflow-y-scroll h-64 max-h-full">
-                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
-                                    <tbody class="bg-white divide-y divide-gray-200">
+                        <div class="border-t border-slate-100 pt-4" x-show="website.excludes_glob?.length>0">
+                            <div class="max-h-64 overflow-y-auto">
+                                <table id="section-nodes" class="min-w-full divide-y divide-slate-100">
+                                    <tbody class="divide-y divide-slate-100 bg-white">
                                     <template x-for="object in website.excludes_glob">
-                                        <tr>
-                                            <td class="px-2 py-2 whitespace-nowrap">
+                                        <tr class="hover:bg-slate-50 transition-colors">
+                                            <td class="whitespace-nowrap px-5 py-3.5">
                                                 <div class="flex items-center">
-                                                    <div class="shrink-0 h-6 w-6">
+                                                    <div class="h-5 w-5 shrink-0">
                                                         <svg xmlns="http://www.w3.org/2000/svg"
-                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
-                                                             viewBox="0 0 24 24" stroke="currentColor">
+                                                             class="h-5 w-5 text-slate-400" fill="none"
+                                                             viewBox="0 0 24 24" stroke="currentColor"
+                                                             stroke-width="1.5">
                                                             <path stroke-linecap="round" stroke-linejoin="round"
-                                                                  stroke-width="2"
-                                                                  d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
+                                                                  d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5"></path>
                                                         </svg>
                                                     </div>
-                                                    <div class="ml-2">
-                                                        <div class="text-sm font-sm text-gray-700">
+                                                    <div class="ml-3">
+                                                        <div class="font-mono text-xs text-slate-700">
                                                             <a x-text="object"></a>
                                                         </div>
                                                     </div>
                                                 </div>
                                             </td>
 
-                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
+                                            <td class="whitespace-nowrap px-5 py-3.5 text-right text-sm font-medium">
                                                 <button @click="removeExcludeGlob(object)" type="button"
-                                                        class="text-center justify-center inline-flex items-center  mx-auto px-2 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                                        class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-rose-600 shadow-sm ring-1 ring-inset ring-rose-200 hover:bg-rose-50 transition-colors">
                                                     Remove
                                                 </button>
                                             </td>
@@ -899,196 +971,191 @@
                             </div>
                         </div>
 
-                    </dl>
+                    </div>
                 </div>
             </div>
 
         </div>
     </div>
 
-    <div class="grid grid-cols-1 gap-4 mt-10">
-        <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6">
-            <div class="px-2 py-3 sm:px-2  bg-indigo-600">
-                <h3 class="text-md leading-6  text-white">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                         viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                        <path stroke-linecap="round" stroke-linejoin="round"
-                              d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path>
-                    </svg>
-                    Server File Explorer <small>(use this to browser your server and include/exclude backup
-                    paths)</small>
-                </h3>
+    <div class="mt-6">
+        <div class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft">
+            <div class="border-b border-slate-100 px-5 py-4 sm:px-6">
+                <div class="flex items-center gap-x-3">
+                    <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                  d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"></path>
+                        </svg>
+                    </span>
+                    <div>
+                        <h3 class="text-sm font-semibold text-slate-900">Server File Explorer</h3>
+                        <p class="mt-0.5 text-sm text-slate-500">Browse your server and include backup paths.</p>
+                    </div>
+                </div>
             </div>
-            <div class="px-4 py-6 pb-7 sm:px-6">
-                <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
-                    <template x-if="loading===true">
-                        <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg pb-4 pt-4">
-                            <div class="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-indigo-600">
-                                <svg class="animate-spin h-14 w-14 text-white" xmlns="http://www.w3.org/2000/svg"
-                                     fill="none"
-                                     viewBox="0 0 24 24">
-                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
-                                            stroke-width="4"></circle>
-                                    <path class="opacity-75" fill="currentColor"
-                                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                </svg>
+            <template x-if="loading===true">
+                <div class="flex items-center justify-center py-16">
+                    <svg class="h-8 w-8 animate-spin text-indigo-600" xmlns="http://www.w3.org/2000/svg"
+                         fill="none"
+                         viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor"
+                              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                </div>
+            </template>
+            <div class="x-cloak px-5 py-6 sm:px-6" x-show="loading===false && errorObjectList">
+                <div class="rounded-lg bg-rose-50 p-4 ring-1 ring-inset ring-rose-600/10">
+                    <div class="flex">
+                        <div class="shrink-0">
+                            <svg class="h-5 w-5 text-rose-500" xmlns="http://www.w3.org/2000/svg"
+                                 fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
+                                 aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                        </div>
+                        <div class="ml-3">
+                            <h3 class="text-sm font-medium text-rose-800">Error fetching objects from
+                                integration.</h3>
+                            <div class="mt-2 text-sm text-rose-700">
+                                <ul role="list" class="list-disc space-y-1 pl-5">
+                                    <li x-text="errorObjectList?.message"></li>
+                                </ul>
                             </div>
                         </div>
-                    </template>
-                    <div class="flex flex-col x-cloak" x-show="loading===false && errorObjectList">
-                        <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
-                            <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
-                                <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg">
-                                    <div class="overflow-x-auto">
-                                        <div class="rounded-md bg-red-50 p-4">
-                                            <div class="flex">
-                                                <div class="shrink-0">
-                                                    <svg class="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg"
-                                                         viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                                        <path fill-rule="evenodd"
-                                                              d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
-                                                              clip-rule="evenodd"></path>
-                                                    </svg>
-                                                </div>
-                                                <div class="ml-3">
-                                                    <h3 class="text-sm font-medium text-red-800">Error fetching objects
-                                                        from
-                                                        integration.</h3>
-                                                    <div class="mt-2 text-sm text-red-700">
-                                                        <ul role="list" class="list-disc pl-5 space-y-1">
-                                                            <li x-text="errorObjectList?.message"></li>
-                                                        </ul>
-                                                    </div>
-                                                </div>
+                    </div>
+                </div>
+            </div>
+            <div x-show="!errorObjectList">
+                <div class="border-b border-slate-100 bg-slate-50 px-5 py-3 sm:px-6">
+                    <nav class="x-cloak flex" aria-label="Breadcrumb"
+                         x-show="loading===false">
+                        <ol role="list" class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                            <li>
+                                <div class="flex items-center text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                    Nav:
+                                </div>
+                            </li>
+                            <template x-for="path in pathTree">
+                                <li>
+                                    <div class="flex items-center">
+                                        <svg class="h-4 w-4 shrink-0 text-slate-300"
+                                             xmlns="http://www.w3.org/2000/svg"
+                                             fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+                                            <path d="M5.555 17.776l8-16 .894.448-8 16-.894-.448z"></path>
+                                        </svg>
+                                        <a @click="getObjects(path.path)"
+                                           class="ml-2 cursor-pointer text-sm font-medium text-indigo-600 hover:text-indigo-500"
+                                           x-text="path.name"></a>
+                                    </div>
+                                </li>
+                            </template>
+                        </ol>
+                    </nav>
+                </div>
+                <div class="overflow-x-auto">
+                    <table id="section-nodes" class="min-w-full divide-y divide-slate-100"
+                           x-show="loading===false">
+                        <thead class="bg-slate-50">
+                        <tr>
+                            <th scope="col"
+                                class="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                Name
+                            </th>
+                            <th scope="col"
+                                class="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                <span class="sr-only">Actions</span>
+                            </th>
+                        </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 bg-white">
+                        <template x-for="object in objectList">
+                            <tr class="hover:bg-slate-50 transition-colors">
+                                <td class="max-w-lg whitespace-nowrap px-5 py-3.5">
+                                    <div class="flex items-center">
+                                        <div class="h-5 w-5 shrink-0">
+                                            <svg x-show="object.type==='file'"
+                                                 xmlns="http://www.w3.org/2000/svg"
+                                                 class="h-5 w-5 text-slate-400" fill="none"
+                                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                      d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"></path>
+                                            </svg>
+
+                                            <svg @click="getObjects(object.path)" x-show="object.type==='directory'"
+                                                 xmlns="http://www.w3.org/2000/svg"
+                                                 class="h-5 w-5 cursor-pointer text-indigo-500"
+                                                 fill="none"
+                                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                      d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="ml-3">
+                                            <div class="text-sm text-slate-900">
+                                                <a class="cursor-pointer font-medium hover:text-indigo-600"
+                                                   x-show="object.type==='directory'"
+                                                   @click="getObjects(object.path)"
+                                                   x-text="object.name"></a>
+                                                <a class="font-medium" x-show="object.type==='file'"
+                                                   x-text="object.name"></a>
+                                                <small class="ml-1 text-xs text-slate-500"
+                                                       x-text="object.path"></small>
+
                                             </div>
+
+                                        </div>
+                                    </div>
+                                </td>
+
+                                <td class="whitespace-nowrap px-5 py-3.5 text-right">
+                                    <button @click="addObject(object)"
+                                            type="button"
+                                            class="mr-2 inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
+                                        Include
+                                    </button>
+                                    {#                                        <button @click="removeObject(object)" type="button"#}
+                                    {#                                                class="mr-2  inline-flex items-center mx-auto px-2.5 py-1 border border-gray-300 shadow-xs text-sm  font-light rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
+                                    {#                                            Exclude#}
+                                    {#                                        </button>#}
+                                    <button x-show="object.type==='directory'"
+                                            @click="getObjects(object.path)"
+                                            type="button"
+                                            class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-indigo-600 shadow-sm ring-1 ring-inset ring-indigo-200 hover:bg-indigo-50 transition-colors">
+                                        Open Directory
+                                    </button>
+                                </td>
+                            </tr>
+                        </template>
+                        <tr x-show="objectList?.length === 0">
+                            <td class="px-5 py-3.5" colspan="2">
+                                <div class="rounded-lg bg-sky-50 p-4 ring-1 ring-inset ring-sky-600/10">
+                                    <div class="flex">
+                                        <div class="shrink-0">
+                                            <svg class="h-5 w-5 text-sky-500"
+                                                 xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                                 stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                      d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="ml-3 flex-1 md:flex md:justify-between">
+                                            <p class="text-sm text-sky-800">No objects found from
+                                                integration.</p>
+
                                         </div>
                                     </div>
                                 </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div x-show="!errorObjectList" class="overflow-x-auto">
-                        <table id="section-nodes" class="min-w-full divide-y divide-gray-200"
-                               x-show="loading===false">
-                            <thead class="bg-gray-50">
-                            <tr>
 
-                                <th scope="col"
-                                    class="px-2 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider"
-                                >
-                                    <nav class="flex x-cloak text-indigo-600" aria-label="Breadcrumb"
-                                         x-show="loading===false">
-                                        <ol role="list" class="flex items-center space-x-2">
-                                            <li>
-                                                <div class="flex items-center ml-2 text-md font-medium text-white-500 hover:text-white-700">
-                                                    Nav:
-                                                </div>
-                                            </li>
-                                            <template x-for="path in pathTree">
-                                                <li>
-                                                    <div class="flex items-center">
-                                                        <svg class="shrink-0 h-4 w-4 text-white-300"
-                                                             xmlns="http://www.w3.org/2000/svg"
-                                                             fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
-                                                            <path d="M5.555 17.776l8-16 .894.448-8 16-.894-.448z"></path>
-                                                        </svg>
-                                                        <a @click="getObjects(path.path)"
-                                                           class="cursor-pointer ml-2 text-md font-medium text-white-500 hover:text-white-700"
-                                                           x-text="path.name"></a>
-                                                    </div>
-                                                </li>
-                                            </template>
-                                        </ol>
-                                    </nav>
-                                </th>
-                                <th scope="col"></th>
-                            </tr>
-                            </thead>
-                            <tbody class="bg-white divide-y divide-gray-200">
-                            <template x-for="object in objectList">
-                                <tr>
-                                    <td class="px-2 py-2 whitespace-nowrap max-w-lg">
-                                        <div class="flex items-center">
-                                            <div class="shrink-0 h-6 w-6">
-                                                <svg x-show="object.type==='file'"
-                                                     xmlns="http://www.w3.org/2000/svg"
-                                                     class="h-6 w-6 rounded-full text-indigo-600" fill="none"
-                                                     viewBox="0 0 24 24" stroke="currentColor">
-                                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                                          stroke-width="2"
-                                                          d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"></path>
-                                                </svg>
-
-                                                <svg @click="getObjects(object.path)" x-show="object.type==='directory'"
-                                                     xmlns="http://www.w3.org/2000/svg"
-                                                     class="h-6 w-6 rounded-full text-indigo-600 cursor-pointer"
-                                                     fill="none"
-                                                     viewBox="0 0 24 24" stroke="currentColor">
-                                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                                          stroke-width="2"
-                                                          d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
-                                                </svg>
-                                            </div>
-                                            <div class="ml-2">
-                                                <div class="text-sm font-sm text-gray-700">
-                                                    <a class="cursor-pointer" x-show="object.type==='directory'"
-                                                       @click="getObjects(object.path)"
-                                                       x-text="object.name"></a>
-                                                    <a x-show="object.type==='file'" x-text="object.name"></a> (<small
-                                                        class="text-xs text-gray-700 " x-text="object.path"></small>)
-
-                                                </div>
-
-                                            </div>
-                                        </div>
-                                    </td>
-
-                                    <td class="whitespace-nowrap">
-                                        <button @click="addObject(object)"
-                                                type="button"
-                                                class="mr-2  inline-flex items-center mx-auto px-2.5 py-1 border border-gray-300 shadow-xs text-sm  font-light rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                            Include
-                                        </button>
-{#                                        <button @click="removeObject(object)" type="button"#}
-{#                                                class="mr-2  inline-flex items-center mx-auto px-2.5 py-1 border border-gray-300 shadow-xs text-sm  font-light rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">#}
-{#                                            Exclude#}
-{#                                        </button>#}
-                                        <button x-show="object.type==='directory'"
-                                                @click="getObjects(object.path)"
-                                                type="button"
-                                                class="inline-flex items-center mx-auto px-2.5 py-1 border border-gray-300 shadow-xs text-sm  font-light rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                            Open Directory
-                                        </button>
-                                    </td>
-                                </tr>
-                            </template>
-                            <tr x-show="objectList?.length === 0">
-                                <td class="px-2 py-2 whitespace-nowrap">
-                                    <div class="rounded-md bg-blue-50 p-4">
-                                        <div class="flex">
-                                            <div class="shrink-0">
-                                                <svg class="h-5 w-5 text-blue-400"
-                                                     xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
-                                                     fill="currentColor" aria-hidden="true">
-                                                    <path fill-rule="evenodd"
-                                                          d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
-                                                          clip-rule="evenodd"></path>
-                                                </svg>
-                                            </div>
-                                            <div class="ml-3 flex-1 md:flex md:justify-between">
-                                                <p class="text-sm text-blue-700">No objects found from
-                                                    integration.</p>
-
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                </td>
-                            </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </dl>
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>

@@ -1,6 +1,11 @@
-<div class="mb-4">
-    <label class="block text-sm font-medium leading-6 text-slate-700 mb-1.5" for="{{ field.id_for_label }}">{{ field.label }}</label>
+<div class="mb-5">
+    <label class="block text-sm font-medium text-slate-700 mb-1.5" for="{{ field.id_for_label }}">{{ field.label }}</label>
     {{ field }}
-    {% if field.help_text %}<p class="text-xs text-slate-500 mt-1.5">{{ field.help_text }}</p>{% endif %}
-    {% for error in field.errors %}<p class="text-xs text-red-600 mt-1.5">{{ error }}</p>{% endfor %}
+    {% if field.help_text %}<p class="mt-1 text-xs text-slate-500">{{ field.help_text }}</p>{% endif %}
+    {% for error in field.errors %}
+        <p class="mt-1.5 flex items-center gap-x-1.5 text-xs font-medium text-rose-600">
+            <svg class="h-3.5 w-3.5 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z"/></svg>
+            <span>{{ error }}</span>
+        </p>
+    {% endfor %}
 </div>

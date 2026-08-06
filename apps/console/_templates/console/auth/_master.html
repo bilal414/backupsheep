@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="h-full">
 <head>
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-CTFWTRZC93"></script>
     <script>
@@ -34,6 +34,9 @@
           content="{% block keywords %}automate cloud backups, cloud backups, website backups, database backups{% endblock %}">
     <link rel="shortcuticon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
     <link rel="icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="canonical" href="{% url 'console:auth:signup' %}"/>
     <link type="text/css" href="{{ STATIC_URL }}css/compiled.css" rel="stylesheet">
     <script>(function (w, r) {
@@ -44,7 +47,7 @@
     })(window, 'rewardful');</script>
     <script async src='https://r.wdfl.co/rw.js' data-rewardful='f2191d'></script>
 </head>
-<body class="{% block page_class %}{% endblock %}">
+<body class="h-full bg-slate-50 antialiased {% block page_class %}{% endblock %}">
 {% block content %}{% endblock %}
 <script src="{{ STATIC_URL }}js/cdn.min.js" defer></script>
 {% if not is_impersonated_session %}

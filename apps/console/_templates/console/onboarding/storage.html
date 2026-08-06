@@ -1,20 +1,31 @@
 {% extends "console/onboarding/_base.html" %}
 {% block step %}
-    <h2 class="text-lg font-semibold text-slate-900 mb-1">Add a storage destination</h2>
-    <p class="text-sm text-slate-500 mb-5">Pick where backups are stored. A provider opens in a new tab; come back here when you're done. You can add more later.</p>
+    <div class="mb-6">
+        <h2 class="text-lg font-semibold tracking-tight text-slate-900">Add a storage destination</h2>
+        <p class="mt-1 text-sm text-slate-500">Pick where backups are stored. A provider opens in a new tab; come back here when you're done. You can add more later.</p>
+    </div>
 
-    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-80 overflow-y-auto pr-1">
+    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 max-h-80 overflow-y-auto pr-1">
         {% for p in providers %}
             <a href="{% url 'console:setup:integration_storage_open' p.code %}" target="_blank" rel="noopener"
-               class="block rounded-xl bg-white ring-1 ring-slate-200 px-3 py-3 text-sm font-medium text-slate-700 shadow-soft hover:ring-indigo-400 hover:text-indigo-700 transition-colors">
-                {{ p.name }}
+               class="group flex items-center justify-between gap-x-2 rounded-xl bg-white px-4 py-3 text-sm font-medium text-slate-700 ring-1 ring-slate-200 shadow-soft hover:ring-indigo-300 hover:text-indigo-700 transition-colors">
+                <span class="truncate">{{ p.name }}</span>
+                <svg class="h-4 w-4 shrink-0 text-slate-300 group-hover:text-indigo-400 transition-colors" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"/></svg>
             </a>
+        {% empty %}
+            <p class="col-span-full rounded-xl bg-slate-50 px-4 py-6 text-center text-sm text-slate-500 ring-1 ring-inset ring-slate-200/70">No storage providers are enabled on this install.</p>
         {% endfor %}
     </div>
 
-    <div class="flex items-center justify-between mt-6">
-        <a href="{% url 'console:onboarding:app_settings' %}" class="text-sm font-medium text-slate-500 hover:text-slate-700">&larr; Back</a>
+    <div class="mt-8 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <a href="{% url 'console:onboarding:app_settings' %}" class="inline-flex items-center justify-center sm:justify-start gap-x-1.5 text-sm font-medium text-slate-500 hover:text-slate-700 transition-colors">
+            <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back
+        </a>
         <a href="{% url 'console:onboarding:source' %}"
-           class="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Continue &rarr;</a>
+           class="inline-flex w-full sm:w-auto items-center justify-center gap-x-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+            Continue
+            <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/></svg>
+        </a>
     </div>
 {% endblock %}

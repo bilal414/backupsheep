@@ -3,317 +3,482 @@
 <div x-data="setupStorage()">
 
         {% if  storage.code == "google_drive" and not is_google_drive_available %}
-            <div class="border-l-4 border-yellow-400 bg-yellow-50 p-4 mb-4">
+            <div class="mb-6 rounded-2xl bg-amber-50 p-4 ring-1 ring-inset ring-amber-600/20">
                 <div class="flex">
                     <div class="shrink-0">
-                        <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                        <svg class="h-5 w-5 text-amber-500" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                             <path fill-rule="evenodd"
                                   d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z"
                                   clip-rule="evenodd"></path>
                         </svg>
                     </div>
                     <div class="ml-3">
-                        <p class="text-sm text-yellow-700">
-                            <strong>Google Drive Integration Is Unavailable</strong> <br/>
+                        <h3 class="text-sm font-semibold text-amber-800">Google Drive integration is unavailable</h3>
+                        <p class="mt-1 text-sm text-amber-700">
                             We are noticing high error rates from Google Drive storage APIs. Please update your backup
                             schedules to use alternate storage integration.
                             <a href="https://support.backupsheep.com/page/notice-on-google-drive-storage-api-errors"
-                               class="font-medium text-yellow-700 underline hover:text-yellow-600">Learn more.</a>
+                               class="font-medium text-amber-800 underline hover:text-amber-700">Learn more.</a>
                         </p>
                     </div>
                 </div>
             </div>
         {% else %}
             <button @click="openStorageModal(null, '{{ storage.code }}')" type="button"
-                    class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                    class="group relative flex w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-white px-6 py-10 text-center transition-colors hover:border-indigo-400 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
 
-                <img class="max-h-20 mx-auto" src="{{ STATIC_URL }}{{ storage.image }}"
+                <img class="mx-auto max-h-14 w-auto" src="{{ STATIC_URL }}{{ storage.image }}"
                      alt="{{ storage.name }} Backups">
 
-                <a class="mt-2 block  text-1xl font-normal leading-7 text-gray-700">
-                    Setup {{ storage.name }} Integration
-                </a>
+                <span class="mt-4 block text-sm font-semibold text-slate-900">
+                    Set up {{ storage.name }} integration
+                </span>
+                <span class="mt-1 block text-sm text-slate-500">
+                    Connect your {{ storage.name }} account and start storing backups.
+                </span>
+                <span class="mt-4 inline-flex items-center gap-x-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors group-hover:bg-indigo-500">
+                    <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                         stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"></path>
+                    </svg>
+                    Add integration
+                </span>
             </button>
         {% endif %}
 
 
     {% if storage_count > 0 %}
-        <div class="pb-3 border-b border-gray-200 mt-12">
-            <div class="-ml-2 -mt-2 flex flex-wrap items-baseline">
-                <h3 class="ml-2 mt-2 text-lg leading-6 font-medium text-gray-700">
-                    {{ storage.name }} Integrations
+        <div class="mt-10 flex items-center justify-between">
+            <div class="flex items-center gap-x-3">
+                <h3 class="text-sm font-semibold text-slate-900">
+                    {{ storage.name }} integrations
                 </h3>
+                <span class="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10">{{ storage_count }}</span>
             </div>
         </div>
-        <div class="flex flex-col mt-4">
-            <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
-                <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
-                    <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg">
-                        <div class="overflow-x-auto">
-                            <table id="section-storages" class="min-w-full divide-y divide-gray-200">
-                                <thead class="bg-gray-50">
-                                <tr>
-                                    <th scope="col"
-                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Name
-                                    </th>
-                                    <th scope="col"
-                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Websites - Backups - Storage
-                                    </th>
-                                    <th scope="col"
-                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Databases - Backups - Storage
-                                    </th>
-                                    <th scope="col"
-                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        SaaS - Backups - Storage
-                                    </th>
-                                    <th scope="col"
-                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Est. monthly storage
-                                    </th>
-                                    <th scope="col"
-                                        class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Status
-                                    </th>
-                                    <th scope="col" class="relative px-6 py-3">
-                                        <span class="sr-only">Actions</span>
-                                    </th>
-                                </tr>
-                                </thead>
-                                <tbody class="bg-white divide-y divide-gray-200">
-                                {% for storage in page.object_list %}
-                                    <tr>
-                                        <td class="px-6 py-4 whitespace-nowrap">
-                                            <div class="flex items-center">
-                                                <div class="shrink-0 h-10 w-10">
-                                                    <svg xmlns="http://www.w3.org/2000/svg"
-                                                         class="h-10 w-10 rounded-full text-indigo-600" fill="none"
-                                                         viewBox="0 0 24 24" stroke="currentColor">
-                                                        <path stroke-linecap="round" stroke-linejoin="round"
-                                                              stroke-width="2"
-                                                              d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
-                                                    </svg>
-                                                </div>
-                                                <div class="ml-4">
-                                                    <div class="text-sm font-medium text-gray-700">
-                                                        {{ storage.name }}
-                                                    </div>
-                                                    {% if storage.is_air_gapped %}
-                                                        <div class="mt-1 text-xs font-medium text-emerald-700">Air-gapped copy</div>
-                                                    {% endif %}
-                                                </div>
-                                            </div>
-                                        </td>
-                                        <td class="px-6 py-4 whitespace-nowrap">
-                                            <div class="text-sm text-gray-700">{{ storage.stats_website_count|default:0|intcomma }}
-                                                - {{ storage.stats_website_backup_count|default:0|intcomma }}
-                                                - {{ storage.stats_website_size|filesizeformat }}</div>
-                                        </td>
-                                        <td class="px-6 py-4 whitespace-nowrap">
-                                            <div class="text-sm text-gray-700">{{ storage.stats_database_count|default:0|intcomma }}
-                                                - {{ storage.stats_database_backup_count|default:0|intcomma }}
-                                                - {{ storage.stats_database_size|filesizeformat }}</div>
-                                        </td>
-                                        <td class="px-6 py-4 whitespace-nowrap">
-                                            <div class="text-sm text-gray-700">{{ storage.stats_wordpress_count|default:0|intcomma }}
-                                                - {{ storage.stats_wordpress_backup_count|default:0|intcomma }}
-                                                - {{ storage.stats_wordpress_size|filesizeformat }}</div>
-                                        </td>
-                                        <td class="px-6 py-4 whitespace-nowrap">
-                                            <div class="text-sm font-medium text-gray-700">
-                                                ${{ storage.cost_estimate.estimated_monthly_storage_usd|floatformat:4 }}
-                                            </div>
-                                            <div class="mt-1 text-xs text-gray-500">
-                                                {{ storage.cost_estimate.stored_bytes|filesizeformat }} stored
-                                            </div>
-                                        </td>
 
-                                        <td class="px-6 py-4 whitespace-nowrap">
-                                            {% if storage.status == 1 or storage.status == 2 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-100 text-green-800">
-                                            {{ storage.get_status_display }}
-                                        </span>
-                                            {% elif storage.status == 3 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-blue-100 text-blue-800">
-                                            {{ storage.get_status_display }}
-                                        </span>
+        {# Desktop table #}
+        <div class="mt-4 hidden lg:block">
+            <div class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft">
+                <table id="section-storages" class="min-w-full divide-y divide-slate-100">
+                    <thead>
+                    <tr>
+                        <th scope="col"
+                            class="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Name
+                        </th>
+                        <th scope="col"
+                            class="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Websites - Backups - Storage
+                        </th>
+                        <th scope="col"
+                            class="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Databases - Backups - Storage
+                        </th>
+                        <th scope="col"
+                            class="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            SaaS - Backups - Storage
+                        </th>
+                        <th scope="col"
+                            class="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Est. monthly storage
+                        </th>
+                        <th scope="col"
+                            class="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Status
+                        </th>
+                        <th scope="col" class="relative px-5 py-3.5">
+                            <span class="sr-only">Actions</span>
+                        </th>
+                    </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                    {% for storage in page.object_list %}
+                        <tr class="transition-colors hover:bg-slate-50">
+                            <td class="px-5 py-3.5">
+                                <div class="flex items-center">
+                                    <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50">
+                                        <svg xmlns="http://www.w3.org/2000/svg"
+                                             class="h-5 w-5 text-indigo-600" fill="none"
+                                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                  d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
+                                        </svg>
+                                    </div>
+                                    <div class="ml-3 min-w-0">
+                                        <div class="truncate text-sm font-medium text-slate-900">
+                                            {{ storage.name }}
+                                        </div>
+                                        {% if storage.is_air_gapped %}
+                                            <div class="mt-0.5 text-xs font-medium text-emerald-700">Air-gapped copy</div>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </td>
+                            <td class="px-5 py-3.5 text-sm text-slate-700">
+                                {{ storage.stats_website_count|default:0|intcomma }}
+                                - {{ storage.stats_website_backup_count|default:0|intcomma }}
+                                - {{ storage.stats_website_size|filesizeformat }}
+                            </td>
+                            <td class="px-5 py-3.5 text-sm text-slate-700">
+                                {{ storage.stats_database_count|default:0|intcomma }}
+                                - {{ storage.stats_database_backup_count|default:0|intcomma }}
+                                - {{ storage.stats_database_size|filesizeformat }}
+                            </td>
+                            <td class="px-5 py-3.5 text-sm text-slate-700">
+                                {{ storage.stats_wordpress_count|default:0|intcomma }}
+                                - {{ storage.stats_wordpress_backup_count|default:0|intcomma }}
+                                - {{ storage.stats_wordpress_size|filesizeformat }}
+                            </td>
+                            <td class="px-5 py-3.5">
+                                <div class="text-sm font-medium text-slate-900">
+                                    ${{ storage.cost_estimate.estimated_monthly_storage_usd|floatformat:4 }}
+                                </div>
+                                <div class="mt-0.5 text-xs text-slate-500">
+                                    {{ storage.cost_estimate.stored_bytes|filesizeformat }} stored
+                                </div>
+                            </td>
+
+                            <td class="px-5 py-3.5">
+                                {% if storage.status == 1 or storage.status == 2 %}
+                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
+                                        {{ storage.get_status_display }}
+                                    </span>
+                                {% elif storage.status == 3 %}
+                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 ring-1 ring-inset ring-sky-600/20">
+                                        {{ storage.get_status_display }}
+                                    </span>
+                                {% elif storage.status == 4 %}
+                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-600/10">
+                                        {{ storage.get_status_display }}
+                                    </span>
+                                {% elif storage.status == 6 or storage.status == 8 %}
+                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">
+                                        {{ storage.get_status_display }}
+                                    </span>
+                                {% else %}
+                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-600/20">
+                                        {{ storage.get_status_display }}
+                                    </span>
+                                {% endif %}
+                            </td>
+
+                            <td class="px-5 py-3.5 text-right text-sm font-medium">
+                                {% if storage.status == 5 %}
+                                    <button @click="resumeStorage('{{ storage.id }}', '{{ storage.type.code }}')"
+                                            type="button"
+                                            class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                                        Undo
+                                    </button>
+                                {% else %}
+                                    <div class="relative inline-block text-left" x-data="{ open: false }">
+                                        <button @click="open = !open" type="button"
+                                                class="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                                aria-haspopup="true">
+                                            <span class="sr-only">Open actions</span>
+                                            <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                                 viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                                <path d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z"></path>
+                                            </svg>
+                                        </button>
+                                        <div x-show="open" @click.outside="open = false" style="display: none;"
+                                             x-transition:enter="transition ease-out duration-100"
+                                             x-transition:enter-start="opacity-0 scale-95"
+                                             x-transition:enter-end="opacity-100 scale-100"
+                                             x-transition:leave="transition ease-in duration-75"
+                                             x-transition:leave-start="opacity-100 scale-100"
+                                             x-transition:leave-end="opacity-0 scale-95"
+                                             class="absolute right-0 z-20 mt-1 w-44 origin-top-right rounded-xl bg-white py-1 ring-1 ring-slate-900/5 shadow-lifted">
+                                            <button @click="open = false; openStorageModal('{{ storage.id }}', '{{ storage.type.code }}')"
+                                                    type="button"
+                                                    class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+                                                Modify
+                                            </button>
+                                            <button @click="open = false; validateStorage('{{ storage.id }}')"
+                                                    type="button"
+                                                    class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+                                                Validate
+                                            </button>
+                                            {% if storage.status == 1 %}
+                                                <button @click="open = false; pauseStorage('{{ storage.id }}')"
+                                                        type="button"
+                                                        class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+                                                    Pause
+                                                </button>
                                             {% elif storage.status == 4 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-100 text-purple-800">
-                                            {{ storage.get_status_display }}
-                                        </span>
-                                            {% elif storage.status == 6 or storage.status == 8 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-yellow-100 text-yellow-800">
-                                            {{ storage.get_status_display }}
-                                        </span>
-                                            {% else %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-100 text-red-800">
-                                            {{ storage.get_status_display }}
-                                        </span>
+                                                <button @click="open = false; resumeStorage('{{ storage.id }}')"
+                                                        type="button"
+                                                        class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+                                                    Resume
+                                                </button>
                                             {% endif %}
-                                        </td>
+                                            <button @click="open = false; openStorageModal('{{ storage.id }}', '{{ storage.type.code }}', 'copy')"
+                                                    type="button"
+                                                    class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+                                                Copy
+                                            </button>
+                                            <div class="my-1 border-t border-slate-100"></div>
+                                            <button @click="open = false; openDeleteStorageModal('{{ storage.id }}', '{{ storage.name }}')"
+                                                    type="button"
+                                                    class="block w-full px-4 py-2 text-left text-sm text-rose-600 transition-colors hover:bg-rose-50">
+                                                Delete
+                                            </button>
+                                        </div>
+                                    </div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
 
-                                        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-
-                                                {% if storage.status == 5 %}
-                                                    <button @click="resumeStorage('{{ storage.id }}', '{{ storage.type.code }}')"
-                                                            type="button"
-                                                            class="inline-flex items-center px-3 py-2 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                                        Undo
-                                                    </button>
-                                                {% else %}
-                                                    <span class="relative z-0 inline-flex shadow-xs rounded-md">
-                                                  <button @click="openStorageModal('{{ storage.id }}', '{{ storage.type.code }}')"
-                                                          type="button" class="relative inline-flex items-center px-4 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium
-                                                  text-gray-700 hover:bg-gray-50
-                                                  focus:z-10
-                                                  focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                    Modify
-                                                  </button>
-                                                     <button @click="validateStorage('{{ storage.id }}')"
-                                                             type="button"
-                                                             class="-ml-px relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                        Validate
-                                                    </button>
-
-                                                        {% if storage.status == 1 %}
-                                                            <button @click="pauseStorage('{{ storage.id }}')"
-                                                                    type="button"
-                                                                    class="-ml-px relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                        Pause
-                                                    </button>
-                                                        {% elif storage.status == 4 %}
-                                                            <button @click="resumeStorage('{{ storage.id }}')"
-                                                                    type="button"
-                                                                    class="-ml-px relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                        Resume
-                                                    </button>
-                                                        {% endif %}
-                                                        <button @click="openStorageModal('{{ storage.id }}', '{{ storage.type.code }}', 'copy')"
-                                                                type="button"
-                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                        Copy
-                                                        </button>
-                                                        <button @click="openDeleteStorageModal('{{ storage.id }}', '{{ storage.name }}')"
-                                                                type="button"
-                                                                class="-ml-px relative inline-flex items-center px-4 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10
-                                                      focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                        Delete
-                                                    </button>
-                                            </span>
-                                                {% endif %}
-                                        </td>
-                                    </tr>
-                                {% endfor %}
-                                </tbody>
-                            </table>
+        {# Mobile / tablet stacked cards #}
+        <div class="mt-4 space-y-4 lg:hidden">
+            {% for storage in page.object_list %}
+                <div class="rounded-2xl bg-white p-5 ring-1 ring-slate-900/5 shadow-soft">
+                    <div class="flex items-start justify-between gap-x-3">
+                        <div class="flex min-w-0 items-center">
+                            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50">
+                                <svg xmlns="http://www.w3.org/2000/svg"
+                                     class="h-5 w-5 text-indigo-600" fill="none"
+                                     viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                          d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
+                                </svg>
+                            </div>
+                            <div class="ml-3 min-w-0">
+                                <div class="truncate text-sm font-medium text-slate-900">
+                                    {{ storage.name }}
+                                </div>
+                                {% if storage.is_air_gapped %}
+                                    <div class="mt-0.5 text-xs font-medium text-emerald-700">Air-gapped copy</div>
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div class="flex shrink-0 items-center gap-x-2">
+                            {% if storage.status == 1 or storage.status == 2 %}
+                                <span class="inline-flex items-center gap-x-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
+                                    {{ storage.get_status_display }}
+                                </span>
+                            {% elif storage.status == 3 %}
+                                <span class="inline-flex items-center gap-x-1.5 rounded-full bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 ring-1 ring-inset ring-sky-600/20">
+                                    {{ storage.get_status_display }}
+                                </span>
+                            {% elif storage.status == 4 %}
+                                <span class="inline-flex items-center gap-x-1.5 rounded-full bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-600/10">
+                                    {{ storage.get_status_display }}
+                                </span>
+                            {% elif storage.status == 6 or storage.status == 8 %}
+                                <span class="inline-flex items-center gap-x-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">
+                                    {{ storage.get_status_display }}
+                                </span>
+                            {% else %}
+                                <span class="inline-flex items-center gap-x-1.5 rounded-full bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-600/20">
+                                    {{ storage.get_status_display }}
+                                </span>
+                            {% endif %}
+                            {% if storage.status == 5 %}
+                                <button @click="resumeStorage('{{ storage.id }}', '{{ storage.type.code }}')"
+                                        type="button"
+                                        class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                                    Undo
+                                </button>
+                            {% else %}
+                                <div class="relative inline-block text-left" x-data="{ open: false }">
+                                    <button @click="open = !open" type="button"
+                                            class="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                            aria-haspopup="true">
+                                        <span class="sr-only">Open actions</span>
+                                        <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
+                                             viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                            <path d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z"></path>
+                                        </svg>
+                                    </button>
+                                    <div x-show="open" @click.outside="open = false" style="display: none;"
+                                         x-transition:enter="transition ease-out duration-100"
+                                         x-transition:enter-start="opacity-0 scale-95"
+                                         x-transition:enter-end="opacity-100 scale-100"
+                                         x-transition:leave="transition ease-in duration-75"
+                                         x-transition:leave-start="opacity-100 scale-100"
+                                         x-transition:leave-end="opacity-0 scale-95"
+                                         class="absolute right-0 z-20 mt-1 w-44 origin-top-right rounded-xl bg-white py-1 ring-1 ring-slate-900/5 shadow-lifted">
+                                        <button @click="open = false; openStorageModal('{{ storage.id }}', '{{ storage.type.code }}')"
+                                                type="button"
+                                                class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+                                            Modify
+                                        </button>
+                                        <button @click="open = false; validateStorage('{{ storage.id }}')"
+                                                type="button"
+                                                class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+                                            Validate
+                                        </button>
+                                        {% if storage.status == 1 %}
+                                            <button @click="open = false; pauseStorage('{{ storage.id }}')"
+                                                    type="button"
+                                                    class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+                                                Pause
+                                            </button>
+                                        {% elif storage.status == 4 %}
+                                            <button @click="open = false; resumeStorage('{{ storage.id }}')"
+                                                    type="button"
+                                                    class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+                                                Resume
+                                            </button>
+                                        {% endif %}
+                                        <button @click="open = false; openStorageModal('{{ storage.id }}', '{{ storage.type.code }}', 'copy')"
+                                                type="button"
+                                                class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+                                            Copy
+                                        </button>
+                                        <div class="my-1 border-t border-slate-100"></div>
+                                        <button @click="open = false; openDeleteStorageModal('{{ storage.id }}', '{{ storage.name }}')"
+                                                type="button"
+                                                class="block w-full px-4 py-2 text-left text-sm text-rose-600 transition-colors hover:bg-rose-50">
+                                            Delete
+                                        </button>
+                                    </div>
+                                </div>
+                            {% endif %}
                         </div>
                     </div>
+                    <dl class="mt-4 grid grid-cols-2 gap-x-4 gap-y-4 border-t border-slate-100 pt-4">
+                        <div class="min-w-0">
+                            <dt class="text-xs font-semibold uppercase tracking-wide text-slate-500">Websites</dt>
+                            <dd class="mt-1 truncate text-sm text-slate-700">
+                                {{ storage.stats_website_count|default:0|intcomma }}
+                                - {{ storage.stats_website_backup_count|default:0|intcomma }}
+                                - {{ storage.stats_website_size|filesizeformat }}
+                            </dd>
+                        </div>
+                        <div class="min-w-0">
+                            <dt class="text-xs font-semibold uppercase tracking-wide text-slate-500">Databases</dt>
+                            <dd class="mt-1 truncate text-sm text-slate-700">
+                                {{ storage.stats_database_count|default:0|intcomma }}
+                                - {{ storage.stats_database_backup_count|default:0|intcomma }}
+                                - {{ storage.stats_database_size|filesizeformat }}
+                            </dd>
+                        </div>
+                        <div class="min-w-0">
+                            <dt class="text-xs font-semibold uppercase tracking-wide text-slate-500">SaaS</dt>
+                            <dd class="mt-1 truncate text-sm text-slate-700">
+                                {{ storage.stats_wordpress_count|default:0|intcomma }}
+                                - {{ storage.stats_wordpress_backup_count|default:0|intcomma }}
+                                - {{ storage.stats_wordpress_size|filesizeformat }}
+                            </dd>
+                        </div>
+                        <div class="min-w-0">
+                            <dt class="text-xs font-semibold uppercase tracking-wide text-slate-500">Est. monthly</dt>
+                            <dd class="mt-1 text-sm font-medium text-slate-900">
+                                ${{ storage.cost_estimate.estimated_monthly_storage_usd|floatformat:4 }}
+                                <span class="block text-xs font-normal text-slate-500">{{ storage.cost_estimate.stored_bytes|filesizeformat }} stored</span>
+                            </dd>
+                        </div>
+                    </dl>
                 </div>
-            </div>
+            {% endfor %}
         </div>
-        <nav class="border-t border-gray-200 px-4 flex items-center justify-between sm:px-0 mt-4">
-            <div class="-mt-px w-0 flex-1 flex">
+
+        <nav class="mt-6 flex items-center justify-between" aria-label="Pagination">
+            <div class="flex flex-1">
                 {% if page.has_previous %}
                     <a href="{% url 'console:setup:integration_storage_open' storage.code %}?p_no={{ page.previous_page_number }}&p_size={{ page.paginator.per_page }}&#section-nodes"
-                       class="border-t-2 border-transparent pt-4 pr-1 inline-flex items-center text-sm font-medium text-gray-700 hover:text-gray-700 hover:border-gray-300">
-                        <!-- Heroicon name: solid/arrow-narrow-left -->
-                        <svg class="mr-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
-                             fill="currentColor" aria-hidden="true">
-                            <path fill-rule="evenodd"
-                                  d="M7.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l2.293 2.293a1 1 0 010 1.414z"
-                                  clip-rule="evenodd"></path>
+                       class="inline-flex items-center gap-x-2 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50">
+                        <svg class="h-4 w-4 text-slate-400" xmlns="http://www.w3.org/2000/svg" fill="none"
+                             viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"></path>
                         </svg>
                         Previous
                     </a>
                 {% endif %}
             </div>
-            <div class="hidden md:-mt-px md:flex">
+            <div class="hidden md:flex md:items-center md:gap-x-1">
                 {% for page_no in elided_page_range %}
-                    <!-- Current: "border-indigo-500 text-indigo-600", Default: "border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300" -->
                     {% if page_no == "…" %}
-                        <a class="{% if page.number ==  page_no %}border-indigo-500 text-indigo-600{% else %}border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300{% endif %} border-t-2 pt-4 px-4 inline-flex items-center text-sm font-medium">
+                        <a class="inline-flex items-center px-3 py-2 text-sm font-medium text-slate-400">
                             {{ page_no }}
                         </a>
                     {% else %}
                         <a href="{% url 'console:setup:integration_storage_open' storage.code %}?p_no={{ page_no }}&p_size={{ page.paginator.per_page }}&#section-nodes"
-                           class="{% if page.number ==  page_no %}border-indigo-500 text-indigo-600{% else %}border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300{% endif %} border-t-2 pt-4 px-4 inline-flex items-center text-sm font-medium">
+                           class="{% if page.number ==  page_no %}bg-indigo-600 text-white shadow-sm{% else %}bg-white text-slate-700 ring-1 ring-inset ring-slate-200 shadow-sm hover:bg-slate-50{% endif %} inline-flex items-center rounded-lg px-3 py-2 text-sm font-semibold transition-colors">
                             {{ page_no }}
                         </a>
                     {% endif %}
                 {% endfor %}
             </div>
-            <div class="-mt-px w-0 flex-1 flex justify-end">
+            <div class="flex flex-1 justify-end">
                 {% if page.has_next %}
                     <a href="{% url 'console:setup:integration_storage_open' storage.code %}?p_no={{ page.next_page_number }}&p_size={{ page.paginator.per_page }}&#section-nodes"
-                       class="border-t-2 border-transparent pt-4 pl-1 inline-flex items-center text-sm font-medium text-gray-700 hover:text-gray-700 hover:border-gray-300">
+                       class="inline-flex items-center gap-x-2 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50">
                         Next
-                        <!-- Heroicon name: solid/arrow-narrow-right -->
-                        <svg class="ml-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
-                             fill="currentColor" aria-hidden="true">
-                            <path fill-rule="evenodd"
-                                  d="M12.293 5.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-2.293-2.293a1 1 0 010-1.414z"
-                                  clip-rule="evenodd"></path>
+                        <svg class="h-4 w-4 text-slate-400" xmlns="http://www.w3.org/2000/svg" fill="none"
+                             viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"></path>
                         </svg>
                     </a>
                 {% endif %}
             </div>
         </nav>
     {% else %}
-        <div class="bg-gray-50 mt-10">
-            <div class="max-w-2xl mx-auto py-12 px-4 sm:px-6 sm:py-12 lg:max-w-7xl lg:px-8 rounded-full">
-                <div class="max-w-4xl">
-                    <h2 class="text-4xl font-extrabold tracking-tight text-gray-700">Setup your first {{ storage.name }}
-                        Integration!</h2>
-                    <p class="mt-4 text-gray-700">
-                        Store unlimited backups of <span class="font-medium text-indigo-600 hover:text-indigo-500">website</span>,
-                        <span class="font-medium text-indigo-600 hover:text-indigo-500">wordpress</span>
-                        and <span
-                            class="font-medium text-indigo-600 hover:text-indigo-500">database</span> on
+        <div class="mt-10 rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft">
+            <div class="px-6 py-12 sm:px-12">
+                <div class="mx-auto max-w-2xl text-center">
+                    <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-indigo-50">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-indigo-600" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                  d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
+                        </svg>
+                    </div>
+                    <h2 class="mt-4 text-2xl font-bold tracking-tight text-slate-900">Set up your first {{ storage.name }}
+                        integration</h2>
+                    <p class="mt-2 text-sm text-slate-500">
+                        Store unlimited backups of <span class="font-medium text-indigo-600">websites</span>,
+                        <span class="font-medium text-indigo-600">wordpress</span>
+                        and <span class="font-medium text-indigo-600">databases</span> on
                         your {{ storage.name }}.
                     </p>
                 </div>
-                <div class="grid grid-cols-1 gap-y-12 sm:grid-cols-3 sm:gap-x-6 lg:grid-cols-3 lg:gap-x-8  mt-10">
-                    <div>
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                <div class="mx-auto mt-10 grid max-w-4xl grid-cols-1 gap-4 sm:grid-cols-3 sm:gap-6">
+                    <div class="rounded-xl bg-slate-50 p-5 ring-1 ring-inset ring-slate-900/5">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-indigo-600" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                            <path stroke-linecap="round" stroke-linejoin="round"
                                   d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
                         </svg>
-                        <h3 class="mt-6 text-sm font-medium text-gray-700">
-                            1. Setup {{ storage.name }} Integration
+                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
+                            1. Set up {{ storage.name }} integration
                         </h3>
-                        <p class="mt-2 text-sm text-gray-700">
+                        <p class="mt-1 text-sm text-slate-500">
                             Connect {{ storage.name }} account and store unlimited website and database backups.
-
                         </p>
                     </div>
 
-                    <div>
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    <div class="rounded-xl bg-slate-50 p-5 ring-1 ring-inset ring-slate-900/5">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-indigo-600" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                            <path stroke-linecap="round" stroke-linejoin="round"
                                   d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
                         </svg>
-                        <h3 class="mt-6 text-sm font-medium text-gray-700">
-                            2. Update Schedule
+                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
+                            2. Update schedule
                         </h3>
-                        <p class="mt-2 text-sm text-gray-700">
+                        <p class="mt-1 text-sm text-slate-500">
                             Select storage account when configuring the schedule or when creating on-demand backups.
                         </p>
                     </div>
 
-                    <div>
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    <div class="rounded-xl bg-slate-50 p-5 ring-1 ring-inset ring-slate-900/5">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-indigo-600" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                            <path stroke-linecap="round" stroke-linejoin="round"
                                   d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
                         </svg>
-                        <h3 class="mt-6 text-sm font-medium text-gray-700">
-                            3. Multi-Storage (optional)
+                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
+                            3. Multi-storage (optional)
                         </h3>
-                        <p class="mt-2 text-sm text-gray-700">
+                        <p class="mt-1 text-sm text-slate-500">
                             Select multiple storage locations for schedule backups for website and database backups.
                         </p>
                     </div>
@@ -332,7 +497,7 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100"
                  x-transition:leave-end="opacity-0"
-                 class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+                 class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm transition-opacity" aria-hidden="true"></div>
 
             <div x-show="openStorage"
                  x-transition:enter="ease-out duration-300"
@@ -341,61 +506,61 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                  x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                 class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                 class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-2xl bg-white px-4 pt-5 pb-4 text-left shadow-lifted ring-1 ring-slate-900/5 transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-xl sm:p-6">
                 <div class="flex-1 overflow-y-auto">
-                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-indigo-50">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-indigo-600" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                            <path stroke-linecap="round" stroke-linejoin="round"
                                   d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
                         </svg>
                     </div>
-                    <div x-show="!loading" class="mt-3 text-center sm:mt-5">
-                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                    <div x-show="!loading" class="mt-3 text-center sm:mt-4">
+                        <h3 class="text-lg font-semibold leading-6 text-slate-900" id="modal-title">
                             {{ storage.name }} Integration
                         </h3>
-                        <div class="mt-2">
-                            <p class="text-sm text-gray-700">
+                        <div class="mt-1">
+                            <p class="text-sm text-slate-500">
                                 <span x-text="storage?.name"></span>
                             </p>
                         </div>
                     </div>
-                    <div class="mt-6 grid grid-cols-1 gap-y-6 gap-x-4 sm:grid-cols-6">
+                    <div class="mt-6 grid grid-cols-1 gap-y-5 gap-x-4 sm:grid-cols-6">
                         <div class="sm:col-span-6">
-                            <label for="name" class="block text-sm font-medium text-gray-700">
+                            <label for="name" class="block text-sm font-medium text-slate-700">
                                 Name
                             </label>
                             <div class="mt-1">
                                 <input x-model="storage.name"
                                        type="text" name="name" id="name" autocomplete="name"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="storageErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="storageErrors?.name" class="mt-1 text-xs text-rose-600" id="name-error"
                                    x-text="storageErrors?.name"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6" x-show="showS3Fields || storage_code === 'google_cloud' || storage_code === 'azure'">
-                            <label for="bucket-name" class="block text-sm font-medium text-gray-700">
+                            <label for="bucket-name" class="block text-sm font-medium text-slate-700">
                                 <span x-show="storage_code === 'azure'">Container Name</span>
                                 <span x-show="storage_code !== 'azure'">Bucket Name</span>
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedStorage.bucket_name" type="text" name="bucket-name"
                                        id="bucket-name" autocomplete="bucket-name"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="storageErrors.auth?.bucket_name" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="storageErrors.auth?.bucket_name" class="mt-1 text-xs text-rose-600"
                                    id="bucket-name-error" x-text="storageErrors.auth?.bucket_name"></p>
                             </div>
                         </div>
                         {% if storage.code == "oracle" %}
                             <div class="sm:col-span-6" x-show="showS3Fields">
-                                <label for="namespace" class="block text-sm font-medium text-gray-700">
+                                <label for="namespace" class="block text-sm font-medium text-slate-700">
                                     Namespace
                                 </label>
                                 <div class="mt-1">
                                     <input x-model="selectedStorage.namespace" type="text" name="namespace"
                                            id="namespace" autocomplete="namespace"
-                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                    <p x-show="storageErrors.auth?.namespace" class="mt-2 text-sm text-red-600"
+                                           class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                    <p x-show="storageErrors.auth?.namespace" class="mt-1 text-xs text-rose-600"
                                        id="namespace-error" x-text="storageErrors.auth?.namespace"></p>
                                 </div>
                             </div>
@@ -403,24 +568,24 @@
 
 
                         <div class="sm:col-span-6" x-show="showS3Fields || storage_code === 'google_cloud'">
-                            <label for="first-name" class="block text-sm font-medium text-gray-700">
+                            <label for="first-name" class="block text-sm font-medium text-slate-700">
                                 Folder Name (must not start with /)
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedStorage.prefix" type="text" name="folder-name" id="folder-name"
                                        autocomplete="folder-name"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="storageErrors.auth?.prefix" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="storageErrors.auth?.prefix" class="mt-1 text-xs text-rose-600"
                                    id="folder-name-error" x-text="storageErrors.auth?.prefix"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
-                            <div class="rounded-md border border-emerald-200 bg-emerald-50 p-4">
+                            <div class="rounded-xl bg-emerald-50 p-4 ring-1 ring-inset ring-emerald-600/20">
                                 <label for="air-gapped-copy" class="inline-flex items-center gap-x-2 text-sm font-semibold text-emerald-900">
                                     <input x-model="storage.is_air_gapped" type="checkbox" name="air-gapped-copy"
                                            id="air-gapped-copy"
-                                           class="rounded border-emerald-300 text-emerald-600 shadow-xs focus:ring-emerald-500">
+                                           class="rounded border-emerald-300 text-emerald-600 shadow-sm focus:ring-emerald-500">
                                     Designate this as an air-gapped copy
                                 </label>
                                 <p class="mt-2 text-sm text-emerald-800">Requires S3 Object Lock in Compliance mode, a retention period, and the destination account ID. BackupSheep will never delete this copy.</p>
@@ -428,60 +593,60 @@
                         </div>
 
                         <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
-                            <label for="s3-no-delete" class="inline-flex items-center gap-x-2 text-sm font-medium text-gray-700">
+                            <label for="s3-no-delete" class="inline-flex items-center gap-x-2 text-sm font-medium text-slate-700">
                                 <input x-model="selectedStorage.no_delete" type="checkbox" name="s3-no-delete"
                                        id="s3-no-delete"
-                                       class="rounded border-gray-300 text-indigo-600 shadow-xs focus:ring-indigo-500">
+                                       class="rounded border-slate-300 text-indigo-600 shadow-sm focus:ring-indigo-500">
                                 Keep backups when BackupSheep deletes a backup record
                             </label>
-                            <p class="mt-2 text-sm text-gray-600">Use this deletion-protection switch when the destination must be retained indefinitely outside BackupSheep.</p>
+                            <p class="mt-1 text-xs text-slate-500">Use this deletion-protection switch when the destination must be retained indefinitely outside BackupSheep.</p>
                         </div>
 
                         <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
-                            <div class="border-t border-slate-200 pt-4">
-                                <p class="text-sm font-semibold text-gray-800">Immutable backup protection</p>
-                                <p class="mt-1 text-xs text-gray-600">The S3 bucket must already have Object Lock enabled. Compliance mode cannot be bypassed before retention expires.</p>
+                            <div class="border-t border-slate-100 pt-4">
+                                <p class="text-sm font-semibold text-slate-900">Immutable backup protection</p>
+                                <p class="mt-1 text-xs text-slate-500">The S3 bucket must already have Object Lock enabled. Compliance mode cannot be bypassed before retention expires.</p>
                             </div>
                         </div>
                         <div class="sm:col-span-3" x-show="storageTypeCode === 'aws_s3'">
-                            <label for="object-lock-mode" class="block text-sm font-medium text-gray-700">Object Lock mode</label>
+                            <label for="object-lock-mode" class="block text-sm font-medium text-slate-700">Object Lock mode</label>
                             <select x-model="selectedStorage.object_lock_mode" id="object-lock-mode"
-                                    class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                                    class="mt-1 block w-full rounded-lg border-slate-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500">
                                 <option value="">Disabled</option>
                                 <option value="GOVERNANCE">Governance</option>
                                 <option value="COMPLIANCE">Compliance</option>
                             </select>
                         </div>
                         <div class="sm:col-span-3" x-show="storageTypeCode === 'aws_s3'">
-                            <label for="object-lock-days" class="block text-sm font-medium text-gray-700">Retention (days)</label>
+                            <label for="object-lock-days" class="block text-sm font-medium text-slate-700">Retention (days)</label>
                             <input x-model.number="selectedStorage.object_lock_retain_days" type="number" min="1"
                                    name="object-lock-days" id="object-lock-days"
-                                   class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                                   class="mt-1 block w-full rounded-lg border-slate-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500">
                         </div>
                         <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
-                            <label for="expected-bucket-owner" class="block text-sm font-medium text-gray-700">Expected AWS bucket owner account ID</label>
+                            <label for="expected-bucket-owner" class="block text-sm font-medium text-slate-700">Expected AWS bucket owner account ID</label>
                             <input x-model="selectedStorage.expected_bucket_owner" type="text" inputmode="numeric" maxlength="12"
                                    name="expected-bucket-owner" id="expected-bucket-owner"
-                                   class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
-                            <p class="mt-1 text-xs text-gray-600">Optional for normal S3 destinations; required for an air-gapped copy.</p>
+                                   class="mt-1 block w-full rounded-lg border-slate-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500">
+                            <p class="mt-1 text-xs text-slate-500">Optional for normal S3 destinations; required for an air-gapped copy.</p>
                         </div>
 
                         <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
-                            <div class="border-t border-slate-200 pt-4">
-                                <p class="text-sm font-semibold text-gray-800">Automatic lifecycle tiering</p>
-                                <p class="mt-1 text-xs text-gray-600">BackupSheep creates or updates only its own lifecycle rule for this folder prefix.</p>
+                            <div class="border-t border-slate-100 pt-4">
+                                <p class="text-sm font-semibold text-slate-900">Automatic lifecycle tiering</p>
+                                <p class="mt-1 text-xs text-slate-500">BackupSheep creates or updates only its own lifecycle rule for this folder prefix.</p>
                             </div>
                         </div>
                         <div class="sm:col-span-3" x-show="storageTypeCode === 'aws_s3'">
-                            <label for="lifecycle-days" class="block text-sm font-medium text-gray-700">Move after (days)</label>
+                            <label for="lifecycle-days" class="block text-sm font-medium text-slate-700">Move after (days)</label>
                             <input x-model.number="selectedStorage.lifecycle_transition_days" type="number" min="1"
                                    name="lifecycle-days" id="lifecycle-days"
-                                   class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                                   class="mt-1 block w-full rounded-lg border-slate-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500">
                         </div>
                         <div class="sm:col-span-3" x-show="storageTypeCode === 'aws_s3'">
-                            <label for="lifecycle-class" class="block text-sm font-medium text-gray-700">Target class</label>
+                            <label for="lifecycle-class" class="block text-sm font-medium text-slate-700">Target class</label>
                             <select x-model="selectedStorage.lifecycle_storage_class" id="lifecycle-class"
-                                    class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                                    class="mt-1 block w-full rounded-lg border-slate-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500">
                                 <option value="">No automatic tiering</option>
                                 <option value="STANDARD_IA">Standard-IA</option>
                                 <option value="ONEZONE_IA">One Zone-IA</option>
@@ -493,37 +658,37 @@
                         </div>
 
                         <div class="sm:col-span-6" x-show="storageTypeCode === 'aws_s3'">
-                            <div class="border-t border-slate-200 pt-4">
-                                <p class="text-sm font-semibold text-gray-800">Cost rates (USD)</p>
-                                <p class="mt-1 text-xs text-gray-600">Enter your actual contracted rates per GiB. Dashboard projections use these rates; provider invoices remain authoritative.</p>
+                            <div class="border-t border-slate-100 pt-4">
+                                <p class="text-sm font-semibold text-slate-900">Cost rates (USD)</p>
+                                <p class="mt-1 text-xs text-slate-500">Enter your actual contracted rates per GiB. Dashboard projections use these rates; provider invoices remain authoritative.</p>
                             </div>
                         </div>
                         <div class="sm:col-span-2" x-show="storageTypeCode === 'aws_s3'">
-                            <label for="standard-rate" class="block text-sm font-medium text-gray-700">Standard / GiB-month</label>
+                            <label for="standard-rate" class="block text-sm font-medium text-slate-700">Standard / GiB-month</label>
                             <input x-model.number="storage.storage_cost_usd_per_gib_month" type="number" min="0" step="0.000001"
-                                   id="standard-rate" class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                                   id="standard-rate" class="mt-1 block w-full rounded-lg border-slate-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500">
                         </div>
                         <div class="sm:col-span-2" x-show="storageTypeCode === 'aws_s3'">
-                            <label for="cold-rate" class="block text-sm font-medium text-gray-700">Cold / GiB-month</label>
+                            <label for="cold-rate" class="block text-sm font-medium text-slate-700">Cold / GiB-month</label>
                             <input x-model.number="storage.cold_storage_cost_usd_per_gib_month" type="number" min="0" step="0.000001"
-                                   id="cold-rate" class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                                   id="cold-rate" class="mt-1 block w-full rounded-lg border-slate-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500">
                         </div>
                         <div class="sm:col-span-2" x-show="storageTypeCode === 'aws_s3'">
-                            <label for="retrieval-rate" class="block text-sm font-medium text-gray-700">Retrieval / GiB</label>
+                            <label for="retrieval-rate" class="block text-sm font-medium text-slate-700">Retrieval / GiB</label>
                             <input x-model.number="storage.retrieval_cost_usd_per_gib" type="number" min="0" step="0.000001"
-                                   id="retrieval-rate" class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-xs focus:border-indigo-500 focus:ring-indigo-500">
+                                   id="retrieval-rate" class="mt-1 block w-full rounded-lg border-slate-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500">
                         </div>
 
                         {% if storage.code == "google_cloud" %}
                             <div class="sm:col-span-6">
-                                <label for="service_key" class="block text-sm font-medium text-gray-700">
+                                <label for="service_key" class="block text-sm font-medium text-slate-700">
                                     Service Key JSON
                                 </label>
                                 <div class="mt-1">
                                         <textarea x-model="selectedStorage.service_key" id="service_key"
                                                   name="service_key" rows="3"
-                                                  class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
-                                    <p x-show="storageErrors?.auth?.service_key" class="mt-2 text-sm text-red-600"
+                                                  class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"></textarea>
+                                    <p x-show="storageErrors?.auth?.service_key" class="mt-1 text-xs text-rose-600"
                                        id="service_key-error"
                                        x-text="storageErrors?.auth?.service_key"></p>
                                 </div>
@@ -532,14 +697,14 @@
 
                         {% if storage.code == "azure" %}
                             <div class="sm:col-span-6">
-                                <label for="connection_string" class="block text-sm font-medium text-gray-700">
+                                <label for="connection_string" class="block text-sm font-medium text-slate-700">
                                     Connection String
                                 </label>
                                 <div class="mt-1">
                                         <textarea x-model="selectedStorage.connection_string" id="connection_string"
                                                   name="connection_string" rows="3"
-                                                  class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
-                                    <p x-show="storageErrors?.auth?.connection_string" class="mt-2 text-sm text-red-600"
+                                                  class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"></textarea>
+                                    <p x-show="storageErrors?.auth?.connection_string" class="mt-1 text-xs text-rose-600"
                                        id="connection_string-error"
                                        x-text="storageErrors?.auth?.connection_string"></p>
                                 </div>
@@ -548,36 +713,36 @@
 
                         {% if storage.code == "local" %}
                             <div class="sm:col-span-6">
-                                <label for="path" class="block text-sm font-medium text-gray-700">
+                                <label for="path" class="block text-sm font-medium text-slate-700">
                                     Path (optional)
                                 </label>
                                 <div class="mt-1">
                                     <input x-model="selectedStorage.path" type="text" name="path" id="path"
                                            autocomplete="path"
-                                           class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                    <p x-show="storageErrors.auth?.path" class="mt-2 text-sm text-red-600"
+                                           class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                    <p x-show="storageErrors.auth?.path" class="mt-1 text-xs text-rose-600"
                                        id="path-error" x-text="storageErrors.auth?.path"></p>
                                 </div>
-                                <p class="mt-2 text-sm text-gray-700">Subdirectory under the server's local storage
+                                <p class="mt-1 text-xs text-slate-500">Subdirectory under the server's local storage
                                     root (leave empty to store at the root).</p>
                             </div>
                             <div class="sm:col-span-6">
-                                <label for="no_delete" class="inline-flex items-center gap-x-2 text-sm font-medium text-gray-700">
+                                <label for="no_delete" class="inline-flex items-center gap-x-2 text-sm font-medium text-slate-700">
                                     <input x-model="selectedStorage.no_delete" type="checkbox" name="no_delete"
                                            id="no_delete"
-                                           class="rounded border-gray-300 text-indigo-600 shadow-xs focus:ring-indigo-500">
+                                           class="rounded border-slate-300 text-indigo-600 shadow-sm focus:ring-indigo-500">
                                     Keep backups on delete
                                 </label>
-                                <p class="mt-2 text-sm text-gray-700">When enabled, deleting a backup in BackupSheep
+                                <p class="mt-1 text-xs text-slate-500">When enabled, deleting a backup in BackupSheep
                                     leaves the zip file on disk.</p>
                             </div>
                         {% endif %}
 
                         <div class="sm:col-span-6" x-show="showS3Fields && storage_code=='backblaze_b2'">
-                            <div class="rounded-md bg-blue-50 p-4">
+                            <div class="rounded-xl bg-sky-50 p-4 ring-1 ring-inset ring-sky-600/20">
                                 <div class="flex">
                                     <div class="shrink-0">
-                                        <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                        <svg class="h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg"
                                              viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                             <path fill-rule="evenodd"
                                                   d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
@@ -585,7 +750,7 @@
                                         </svg>
                                     </div>
                                     <div class="ml-3 flex-1 md:flex md:justify-between">
-                                        <p class="text-sm font-bold text-blue-700">
+                                        <p class="text-sm font-medium text-sky-800">
                                             Master Application Key will not work for BackBlaze B2 storage integration.
                                             Please use bucket-specific Application Key.
                                         </p>
@@ -595,73 +760,73 @@
                         </div>
 
                         <div class="sm:col-span-6" x-show="showS3Fields && storage_code=='cloudflare'">
-                            <label for="account_id" class="block text-sm font-medium text-gray-700">
+                            <label for="account_id" class="block text-sm font-medium text-slate-700">
                                 <span>Account ID (Cloudflare)</span>
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedStorage.account_id" type="text" name="account_id"
                                        id="account_id" autocomplete="account_id"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="storageErrors.auth?.account_id" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="storageErrors.auth?.account_id" class="mt-1 text-xs text-rose-600"
                                    id="access-key-error" x-text="storageErrors.auth?.account_id"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6" x-show="showS3Fields">
-                            <label for="accesskey" class="block text-sm font-medium text-gray-700">
+                            <label for="accesskey" class="block text-sm font-medium text-slate-700">
                                 <span x-show="storage_code!='backblaze_b2'">Access Key</span>
                                 <span x-show="storage_code=='backblaze_b2'">Key ID</span>
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedStorage.access_key" type="text" name="access-key"
                                        id="access-key" autocomplete="access-key"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="storageErrors.auth?.access_key" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="storageErrors.auth?.access_key" class="mt-1 text-xs text-rose-600"
                                    id="access-key-error" x-text="storageErrors.auth?.access_key"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6" x-show="showS3Fields">
-                            <label for="secretkey" class="block text-sm font-medium text-gray-700">
+                            <label for="secretkey" class="block text-sm font-medium text-slate-700">
                                 <span x-show="storage_code!='backblaze_b2'">Secret Key</span>
                                 <span x-show="storage_code=='backblaze_b2'">Application Key</span>
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedStorage.secret_key" type="text" name="secret-key"
                                        id="secret-key" autocomplete="secret-key"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="storageErrors.auth?.secret_key" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="storageErrors.auth?.secret_key" class="mt-1 text-xs text-rose-600"
                                    id="secret-key-error" x-text="storageErrors.auth?.secret_key"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6"
                              x-show="showS3Fields && (storage_code==='backblaze_b2' || storage_code==='linode' || storage_code==='vultr' || storage_code==='upcloud' || storage_code==='idrive')">
-                            <label for="endpoint" class="block text-sm font-medium text-gray-700">
+                            <label for="endpoint" class="block text-sm font-medium text-slate-700">
                                 Endpoint
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedStorage.endpoint" type="text" name="endpoint" id="endpoint"
                                        autocomplete="endpoint"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="storageErrors.auth?.endpoint" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="storageErrors.auth?.endpoint" class="mt-1 text-xs text-rose-600"
                                    id="endpoint-error" x-text="storageErrors.auth?.endpoint"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6"
                              x-show="showS3Fields && storage_code!=='backblaze_b2' && storage_code!=='linode' && storage_code!=='vultr' && storage_code!=='upcloud' && storage_code!=='cloudflare' && storage_code!=='leviia' && storage_code!=='idrive'">
-                            <label for="first-name" class="block text-sm font-medium text-gray-700">
+                            <label for="first-name" class="block text-sm font-medium text-slate-700">
                                 Region
                             </label>
-                            <div class="relative mt-2">
+                            <div class="relative mt-1">
                                 <button @click="toggleRegionDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left shadow-sm cursor-default focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
                                     <span class="block truncate"
                                           x-text="selectedStorage.region?.name||'--Choose Region--'"></span>
-                                    <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
+                                    <span class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
                                                 <!-- Heroicon name: solid/selector -->
-                                                <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                                <svg class="h-5 w-5 text-slate-400" xmlns="http://www.w3.org/2000/svg"
                                                      viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                                   <path fill-rule="evenodd"
                                                         d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
@@ -679,7 +844,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
+                                        class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl bg-white py-1 text-base shadow-lifted ring-1 ring-slate-900/5 focus:outline-none sm:text-sm"
                                         tabindex="-1" role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
 
@@ -688,17 +853,17 @@
                                                 @click="selectedStorage.region = region;toggleRegionDropdown()"
                                                 @mouseenter="regionActiveIndex = index"
                                                 @mouseleave="regionActiveIndex = null"
-                                                :class="{ 'text-white bg-indigo-600': regionActiveIndex === index, 'text-gray-700': !(regionActiveIndex === index) }"
-                                                class="cursor-default select-none relative py-2 pl-8 pr-4"
+                                                :class="{ 'text-white bg-indigo-600': regionActiveIndex === index, 'text-slate-700': !(regionActiveIndex === index) }"
+                                                class="relative cursor-default select-none py-2 pl-8 pr-4"
                                                 id="listbox-option-0" role="option">
-                                                    <span class="font-normal block truncate">
+                                                    <span class="block truncate font-normal">
                                                         <span x-text="region.name"></span>
                                                     </span>
 
                                             <span
                                                     x-show="selectedStorage.region?.id === region?.id"
                                                     :class="{ 'text-indigo-600': (selectedStorage.region?.id === region?.id) && (regionActiveIndex !== index), 'text-white': (!(selectedStorage.region === region) || (regionActiveIndex === index)) }"
-                                                    class="text-indigo-600 absolute inset-y-0 left-0 flex items-center pl-1.5">
+                                                    class="absolute inset-y-0 left-0 flex items-center pl-1.5 text-indigo-600">
                                                       <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg"
                                                            viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                                         <path fill-rule="evenodd"
@@ -710,22 +875,22 @@
                                     </template>
                                 </ul>
                             </div>
-                            <p x-show="storageErrors.auth?.region" class="mt-2 text-sm text-red-600" id="email-error"
+                            <p x-show="storageErrors.auth?.region" class="mt-1 text-xs text-rose-600" id="email-error"
                                x-text="storageErrors.auth?.region"></p>
                         </div>
 
 
                             <div class="sm:col-span-6">
-                                <label for="about" class="block text-sm font-medium text-gray-700">
+                                <label for="about" class="block text-sm font-medium text-slate-700">
                                     Notes
                                 </label>
                                 <div class="mt-1">
                                     <textarea x-model="storage.notes" id="about" name="about" rows="3"
-                                              class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
-                                    <p x-show="storageErrors?.notes" class="mt-2 text-sm text-red-600" id="email-error"
+                                              class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"></textarea>
+                                    <p x-show="storageErrors?.notes" class="mt-1 text-xs text-rose-600" id="email-error"
                                        x-text="storageErrors?.notes"></p>
                                 </div>
-                                <p class="mt-2 text-sm text-gray-700">Optional notes about the storage.</p>
+                                <p class="mt-1 text-xs text-slate-500">Optional notes about the storage.</p>
                             </div>
                     </div>
                 </div>
@@ -733,12 +898,12 @@
                 <div x-show="!loading"
                      class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                     <button @click="saveStorage()" type="button"
-                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                            class="inline-flex w-full items-center justify-center gap-x-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 sm:col-start-2">
                         <span x-show="!storage.id">Add Integration</span>
                         <span x-show="storage.id">Modify Integration</span>
                     </button>
                     <button @click="closeStorageModal()" type="button"
-                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                            class="mt-3 inline-flex w-full items-center justify-center gap-x-2 rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:col-start-1 sm:mt-0">
                         Cancel
                     </button>
                 </div>
@@ -757,7 +922,7 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100"
                  x-transition:leave-end="opacity-0"
-                 class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+                 class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm transition-opacity" aria-hidden="true"></div>
 
             <div x-show="openDeleteStorage"
                  x-transition:enter="ease-out duration-300"
@@ -766,28 +931,28 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                  x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                 class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                 class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-2xl bg-white px-4 pt-5 pb-4 text-left shadow-lifted ring-1 ring-slate-900/5 transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
                 <div class="flex-1 overflow-y-auto">
-                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
-                        <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
+                    <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-50">
+                        <svg x-show="loading" class="animate-spin h-10 w-10 text-rose-600"
                              xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
                                     stroke-width="4"></circle>
                             <path class="opacity-75" fill="currentColor"
                                   d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                         </svg>
-                        <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-rose-600" fill="none"
+                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                  d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"></path>
                         </svg>
                     </div>
-                    <div x-show="!loading" class="mt-3 text-center sm:mt-5">
-                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
-                            Please Confirm
+                    <div x-show="!loading" class="mt-3 text-center sm:mt-4">
+                        <h3 class="text-lg font-semibold leading-6 text-slate-900" id="modal-title">
+                            Delete storage integration
                         </h3>
                         <div class="mt-2">
-                            <p class="text-sm text-gray-700">
+                            <p class="text-sm text-slate-500">
                                 This action will remove this storage from all schedules and delete all backups created
                                 with this storage (<strong x-text="storage.name"></strong>). You can't undo this action.
                                 Proceed carefully.
@@ -795,35 +960,35 @@
                         </div>
                     </div>
                     <div x-show="loading" class="mt-3 text-center sm:mt-5">
-                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
+                        <h3 class="text-lg font-semibold leading-6 text-slate-900" id="modal-title">
                             Loading...
                         </h3>
                         <div class="mt-2">
-                            <p class="text-sm text-gray-700">
+                            <p class="text-sm text-slate-500">
                                 Don't refresh page.
                             </p>
                         </div>
                     </div>
                     <div x-show="!loading" class="mt-3 text-left sm:mt-5">
                         <div class="sm:col-span-6">
-                            <label for="about" class="block text-sm font-medium text-gray-700">
+                            <label for="about" class="block text-sm font-medium text-slate-700">
                                 Notes
                             </label>
                             <div class="mt-1">
                                 <textarea x-model="notes" id="about" name="about" rows="3"
-                                          class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                          class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"></textarea>
                             </div>
-                            <p class="mt-2 text-sm text-gray-700">Optional notes about this action.</p>
+                            <p class="mt-1 text-xs text-slate-500">Optional notes about this action.</p>
                         </div>
                     </div>
                 </div>
                 <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                     <button @click="deleteStorage(storage.id)" type="button"
-                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                            class="inline-flex w-full items-center justify-center gap-x-2 rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-500 focus:ring-offset-2 sm:col-start-2">
                         Delete Storage
                     </button>
                     <button @click="closeDeleteStorageModal()" type="button"
-                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                            class="mt-3 inline-flex w-full items-center justify-center gap-x-2 rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:col-start-1 sm:mt-0">
                         Cancel
                     </button>
                 </div>

@@ -1,35 +1,49 @@
 {% extends "console/onboarding/_base.html" %}
 {% block step %}
-    <h2 class="text-lg font-semibold text-slate-900 mb-1">Transactional email</h2>
-    <p class="text-sm text-slate-500 mb-5">Used for password resets and notifications. Choose "Disabled" to skip — you can configure it later in settings.</p>
+    <div class="mb-6">
+        <h2 class="text-lg font-semibold tracking-tight text-slate-900">Transactional email</h2>
+        <p class="mt-1 text-sm text-slate-500">Used for password resets and notifications. Choose "Disabled" to skip — you can configure it later in settings.</p>
+    </div>
     <form method="post" novalidate x-data="{ provider: '{{ form.email_provider.value|default:"none" }}' }">
         {% csrf_token %}
         {% include "console/onboarding/_field.html" with field=form.email_provider %}
 
-        <div x-show="provider === 'postmark'" x-cloak class="border-t border-slate-100 pt-4 mt-2">
+        <div x-show="provider === 'postmark'" x-cloak x-transition.opacity.duration.200ms
+             class="mt-2 rounded-xl bg-slate-50/80 p-4 sm:p-5 ring-1 ring-slate-200/70 [&>*:last-child]:mb-0">
+            <p class="mb-4 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Postmark</p>
             {% include "console/onboarding/_field.html" with field=form.postmark_api_key %}
             {% include "console/onboarding/_field.html" with field=form.postmark_email %}
         </div>
-        <div x-show="provider === 'mailgun'" x-cloak class="border-t border-slate-100 pt-4 mt-2">
+        <div x-show="provider === 'mailgun'" x-cloak x-transition.opacity.duration.200ms
+             class="mt-2 rounded-xl bg-slate-50/80 p-4 sm:p-5 ring-1 ring-slate-200/70 [&>*:last-child]:mb-0">
+            <p class="mb-4 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Mailgun</p>
             {% include "console/onboarding/_field.html" with field=form.mailgun_api_key %}
             {% include "console/onboarding/_field.html" with field=form.mailgun_domain %}
             {% include "console/onboarding/_field.html" with field=form.mailgun_email %}
         </div>
-        <div x-show="provider === 'ses'" x-cloak class="border-t border-slate-100 pt-4 mt-2">
+        <div x-show="provider === 'ses'" x-cloak x-transition.opacity.duration.200ms
+             class="mt-2 rounded-xl bg-slate-50/80 p-4 sm:p-5 ring-1 ring-slate-200/70 [&>*:last-child]:mb-0">
+            <p class="mb-4 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Amazon SES</p>
             {% include "console/onboarding/_field.html" with field=form.ses_access_key_id %}
             {% include "console/onboarding/_field.html" with field=form.ses_secret_access_key %}
             {% include "console/onboarding/_field.html" with field=form.ses_region_name %}
             {% include "console/onboarding/_field.html" with field=form.ses_from_email %}
         </div>
 
-        <div class="flex items-center justify-between mt-6">
-            <button type="submit" name="action" value="test" x-show="provider !== 'none'" x-cloak
-                    class="rounded-lg px-4 py-2.5 text-sm font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-50">
-                Send test email
-            </button>
-            <span x-show="provider === 'none'" class="text-xs text-slate-400">No provider selected</span>
+        <div class="mt-8 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+                <button type="submit" name="action" value="test" x-show="provider !== 'none'" x-cloak
+                        class="inline-flex w-full sm:w-auto items-center justify-center gap-x-2 rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 ring-1 ring-inset ring-slate-200 shadow-sm hover:bg-slate-50 transition-colors">
+                    <svg class="h-4 w-4 text-slate-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5"/></svg>
+                    Send test email
+                </button>
+                <span x-show="provider === 'none'" x-cloak class="text-xs text-slate-400">No provider selected</span>
+            </div>
             <button type="submit" name="action" value="continue"
-                    class="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Continue &rarr;</button>
+                    class="inline-flex w-full sm:w-auto items-center justify-center gap-x-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                Continue
+                <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/></svg>
+            </button>
         </div>
     </form>
 {% endblock %}

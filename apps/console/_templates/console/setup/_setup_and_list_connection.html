@@ -1,217 +1,233 @@
 <div x-data="setupSelectConnection()">
     <button @click="openConnectionModal(null, null, null,'{{ integration.code }}')" type="button"
-            class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+            class="group relative block w-full rounded-2xl border-2 border-dashed border-slate-300 bg-white px-6 py-10 text-center transition-colors hover:border-indigo-400 hover:bg-indigo-50/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
 
-        <img class="max-h-20 mx-auto" src="{{ STATIC_URL }}{{ integration.image }}"
+        <img class="mx-auto max-h-16" src="{{ STATIC_URL }}{{ integration.image }}"
              alt="{{ integration.name }} Backups">
 
-        <a class="mt-2 block  text-1xl font-normal leading-7 text-gray-700">
+        <span class="mt-4 flex items-center justify-center gap-x-2 text-sm font-semibold text-slate-900">
+            <svg class="h-5 w-5 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                 stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>
+            </svg>
             Setup {{ integration.name }} Integration
-        </a>
+        </span>
         {% if "ovh" in integration.code %}
-            Note: For OVH, please select <strong>validity</strong> period <strong>unlimited</strong>. Otherwise, backups
-            will fail after the validity period.
+            <span class="mx-auto mt-4 inline-flex max-w-xl items-start gap-x-2 rounded-xl bg-amber-50 px-3 py-2 text-left text-xs text-amber-700 ring-1 ring-inset ring-amber-600/20">
+                <svg class="mt-0.5 h-4 w-4 shrink-0 text-amber-500" xmlns="http://www.w3.org/2000/svg" fill="none"
+                     viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                          d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/>
+                </svg>
+                <span>Note: For OVH, please select <strong>validity</strong> period <strong>unlimited</strong>. Otherwise, backups
+                will fail after the validity period.</span>
+            </span>
         {% endif %}
 
     </button>
 
     {% if connections_count > 0 %}
-        <div class="pb-3 border-b border-gray-200 mt-12">
-            <div class="-ml-2 -mt-2 flex flex-wrap items-baseline">
-                <h3 class="ml-2 mt-2 text-lg leading-6 font-medium text-gray-700">
-                    {{ integration.name }} Integrations {% if "wordpress" in integration.code %}(<a target="_blank" class="text-indigo-600" href="https://support.backupsheep.com/docs/how-to-backup-wordpress">How to Backup WordPress</a>){% endif %}
-                    {% if i_name %}
-                        <small>(<a class="text-indigo-500"
-                                   href="{% url 'console:setup:integration_open' integration_code=integration.code|lower %}">reset
-                            filter</a>)</small>
-                    {% endif %}
-                </h3>
-            </div>
+        <div class="mt-10 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            <h3 class="text-sm font-semibold text-slate-900">
+                {{ integration.name }} Integrations {% if "wordpress" in integration.code %}(<a target="_blank" class="font-medium text-indigo-600 hover:text-indigo-500" href="https://support.backupsheep.com/docs/how-to-backup-wordpress">How to Backup WordPress</a>){% endif %}
+                {% if i_name %}
+                    <span class="font-normal text-slate-500">(<a class="font-medium text-indigo-600 hover:text-indigo-500"
+                                                                 href="{% url 'console:setup:integration_open' integration_code=integration.code|lower %}">reset
+                        filter</a>)</span>
+                {% endif %}
+            </h3>
         </div>
-        <div class="flex flex-col mt-4">
-            <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
-                <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
-                    <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg">
-                        <div class="overflow-x-auto">
-                            <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
-                                <thead class="bg-gray-50">
-                                <tr>
-                                    <th scope="col"
-                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Name
-                                    </th>
-                                    <th scope="col"
-                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Status
-                                    </th>
-                                    <th scope="col"
-                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Backup Server
-                                    </th>
-                                    <th scope="col"
-                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Nodes
-                                    </th>
-                                    {#                                    <th scope="col" class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">#}
-                                    {#                                        Date#}
-                                    {#                                    </th>#}
-                                    <th scope="col"
-                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Create Node
-                                    </th>
-                                    <th scope="col"
-                                        class="px-4 py-4 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Actions
-                                    </th>
-                                </tr>
-                                </thead>
-                                <tbody class="bg-white divide-y divide-gray-200">
-                                {% for connection in page.object_list %}
-                                    <tr>
-                                        <td class="px-4 py-4">
-                                            <div class="text-sm text-gray-700">{{ connection.name }}
-                                            </div>
-                                            <small>{{ connection.modified }}</small>
-                                        </td>
-                                        <td class="px-4 py-4 whitespace-nowrap">
-                                            {% if connection.status == 1 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-green-100 text-green-800">
-                                            {{ connection.get_status_display }}
-                                        </span>
-                                            {% elif connection.status == 6 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-purple-100 text-purple-800">
-                                            {{ connection.get_status_display }}
-                                        </span>
-                                            {% elif connection.status == 4 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-yellow-100 text-yellow-800">
-                                            {{ connection.get_status_display }}
-                                        </span>
-                                            {% elif connection.status == 5 %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-red-100 text-red-800">
-                                            {{ connection.get_status_display }}
-                                        </span>
-                                            {% else %}
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-blue-100 text-blue-800">
-                                            {{ connection.get_status_display }}
-                                        </span>
-                                            {% endif %}
-                                        </td>
-
-                                        <td class="px-4 py-4 whitespace-nowrap">
-{#                                            <img src="{{ connection.location.image_url }}"#}
-{#                                                 alt="{{ connection.location.location }}" class="max-h-6 float-left mr-2">#}
-                                            <small>{{ connection.location.location }}</small><br/>
-                                            <small>IPv4: {{ connection.location.ip_address }}</small><br/>
-                                            <small>IPv6: {{ connection.location.ip_address_v6 }}</small>
-                                        </td>
-                                        <td class="px-4 py-4 whitespace-nowrap">
-                                            <div class="text-sm text-gray-700">{{ connection.total_nodes }}</div>
-                                        </td>
-                                        {#                                        <td class="px-4 py-4 whitespace-nowrap">#}
-                                        {#                                            <div class="text-sm text-gray-700">{{ connection.modified }}</div>#}
-                                        {#                                        </td>#}
-                                        <td class="px-4 py-4 whitespace-nowrap text-sm font-medium">
-                                            {% if integration.code == "website" %}
-                                                <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
-                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded-sm shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                                    Create Website Node
-                                                </a>
-                                            {% elif integration.code == "database" %}
-                                                <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
-                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded-sm shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                                    Create Database Node
-                                                </a>
-                                            {% elif integration.type == "saas" %}
-                                                <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
-                                                   class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded-sm shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                                    Create {{ integration.name }} Node
-                                                </a>
-                                            {% else %}
-                                                {% if integration.code != "upcloud" and integration.code != "oracle" %}
-                                                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
-                                                       class="inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded-sm shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                                        Create Server Node
-                                                    </a>
-                                                {% endif %}
-                                                {% if integration.code != "aws_rds" %}
-                                                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
-                                                       class="{% if integration.code != "upcloud" and integration.code != "oracle" %}ml-2{% endif %} inline-flex items-center px-2.5 py-1.5 border border-transparent text-xs font-medium rounded-sm shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                                        Create Volume Node
-                                                    </a>
-                                                {% endif %}
-                                            {% endif %}
-                                        </td>
-                                        <td class="px-4 py-4 whitespace-nowrap text-sm font-medium">
-
-                                            {% if connection.status == 5 %}
-                                                <button @click="resumeConnection('{{ connection.id }}')" type="button"
-                                                        class="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                                    Undo
+        <div class="mt-4 rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft">
+            <div class="overflow-x-auto lg:overflow-x-visible">
+                <table id="section-nodes" class="min-w-full divide-y divide-slate-100">
+                    <thead class="bg-slate-50">
+                    <tr>
+                        <th scope="col"
+                            class="rounded-tl-2xl px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Name
+                        </th>
+                        <th scope="col"
+                            class="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Status
+                        </th>
+                        <th scope="col"
+                            class="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Backup Server
+                        </th>
+                        <th scope="col"
+                            class="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Nodes
+                        </th>
+                        <th scope="col"
+                            class="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Create Node
+                        </th>
+                        <th scope="col"
+                            class="rounded-tr-2xl px-5 py-3.5 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Actions
+                        </th>
+                    </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100 bg-white">
+                    {% for connection in page.object_list %}
+                        <tr class="hover:bg-slate-50 transition-colors">
+                            <td class="px-5 py-3.5">
+                                <div class="text-sm font-medium text-slate-900">{{ connection.name }}</div>
+                                <div class="mt-0.5 text-xs text-slate-500">{{ connection.modified }}</div>
+                            </td>
+                            <td class="px-5 py-3.5 whitespace-nowrap">
+                                {% if connection.status == 1 %}
+                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
+                                        <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                                        {{ connection.get_status_display }}
+                                    </span>
+                                {% elif connection.status == 6 %}
+                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 ring-1 ring-inset ring-sky-600/20">
+                                        <span class="h-1.5 w-1.5 rounded-full bg-sky-500"></span>
+                                        {{ connection.get_status_display }}
+                                    </span>
+                                {% elif connection.status == 4 %}
+                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">
+                                        <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+                                        {{ connection.get_status_display }}
+                                    </span>
+                                {% elif connection.status == 5 %}
+                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-600/20">
+                                        <span class="h-1.5 w-1.5 rounded-full bg-rose-500"></span>
+                                        {{ connection.get_status_display }}
+                                    </span>
+                                {% else %}
+                                    <span class="inline-flex items-center gap-x-1.5 rounded-full bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/20">
+                                        <span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>
+                                        {{ connection.get_status_display }}
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td class="px-5 py-3.5 whitespace-nowrap">
+                                <div class="text-sm text-slate-700">{{ connection.location.location }}</div>
+                                <div class="mt-0.5 text-xs text-slate-500">IPv4: {{ connection.location.ip_address }}</div>
+                                <div class="text-xs text-slate-500">IPv6: {{ connection.location.ip_address_v6 }}</div>
+                            </td>
+                            <td class="px-5 py-3.5 whitespace-nowrap">
+                                <div class="text-sm text-slate-700">{{ connection.total_nodes }}</div>
+                            </td>
+                            <td class="px-5 py-3.5 whitespace-nowrap">
+                                {% if integration.code == "website" %}
+                                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
+                                       class="inline-flex items-center gap-x-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                                        Create Website Node
+                                    </a>
+                                {% elif integration.code == "database" %}
+                                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
+                                       class="inline-flex items-center gap-x-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                                        Create Database Node
+                                    </a>
+                                {% elif integration.type == "saas" %}
+                                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'objects' %}"
+                                       class="inline-flex items-center gap-x-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                                        Create {{ integration.name }} Node
+                                    </a>
+                                {% else %}
+                                    {% if integration.code != "upcloud" and integration.code != "oracle" %}
+                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
+                                           class="inline-flex items-center gap-x-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                                            Create Server Node
+                                        </a>
+                                    {% endif %}
+                                    {% if integration.code != "aws_rds" %}
+                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
+                                           class="{% if integration.code != "upcloud" and integration.code != "oracle" %}ml-2{% endif %} inline-flex items-center gap-x-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                                            Create Volume Node
+                                        </a>
+                                    {% endif %}
+                                {% endif %}
+                            </td>
+                            <td class="px-5 py-3.5 whitespace-nowrap text-right">
+                                {% if connection.status == 5 %}
+                                    <button @click="resumeConnection('{{ connection.id }}')" type="button"
+                                            class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
+                                        Undo
+                                    </button>
+                                {% else %}
+                                    <div class="relative inline-block text-left" x-data="{ open: false }"
+                                         @click.away="open = false">
+                                        <button @click="open = !open" type="button"
+                                                class="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                                aria-haspopup="true" :aria-expanded="open">
+                                            <span class="sr-only">Connection actions</span>
+                                            <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none"
+                                                 viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
+                                                 aria-hidden="true">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                      d="M12 6.75a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5Zm0 6a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5Zm0 6a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5Z"/>
+                                            </svg>
+                                        </button>
+                                        <div x-show="open" @click="open = false" style="display: none;"
+                                             x-transition:enter="transition ease-out duration-100"
+                                             x-transition:enter-start="transform opacity-0 scale-95"
+                                             x-transition:enter-end="transform opacity-100 scale-100"
+                                             x-transition:leave="transition ease-in duration-75"
+                                             x-transition:leave-start="transform opacity-100 scale-100"
+                                             x-transition:leave-end="transform opacity-0 scale-95"
+                                             class="absolute right-0 z-20 mt-2 w-44 origin-top-right rounded-xl bg-white py-1 shadow-lifted ring-1 ring-slate-900/5 focus:outline-none"
+                                             role="menu" aria-orientation="vertical">
+                                            <button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'modify')"
+                                                    type="button" role="menuitem"
+                                                    class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50">
+                                                Modify
+                                            </button>
+                                            <button @click="validateConnection('{{ connection.id }}', '{{ connection.location.id }}')"
+                                                    type="button" role="menuitem"
+                                                    class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50">
+                                                Validate
+                                            </button>
+                                            <a target="_blank" role="menuitem"
+                                               href="{% url 'console:log:index' %}?integration={{ connection.id }}"
+                                               class="block px-4 py-2 text-sm text-slate-700 transition-colors hover:bg-slate-50">
+                                                Logs
+                                            </a>
+                                            {% if integration.code != "google_cloud" %}
+                                                <button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'copy')"
+                                                        type="button" role="menuitem"
+                                                        class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50">
+                                                    Copy
                                                 </button>
-                                            {% else %}
-                                                <span class="relative z-0 inline-flex shadow-xs rounded-md">
-                                                  <button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'modify')"
-                                                          type="button" class="relative inline-flex items-center px-2.5 py-1.5 rounded-l-md border border-gray-300 bg-white text-sm font-medium
-                                                  text-gray-700 hover:bg-gray-50
-                                                  focus:z-10
-                                                  focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                    Modify
-                                                  </button>
-                                                   <button @click="validateConnection('{{ connection.id }}', '{{ connection.location.id }}')"
-                                                           type="button"
-                                                           class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                        Validate
-                                                    </button>
-                                                    <a target="_blank"
-                                                       href="{% url 'console:log:index' %}?integration={{ connection.id }}"
-                                                       class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                        Logs
-                                                    </a>
-                                                    {% if integration.code != "google_cloud" %}
-                                                        <button @click="openConnectionModal('{{ connection.id }}', '{{ connection.location.id }}', 'copy')"
-                                                                type="button"
-                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                            Copy
-                                                        </button>
-                                                    {% endif %}
-                                                    {% if connection.status == 1 %}
-                                                        <button @click="pauseConnection('{{ connection.id }}')"
-                                                                type="button"
-                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                        Pause
-                                                    </button>
-                                                    {% elif connection.status == 4 %}
-                                                        <button @click="resumeConnection('{{ connection.id }}')"
-                                                                type="button"
-                                                                class="-ml-px relative inline-flex items-center px-2.5 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                        Resume
-                                                    </button>
-                                                    {% endif %}
-                                                    <button @click="deleteConnection('{{ connection.id }}')"
-                                                            type="button"
-                                                            class="-ml-px relative inline-flex items-center px-2.5 py-1.5 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:z-10
-                                                      focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
-                                                        Delete
-                                                    </button>
-                                            </span>
                                             {% endif %}
-                                        </td>
-                                    </tr>
-                                {% endfor %}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
+                                            {% if connection.status == 1 %}
+                                                <button @click="pauseConnection('{{ connection.id }}')"
+                                                        type="button" role="menuitem"
+                                                        class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50">
+                                                    Pause
+                                                </button>
+                                            {% elif connection.status == 4 %}
+                                                <button @click="resumeConnection('{{ connection.id }}')"
+                                                        type="button" role="menuitem"
+                                                        class="block w-full px-4 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50">
+                                                    Resume
+                                                </button>
+                                            {% endif %}
+                                            <div class="my-1 border-t border-slate-100"></div>
+                                            <button @click="deleteConnection('{{ connection.id }}')"
+                                                    type="button" role="menuitem"
+                                                    class="block w-full px-4 py-2 text-left text-sm text-rose-600 transition-colors hover:bg-rose-50">
+                                                Delete
+                                            </button>
+                                        </div>
+                                    </div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
             </div>
         </div>
-        <nav class="border-t border-gray-200 px-4 flex items-center justify-between sm:px-0 mt-4">
-            <div class="-mt-px w-0 flex-1 flex">
+        <nav class="mt-6 flex items-center justify-between border-t border-slate-200 pt-4" aria-label="Pagination">
+            <div class="flex flex-1">
                 {% if page.has_previous %}
                     <a href="{% url 'console:setup:integration_open' integration.code %}?p_no={{ page.previous_page_number }}&p_size={{ page.paginator.per_page }}&#section-nodes"
-                       class="border-t-2 border-transparent pt-4 pr-1 inline-flex items-center text-sm font-medium text-gray-700 hover:text-gray-700 hover:border-gray-300">
-                        <!-- Heroicon name: solid/arrow-narrow-left -->
-                        <svg class="mr-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
+                       class="inline-flex items-center gap-x-1.5 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
+                        <svg class="h-4 w-4 text-slate-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
                              fill="currentColor" aria-hidden="true">
                             <path fill-rule="evenodd"
                                   d="M7.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l2.293 2.293a1 1 0 010 1.414z"
@@ -221,31 +237,29 @@
                     </a>
                 {% endif %}
             </div>
-            <div class="hidden md:-mt-px md:flex">
+            <div class="hidden md:flex md:items-center md:gap-x-1">
                 {% for page_no in elided_page_range %}
-                    <!-- Current: "border-indigo-500 text-indigo-600", Default: "border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300" -->
                     {% if page_no == "…" %}
-                        <a class="{% if page.number ==  page_no %}border-indigo-500 text-indigo-600{% else %}border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300{% endif %} border-t-2 pt-4 px-4 inline-flex items-center text-sm font-medium">
+                        <span class="{% if page.number ==  page_no %}text-indigo-600{% else %}text-slate-400{% endif %} px-3 py-2 text-sm font-medium">
                             {{ page_no }}
-                        </a>
+                        </span>
                     {% else %}
                         <a href="{% url 'console:setup:integration_open' integration.code %}?p_no={{ page_no }}&p_size={{ page.paginator.per_page }}&#section-nodes"
-                           class="{% if page.number ==  page_no %}border-indigo-500 text-indigo-600{% else %}border-transparent text-gray-700 hover:text-gray-700 hover:border-gray-300{% endif %} border-t-2 pt-4 px-4 inline-flex items-center text-sm font-medium">
+                           class="{% if page.number ==  page_no %}bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-indigo-600/20{% else %}text-slate-600 hover:bg-slate-50{% endif %} inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium transition-colors">
                             {{ page_no }}
                         </a>
                     {% endif %}
                 {% endfor %}
             </div>
-            <div class="-mt-px w-0 flex-1 flex justify-end">
+            <div class="flex flex-1 justify-end">
                 {% if page.has_next %}
                     <a href="{% url 'console:setup:integration_open' integration.code %}?p_no={{ page.next_page_number }}&p_size={{ page.paginator.per_page }}&#section-nodes"
-                       class="border-t-2 border-transparent pt-4 pl-1 inline-flex items-center text-sm font-medium text-gray-700 hover:text-gray-700 hover:border-gray-300">
+                       class="inline-flex items-center gap-x-1.5 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
                         Next
-                        <!-- Heroicon name: solid/arrow-narrow-right -->
-                        <svg class="ml-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
+                        <svg class="h-4 w-4 text-slate-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
                              fill="currentColor" aria-hidden="true">
                             <path fill-rule="evenodd"
-                                  d="M12.293 5.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-2.293-2.293a1 1 0 010-1.414z"
+                                  d="M12.293 5.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-2.293-2.293a1 1 0 010 1.414z"
                                   clip-rule="evenodd"></path>
                         </svg>
                     </a>
@@ -254,56 +268,69 @@
         </nav>
 
     {% else %}
-        <div class="bg-gray-50 mt-10">
-            <div class="max-w-2xl mx-auto py-12 px-4 sm:px-6 sm:py-12 lg:max-w-7xl lg:px-8 rounded-full">
-                <div class="max-w-4xl">
-                    <h2 class="text-4xl font-extrabold tracking-tight text-gray-700">Setup your
-                        first {{ integration.name }} Integration!</h2>
-                    {% if integration.code == "database" %}
-                        <p class="mt-4 text-gray-700">
-                            We support backup automation of MySQL, MariaDB and PostgreSQL <span
-                                class="font-medium text-indigo-600 hover:text-indigo-500">databases</span> and <span
-                                class="font-medium text-indigo-600 hover:text-indigo-500">tables</span>.
-
-                        </p>
-                    {% elif integration.code == "website" %}
-                        <p class="mt-4 text-gray-700">
-                            We support backup automation of SFTP, FTP and FTPS <span
-                                class="font-medium text-indigo-600 hover:text-indigo-500">web/file servers</span>.
-
-                        </p>
-                    {% elif integration.code == "wordpress" %}
-                        <p class="mt-4 text-gray-700">
-                            We support backup automation of {{ integration.name }} <span
-                                class="font-medium text-indigo-600 hover:text-indigo-500">full website backups</span>.
-
-                        </p>
-                    {% elif integration.code == "basecamp" %}
-                        <p class="mt-4 text-gray-700">
-                            We support backup automation of <span
-                                class="font-medium text-indigo-600 hover:text-indigo-500">any data available through {{ integration.name }} public APIs.</span>
-
-                        </p>
-                    {% else %}
-                        <p class="mt-4 text-gray-700">
-                            We support backup automation of {{ integration.name }} <span
-                                class="font-medium text-indigo-600 hover:text-indigo-500">servers</span> and <span
-                                class="font-medium text-indigo-600 hover:text-indigo-500">volumes</span>.
-
-                        </p>
-                    {% endif %}
+        <div class="mt-8 overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5 shadow-soft">
+            <div class="px-6 py-12 text-center sm:px-12">
+                <div class="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-50 ring-1 ring-inset ring-indigo-600/10">
+                    <img class="max-h-8" src="{{ STATIC_URL }}{{ integration.image }}"
+                         alt="{{ integration.name }} Backups">
                 </div>
-                <div class="grid grid-cols-1 gap-y-12 sm:grid-cols-2 sm:gap-x-6 lg:grid-cols-4 lg:gap-x-8  mt-10">
+                <h2 class="mt-5 text-2xl font-bold tracking-tight text-slate-900">Setup your
+                    first {{ integration.name }} Integration</h2>
+                {% if integration.code == "database" %}
+                    <p class="mx-auto mt-2 max-w-xl text-sm text-slate-500">
+                        We support backup automation of MySQL, MariaDB and PostgreSQL <span
+                            class="font-medium text-slate-700">databases</span> and <span
+                            class="font-medium text-slate-700">tables</span>.
+
+                    </p>
+                {% elif integration.code == "website" %}
+                    <p class="mx-auto mt-2 max-w-xl text-sm text-slate-500">
+                        We support backup automation of SFTP, FTP and FTPS <span
+                            class="font-medium text-slate-700">web/file servers</span>.
+
+                    </p>
+                {% elif integration.code == "wordpress" %}
+                    <p class="mx-auto mt-2 max-w-xl text-sm text-slate-500">
+                        We support backup automation of {{ integration.name }} <span
+                            class="font-medium text-slate-700">full website backups</span>.
+
+                    </p>
+                {% elif integration.code == "basecamp" %}
+                    <p class="mx-auto mt-2 max-w-xl text-sm text-slate-500">
+                        We support backup automation of <span
+                            class="font-medium text-slate-700">any data available through {{ integration.name }} public APIs.</span>
+
+                    </p>
+                {% else %}
+                    <p class="mx-auto mt-2 max-w-xl text-sm text-slate-500">
+                        We support backup automation of {{ integration.name }} <span
+                            class="font-medium text-slate-700">servers</span> and <span
+                            class="font-medium text-slate-700">volumes</span>.
+
+                    </p>
+                {% endif %}
+                <div class="mt-6">
+                    <button @click="openConnectionModal(null, null, null,'{{ integration.code }}')" type="button"
+                            class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
+                        Setup {{ integration.name }} Integration
+                    </button>
+                </div>
+            </div>
+            <div class="border-t border-slate-100 px-6 py-8 sm:px-12">
+                <p class="text-xs font-semibold uppercase tracking-[0.16em] text-indigo-600">How it works</p>
+                <div class="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
                     <div>
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
-                        </svg>
-                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 ring-1 ring-inset ring-indigo-600/10">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+                            </svg>
+                        </div>
+                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
                             1. Setup {{ integration.name }} Integration
                         </h3>
-                        <p class="mt-2 text-sm text-gray-700">
+                        <p class="mt-1.5 text-sm text-slate-500">
                             {% if integration.code == "database" %}
                                 Connect {{ integration.name }} using standard database logins or using public/private
                                 keys method.
@@ -318,15 +345,17 @@
                     </div>
 
                     <div>
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
-                        </svg>
-                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 ring-1 ring-inset ring-indigo-600/10">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
+                            </svg>
+                        </div>
+                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
                             2. Link {{ integration.name }} Node
                         </h3>
-                        <p class="mt-2 text-sm text-gray-700">
+                        <p class="mt-1.5 text-sm text-slate-500">
                             {% if integration.code == "database" %}
                                 Create nodes with single or multiple databases or specific tables from the samedatabase.
                             {% elif integration.code == "website" %}
@@ -342,15 +371,17 @@
                     </div>
 
                     <div>
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                        </svg>
-                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 ring-1 ring-inset ring-indigo-600/10">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                            </svg>
+                        </div>
+                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
                             3. Setup Schedule
                         </h3>
-                        <p class="mt-2 text-sm text-gray-700">
+                        <p class="mt-1.5 text-sm text-slate-500">
                             {% if integration.code == "database" %}
                                 Automate backups of {{ integration.name }} nodes using schedule(s), and you can also
                                 create on-demand backups.
@@ -368,15 +399,17 @@
                     </div>
 
                     <div>
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 h-10 text-indigo-500" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
-                        </svg>
-                        <h3 class="mt-6 text-sm font-medium text-gray-700">
+                        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 ring-1 ring-inset ring-indigo-600/10">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600" fill="none"
+                                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path>
+                            </svg>
+                        </div>
+                        <h3 class="mt-4 text-sm font-semibold text-slate-900">
                             4. Setup Storage (optional)
                         </h3>
-                        <p class="mt-2 text-sm text-gray-700">
+                        <p class="mt-1.5 text-sm text-slate-500">
                             {% if integration.code == "website" %}
                                 Store backups on Free Storage included in your plan, or you can bring your storage
                                 as well.
@@ -407,7 +440,7 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100"
                  x-transition:leave-end="opacity-0"
-                 class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+                 class="fixed inset-0 bg-slate-900/60 transition-opacity" aria-hidden="true"></div>
 
             <div x-show="openConnection"
                  x-transition:enter="ease-out duration-300"
@@ -416,57 +449,66 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                  x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                 class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                 class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-2xl bg-white px-4 pt-5 pb-4 text-left shadow-lifted ring-1 ring-slate-900/5 transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-xl sm:p-6">
                 <div class="flex-1 overflow-y-auto">
-                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
-                        <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
-                             xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
-                                    stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor"
-                                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
+                    <div class="flex items-start justify-between gap-x-4">
+                        <div class="flex items-center gap-x-3">
+                            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 ring-1 ring-inset ring-indigo-600/10">
+                                <svg x-show="loading" class="animate-spin h-5 w-5 text-indigo-600"
+                                     xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                            stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor"
+                                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
 
-                        <svg  x-show="!loading"  xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
-                        </svg>
+                                <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600"
+                                     fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                          d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+                                </svg>
 
-                    </div>
-                    <div x-show="!loading" class="mt-3 text-center sm:mt-5">
-                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
-                            {{ integration.name|title }} Integration
-                        </h3>
-
-                    </div>
-                    <div x-show="loading" class="mt-3 text-center sm:mt-5">
-                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
-                            Loading...
-                        </h3>
-                        <div class="mt-2">
-                            <p class="text-sm text-gray-700">
-                                Don't refresh page.
-                            </p>
+                            </div>
+                            <div>
+                                <h3 x-show="!loading" class="text-base font-semibold text-slate-900" id="modal-title">
+                                    {{ integration.name|title }} Integration
+                                </h3>
+                                <h3 x-show="loading" class="text-base font-semibold text-slate-900" id="modal-title">
+                                    Loading...
+                                </h3>
+                                <p x-show="loading" class="mt-0.5 text-xs text-slate-500">
+                                    Don't refresh page.
+                                </p>
+                            </div>
                         </div>
+                        <button @click="closeConnectionModal()" type="button" x-show="!loading"
+                                class="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                            <span class="sr-only">Close</span>
+                            <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                 stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/>
+                            </svg>
+                        </button>
                     </div>
                     <div x-show="!loading" class="mt-6 grid grid-cols-1 gap-y-6 gap-x-4 sm:grid-cols-6">
                         <div class="sm:col-span-6">
-                            <label for="name" class="block text-sm font-medium text-gray-700">
-                                Name  {% if "wordpress" in integration.code %}(<a target="_blank" class="text-indigo-600" href="https://support.backupsheep.com/docs/how-to-backup-wordpress">How to Backup WordPress</a>){% endif %}
+                            <label for="name" class="block text-sm font-medium text-slate-700">
+                                Name  {% if "wordpress" in integration.code %}(<a target="_blank" class="font-medium text-indigo-600 hover:text-indigo-500" href="https://support.backupsheep.com/docs/how-to-backup-wordpress">How to Backup WordPress</a>){% endif %}
 
                             </label>
                             <div class="mt-1">
                                 <input x-model="connection.name" type="text" name="name" id="name" autocomplete="name"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors?.name" class="mt-1 text-xs text-rose-600" id="name-error"
                                    x-text="connectionErrors?.name"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6">
-                            <label for="location" class="block text-sm font-medium text-gray-700">
+                            <label for="location" class="block text-sm font-medium text-slate-700">
                                 Backup Server
                             </label>
-                            <p class="mt-1 text-sm text-gray-700">
+                            <p class="mt-1 text-xs text-slate-500">
                                 This server will execute, compress and upload your backups. <span
                                     x-show="connection.location"><br/>You must whitelist IP <strong
                                     x-text="connection.location?.ip_address"></strong> and IPv6(if supported) <strong
@@ -475,15 +517,12 @@
                             <div class="relative mt-2">
                                 <button @click="toggleEndpointDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full cursor-default rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
-{#                                    <img :src="connection.location?.image_url" class="max-h-6 mr-2  float-left">#}
-
                                     <span class="block truncate"
                                           x-text="connection.location?.location||'--Choose Backup Server--'"></span>
                                     <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
-                                            <!-- Heroicon name: solid/selector -->
-                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                            <svg class="h-5 w-5 text-slate-400" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                               <path fill-rule="evenodd"
                                                     d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
@@ -501,26 +540,19 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
+                                        class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl bg-white py-1 text-sm shadow-lifted ring-1 ring-slate-900/5 focus:outline-none"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
-                                    <!--
-                                      Select option, manage highlight styles based on mouseenter/mouseleave and keyboard navigation.
-
-                                      Highlighted: "text-white bg-indigo-600", Not Highlighted: "text-gray-700"
-                                    -->
                                     <template x-for="(endpoint, index) in endpoints">
                                         <li
                                                 @click="connection.location = endpoint;toggleEndpointDropdown()"
                                                 @mouseenter="endpointActiveIndex = index"
                                                 @mouseleave="endpointActiveIndex = null"
-                                                :class="{ 'text-white bg-indigo-600': endpointActiveIndex === index, 'text-gray-700': !(endpointActiveIndex === index) }"
+                                                :class="{ 'text-white bg-indigo-600': endpointActiveIndex === index, 'text-slate-700': !(endpointActiveIndex === index) }"
                                                 class="cursor-default select-none relative py-2 pl-8 pr-4"
                                                 id="listbox-option-0" role="option">
                                                 <span class="font-normal block truncate">
-{#                                                    <img :src="endpoint?.image_url"#}
-{#                                                         class="max-h-6 mr-2  float-left">#}
                                                     <span
                                                         x-text="endpoint.location"></span>
                                                 </span>
@@ -530,7 +562,6 @@
                                                         x-show="endpoint.ip_address_v6"> &middot; IPv6: <span
                                                         x-text="endpoint.ip_address_v6"></span></span>
                                                 </span>
-
                                             <span
                                                     x-show="connection.location?.id === endpoint?.id"
                                                     :class="{ 'text-indigo-600': (connection.location?.id === endpoint?.id) && (endpointActiveIndex !== index), 'text-white': (!(connection.location === endpoint) || (endpointActiveIndex === index)) }"
@@ -546,58 +577,64 @@
                                     </template>
                                 </ul>
                             </div>
-                            <p x-show="connectionErrors?.location" class="mt-2 text-sm text-red-600" id="location-error"
+                            <p x-show="connectionErrors?.location" class="mt-1 text-xs text-rose-600" id="location-error"
                                x-text="connectionErrors?.location"></p>
                         </div>
 
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'wordpress'">
-                            <label for="url" class="block text-sm font-medium text-gray-700">
+                            <label for="url" class="block text-sm font-medium text-slate-700">
                                 WordPress URL
-                                {% if "wordpress" in integration.code %} (<a target="_blank" class="text-indigo-600" href="https://wordpress.org/plugins/backupsheep/">Download BackupSheep Plugin</a>){% endif %}
+                                {% if "wordpress" in integration.code %} (<a target="_blank" class="font-medium text-indigo-600 hover:text-indigo-500" href="https://wordpress.org/plugins/backupsheep/">Download BackupSheep Plugin</a>){% endif %}
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.url" type="text" name="url" id="url"
                                        autocomplete="url"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.url" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.url" class="mt-1 text-xs text-rose-600"
                                    id="url-error" x-text="connectionErrors.auth?.url"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'wordpress'">
-                            <label for="key" class="block text-sm font-medium text-gray-700">
-                                 <a class="text-indigo-700 cursor-pointer float-left" @click="copyToClipboard(selectedAuth.key)">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
-                                </svg>
-                            </a> WordPress Key (add this to BackupSheep plugin page)
+                            <label for="key" class="block text-sm font-medium text-slate-700">
+                                <span class="inline-flex items-center gap-x-1.5">
+                                    <a class="cursor-pointer text-indigo-600 hover:text-indigo-500"
+                                       @click="copyToClipboard(selectedAuth.key)">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none"
+                                             viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                  d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+                                        </svg>
+                                    </a>
+                                    WordPress Key (add this to BackupSheep plugin page)
+                                </span>
                             </label>
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.key" type="text" name="key" id="key"
                                        autocomplete="key"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.key" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.key" class="mt-1 text-xs text-rose-600"
                                    id="key-error" x-text="connectionErrors.auth?.key"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'wordpress'">
-                           <div class="rounded-md bg-blue-50 p-4">
+                           <div class="rounded-xl bg-sky-50 p-4 ring-1 ring-inset ring-sky-600/10">
                               <div class="flex">
                                 <div class="shrink-0">
-                                  <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                  <svg class="h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                     <path fill-rule="evenodd" d="M19 10.5a8.5 8.5 0 11-17 0 8.5 8.5 0 0117 0zM8.25 9.75A.75.75 0 019 9h.253a1.75 1.75 0 011.709 2.13l-.46 2.066a.25.25 0 00.245.304H11a.75.75 0 010 1.5h-.253a1.75 1.75 0 01-1.709-2.13l.46-2.066a.25.25 0 00-.245-.304H9a.75.75 0 01-.75-.75zM10 7a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
                                   </svg>
                                 </div>
                                 <div class="ml-3 flex-1 md:flex md:justify-between">
-                                  <p class="text-sm text-blue-700">
+                                  <p class="text-sm text-sky-700">
                                    If your website is password protected then add your
                                   user and password below.
                                       <br/><strong>This is not WordPress admin password. </strong>
                                   </p>
                                   <p class="mt-3 text-sm md:mt-0 md:ml-6">
-                                    <a target="_blank" href="https://support.backupsheep.com/docs/password-protected-wordpress-sites" class="whitespace-nowrap font-medium text-blue-700 hover:text-blue-600">
+                                    <a target="_blank" href="https://support.backupsheep.com/docs/password-protected-wordpress-sites" class="whitespace-nowrap font-medium text-sky-700 hover:text-sky-600">
                                       Learn More
                                       <span aria-hidden="true"> &rarr;</span>
                                     </a>
@@ -609,131 +646,128 @@
                         </div>
                         <div class="sm:col-span-3"
                              x-show="integrationCode === 'wordpress'">
-                            <label for="http_user" class="block text-sm font-medium text-gray-700">
-                                 <a class="text-indigo-700 cursor-pointer float-left" >
-                            </a>  User (not required)
+                            <label for="http_user" class="block text-sm font-medium text-slate-700">
+                                User (not required)
                             </label>
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.http_user" type="text" name="http_user" id="http_user"
                                        autocomplete="http_user"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.http_user" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.http_user" class="mt-1 text-xs text-rose-600"
                                    id="http_user-error" x-text="connectionErrors.auth?.http_user"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-3"
                              x-show="integrationCode === 'wordpress'">
-                            <label for="http_pass" class="block text-sm font-medium text-gray-700">
-                                 <a class="text-indigo-700 cursor-pointer float-left" >
-                            </a>  Password (not required)
+                            <label for="http_pass" class="block text-sm font-medium text-slate-700">
+                                Password (not required)
                             </label>
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.http_pass" type="text" name="http_pass" id="http_pass"
                                        autocomplete="http_pass"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.http_pass" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.http_pass" class="mt-1 text-xs text-rose-600"
                                    id="http_pass-error" x-text="connectionErrors.auth?.http_pass"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
-                            <label for="profile" class="block text-sm font-medium text-gray-700">
+                            <label for="profile" class="block text-sm font-medium text-slate-700">
                              Profile Name
                             </label>
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.profile" type="text" name="profile" id="profile"
                                        autocomplete="profile"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.profile" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.profile" class="mt-1 text-xs text-rose-600"
                                    id="profile-error" x-text="connectionErrors.auth?.profile"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
-                            <label for="user" class="block text-sm font-medium text-gray-700">
+                            <label for="user" class="block text-sm font-medium text-slate-700">
                              User
                             </label>
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.user" type="text" name="user" id="user"
                                        autocomplete="user"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.user" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.user" class="mt-1 text-xs text-rose-600"
                                    id="user-error" x-text="connectionErrors.auth?.user"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
-                            <label for="fingerprint" class="block text-sm font-medium text-gray-700">
+                            <label for="fingerprint" class="block text-sm font-medium text-slate-700">
                                Fingerprint
                             </label>
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.fingerprint" type="text" name="fingerprint" id="fingerprint"
                                        autocomplete="fingerprint"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.fingerprint" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.fingerprint" class="mt-1 text-xs text-rose-600"
                                    id="fingerprint-error" x-text="connectionErrors.auth?.fingerprint"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
-                            <label for="tenancy" class="block text-sm font-medium text-gray-700">
+                            <label for="tenancy" class="block text-sm font-medium text-slate-700">
                              Tenancy
                             </label>
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.tenancy" type="text" name="tenancy" id="tenancy"
                                        autocomplete="tenancy"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.tenancy" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.tenancy" class="mt-1 text-xs text-rose-600"
                                    id="tenancy-error" x-text="connectionErrors.auth?.tenancy"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6" x-show="integrationCode === 'oracle'">
-                            <label for="region" class="block text-sm font-medium text-gray-700">
+                            <label for="region" class="block text-sm font-medium text-slate-700">
                                 Region
                             </label>
                             <div class="mt-1">
                                 <input  x-model="selectedAuth.region" type="text" name="region" id="region"
                                        autocomplete="region"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.region" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.region" class="mt-1 text-xs text-rose-600"
                                    id="region-error" x-text="connectionErrors.auth?.region"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6"  x-show="integrationCode === 'oracle'">
-                            <label for="private_key" class="block text-sm font-medium text-gray-700">
+                            <label for="private_key" class="block text-sm font-medium text-slate-700">
                                 Private Key
                             </label>
                             <div class="mt-1">
                                         <textarea x-model="selectedAuth.private_key" id="private_key" name="private_key" rows="3"
-                                                  class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
-                                <p x-show="connectionErrors?.private_key" class="mt-2 text-sm text-red-600" id="private_key-error"
+                                                  class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"></textarea>
+                                <p x-show="connectionErrors?.private_key" class="mt-1 text-xs text-rose-600" id="private_key-error"
                                    x-text="connectionErrors?.private_key"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6"  x-show="integrationCode === 'google_cloud'">
-                            <label for="service_key" class="block text-sm font-medium text-gray-700">
+                            <label for="service_key" class="block text-sm font-medium text-slate-700">
                                 Service Key JSON
                             </label>
                             <div class="mt-1">
                                         <textarea x-model="selectedAuth.service_key" id="service_key" name="service_key" rows="3"
-                                                  class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
-                                <p x-show="connectionErrors?.auth?.service_key" class="mt-2 text-sm text-red-600" id="service_key-error"
+                                                  class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"></textarea>
+                                <p x-show="connectionErrors?.auth?.service_key" class="mt-1 text-xs text-rose-600" id="service_key-error"
                                    x-text="connectionErrors?.auth?.service_key"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6" x-show="selectAWSRegions">
-                            <label for="region" class="block text-sm font-medium text-gray-700">
+                            <label for="region" class="block text-sm font-medium text-slate-700">
                                 <span x-text="connection.integration?.name"></span> Region
                             </label>
                             <div class="relative mt-2">
                                 <button @click="toggleAWSRegionDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full cursor-default rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.region?.name||'--Choose AWS Region--'"></span>
                                     <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
-                                            <!-- Heroicon name: solid/selector -->
-                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                            <svg class="h-5 w-5 text-slate-400" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                               <path fill-rule="evenodd"
                                                     d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
@@ -751,7 +785,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
+                                        class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl bg-white py-1 text-sm shadow-lifted ring-1 ring-slate-900/5 focus:outline-none"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -761,7 +795,7 @@
                                                 @click="selectedAuth.region = region;toggleAWSRegionDropdown()"
                                                 @mouseenter="awsRegionActiveIndex = index"
                                                 @mouseleave="awsRegionActiveIndex = null"
-                                                :class="{ 'text-white bg-indigo-600': awsRegionActiveIndex === index, 'text-gray-700': !(awsRegionActiveIndex === index) }"
+                                                :class="{ 'text-white bg-indigo-600': awsRegionActiveIndex === index, 'text-slate-700': !(awsRegionActiveIndex === index) }"
                                                 class="cursor-default select-none relative py-2 pl-8 pr-4"
                                                 id="listbox-option-0" role="option">
                                                 <span class="font-normal block truncate">
@@ -783,102 +817,102 @@
                                     </template>
                                 </ul>
                             </div>
-                            <p x-show="connectionErrors?.region" class="mt-2 text-sm text-red-600" id="region-error"
+                            <p x-show="connectionErrors?.region" class="mt-1 text-xs text-rose-600" id="region-error"
                                x-text="connectionErrors?.region"></p>
                         </div>
 
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'aws' || integrationCode === 'aws_rds' || integrationCode === 'lightsail'">
-                            <label for="access_key" class="block text-sm font-medium text-gray-700">
+                            <label for="access_key" class="block text-sm font-medium text-slate-700">
                                 Access Key
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.access_key" type="text" name="access_key" id="access_key"
                                        autocomplete="access_key"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.access_key" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.access_key" class="mt-1 text-xs text-rose-600"
                                    id="access_key-error" x-text="connectionErrors.auth?.access_key"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'aws' || integrationCode === 'aws_rds' || integrationCode === 'lightsail'">
-                            <label for="secret_key" class="block text-sm font-medium text-gray-700">
+                            <label for="secret_key" class="block text-sm font-medium text-slate-700">
                                 Secret Key
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.secret_key" type="text" name="secret_key" id="secret_key"
                                        autocomplete="secret_key"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.secret_key" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.secret_key" class="mt-1 text-xs text-rose-600"
                                    id="secret_key-error" x-text="connectionErrors.auth?.secret_key"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6" x-show="integrationCode === 'aws'">
-                            <label for="backup_vault_name" class="block text-sm font-medium text-gray-700">
+                            <label for="backup_vault_name" class="block text-sm font-medium text-slate-700">
                                 AWS Backup Vault
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.backup_vault_name" type="text" name="backup_vault_name" id="backup_vault_name"
                                        placeholder="Default" autocomplete="off"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p class="mt-1 text-xs text-gray-500">Used for S3 and DynamoDB AWS Backup jobs.</p>
-                                <p x-show="connectionErrors.auth?.backup_vault_name" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p class="mt-1 text-xs text-slate-500">Used for S3 and DynamoDB AWS Backup jobs.</p>
+                                <p x-show="connectionErrors.auth?.backup_vault_name" class="mt-1 text-xs text-rose-600"
                                    x-text="connectionErrors.auth?.backup_vault_name"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6" x-show="integrationCode === 'aws'">
-                            <label for="backup_role_arn" class="block text-sm font-medium text-gray-700">
+                            <label for="backup_role_arn" class="block text-sm font-medium text-slate-700">
                                 AWS Backup IAM Role ARN (optional)
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.backup_role_arn" type="text" name="backup_role_arn" id="backup_role_arn"
                                        placeholder="Uses AWSBackupDefaultServiceRole when empty" autocomplete="off"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p class="mt-1 text-xs text-gray-500">The role needs AWS Backup and, for S3, the S3 backup/restore managed policies.</p>
-                                <p x-show="connectionErrors.auth?.backup_role_arn" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p class="mt-1 text-xs text-slate-500">The role needs AWS Backup and, for S3, the S3 backup/restore managed policies.</p>
+                                <p x-show="connectionErrors.auth?.backup_role_arn" class="mt-1 text-xs text-rose-600"
                                    x-text="connectionErrors.auth?.backup_role_arn"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6" x-show="integrationCode === 'upcloud'">
-                            <label for="username" class="block text-sm font-medium text-gray-700">
+                            <label for="username" class="block text-sm font-medium text-slate-700">
                                 API User Name
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.username" type="text" name="username" id="username"
                                        autocomplete="username"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.username" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.username" class="mt-1 text-xs text-rose-600"
                                    id="access_key-error" x-text="connectionErrors.auth?.username"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6" x-show="integrationCode === 'upcloud'">
-                            <label for="password" class="block text-sm font-medium text-gray-700">
+                            <label for="password" class="block text-sm font-medium text-slate-700">
                                 API User Password
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.password" type="text" name="password" id="password"
                                        autocomplete="password"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.password" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.password" class="mt-1 text-xs text-rose-600"
                                    id="password-error" x-text="connectionErrors.auth?.password"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'vultr' || integrationCode === 'hetzner' || integrationCode === 'digitalocean'">
-                            <label for="api_key" class="block text-sm font-medium text-gray-700">
+                            <label for="api_key" class="block text-sm font-medium text-slate-700">
                                 API Key (
-                                <a x-show="integrationCode === 'digitalocean'"
+                                <a x-show="integrationCode === 'digitalocean'" class="font-medium text-indigo-600 hover:text-indigo-500"
                                    href="https://docs.digitalocean.com/reference/api/create-personal-access-token/"
                                    target="_blank">create api key</a>
-                                <a x-show="integrationCode === 'hetzner'"
+                                <a x-show="integrationCode === 'hetzner'" class="font-medium text-indigo-600 hover:text-indigo-500"
                                    href="https://docs.hetzner.cloud/#getting-started" target="_blank">create api key</a>
-                                <a x-show="integrationCode === 'vultr'"
+                                <a x-show="integrationCode === 'vultr'" class="font-medium text-indigo-600 hover:text-indigo-500"
                                    href="https://www.vultr.com/api/#section/Authentication/API%20Key" target="_blank">create
                                     api key</a>
                                 )
@@ -886,39 +920,37 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.api_key" type="text" name="api_key" id="api_key"
                                        autocomplete="api_key"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.api_key" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.api_key" class="mt-1 text-xs text-rose-600"
                                    id="api_key-error" x-text="connectionErrors.auth?.api_key"></p>
                             </div>
                         </div>
 
-                        <!-- Website-->
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="database_name" class="block text-sm font-medium text-gray-700">
+                            <label for="database_name" class="block text-sm font-medium text-slate-700">
                                 Database Name
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.database_name" type="text" name="database_name"
                                        id="database_name" autocomplete="database_name"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.database_name" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.database_name" class="mt-1 text-xs text-rose-600"
                                    id="database_name-error" x-text="connectionErrors.auth?.database_name"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="region" class="block text-sm font-medium text-gray-700">
+                            <label for="region" class="block text-sm font-medium text-slate-700">
                                 Database Type
                             </label>
                             <div class="relative mt-2">
                                 <button @click="toggleDatabaseTypeDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full cursor-default rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.type?.name||'--Database Type--'"></span>
                                     <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
-                                            <!-- Heroicon name: solid/selector -->
-                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                            <svg class="h-5 w-5 text-slate-400" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                               <path fill-rule="evenodd"
                                                     d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
@@ -936,7 +968,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
+                                        class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl bg-white py-1 text-sm shadow-lifted ring-1 ring-slate-900/5 focus:outline-none"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -946,7 +978,7 @@
                                                 @click="selectedAuth.type = type; selectedAuth.version = null; toggleDatabaseTypeDropdown()"
                                                 @mouseenter="databaseTypeActiveIndex = index"
                                                 @mouseleave="databaseTypeActiveIndex = null"
-                                                :class="{ 'text-white bg-indigo-600': databaseTypeActiveIndex === index, 'text-gray-700': !(databaseTypeActiveIndex === index) }"
+                                                :class="{ 'text-white bg-indigo-600': databaseTypeActiveIndex === index, 'text-slate-700': !(databaseTypeActiveIndex === index) }"
                                                 class="cursor-default select-none relative py-2 pl-8 pr-4"
                                                 id="listbox-option-0" role="option">
                                                 <span class="font-normal block truncate">
@@ -968,24 +1000,23 @@
                                     </template>
                                 </ul>
                             </div>
-                            <p x-show="connectionErrors?.auth?.type" class="mt-2 text-sm text-red-600" id="region-error"
+                            <p x-show="connectionErrors?.auth?.type" class="mt-1 text-xs text-rose-600" id="region-error"
                                x-text="connectionErrors?.auth?.type"></p>
                         </div>
 
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="region" class="block text-sm font-medium text-gray-700">
+                            <label for="region" class="block text-sm font-medium text-slate-700">
                                 Database Version
                             </label>
                             <div class="relative mt-2">
                                 <button @click="toggleDatabaseVersionDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full cursor-default rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.version?.name||'--Database Version--'"></span>
                                     <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
-                                            <!-- Heroicon name: solid/selector -->
-                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                            <svg class="h-5 w-5 text-slate-400" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                               <path fill-rule="evenodd"
                                                     d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
@@ -1003,7 +1034,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
+                                        class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl bg-white py-1 text-sm shadow-lifted ring-1 ring-slate-900/5 focus:outline-none"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -1014,7 +1045,7 @@
                                                 x-show="version?.name?.includes(selectedAuth.type?.name)"
                                                 @mouseenter="databaseVersionActiveIndex = index"
                                                 @mouseleave="databaseVersionActiveIndex = null"
-                                                :class="{ 'text-white bg-indigo-600': databaseVersionActiveIndex === index, 'text-gray-700': !(databaseVersionActiveIndex === index) }"
+                                                :class="{ 'text-white bg-indigo-600': databaseVersionActiveIndex === index, 'text-slate-700': !(databaseVersionActiveIndex === index) }"
                                                 class="cursor-default select-none relative py-2 pl-8 pr-4"
                                                 id="listbox-option-0" role="option">
                                                 <span class="font-normal block truncate">
@@ -1036,36 +1067,36 @@
                                     </template>
                                 </ul>
                             </div>
-                            <p x-show="connectionErrors?.auth?.version" class="mt-2 text-sm text-red-600"
+                            <p x-show="connectionErrors?.auth?.version" class="mt-1 text-xs text-rose-600"
                                id="region-error" x-text="connectionErrors?.auth?.version"></p>
                         </div>
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="port" class="block text-sm font-medium text-gray-700">
+                            <label for="port" class="block text-sm font-medium text-slate-700">
                                 Database Port
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.port" type="text" name="port" id="port" autocomplete="port"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.port" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.port" class="mt-1 text-xs text-rose-600"
                                    id="port-error" x-text="connectionErrors.auth?.port"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6" x-show="integrationCode === 'database'">
-                            <label for="host" class="block text-sm font-medium text-gray-700">
+                            <label for="host" class="block text-sm font-medium text-slate-700">
                                 Database Hostname or IPv4 or IPv6
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.host"  x-on:change.debounce="awsRDSReplicaWarning()" type="text" name="host" id="host" autocomplete="host"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.host" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.host" class="mt-1 text-xs text-rose-600"
                                    id="host-error" x-text="connectionErrors.auth?.host"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6" x-show="integrationCode === 'database' && awsRDSReplicaWarning() === true">
-                            <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4">
+                            <div class="rounded-xl bg-amber-50 p-4 ring-1 ring-inset ring-amber-600/20">
                                 <div class="flex">
                                     <div class="shrink-0">
-                                        <svg class="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg"
+                                        <svg class="h-5 w-5 text-amber-500" xmlns="http://www.w3.org/2000/svg"
                                              viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                             <path fill-rule="evenodd"
                                                   d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
@@ -1073,50 +1104,50 @@
                                         </svg>
                                     </div>
                                     <div class="ml-3 flex-1 md:flex md:justify-between">
-                                        <p class="text-sm text-yellow-700">
+                                        <p class="text-sm text-amber-700">
                                             <strong> We recommend using master RDS server hostname to create backup</strong>. Using AWS RDS Read Replica server to create database backup may cause error "canceling statement due to conflict with recovery" and your
-                                            backup may fail. <a target="_blank" href="https://aws.amazon.com/premiumsupport/knowledge-center/rds-postgresql-error-conflict-recovery/#:~:text=This%20error%20might%20occur%20due,happening%20on%20the%20read%20replica"><strong>Learn More</strong></a>.
+                                            backup may fail. <a target="_blank" class="font-medium text-amber-800 hover:text-amber-700" href="https://aws.amazon.com/premiumsupport/knowledge-center/rds-postgresql-error-conflict-recovery/#:~:text=This%20error%20might%20occur%20due,happening%20on%20the%20read%20replica"><strong>Learn More</strong></a>.
                                         </p>
                                     </div>
                                 </div>
                             </div>
                         </div>
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="username" class="block text-sm font-medium text-gray-700">
+                            <label for="username" class="block text-sm font-medium text-slate-700">
                                 Database User
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.username" type="text" name="username" id="username"
                                        autocomplete="username"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.username" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.username" class="mt-1 text-xs text-rose-600"
                                    id="port-error" x-text="connectionErrors.auth?.username"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-3" x-show="integrationCode === 'database'">
-                            <label for="password" class="block text-sm font-medium text-gray-700">
+                            <label for="password" class="block text-sm font-medium text-slate-700">
                                 Database Password
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.password" type="text" name="password" id="password"
                                        autocomplete="password"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.password" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.password" class="mt-1 text-xs text-rose-600"
                                    id="port-error" x-text="connectionErrors.auth?.password"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' && (selectedAuth.type?.code===1 || selectedAuth.type?.code===2)">
                             <div class="mt-1">
-                                <div class="flex items-center justify-between">
+                                <div class="flex items-center justify-between gap-x-4">
                                           <span class="grow flex flex-col">
-                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Use SSL/TLS? (ssl-mode=PREFERRED)</span>
-                                            <span class="text-sm text-gray-700" id="availability-description">Only use this if your database server supports connection using SSL/TLS.</span>
+                                            <span class="text-sm font-medium text-slate-900" id="availability-label">Use SSL/TLS? (ssl-mode=PREFERRED)</span>
+                                            <span class="mt-0.5 text-xs text-slate-500" id="availability-description">Only use this if your database server supports connection using SSL/TLS.</span>
                                           </span>
                                     <button type="button"
                                             @click="toggleUseSSL()"
-                                            :class="{ 'bg-indigo-600': selectedAuth.use_ssl, 'bg-gray-200': !(selectedAuth.use_ssl) }"
-                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            :class="{ 'bg-indigo-600': selectedAuth.use_ssl, 'bg-slate-200': !(selectedAuth.use_ssl) }"
+                                            class="bg-slate-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.use_ssl, 'translate-x-0': !(selectedAuth.use_ssl) }"
@@ -1130,16 +1161,16 @@
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' && (selectedAuth.type?.code===1 || selectedAuth.type?.code===2)">
                             <div class="mt-1">
-                                <div class="flex items-center justify-between">
+                                <div class="flex items-center justify-between gap-x-4">
                                           <span class="grow flex flex-col">
-                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Include Stored Procedures?</span>
-                                            <span class="text-sm text-gray-700" id="availability-description">Include stored procedures, functions & triggers in backups.
+                                            <span class="text-sm font-medium text-slate-900" id="availability-label">Include Stored Procedures?</span>
+                                            <span class="mt-0.5 text-xs text-slate-500" id="availability-description">Include stored procedures, functions & triggers in backups.
                                                 Please ensure your database user has permissions; otherwise, the backup will fail.</span>
                                           </span>
                                     <button type="button"
                                             @click="toggleIncludeStoredProcedure()"
-                                            :class="{ 'bg-indigo-600': selectedAuth.include_stored_procedure, 'bg-gray-200': !(selectedAuth.include_stored_procedure) }"
-                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            :class="{ 'bg-indigo-600': selectedAuth.include_stored_procedure, 'bg-slate-200': !(selectedAuth.include_stored_procedure) }"
+                                            class="bg-slate-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.include_stored_procedure, 'translate-x-0': !(selectedAuth.include_stored_procedure) }"
@@ -1151,71 +1182,69 @@
                         </div>
 
 
-                        <!-- Website-->
                         <div class="sm:col-span-3" x-show="integrationCode === 'website'">
-                            <label for="host" class="block text-sm font-medium text-gray-700">
+                            <label for="host" class="block text-sm font-medium text-slate-700">
                                 Hostname or IPv4 or IPv6
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.host" type="text" name="host" id="host" autocomplete="host"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.host" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.host" class="mt-1 text-xs text-rose-600"
                                    id="host-error" x-text="connectionErrors.auth?.host"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-3" x-show="integrationCode === 'website'">
-                            <label for="port" class="block text-sm font-medium text-gray-700">
+                            <label for="port" class="block text-sm font-medium text-slate-700">
                                 Port
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.port" type="text" name="port" id="port" autocomplete="port"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.port" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.port" class="mt-1 text-xs text-rose-600"
                                    id="port-error" x-text="connectionErrors.auth?.port"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-3" x-show="integrationCode === 'website'">
-                            <label for="username" class="block text-sm font-medium text-gray-700">
+                            <label for="username" class="block text-sm font-medium text-slate-700">
                                 Username
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.username" type="text" name="username" id="username"
                                        autocomplete="username"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.username" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.username" class="mt-1 text-xs text-rose-600"
                                    id="username-error" x-text="connectionErrors.auth?.username"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-3"
                              x-show="integrationCode === 'website' && (!selectedAuth.use_public_key||selectedAuth.use_private_key)">
-                            <label for="password" class="block text-sm font-medium text-gray-700">
+                            <label for="password" class="block text-sm font-medium text-slate-700">
                                 <span x-show="selectedAuth.use_private_key===false||!selectedAuth.use_private_key">Password</span>
                                 <span x-show="selectedAuth.use_private_key===true">SSH Key Passphrase (optional)</span>
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.password" type="text" name="password" id="password"
                                        autocomplete="password"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.password" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.password" class="mt-1 text-xs text-rose-600"
                                    id="password-error" x-text="connectionErrors.auth?.password"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-3" x-show="integrationCode === 'website'">
-                            <label for="protocol" class="block text-sm font-medium text-gray-700">
+                            <label for="protocol" class="block text-sm font-medium text-slate-700">
                                 Protocol
                             </label>
                             <div class="relative mt-2">
                                 <button @click="toggleProtocolDropdown()"
                                         type="button"
-                                        class="relative w-full bg-white border border-gray-300 rounded-md shadow-xs pl-3 pr-10 py-2 text-left cursor-default focus:outline-hidden focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        class="relative w-full cursor-default rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-left shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 sm:text-sm"
                                         aria-haspopup="listbox" aria-expanded="true" aria-labelledby="listbox-label">
                                     <span class="block truncate"
                                           x-text="selectedAuth.protocol?.name||'--Server Protocol--'"></span>
                                     <span class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
-                                            <!-- Heroicon name: solid/selector -->
-                                            <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg"
+                                            <svg class="h-5 w-5 text-slate-400" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                               <path fill-rule="evenodd"
                                                     d="M10 3a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L10 5.414 7.707 7.707a1 1 0 01-1.414-1.414l3-3A1 1 0 0110 3zm-3.707 9.293a1 1 0 011.414 0L10 14.586l2.293-2.293a1 1 0 011.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
@@ -1233,7 +1262,7 @@
                                         x-transition:leave="transition ease-in duration-100"
                                         x-transition:leave-start="opacity-100"
                                         x-transition:leave-end="opacity-0"
-                                        class="absolute z-10 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-hidden sm:text-sm"
+                                        class="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-xl bg-white py-1 text-sm shadow-lifted ring-1 ring-slate-900/5 focus:outline-none"
                                         tabindex="-1"
                                         role="listbox"
                                         aria-labelledby="listbox-label" aria-activedescendant="listbox-option-3">
@@ -1243,7 +1272,7 @@
                                                 @click="selectedAuth.protocol = protocol;toggleProtocolDropdown()"
                                                 @mouseenter="protocolActiveIndex = index"
                                                 @mouseleave="protocolActiveIndex = null"
-                                                :class="{ 'text-white bg-indigo-600': protocolActiveIndex === index, 'text-gray-700': !(protocolActiveIndex === index) }"
+                                                :class="{ 'text-white bg-indigo-600': protocolActiveIndex === index, 'text-slate-700': !(protocolActiveIndex === index) }"
                                                 class="cursor-default select-none relative py-2 pl-8 pr-4"
                                                 id="listbox-option-0" role="option">
                                                 <span class="font-normal block truncate">
@@ -1265,19 +1294,19 @@
                                     </template>
                                 </ul>
                             </div>
-                            <p x-show="connectionErrors.auth?.protocol" class="mt-2 text-sm text-red-600"
+                            <p x-show="connectionErrors.auth?.protocol" class="mt-1 text-xs text-rose-600"
                                id="region-error" x-text="connectionErrors.auth?.protocol"></p>
                         </div>
                         <div class="sm:col-span-3"
                              x-show="integrationCode === 'website' && selectedAuth.protocol?.name === 'FTPS'">
-                            <label for="protocol" class="block text-sm font-medium text-gray-700">
+                            <label for="protocol" class="block text-sm font-medium text-slate-700">
                                 Use Explicit SSL
                             </label>
                             <div class="relative mt-3">
                                 <button type="button"
                                         @click="selectedAuth.ftps_use_explicit_ssl = !selectedAuth.ftps_use_explicit_ssl; selectedAuth.use_private_key=false;"
-                                        :class="{ 'bg-indigo-600': selectedAuth.ftps_use_explicit_ssl, 'bg-gray-200': !(selectedAuth.ftps_use_explicit_ssl) }"
-                                        class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                        :class="{ 'bg-indigo-600': selectedAuth.ftps_use_explicit_ssl, 'bg-slate-200': !(selectedAuth.ftps_use_explicit_ssl) }"
+                                        class="bg-slate-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                         role="switch" aria-checked="false" aria-labelledby="availability-label"
                                         aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.ftps_use_explicit_ssl, 'translate-x-0': !(selectedAuth.ftps_use_explicit_ssl) }"
@@ -1285,33 +1314,33 @@
                                                   class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                 </button>
                             </div>
-                            <p x-show="connectionErrors.auth?.protocol" class="mt-2 text-sm text-red-600"
+                            <p x-show="connectionErrors.auth?.protocol" class="mt-1 text-xs text-rose-600"
                                id="region-error" x-text="connectionErrors.auth?.protocol"></p>
                         </div>
                         <div class="sm:col-span-3"
                              x-show="integrationCode === 'website' && selectedAuth.protocol?.name === 'FTPS'">
-                            <label class="block text-sm font-medium text-gray-700">
+                            <label class="block text-sm font-medium text-slate-700">
                                 Verify SSL certificate
                             </label>
                             <div class="relative mt-3">
                                 <button type="button"
                                         @click="selectedAuth.verify_ssl = !(selectedAuth.verify_ssl !== false)"
-                                        :class="{ 'bg-indigo-600': selectedAuth.verify_ssl !== false, 'bg-gray-200': selectedAuth.verify_ssl === false }"
-                                        class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                        :class="{ 'bg-indigo-600': selectedAuth.verify_ssl !== false, 'bg-slate-200': selectedAuth.verify_ssl === false }"
+                                        class="bg-slate-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                         role="switch" aria-checked="false">
                                             <span :class="{ 'translate-x-5': selectedAuth.verify_ssl !== false, 'translate-x-0': selectedAuth.verify_ssl === false }"
                                                   aria-hidden="true"
                                                   class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                 </button>
                             </div>
-                            <p class="mt-2 text-xs text-gray-500">Turn off for self-signed or mismatched certificates.</p>
+                            <p class="mt-1 text-xs text-slate-500">Turn off for self-signed or mismatched certificates.</p>
                         </div>
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'website' && selectedAuth.protocol?.name === 'FTPS'">
-                            <div class="rounded-md bg-blue-50 p-4">
+                            <div class="rounded-xl bg-sky-50 p-4 ring-1 ring-inset ring-sky-600/10">
                                 <div class="flex">
                                     <div class="shrink-0">
-                                        <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                        <svg class="h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg"
                                              viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                             <path fill-rule="evenodd"
                                                   d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
@@ -1319,7 +1348,7 @@
                                         </svg>
                                     </div>
                                     <div class="ml-3 flex-1 md:flex md:justify-between">
-                                        <p class="text-sm text-blue-700">Depending on your host, you may need to
+                                        <p class="text-sm text-sky-700">Depending on your host, you may need to
                                             enable<br/> <strong>Use Explicit SSL</strong> option on the integration for
                                             the backups to work correctly. If your backup zip
                                             folder is empty, try enabling <strong>Use Explicit SSL</strong>.</p>
@@ -1328,26 +1357,23 @@
                             </div>
                         </div>
 
-                        <!-- Website and Database-->
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
-                            <div class="mt-1">
-                                <hr/>
-                            </div>
+                            <div class="mt-1 border-t border-slate-100"></div>
                         </div>
 
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="mt-1">
-                                <div class="flex items-center justify-between">
+                                <div class="flex items-center justify-between gap-x-4">
                                           <span class="grow flex flex-col">
-                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Use Our Public Key?</span>
-                                            <span class="text-sm text-gray-700" id="availability-description">Use the public-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
+                                            <span class="text-sm font-medium text-slate-900" id="availability-label">Use Our Public Key?</span>
+                                            <span class="mt-0.5 text-xs text-slate-500" id="availability-description">Use the public-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
                                           </span>
                                     <button type="button"
                                             @click="selectedAuth.use_public_key = !selectedAuth.use_public_key; selectedAuth.use_private_key=false;"
-                                            :class="{ 'bg-indigo-600': selectedAuth.use_public_key, 'bg-gray-200': !(selectedAuth.use_public_key) }"
-                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            :class="{ 'bg-indigo-600': selectedAuth.use_public_key, 'bg-slate-200': !(selectedAuth.use_public_key) }"
+                                            class="bg-slate-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.use_public_key, 'translate-x-0': !(selectedAuth.use_public_key) }"
@@ -1355,11 +1381,11 @@
                                                   class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
                                     </button>
                                 </div>
-                                <div class="rounded-md bg-blue-50 p-4 mt-3 mb-3"
+                                <div class="rounded-xl bg-sky-50 p-4 ring-1 ring-inset ring-sky-600/10 mt-3 mb-3"
                                      x-show="(selectedAuth.use_public_key===true)">
                                     <div class="flex">
                                         <div class="shrink-0">
-                                            <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                            <svg class="h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                                 <path fill-rule="evenodd"
                                                       d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
@@ -1367,20 +1393,20 @@
                                             </svg>
                                         </div>
                                         <div class="ml-3 flex-1 md:flex md:justify-between">
-                                            <p class="text-sm text-blue-700">
+                                            <p class="text-sm text-sky-700">
                                                 Use the following Linux bash command to add the public key to your SSH
                                                 user. Please make sure you log in as a user before running this command.
                                             </p>
                                         </div>
                                     </div>
                                 </div>
-                                <code class="block wrap-break-word whitespace-normal overflow-x-scroll prose bg-indigo-500 text-white p-2 mt-3 rounded-lg"
+                                <code class="mt-3 block overflow-x-auto whitespace-pre-wrap break-words rounded-xl bg-slate-900 p-3 font-mono text-xs leading-5 text-slate-100"
                                       x-show="(selectedAuth.use_public_key===true)">
                                     echo -e 'ssh-rsa
                                     AAAAB3NzaC1yc2EAAAADAQABAAABAQC4PG+UeogbJNjvqNOXHK6TsRcE+Zd7hU67qI5Kelt/jpim/kneW1R6lTD9X39EwYGJxjXG6cZkfio3mEFpVmciKWpT9x9jKMvEQGSupzlhU7qSaFIbf1jtpWlPKs686BsJwfkFrUMk2jtaB/GIcRp39UyZB9heoqsgdPwNu2R6uToCjSmZGgg3dMl5Uwis4obu+NeLDl9r6E9LdwXTV3jJI+ZAn1Ju3S7WOXaG+sNLcs+sPMwBPNyLkHEUbJ0XrEHnWhamcm4tgrNlzv2oV2ysS4qCPGZYLari0nrl43MJK+h5YUeAAqHih9zneIN2Gh45rQwBQcOt37a1T993klDh
                                     backupsheep.com' >> ~/.ssh/authorized_keys
                                 </code>
-                                <code class="block wrap-break-word whitespace-normal overflow-x-scroll prose bg-indigo-500 text-white p-2 mt-3 rounded-lg"
+                                <code class="mt-3 block overflow-x-auto whitespace-pre-wrap break-words rounded-xl bg-slate-900 p-3 font-mono text-xs leading-5 text-slate-100"
                                       x-show="(selectedAuth.use_public_key===true)">
                                     chmod 0600 ~/.ssh/authorized_keys
                                 </code>
@@ -1389,16 +1415,16 @@
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="mt-1">
-                                <div class="flex items-center justify-between">
+                                <div class="flex items-center justify-between gap-x-4">
                                           <span class="grow flex flex-col">
-                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Use Your Private Key?</span>
-                                            <span class="text-sm text-gray-700"
+                                            <span class="text-sm font-medium text-slate-900" id="availability-label">Use Your Private Key?</span>
+                                            <span class="mt-0.5 text-xs text-slate-500"
                                                   id="availability-description">Use the private-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
                                           </span>
                                     <button type="button"
                                             @click="selectedAuth.use_private_key = !selectedAuth.use_private_key; selectedAuth.use_public_key=false;"
-                                            :class="{ 'bg-indigo-600': selectedAuth.use_private_key, 'bg-gray-200': !(selectedAuth.use_private_key) }"
-                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            :class="{ 'bg-indigo-600': selectedAuth.use_private_key, 'bg-slate-200': !(selectedAuth.use_private_key) }"
+                                            class="bg-slate-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.use_private_key, 'translate-x-0': !(selectedAuth.use_private_key) }"
@@ -1409,9 +1435,9 @@
                                 <textarea x-model="selectedAuth.private_key" id="private_key" name="private_key"
                                           rows="3"
                                           x-show="(selectedAuth.use_private_key===true)"
-                                          class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md mt-3"></textarea>
+                                          class="mt-3 block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"></textarea>
                                 <p x-show="connectionErrors.auth?.private_key && selectedAuth.use_private_key===true"
-                                   class="mt-2 text-sm text-red-600" id="notes-error"
+                                   class="mt-1 text-xs text-rose-600" id="notes-error"
                                    x-text="connectionErrors.auth?.private_key"></p>
 
                             </div>
@@ -1419,16 +1445,16 @@
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="mt-1">
-                                <div class="flex items-center justify-between">
+                                <div class="flex items-center justify-between gap-x-4">
                                           <span class="grow flex flex-col">
-                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Use legacy SHA-1 Key Verification?</span>
-                                            <span class="text-sm text-gray-700"
+                                            <span class="text-sm font-medium text-slate-900" id="availability-label">Use legacy SHA-1 Key Verification?</span>
+                                            <span class="mt-0.5 text-xs text-slate-500"
                                                   id="availability-description">If your systems do not support SHA-2 variants of RSA key verification algorithms.</span>
                                           </span>
                                     <button type="button"
                                             @click="selectedAuth.flag_use_sha1_key_verification = !selectedAuth.flag_use_sha1_key_verification;"
-                                            :class="{ 'bg-indigo-600': selectedAuth.flag_use_sha1_key_verification, 'bg-gray-200': !(selectedAuth.flag_use_sha1_key_verification) }"
-                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            :class="{ 'bg-indigo-600': selectedAuth.flag_use_sha1_key_verification, 'bg-slate-200': !(selectedAuth.flag_use_sha1_key_verification) }"
+                                            class="bg-slate-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.flag_use_sha1_key_verification, 'translate-x-0': !(selectedAuth.flag_use_sha1_key_verification) }"
@@ -1442,56 +1468,54 @@
 
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
-                            <div class="mt-1">
-                                <hr/>
-                            </div>
+                            <div class="mt-1 border-t border-slate-100"></div>
                         </div>
 
                         <div class="sm:col-span-3"
                              x-show="(integrationCode === 'database') && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
-                            <label for="ssh_host" class="block text-sm font-medium text-gray-700">
+                            <label for="ssh_host" class="block text-sm font-medium text-slate-700">
                                 SSH Server Address
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.ssh_host" type="text" name="ssh_host" id="ssh_host"
                                        autocomplete="ssh_host"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.ssh_host" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.ssh_host" class="mt-1 text-xs text-rose-600"
                                    id="ssh_host-error" x-text="connectionErrors.auth?.ssh_host"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-3"
                              x-show="(integrationCode === 'database') && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
-                            <label for="ssh_ssh_port" class="block text-sm font-medium text-gray-700">
+                            <label for="ssh_ssh_port" class="block text-sm font-medium text-slate-700">
                                 SSH Server Port
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.ssh_port" type="text" name="ssh_port" id="ssh_port"
                                        autocomplete="ssh_port"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.ssh_port" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.ssh_port" class="mt-1 text-xs text-rose-600"
                                    id="ssh_port-error" x-text="connectionErrors.auth?.ssh_port"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-3"
                              x-show="(integrationCode === 'database') && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
-                            <label for="ssh_username" class="block text-sm font-medium text-gray-700">
+                            <label for="ssh_username" class="block text-sm font-medium text-slate-700">
                                 SSH User
                             </label>
                             <div class="mt-1">
                                 <input x-model="selectedAuth.ssh_username" type="text" name="ssh_username"
                                        id="ssh_username" autocomplete="ssh_username"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.ssh_username" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.ssh_username" class="mt-1 text-xs text-rose-600"
                                    id="ssh_username-error" x-text="connectionErrors.auth?.ssh_username"></p>
                             </div>
                         </div>
 
                         <div class="sm:col-span-3"
                              x-show="(integrationCode === 'database') && (selectedAuth.use_private_key===true)">
-                            <label for="ssh_password" class="block text-sm font-medium text-gray-700">
+                            <label for="ssh_password" class="block text-sm font-medium text-slate-700">
                                 <span x-show="selectedAuth.use_private_key===false||!selectedAuth.use_private_key">SSH User Password <span
                                         x-show="selectedAuth.use_public_key===true">(optional)</span></span>
                                 <span x-show="selectedAuth.use_private_key===true">SSH Key Passphrase (optional)</span>
@@ -1499,31 +1523,28 @@
                             <div class="mt-1">
                                 <input x-model="selectedAuth.ssh_password" type="text" name="ssh_port" id="ssh_port"
                                        autocomplete="ssh_password"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="connectionErrors.auth?.ssh_password" class="mt-2 text-sm text-red-600"
+                                       class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                                <p x-show="connectionErrors.auth?.ssh_password" class="mt-1 text-xs text-rose-600"
                                    id="ssh_port-error" x-text="connectionErrors.auth?.ssh_password"></p>
                             </div>
                         </div>
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
-                            <div class="mt-1">
-                                <hr/>
-                            </div>
+                            <div class="mt-1 border-t border-slate-100"></div>
                         </div>
 
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' && (selectedAuth.use_public_key===true || selectedAuth.use_private_key===true)">
                             <div class="mt-1">
-                                <!-- This example requires Tailwind CSS v2.0+ -->
-                                <div class="flex items-center justify-between">
+                                <div class="flex items-center justify-between gap-x-4">
                                           <span class="grow flex flex-col">
-                                            <span class="text-sm font-medium text-gray-700" id="availability-label">Multi-Database User?</span>
-                                            <span class="text-sm text-gray-700" id="availability-description">If you use the same user for multiple databases, it's good to enable this option.</span>
+                                            <span class="text-sm font-medium text-slate-900" id="availability-label">Multi-Database User?</span>
+                                            <span class="mt-0.5 text-xs text-slate-500" id="availability-description">If you use the same user for multiple databases, it's good to enable this option.</span>
                                           </span>
                                     <button type="button"
                                             @click="selectedAuth.all_databases = !selectedAuth.all_databases;"
-                                            :class="{ 'bg-indigo-600': selectedAuth.all_databases, 'bg-gray-200': !(selectedAuth.all_databases) }"
-                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                            :class="{ 'bg-indigo-600': selectedAuth.all_databases, 'bg-slate-200': !(selectedAuth.all_databases) }"
+                                            class="bg-slate-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                                             role="switch" aria-checked="false" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.all_databases, 'translate-x-0': !(selectedAuth.all_databases) }"
@@ -1535,10 +1556,10 @@
                             </div>
 
                             <div class="mt-3" x-show="selectedAuth.type?.name === 'PostgreSQL'">
-                                <div class="rounded-md bg-blue-50 p-4">
+                                <div class="rounded-xl bg-sky-50 p-4 ring-1 ring-inset ring-sky-600/10">
                                     <div class="flex">
                                         <div class="shrink-0">
-                                            <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                            <svg class="h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                                 <path fill-rule="evenodd"
                                                       d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
@@ -1546,14 +1567,14 @@
                                             </svg>
                                         </div>
                                         <div class="ml-3 flex-1 md:flex md:justify-between">
-                                            <p class="text-sm text-blue-700">Please make sure that <strong>psql</strong>
+                                            <p class="text-sm text-sky-700">Please make sure that <strong>psql</strong>
                                                 is installed on your SSH server and <strong>pg_dump</strong> version
                                                 must be equal or higher than database server
                                                 version</p>
                                             <p class="mt-3 text-sm md:mt-0 md:ml-6">
                                                 <a target="_blank"
                                                    href="https://support.backupsheep.com/docs/requirements-for-database-backup-using-ssh"
-                                                   class="whitespace-nowrap font-medium text-blue-700 hover:text-blue-600">Details
+                                                   class="whitespace-nowrap font-medium text-sky-700 hover:text-sky-600">Details
                                                     <span aria-hidden="true">&rarr;</span></a>
                                             </p>
                                         </div>
@@ -1562,10 +1583,10 @@
                             </div>
                             <div class="mt-3"
                                  x-show="selectedAuth.type?.name === 'MySQL' || selectedAuth.type?.name === 'MariaDB'">
-                                <div class="rounded-md bg-blue-50 p-4">
+                                <div class="rounded-xl bg-sky-50 p-4 ring-1 ring-inset ring-sky-600/10">
                                     <div class="flex">
                                         <div class="shrink-0">
-                                            <svg class="h-5 w-5 text-blue-400" xmlns="http://www.w3.org/2000/svg"
+                                            <svg class="h-5 w-5 text-sky-500" xmlns="http://www.w3.org/2000/svg"
                                                  viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                                 <path fill-rule="evenodd"
                                                       d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
@@ -1573,14 +1594,14 @@
                                             </svg>
                                         </div>
                                         <div class="ml-3 flex-1 md:flex md:justify-between">
-                                            <p class="text-sm text-blue-700">Please make sure that
+                                            <p class="text-sm text-sky-700">Please make sure that
                                                 <strong>mysql</strong> is installed on your SSH server and <strong>mysqldump</strong>
                                                 version must be equal or higher than database server
                                                 version</p>
                                             <p class="mt-3 text-sm md:mt-0 md:ml-6">
                                                 <a target="_blank"
                                                    href="https://support.backupsheep.com/databases/database-backup-using-ssh-server#mysql-mysql-mysqldump-and-server-version"
-                                                   class="whitespace-nowrap font-medium text-blue-700 hover:text-blue-600">Details
+                                                   class="whitespace-nowrap font-medium text-sky-700 hover:text-sky-600">Details
                                                     <span aria-hidden="true">&rarr;</span></a>
                                             </p>
                                         </div>
@@ -1590,29 +1611,29 @@
                         </div>
 
                         <div class="sm:col-span-6">
-                            <label for="notes" class="block text-sm font-medium text-gray-700">
+                            <label for="notes" class="block text-sm font-medium text-slate-700">
                                 Notes
                             </label>
                             <div class="mt-1">
                                         <textarea x-model="connection.notes" id="notes" name="notes" rows="3"
-                                                  class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
-                                <p x-show="connectionErrors?.notes" class="mt-2 text-sm text-red-600" id="notes-error"
+                                                  class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"></textarea>
+                                <p x-show="connectionErrors?.notes" class="mt-1 text-xs text-rose-600" id="notes-error"
                                    x-text="connectionErrors?.notes"></p>
                             </div>
-                            <p class="mt-2 text-sm text-gray-700">Optional notes about the connection.</p>
+                            <p class="mt-1 text-xs text-slate-500">Optional notes about the connection.</p>
                         </div>
                     </div>
                 </div>
 
-                <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                <div x-show="!loading" class="mt-6 flex flex-col-reverse gap-3 border-t border-slate-100 pt-5 sm:flex-row sm:justify-end">
+                    <button @click="closeConnectionModal()" type="button"
+                            class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
+                        Cancel
+                    </button>
                     <button @click="saveConnection()" type="button"
-                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
+                            class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors">
                         <span x-show="!connection.id">Add Integration</span>
                         <span x-show="connection.id">Modify Integration</span>
-                    </button>
-                    <button @click="closeConnectionModal()" type="button"
-                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
-                        Cancel
                     </button>
                 </div>
             </div>
@@ -1630,7 +1651,7 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100"
                  x-transition:leave-end="opacity-0"
-                 class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+                 class="fixed inset-0 bg-slate-900/60 transition-opacity" aria-hidden="true"></div>
 
             <div x-show="openDeleteConnection"
                  x-transition:enter="ease-out duration-300"
@@ -1639,66 +1660,66 @@
                  x-transition:leave="ease-in duration-200"
                  x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                  x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                 class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
+                 class="relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-2xl bg-white px-4 pt-5 pb-4 text-left shadow-lifted ring-1 ring-slate-900/5 transform transition-all sm:max-h-[calc(100vh-3rem)] sm:max-w-lg sm:p-6">
                 <div class="flex-1 overflow-y-auto">
-                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-500">
-                        <svg x-show="loading" class="animate-spin h-10 w-10 text-white"
-                             xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
-                                    stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor"
-                                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                        </svg>
-                    </div>
-                    <div x-show="!loading" class="mt-3 text-center sm:mt-5">
-                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
-                            Please Confirm
-                        </h3>
-                        <div class="mt-2">
-                            <p class="text-sm text-gray-700">
-                                This action will delete all nodes created with this connection (<strong
-                                    x-text="connection.name"></strong>) and their backups as well. You can't undo this
-                                action. Proceed carefully.
-                            </p>
+                    <div class="flex items-start gap-x-3">
+                        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-rose-50 ring-1 ring-inset ring-rose-600/10">
+                            <svg x-show="loading" class="animate-spin h-5 w-5 text-rose-600"
+                                 xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                        stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor"
+                                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-rose-600"
+                                 fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/>
+                            </svg>
+                        </div>
+                        <div class="min-w-0">
+                            <h3 x-show="!loading" class="text-base font-semibold text-slate-900" id="modal-title">
+                                Please Confirm
+                            </h3>
+                            <h3 x-show="loading" class="text-base font-semibold text-slate-900" id="modal-title">
+                                Loading...
+                            </h3>
+                            <div x-show="!loading" class="mt-1">
+                                <p class="text-sm text-slate-500">
+                                    This action will delete all nodes created with this connection (<strong
+                                        x-text="connection.name"></strong>) and their backups as well. You can't undo this
+                                    action. Proceed carefully.
+                                </p>
+                            </div>
+                            <div x-show="loading" class="mt-1">
+                                <p class="text-sm text-slate-500">
+                                    Don't refresh page.
+                                </p>
+                            </div>
                         </div>
                     </div>
-                    <div x-show="loading" class="mt-3 text-center sm:mt-5">
-                        <h3 class="text-lg leading-6 font-medium text-gray-700" id="modal-title">
-                            Loading...
-                        </h3>
-                        <div class="mt-2">
-                            <p class="text-sm text-gray-700">
-                                Don't refresh page.
-                            </p>
-                        </div>
-                    </div>
-                    <div x-show="!loading" class="mt-3 text-left sm:mt-5">
+                    <div x-show="!loading" class="mt-5 text-left">
                         <div class="sm:col-span-6">
-                            <label for="about" class="block text-sm font-medium text-gray-700">
+                            <label for="about" class="block text-sm font-medium text-slate-700">
                                 Notes
                             </label>
                             <div class="mt-1">
                                 <textarea x-model="notes" id="about" name="about" rows="3"
-                                          class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md"></textarea>
+                                          class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"></textarea>
                             </div>
-                            <p class="mt-2 text-sm text-gray-700">Optional notes about this action.</p>
+                            <p class="mt-1 text-xs text-slate-500">Optional notes about this action.</p>
                         </div>
                     </div>
                 </div>
 
-                <div x-show="!loading" class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
-                    <button @click="deleteConnection(connection.id)" type="button"
-                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
-                        Delete Connection
-                    </button>
+                <div x-show="!loading" class="mt-6 flex flex-col-reverse gap-3 border-t border-slate-100 pt-5 sm:flex-row sm:justify-end">
                     <button @click="closeDeleteConnectionModal()" type="button"
-                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
+                            class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 transition-colors">
                         Cancel
+                    </button>
+                    <button @click="deleteConnection(connection.id)" type="button"
+                            class="inline-flex items-center justify-center gap-x-2 rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-rose-500 transition-colors">
+                        Delete Connection
                     </button>
                 </div>
             </div>
