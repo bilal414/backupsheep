@@ -30,6 +30,7 @@ from apps._tasks.exceptions import (
     RestoreStoragePointRequired,
 )
 from apps.api.v1.backup.database.filters import CoreDatabaseBackupFilter
+from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.database.permissions import (
     CoreDatabaseBackupViewPermissions,
 )
@@ -58,9 +59,11 @@ def _log_activity(request, log_type, data):
         pass
 
 
-class CoreDatabaseBackupView(viewsets.ModelViewSet):
+class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreDatabaseBackupViewPermissions)
     serializer_class = CoreDatabaseBackupSerializer
+    backup_model = CoreDatabaseBackup
+    backup_node_relation = "database"
     all_fields = [f.name for f in CoreDatabaseBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -70,16 +73,6 @@ class CoreDatabaseBackupView(viewsets.ModelViewSet):
     ]
     filterset_class = CoreDatabaseBackupFilter
     search_fields = all_fields
-
-    def get_queryset(self):
-        member = self.request.user.member
-        query = Q(database__node__connection__account=member.get_current_account())
-        query &= ~Q(database__node__status=CoreNode.Status.DELETE_REQUESTED)
-        query &= ~Q(status=CoreDatabaseBackup.Status.DELETE_REQUESTED)
-        if self.request.query_params.get("node"):
-            query &= Q(database__node__id=self.request.query_params.get("node"))
-        queryset = CoreDatabaseBackup.objects.filter(query)
-        return queryset
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -102,8 +95,10 @@ class CoreDatabaseBackupView(viewsets.ModelViewSet):
     def download(self, request, pk=None):
         storage_point_id = self.request.query_params.get("storage_point_id")
         if storage_point_id:
+            # Resolve the scoped object before the provider-error wrapper so a
+            # hidden/nonexistent backup remains a normal DRF 404.
+            backup = self.get_object()
             try:
-                backup = self.get_object()
                 if backup.stored_database_backups.filter(
                         id=storage_point_id
                 ).exists():

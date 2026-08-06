@@ -30,6 +30,7 @@ from apps._tasks.exceptions import (
     RestoreStoragePointRequired,
 )
 from apps.api.v1.backup.website.filters import CoreWebsiteBackupFilter
+from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.website.permissions import (
     CoreWebsiteBackupViewPermissions,
 )
@@ -59,9 +60,11 @@ def _log_activity(request, log_type, data):
     except Exception:
         pass
 
-class CoreWebsiteBackupView(viewsets.ModelViewSet):
+class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreWebsiteBackupViewPermissions)
     serializer_class = CoreWebsiteBackupSerializer
+    backup_model = CoreWebsiteBackup
+    backup_node_relation = "website"
     all_fields = [f.name for f in CoreWebsiteBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -71,16 +74,6 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
     ]
     filterset_class = CoreWebsiteBackupFilter
     search_fields = all_fields
-
-    def get_queryset(self):
-        member = self.request.user.member
-        query = Q(website__node__connection__account=member.get_current_account())
-        query &= ~Q(website__node__status=CoreNode.Status.DELETE_REQUESTED)
-        query &= ~Q(status=CoreWebsiteBackup.Status.DELETE_REQUESTED)
-        if self.request.query_params.get("node"):
-            query &= Q(website__node__id=self.request.query_params.get("node"))
-        queryset = CoreWebsiteBackup.objects.filter(query)
-        return queryset
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -104,9 +97,10 @@ class CoreWebsiteBackupView(viewsets.ModelViewSet):
         storage_point_id = self.request.query_params.get("storage_point_id")
 
         if storage_point_id:
+            # Keep authorization/queryset 404s outside the provider error
+            # wrapper; hidden backups must not become misleading 503s.
+            backup = self.get_object()
             try:
-                backup = self.get_object()
-
                 if backup.stored_website_backups.filter(
                         id=storage_point_id
                 ).exists():

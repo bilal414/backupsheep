@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 from apps.api.v1.backup.aws_rds.filters import CoreAWSRDSBackupFilter
+from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.aws_rds.permissions import (
     CoreAWSRDSBackupViewPermissions,
 )
@@ -21,9 +22,11 @@ from apps.console.node.models import CoreNode
 from rest_framework import status
 
 
-class CoreAWSRDSBackupView(viewsets.ModelViewSet):
+class CoreAWSRDSBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreAWSRDSBackupViewPermissions)
     serializer_class = CoreAWSRDSBackupSerializer
+    backup_model = CoreAWSRDSBackup
+    backup_node_relation = "aws_rds"
     all_fields = [f.name for f in CoreAWSRDSBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -33,16 +36,6 @@ class CoreAWSRDSBackupView(viewsets.ModelViewSet):
     ]
     filterset_class = CoreAWSRDSBackupFilter
     search_fields = all_fields
-
-    def get_queryset(self):
-        member = self.request.user.member
-        query = Q(aws_rds__node__connection__account=member.get_current_account())
-        query &= ~Q(aws_rds__node__status=CoreNode.Status.DELETE_REQUESTED)
-        query &= ~Q(status=CoreAWSRDSBackup.Status.DELETE_REQUESTED)
-        if self.request.query_params.get("node"):
-            query &= Q(aws_rds__node__id=self.request.query_params.get("node"))
-        queryset = CoreAWSRDSBackup.objects.filter(query)
-        return queryset
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()

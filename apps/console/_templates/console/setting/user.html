@@ -231,7 +231,7 @@
 
                                         <td class="px-4 py-4 whitespace-nowrap text-right text-sm font-medium">
                                             {% if membership.member.id != member.id %}
-                                                <button @click="editMembership('{{ membership.id }}')" type="button"
+                                                <button @click="editMembership('{{ membership.member.id }}')" type="button"
                                                         class="inline-flex items-center mx-auto px-2.5 py-1.5 border border-gray-300 shadow-xs text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
                                                     Edit
                                                 </button>

@@ -86,11 +86,27 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        membership = (
-            CoreMemberAccount.objects.filter(member_id=pk, account=account)
-            .select_related("member__user")
-            .first()
-        )
+        try:
+            target_id = int(pk)
+        except (TypeError, ValueError):
+            target_id = None
+
+        membership = None
+        if target_id is not None:
+            # The API uses member IDs in this route. Accepting a membership ID
+            # as a fallback keeps the existing web editor compatible, while the
+            # account filter prevents cross-tenant membership updates.
+            membership = (
+                CoreMemberAccount.objects.filter(member_id=target_id, account=account)
+                .select_related("member__user")
+                .first()
+            )
+            if membership is None:
+                membership = (
+                    CoreMemberAccount.objects.filter(pk=target_id, account=account)
+                    .select_related("member__user")
+                    .first()
+                )
         if not membership:
             return Response(
                 {"detail": "Membership not found for this account."},
@@ -147,13 +163,20 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def switch_current_account(self, request, pk=None):
-        member = self.get_object()
+        member = request.user.member
+        if str(pk) != str(member.pk):
+            return Response(
+                {"detail": "You can only switch your own current account."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         account_id = self.request.data.get("account_id")
 
         if member.memberships.filter(account_id=account_id).exists():
-            membership = member.memberships.get(current=True)
-            membership.current = False
-            membership.save()
+            current_membership = member.memberships.filter(current=True).first()
+            if current_membership:
+                current_membership.current = False
+                current_membership.save()
 
             membership = member.memberships.get(account_id=account_id)
             membership.current = True

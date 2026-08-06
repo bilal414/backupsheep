@@ -26,6 +26,7 @@ from apps._tasks.exceptions import (
     StoragePointError,
 )
 from apps.api.v1.backup.wordpress.filters import CoreWordPressBackupFilter
+from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.wordpress.permissions import (
     CoreWordPressBackupViewPermissions,
 )
@@ -50,9 +51,11 @@ def _log_activity(request, log_type, data):
     except Exception:
         pass
 
-class CoreWordPressBackupView(viewsets.ModelViewSet):
+class CoreWordPressBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreWordPressBackupViewPermissions)
     serializer_class = CoreWordPressBackupSerializer
+    backup_model = CoreWordPressBackup
+    backup_node_relation = "wordpress"
     all_fields = [f.name for f in CoreWordPressBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -62,16 +65,6 @@ class CoreWordPressBackupView(viewsets.ModelViewSet):
     ]
     filterset_class = CoreWordPressBackupFilter
     search_fields = all_fields
-
-    def get_queryset(self):
-        member = self.request.user.member
-        query = Q(wordpress__node__connection__account=member.get_current_account())
-        query &= ~Q(wordpress__node__status=CoreNode.Status.DELETE_REQUESTED)
-        query &= ~Q(status=CoreWordPressBackup.Status.DELETE_REQUESTED)
-        if self.request.query_params.get("node"):
-            query &= Q(wordpress__node__id=self.request.query_params.get("node"))
-        queryset = CoreWordPressBackup.objects.filter(query)
-        return queryset
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -94,8 +87,8 @@ class CoreWordPressBackupView(viewsets.ModelViewSet):
     def download(self, request, pk=None):
         storage_point_id = self.request.query_params.get("storage_point_id")
         if storage_point_id:
+            backup = self.get_object()
             try:
-                backup = self.get_object()
                 if backup.stored_wordpress_backups.filter(id=storage_point_id).exists():
                     storage_point = backup.stored_wordpress_backups.get(id=storage_point_id)
                     download_url = storage_point.generate_download_url()

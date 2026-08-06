@@ -23,6 +23,7 @@ from apps.console.backup.models import (
     CoreOVHUSBackup,
     CoreUpCloudBackup,
     CoreVultrBackup,
+    CoreVultrDatabaseBackup,
     CoreWebsiteBackup,
     CoreWordPressBackup,
 )
@@ -54,6 +55,7 @@ class BackupActivityView(APIView):
             (CoreOVHEUBackup, "ovh_eu"),
             (CoreOVHUSBackup, "ovh_us"),
             (CoreVultrBackup, "vultr"),
+            (CoreVultrDatabaseBackup, "vultr_database"),
             (CoreOracleBackup, "oracle"),
             (CoreGoogleCloudBackup, "google_cloud"),
         ),

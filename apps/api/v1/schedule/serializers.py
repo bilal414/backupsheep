@@ -10,6 +10,7 @@ from apps.console.account.models import CoreAccount
 from apps.api.v1.utils.api_helpers import (
     CurrentAccountDefault,
     CurrentMemberDefault,
+    visible_nodes,
 )
 from apps.console.connection.models import (
     CoreConnection,
@@ -136,7 +137,19 @@ class AccountFilteredPrimaryKeyRelatedField(serializers.PrimaryKeyRelatedField):
         return queryset.filter(account=request.user.member.get_current_account())
 
 
+class VisibleNodePrimaryKeyRelatedField(serializers.PrimaryKeyRelatedField):
+    """Only allow schedule nodes visible to the requesting member."""
+
+    def get_queryset(self):
+        request = self.context.get("request")
+        queryset = super().get_queryset()
+        if request is None or queryset is None:
+            return None
+        return visible_nodes(request.user.member)
+
+
 class CoreScheduleSerializer(serializers.ModelSerializer):
+    node = VisibleNodePrimaryKeyRelatedField(queryset=CoreNode.objects.all())
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField(read_only=True)
     modified_display = serializers.SerializerMethodField(read_only=True)
@@ -151,10 +164,18 @@ class CoreScheduleSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
-        if data["type"] == CoreSchedule.Type.CRON:
+        instance = self.instance
+        schedule_type = data.get(
+            "type", getattr(instance, "type", CoreSchedule.Type.CRON)
+        )
+
+        if schedule_type == CoreSchedule.Type.CRON:
             cron_expression = (
-                f"{data['minute']} {data['hour']} {data['day_of_month']} "
-                f"{data['month_of_year']} {data['day_of_week']}"
+                f"{data.get('minute', getattr(instance, 'minute', None)) or '*'} "
+                f"{data.get('hour', getattr(instance, 'hour', None)) or '*'} "
+                f"{data.get('day_of_month', getattr(instance, 'day_of_month', None)) or '*'} "
+                f"{data.get('month_of_year', getattr(instance, 'month_of_year', None)) or '*'} "
+                f"{data.get('day_of_week', getattr(instance, 'day_of_week', None)) or '*'}"
             )
             if not croniter.is_valid(cron_expression):
                 raise serializers.ValidationError(
@@ -162,8 +183,9 @@ class CoreScheduleSerializer(serializers.ModelSerializer):
                 )
             data['rate_value'] = None
             data['rate_unit'] = None
-        elif data["type"] == CoreSchedule.Type.RATE:
-            if not data.get('rate_value') or data['rate_value'] < 1:
+        elif schedule_type == CoreSchedule.Type.RATE:
+            rate_value = data.get("rate_value", getattr(instance, "rate_value", None))
+            if not rate_value or rate_value < 1:
                 raise serializers.ValidationError(
                     "Invalid schedule configuration. Rate value must be a positive integer."
                 )
@@ -173,8 +195,8 @@ class CoreScheduleSerializer(serializers.ModelSerializer):
             data['month_of_year'] = None
             data['day_of_week'] = None
             data['year'] = None
-        elif data["type"] == CoreSchedule.Type.ONETIME:
-            if not data.get('onetime_datetime'):
+        elif schedule_type == CoreSchedule.Type.ONETIME:
+            if not data.get("at_datetime", getattr(instance, "at_datetime", None)):
                 raise serializers.ValidationError(
                     "Invalid schedule configuration. A date and time is required."
                 )
@@ -187,14 +209,34 @@ class CoreScheduleSerializer(serializers.ModelSerializer):
             data['day_of_week'] = None
             data['year'] = None
 
+        node = data.get("node", getattr(instance, "node", None))
+        storage_points = data.get("storage_points")
+        if storage_points is None:
+            storage_points = instance.storage_points.all() if instance else []
+
+        request = self.context.get("request")
+        account = request.user.member.get_current_account() if request else None
+        if account is not None and any(
+            storage_point.account_id != account.id for storage_point in storage_points
+        ):
+            raise serializers.ValidationError(
+                "Storage destinations must belong to the current account."
+            )
+
+        if node and node.type in (
+            CoreNode.Type.DATABASE,
+            CoreNode.Type.WEBSITE,
+            CoreNode.Type.SAAS,
+        ) and not storage_points:
+            raise serializers.ValidationError(
+                {"storage_point_ids": "This field is required."}
+            )
+
         require_air_gapped_copy = data.get(
             "require_air_gapped_copy",
-            getattr(self.instance, "require_air_gapped_copy", False),
+            getattr(instance, "require_air_gapped_copy", False),
         )
         if require_air_gapped_copy:
-            storage_points = data.get("storage_points")
-            if storage_points is None and self.instance:
-                storage_points = self.instance.storage_points.all()
             if not storage_points or not any(
                 storage_point.is_air_gapped for storage_point in storage_points
             ):
@@ -246,13 +288,6 @@ class CoreScheduleSerializer(serializers.ModelSerializer):
     #     except Exception as e:
     #         raise serializers.ValidationError("Invalid value.")
     #     return data
-
-    def validate_storage_point_ids(self, data):
-        node = CoreNode.objects.get(id=self.initial_data.get("node"))
-        if node.type == CoreNode.Type.DATABASE or node.type == CoreNode.Type.WEBSITE or node.type == CoreNode.Type.SAAS:
-            if len(data) == 0:
-                raise serializers.ValidationError("This field is required.")
-        return data
 
     @staticmethod
     def get_status_display(obj):

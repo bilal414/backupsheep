@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 from apps.api.v1.backup.vultr.filters import CoreVultrBackupFilter
+from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.vultr.permissions import (
     CoreVultrBackupViewPermissions,
 )
@@ -21,9 +22,11 @@ from apps.console.node.models import CoreNode
 from rest_framework import status
 
 
-class CoreVultrBackupView(viewsets.ModelViewSet):
+class CoreVultrBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreVultrBackupViewPermissions)
     serializer_class = CoreVultrBackupSerializer
+    backup_model = CoreVultrBackup
+    backup_node_relation = "vultr"
     all_fields = [f.name for f in CoreVultrBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -33,16 +36,6 @@ class CoreVultrBackupView(viewsets.ModelViewSet):
     ]
     filterset_class = CoreVultrBackupFilter
     search_fields = all_fields
-
-    def get_queryset(self):
-        member = self.request.user.member
-        query = Q(vultr__node__connection__account=member.get_current_account())
-        query &= ~Q(vultr__node__status=CoreNode.Status.DELETE_REQUESTED)
-        query &= ~Q(status=CoreVultrBackup.Status.DELETE_REQUESTED)
-        if self.request.query_params.get("node"):
-            query &= Q(vultr__node__id=self.request.query_params.get("node"))
-        queryset = CoreVultrBackup.objects.filter(query)
-        return queryset
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()

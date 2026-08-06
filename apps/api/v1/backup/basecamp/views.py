@@ -22,6 +22,7 @@ from apps._tasks.exceptions import (
     StoragePointError,
 )
 from apps.api.v1.backup.basecamp.filters import CoreBasecampBackupFilter
+from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.basecamp.permissions import (
     CoreBasecampBackupViewPermissions,
 )
@@ -47,9 +48,11 @@ def _log_activity(request, log_type, data):
         pass
 
 
-class CoreBasecampBackupView(viewsets.ModelViewSet):
+class CoreBasecampBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreBasecampBackupViewPermissions)
     serializer_class = CoreBasecampBackupSerializer
+    backup_model = CoreBasecampBackup
+    backup_node_relation = "basecamp"
     all_fields = [f.name for f in CoreBasecampBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -59,16 +62,6 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
     ]
     filterset_class = CoreBasecampBackupFilter
     search_fields = all_fields
-
-    def get_queryset(self):
-        member = self.request.user.member
-        query = Q(basecamp__node__connection__account=member.get_current_account())
-        query &= ~Q(basecamp__node__status=CoreNode.Status.DELETE_REQUESTED)
-        query &= ~Q(status=CoreBasecampBackup.Status.DELETE_REQUESTED)
-        if self.request.query_params.get("node"):
-            query &= Q(basecamp__node__id=self.request.query_params.get("node"))
-        queryset = CoreBasecampBackup.objects.filter(query)
-        return queryset
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -91,8 +84,8 @@ class CoreBasecampBackupView(viewsets.ModelViewSet):
     def download(self, request, pk=None):
         storage_point_id = self.request.query_params.get("storage_point_id")
         if storage_point_id:
+            backup = self.get_object()
             try:
-                backup = self.get_object()
                 if backup.stored_basecamp_backups.filter(id=storage_point_id).exists():
                     storage_point = backup.stored_basecamp_backups.get(id=storage_point_id)
                     download_url = storage_point.generate_download_url()

@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
 
 from apps.api.v1.backup.vultr_database.filters import CoreVultrDatabaseBackupFilter
+from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.vultr_database.permissions import CoreVultrDatabaseBackupViewPermissions
 from apps.api.v1.backup.vultr_database.serializers import CoreVultrDatabaseBackupSerializer
 from apps.console.backup.models import CoreVultrDatabaseBackup, CoreVultrDatabaseRestore
@@ -15,21 +16,14 @@ from apps.console.node.models import CoreNode
 from apps.console.utils.models import UtilBackup
 
 
-class CoreVultrDatabaseBackupView(viewsets.ModelViewSet):
+class CoreVultrDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated, CoreVultrDatabaseBackupViewPermissions)
     serializer_class = CoreVultrDatabaseBackupSerializer
+    backup_model = CoreVultrDatabaseBackup
+    backup_node_relation = "vultr_database"
     filter_backends = [DjangoFilterBackend, DatatablesFilterBackend, SearchFilter]
     filterset_class = CoreVultrDatabaseBackupFilter
     search_fields = ["name", "uuid", "provider_backup_id", "provider_status"]
-
-    def get_queryset(self):
-        account = self.request.user.member.get_current_account()
-        query = Q(vultr_database__node__connection__account=account)
-        query &= ~Q(vultr_database__node__status=CoreNode.Status.DELETE_REQUESTED)
-        query &= ~Q(status=UtilBackup.Status.DELETE_REQUESTED)
-        if self.request.query_params.get("node"):
-            query &= Q(vultr_database__node__id=self.request.query_params["node"])
-        return CoreVultrDatabaseBackup.objects.filter(query)
 
     def destroy(self, request, *args, **kwargs):
         self.get_object().soft_delete()
