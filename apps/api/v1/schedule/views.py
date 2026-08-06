@@ -202,7 +202,9 @@ class CoreScheduleView(viewsets.ModelViewSet):
                 "node_name": schedule.node.name,
             },
         )
-        return Response({"detail": "Schedule is paused."}, status=status.HTTP_200_OK)
+        data = self.get_serializer(schedule).data
+        data["detail"] = "Schedule is paused."
+        return Response(data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
@@ -223,4 +225,6 @@ class CoreScheduleView(viewsets.ModelViewSet):
                 "node_name": schedule.node.name,
             },
         )
-        return Response({"detail": "Schedule is resumed."}, status=status.HTTP_200_OK)
+        data = self.get_serializer(schedule).data
+        data["detail"] = "Schedule is resumed."
+        return Response(data, status=status.HTTP_200_OK)

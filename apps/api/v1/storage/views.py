@@ -72,7 +72,9 @@ class CoreStorageView(mixins.ListModelMixin, viewsets.GenericViewSet):
                 "storage_name": storage.name,
             },
         )
-        return Response({"detail": "Storage is paused."}, status=status.HTTP_200_OK)
+        data = self.get_serializer(storage).data
+        data["detail"] = "Storage is paused."
+        return Response(data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
@@ -90,7 +92,28 @@ class CoreStorageView(mixins.ListModelMixin, viewsets.GenericViewSet):
                 "storage_name": storage.name,
             },
         )
-        return Response({"detail": "Storage is resumed."}, status=status.HTTP_200_OK)
+        data = self.get_serializer(storage).data
+        data["detail"] = "Storage is resumed."
+        return Response(data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"])
+    def validate(self, request, pk=None):
+        storage = self.get_object()
+        try:
+            valid = bool(storage.validate())
+        except Exception:
+            valid = False
+        return Response(
+            {
+                "success": valid,
+                "message": (
+                    "Validation passed. Storage is good for backups."
+                    if valid
+                    else "Storage validation failed."
+                ),
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["post"])
     def delete(self, request, pk=None):

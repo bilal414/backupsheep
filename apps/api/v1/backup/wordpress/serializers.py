@@ -50,6 +50,7 @@ class CoreWordPressBackupStoragePointsSerializer(serializers.ModelSerializer):
 
 class CoreWordPressBackupSerializer(serializers.ModelSerializer):
     wordpress = CoreWordPressSerializer(read_only=True)
+    database = CoreWordPressSerializer(source="wordpress", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

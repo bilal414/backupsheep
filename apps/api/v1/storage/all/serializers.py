@@ -1,10 +1,15 @@
 import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
+from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.console.storage.models import CoreStorage
+from apps.api.v1.storage.serializers import CoreStorageTypeSerializer
 
 
 class CoreStorageSerializer(serializers.ModelSerializer):
+    type = CoreStorageTypeSerializer(read_only=True)
+    account = CoreAccountSerializer(read_only=True)
+    status_display = serializers.SerializerMethodField()
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()
     name_display = serializers.SerializerMethodField()
@@ -20,6 +25,10 @@ class CoreStorageSerializer(serializers.ModelSerializer):
     @staticmethod
     def get_name_display(obj):
         return f"{obj.type.name} - {obj.name}"
+
+    @staticmethod
+    def get_status_display(obj):
+        return obj.get_status_display()
 
     @staticmethod
     def get_created_display(obj):

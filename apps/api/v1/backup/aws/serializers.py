@@ -20,7 +20,8 @@ class CoreAWSSerializer(serializers.ModelSerializer):
 
 
 class CoreAWSBackupSerializer(serializers.ModelSerializer):
-    website = CoreAWSSerializer(read_only=True)
+    website = CoreAWSSerializer(source="aws", read_only=True)
+    database = CoreAWSSerializer(source="aws", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

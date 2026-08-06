@@ -19,7 +19,8 @@ class CoreVultrSerializer(serializers.ModelSerializer):
 
 
 class CoreVultrBackupSerializer(serializers.ModelSerializer):
-    website = CoreVultrSerializer(read_only=True)
+    website = CoreVultrSerializer(source="vultr", read_only=True)
+    database = CoreVultrSerializer(source="vultr", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

@@ -19,7 +19,8 @@ class CoreOracleSerializer(serializers.ModelSerializer):
 
 
 class CoreOracleBackupSerializer(serializers.ModelSerializer):
-    website = CoreOracleSerializer(read_only=True)
+    website = CoreOracleSerializer(source="oracle", read_only=True)
+    database = CoreOracleSerializer(source="oracle", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

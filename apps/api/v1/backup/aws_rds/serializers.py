@@ -19,7 +19,8 @@ class CoreAWSRDSSerializer(serializers.ModelSerializer):
 
 
 class CoreAWSRDSBackupSerializer(serializers.ModelSerializer):
-    website = CoreAWSRDSSerializer(read_only=True)
+    website = CoreAWSRDSSerializer(source="aws_rds", read_only=True)
+    database = CoreAWSRDSSerializer(source="aws_rds", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

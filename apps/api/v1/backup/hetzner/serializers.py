@@ -19,7 +19,8 @@ class CoreHetznerSerializer(serializers.ModelSerializer):
 
 
 class CoreHetznerBackupSerializer(serializers.ModelSerializer):
-    website = CoreHetznerSerializer(read_only=True)
+    website = CoreHetznerSerializer(source="hetzner", read_only=True)
+    database = CoreHetznerSerializer(source="hetzner", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

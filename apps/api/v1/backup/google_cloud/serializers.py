@@ -19,7 +19,8 @@ class CoreGoogleCloudSerializer(serializers.ModelSerializer):
 
 
 class CoreGoogleCloudBackupSerializer(serializers.ModelSerializer):
-    website = CoreGoogleCloudSerializer(read_only=True)
+    website = CoreGoogleCloudSerializer(source="google_cloud", read_only=True)
+    database = CoreGoogleCloudSerializer(source="google_cloud", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

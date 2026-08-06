@@ -41,7 +41,7 @@ class CoreAccountView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         member = self.request.user.member
-        queryset = CoreAccount.objects.filter(members=member, memberships__primary=True)
+        queryset = CoreAccount.objects.filter(members=member).distinct()
         return queryset
 
     @action(detail=True, methods=["post"])

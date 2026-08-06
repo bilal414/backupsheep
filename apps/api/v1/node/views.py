@@ -231,7 +231,9 @@ class CoreNodeView(viewsets.ModelViewSet):
                 "connection_name": node.connection.name,
             },
         )
-        return Response({"detail": "Node is paused."}, status=status.HTTP_200_OK)
+        data = self.get_serializer(node).data
+        data["detail"] = "Node is paused."
+        return Response(data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
@@ -251,7 +253,9 @@ class CoreNodeView(viewsets.ModelViewSet):
                 "connection_name": node.connection.name,
             },
         )
-        return Response({"detail": "Node is resumed."}, status=status.HTTP_200_OK)
+        data = self.get_serializer(node).data
+        data["detail"] = "Node is resumed."
+        return Response(data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def delete(self, request, pk=None):

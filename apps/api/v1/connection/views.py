@@ -87,6 +87,25 @@ class CoreConnectionView(viewsets.ModelViewSet):
         )
         return Response({"detail": "Connection is resumed."}, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=["get"])
+    def validate(self, request, pk=None):
+        connection = self.get_object()
+        try:
+            valid = bool(connection.validate())
+        except Exception:
+            valid = False
+        return Response(
+            {
+                "success": valid,
+                "message": (
+                    "Validation passed. Integration is good for backups."
+                    if valid
+                    else "Integration validation failed."
+                ),
+            },
+            status=status.HTTP_200_OK,
+        )
+
     # @action(detail=True, methods=["post"])
     # def delete(self, request, pk=None):
     #     connection = self.get_object()

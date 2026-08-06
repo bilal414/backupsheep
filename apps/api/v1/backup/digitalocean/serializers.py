@@ -19,7 +19,8 @@ class CoreDigitalOceanSerializer(serializers.ModelSerializer):
 
 
 class CoreDigitalOceanBackupSerializer(serializers.ModelSerializer):
-    website = CoreDigitalOceanSerializer(read_only=True)
+    website = CoreDigitalOceanSerializer(source="digitalocean", read_only=True)
+    database = CoreDigitalOceanSerializer(source="digitalocean", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

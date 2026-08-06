@@ -21,25 +21,36 @@ class CurrentAccountMembershipSerializer(serializers.ModelSerializer):
     """One membership row for the account member list (Users settings page):
     member details plus groups/notify flags/status within the current account."""
 
+    id = serializers.IntegerField(source="member.id", read_only=True)
+    membership_id = serializers.IntegerField(source="pk", read_only=True)
     member_id = serializers.IntegerField(source="member.id", read_only=True)
     first_name = serializers.CharField(source="member.user.first_name", read_only=True)
     last_name = serializers.CharField(source="member.user.last_name", read_only=True)
     full_name = serializers.SerializerMethodField()
+    name = serializers.SerializerMethodField()
     email = serializers.CharField(source="member.user.email", read_only=True)
     status_display = serializers.SerializerMethodField()
+    role = serializers.SerializerMethodField()
+    role_display = serializers.SerializerMethodField()
+    account = CoreAccountSerializer(read_only=True)
     groups = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreMemberAccount
         fields = (
             "id",
+            "membership_id",
             "member_id",
             "first_name",
             "last_name",
             "full_name",
+            "name",
             "email",
             "status",
             "status_display",
+            "role",
+            "role_display",
+            "account",
             "notify_on_success",
             "notify_on_fail",
             "current",
@@ -53,8 +64,20 @@ class CurrentAccountMembershipSerializer(serializers.ModelSerializer):
         return obj.member.full_name
 
     @staticmethod
+    def get_name(obj):
+        return obj.member.full_name
+
+    @staticmethod
     def get_status_display(obj):
         return obj.get_status_display()
+
+    @staticmethod
+    def get_role(obj):
+        return "owner" if obj.primary else "member"
+
+    @staticmethod
+    def get_role_display(obj):
+        return "Owner" if obj.primary else "Member"
 
     def get_groups(self, obj):
         # Intersect the member's auth groups with the current account's enrollments.

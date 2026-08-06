@@ -20,6 +20,7 @@ class CoreLightsailSerializer(serializers.ModelSerializer):
 
 class CoreLightsailBackupSerializer(serializers.ModelSerializer):
     lightsail = CoreLightsailSerializer(read_only=True)
+    database = CoreLightsailSerializer(source="lightsail", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

@@ -21,6 +21,7 @@ urlpatterns = [
         path(r'', include('apps.api.v1.backup.urls')),
         path(r'', include('apps.api.v1.schedule.urls')),
         path(r'', include('apps.api.v1.account.urls')),
+        path(r'', include('apps.api.v1.stats.urls')),
         path(r'', include('apps.api.v1.group.urls')),
         path(r'', include('apps.api.v1.invite.urls')),
         path(r'', include('apps.api.v1.notification.urls')),

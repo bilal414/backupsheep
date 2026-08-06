@@ -50,6 +50,7 @@ class CoreBasecampBackupStoragePointsSerializer(serializers.ModelSerializer):
 
 class CoreBasecampBackupSerializer(serializers.ModelSerializer):
     basecamp = CoreBasecampSerializer(read_only=True)
+    database = CoreBasecampSerializer(source="basecamp", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

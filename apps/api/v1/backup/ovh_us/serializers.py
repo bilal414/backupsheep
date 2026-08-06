@@ -19,7 +19,8 @@ class CoreOVHUSSerializer(serializers.ModelSerializer):
 
 
 class CoreOVHUSBackupSerializer(serializers.ModelSerializer):
-    website = CoreOVHUSSerializer(read_only=True)
+    website = CoreOVHUSSerializer(source="ovh_us", read_only=True)
+    database = CoreOVHUSSerializer(source="ovh_us", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

@@ -64,6 +64,7 @@ class CoreWebsiteBackupStoragePointsSerializer(serializers.ModelSerializer):
 
 class CoreWebsiteBackupSerializer(serializers.ModelSerializer):
     website = CoreWebsiteSerializer(read_only=True)
+    database = CoreWebsiteSerializer(source="website", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()
