@@ -2199,6 +2199,56 @@ body.brand-console::before {
     background: var(--bs-ink) !important;
 }
 
+.brand-console.page_settings .bs-notification-providers {
+    align-items: stretch;
+}
+
+.brand-console.page_settings .bs-notification-provider {
+    display: flex;
+    min-height: 96px;
+    width: 100%;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    border: 1px solid var(--bs-line) !important;
+    border-radius: 0 !important;
+    font-family: var(--bs-display);
+    font-size: 16px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: background-color .18s ease, border-color .18s ease, transform .18s ease;
+}
+
+.brand-console.page_settings .bs-notification-provider:hover {
+    transform: translateY(-2px);
+}
+
+.brand-console.page_settings .bs-provider-icon {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 auto;
+}
+
+.brand-console.page_settings .bs-slack-provider {
+    border-color: var(--bs-ink) !important;
+    background: var(--bs-ink) !important;
+    color: var(--bs-paper) !important;
+}
+
+.brand-console.page_settings .bs-slack-provider:hover {
+    background: var(--bs-ink-soft) !important;
+}
+
+.brand-console.page_settings .bs-telegram-provider {
+    background: var(--bs-pasture) !important;
+    color: var(--bs-ink) !important;
+}
+
+.brand-console.page_settings .bs-telegram-provider:hover {
+    border-color: var(--bs-ink) !important;
+    background: var(--bs-pasture-deep) !important;
+}
+
 /* Authentication and first-run setup share the same brand foundation. */
 body.brand-auth,
 body.brand-onboarding {
