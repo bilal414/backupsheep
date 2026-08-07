@@ -5581,6 +5581,7 @@ body.bs-console-v3.bs-nodes-index .bs-node-filter > span button {
     min-height: 38px;
     flex: 1 1 50%;
     cursor: pointer;
+    white-space: nowrap;
 }
 
 body.bs-console-v3.bs-nodes-index .bs-node-filter > span button:first-child {
@@ -5628,8 +5629,9 @@ body.bs-console-v3.bs-nodes-index .bs-node-filter input:focus-visible {
 
     body.bs-console-v3.bs-nodes-index #section-nodes tbody tr {
         display: grid !important;
-        grid-template-columns: minmax(0, 1fr) !important;
-        gap: 0 !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        column-gap: 14px !important;
+        row-gap: 10px !important;
         width: 100% !important;
         padding: 15px !important;
         border-bottom: 1px solid var(--bs-shell-line) !important;
@@ -5649,8 +5651,14 @@ body.bs-console-v3.bs-nodes-index .bs-node-filter input:focus-visible {
         white-space: normal !important;
     }
 
-    body.bs-console-v3.bs-nodes-index #section-nodes td + td {
-        margin-top: 12px !important;
+    body.bs-console-v3.bs-nodes-index #section-nodes td {
+        margin-top: 0 !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(1),
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(4),
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(5) {
+        grid-column: 1 / -1 !important;
     }
 
     body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(1) > div {
