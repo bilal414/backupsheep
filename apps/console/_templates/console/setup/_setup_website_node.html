@@ -746,7 +746,7 @@
                                         @click="website.tar_exclude_vcs_ignores = !website.tar_exclude_vcs_ignores;"
                                         :class="{ 'bg-indigo-600': website.tar_exclude_vcs_ignores, 'bg-gray-200': !(website.tar_exclude_vcs_ignores) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="website.tar_exclude_vcs_ignores" aria-labelledby="annual-billing-label">
                                     <span :class="{ 'translate-x-5': website.tar_exclude_vcs_ignores, 'translate-x-0': !(website.tar_exclude_vcs_ignores) }"
                                           aria-hidden="true"
                                           class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
@@ -768,7 +768,7 @@
                                         @click="website.tar_exclude_vcs = !website.tar_exclude_vcs;"
                                         :class="{ 'bg-indigo-600': website.tar_exclude_vcs, 'bg-gray-200': !(website.tar_exclude_vcs) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="website.tar_exclude_vcs" aria-labelledby="annual-billing-label">
                                     <span :class="{ 'translate-x-5': website.tar_exclude_vcs, 'translate-x-0': !(website.tar_exclude_vcs) }"
                                           aria-hidden="true"
                                           class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
@@ -790,7 +790,7 @@
                                         @click="website.tar_exclude_backups = !website.tar_exclude_backups;"
                                         :class="{ 'bg-indigo-600': website.tar_exclude_backups, 'bg-gray-200': !(website.tar_exclude_backups) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="website.tar_exclude_backups" aria-labelledby="annual-billing-label">
                                     <span :class="{ 'translate-x-5': website.tar_exclude_backups, 'translate-x-0': !(website.tar_exclude_backups) }"
                                           aria-hidden="true"
                                           class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
@@ -812,7 +812,7 @@
                                         @click="website.tar_exclude_caches = !website.tar_exclude_caches;"
                                         :class="{ 'bg-indigo-600': website.tar_exclude_caches, 'bg-gray-200': !(website.tar_exclude_caches) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="website.tar_exclude_caches" aria-labelledby="annual-billing-label">
                                     <span :class="{ 'translate-x-5': website.tar_exclude_caches, 'translate-x-0': !(website.tar_exclude_caches) }"
                                           aria-hidden="true"
                                           class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>

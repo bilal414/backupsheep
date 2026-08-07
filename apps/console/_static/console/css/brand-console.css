@@ -5803,3 +5803,41 @@ body.bs-console-v3.bs-nodes-index .bs-node-filter input:focus-visible {
         padding-top: 11px !important;
     }
 }
+
+/* Settings uses the current shell frame rather than the retired
+   .bs-main-content wrapper. Keep the desktop two-column layout explicit so
+   Tailwind's twelve-column utility cannot collapse form fields to one grid
+   track at wide widths. */
+@media (min-width: 1024px) {
+    body.bs-console-v3.page_settings .bs-page-frame-v3 > [class~="lg:grid"] {
+        display: grid !important;
+        grid-template-columns: 230px minmax(0, 1fr) !important;
+        gap: 34px !important;
+        min-width: 0;
+    }
+
+    body.bs-console-v3.page_settings .bs-page-frame-v3 > [class~="lg:grid"] > aside,
+    body.bs-console-v3.page_settings .bs-page-frame-v3 > [class~="lg:grid"] > [class~="lg:col-span-9"] {
+        grid-column: auto !important;
+        min-width: 0;
+        width: auto;
+        max-width: none;
+    }
+}
+
+@media (max-width: 1023px) {
+    body.bs-console-v3.page_settings .bs-page-frame-v3 > [class~="lg:grid"] {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) !important;
+        gap: 20px !important;
+        min-width: 0;
+    }
+
+    body.bs-console-v3.page_settings .bs-page-frame-v3 > [class~="lg:grid"] > aside,
+    body.bs-console-v3.page_settings .bs-page-frame-v3 > [class~="lg:grid"] > [class~="lg:col-span-9"] {
+        grid-column: auto !important;
+        min-width: 0;
+        width: 100%;
+        max-width: 100%;
+    }
+}

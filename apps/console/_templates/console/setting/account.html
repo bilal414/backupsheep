@@ -148,7 +148,7 @@
                                         @click="toggleNotification('success')"
                                         :class="{ 'bg-indigo-600': account.notify_on_success, 'bg-gray-200': !(account.notify_on_success) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="account.notify_on_success" aria-labelledby="annual-billing-label">
                                     <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
                                     <span :class="{ 'translate-x-5': account.notify_on_success, 'translate-x-0': !(account.notify_on_success) }"
                                           aria-hidden="true"
@@ -165,7 +165,7 @@
                                         @click="toggleNotification('fail')"
                                         :class="{ 'bg-indigo-600': account.notify_on_fail, 'bg-gray-200': !(account.notify_on_fail) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="account.notify_on_fail" aria-labelledby="annual-billing-label">
                                         <span :class="{ 'translate-x-5': account.notify_on_fail, 'translate-x-0': !(account.notify_on_fail) }"
                                               aria-hidden="true"
                                               class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>

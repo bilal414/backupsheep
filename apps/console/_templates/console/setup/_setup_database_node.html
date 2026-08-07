@@ -165,7 +165,7 @@
                                             @click="database.all_databases = !database.all_databases;"
                                             :class="{ 'bg-indigo-600': database.all_databases, 'bg-gray-200': !(database.all_databases) }"
                                             class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                            role="switch" :aria-checked="database.all_databases" aria-labelledby="annual-billing-label">
                                         <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
                                         <span :class="{ 'translate-x-5': database.all_databases, 'translate-x-0': !(database.all_databases) }"
                                               aria-hidden="true"
@@ -186,7 +186,7 @@
                                             @click="database.all_tables = !database.all_tables;"
                                             :class="{ 'bg-indigo-600': database.all_tables, 'bg-gray-200': !(database.all_tables) }"
                                             class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                            role="switch" :aria-checked="database.all_tables" aria-labelledby="annual-billing-label">
                                         <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
                                         <span :class="{ 'translate-x-5': database.all_tables, 'translate-x-0': !(database.all_tables) }"
                                               aria-hidden="true"
@@ -229,7 +229,7 @@
                                             @click="database.option_gtid_purged_off = !database.option_gtid_purged_off;"
                                             :class="{ 'bg-indigo-600': database.option_gtid_purged_off, 'bg-gray-200': !(database.option_gtid_purged_off) }"
                                             class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                            role="switch" :aria-checked="database.option_gtid_purged_off" aria-labelledby="annual-billing-label">
                                     <span :class="{ 'translate-x-5': database.option_gtid_purged_off, 'translate-x-0': !(database.option_gtid_purged_off) }"
                                           aria-hidden="true"
                                           class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>

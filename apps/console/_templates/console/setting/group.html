@@ -329,7 +329,7 @@
                                                 @click="permissions.backup_create=!permissions.backup_create"
                                                 :class="{ 'bg-indigo-600': permissions.backup_create, 'bg-gray-200': !(permissions.backup_create) }"
                                                 class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                                role="switch" aria-checked="false"
+                                                role="switch" :aria-checked="permissions.backup_create"
                                                 aria-labelledby="backup_create-label">
                                             <span :class="{ 'translate-x-5': permissions.backup_create, 'translate-x-0': !(permissions.backup_create) }"
                                                   aria-hidden="true"
@@ -352,7 +352,7 @@
                                                 @click="permissions.backup_download=!permissions.backup_download"
                                                 :class="{ 'bg-indigo-600': permissions.backup_download, 'bg-gray-200': !(permissions.backup_download) }"
                                                 class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                                role="switch" aria-checked="false"
+                                                role="switch" :aria-checked="permissions.backup_download"
                                                 aria-labelledby="backup_download-label">
                                             <span :class="{ 'translate-x-5': permissions.backup_download, 'translate-x-0': !(permissions.backup_download) }"
                                                   aria-hidden="true"
@@ -373,7 +373,7 @@
                                                 @click="permissions.backup_delete=!permissions.backup_delete"
                                                 :class="{ 'bg-indigo-600': permissions.backup_delete, 'bg-gray-200': !(permissions.backup_delete) }"
                                                 class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                                role="switch" aria-checked="false"
+                                                role="switch" :aria-checked="permissions.backup_delete"
                                                 aria-labelledby="backup_delete-label">
                                             <span :class="{ 'translate-x-5': permissions.backup_delete, 'translate-x-0': !(permissions.backup_delete) }"
                                                   aria-hidden="true"
@@ -394,7 +394,7 @@
                                                 @click="permissions.schedule_changes=!permissions.schedule_changes"
                                                 :class="{ 'bg-indigo-600': permissions.schedule_changes, 'bg-gray-200': !(permissions.schedule_changes) }"
                                                 class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                                role="switch" aria-checked="false"
+                                                role="switch" :aria-checked="permissions.schedule_changes"
                                                 aria-labelledby="schedule_changes-label">
                                             <span :class="{ 'translate-x-5': permissions.schedule_changes, 'translate-x-0': !(permissions.schedule_changes) }"
                                                   aria-hidden="true"
@@ -415,7 +415,7 @@
                                                 @click="permissions.node_changes=!permissions.node_changes"
                                                 :class="{ 'bg-indigo-600': permissions.node_changes, 'bg-gray-200': !(permissions.node_changes) }"
                                                 class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                                role="switch" aria-checked="false"
+                                                role="switch" :aria-checked="permissions.node_changes"
                                                 aria-labelledby="node_changes-label">
                                             <span :class="{ 'translate-x-5': permissions.node_changes, 'translate-x-0': !(permissions.node_changes) }"
                                                   aria-hidden="true"
@@ -437,7 +437,7 @@
                                                 @click="permissions.integration_changes=!permissions.integration_changes"
                                                 :class="{ 'bg-indigo-600': permissions.integration_changes, 'bg-gray-200': !(permissions.integration_changes) }"
                                                 class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                                role="switch" aria-checked="false"
+                                                role="switch" :aria-checked="permissions.integration_changes"
                                                 aria-labelledby="integration_changes-label">
                                             <span :class="{ 'translate-x-5': permissions.integration_changes, 'translate-x-0': !(permissions.integration_changes) }"
                                                   aria-hidden="true"
@@ -458,7 +458,7 @@
                                                 @click="permissions.storage_changes=!permissions.storage_changes"
                                                 :class="{ 'bg-indigo-600': permissions.storage_changes, 'bg-gray-200': !(permissions.storage_changes) }"
                                                 class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                                role="switch" aria-checked="false"
+                                                role="switch" :aria-checked="permissions.storage_changes"
                                                 aria-labelledby="storage_changes-label">
                                             <span :class="{ 'translate-x-5': permissions.storage_changes, 'translate-x-0': !(permissions.storage_changes) }"
                                                   aria-hidden="true"
@@ -494,7 +494,7 @@
                                         @click="toggleNotification('success')"
                                         :class="{ 'bg-indigo-600': permissions.notify_on_success, 'bg-gray-200': !(permissions.notify_on_success) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="permissions.notify_on_success" aria-labelledby="annual-billing-label">
                                     <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
                                     <span :class="{ 'translate-x-5': permissions.notify_on_success, 'translate-x-0': !(permissions.notify_on_success) }"
                                           aria-hidden="true"
@@ -511,7 +511,7 @@
                                         @click="toggleNotification('fail')"
                                         :class="{ 'bg-indigo-600': permissions.notify_on_fail, 'bg-gray-200': !(permissions.notify_on_fail) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="permissions.notify_on_fail" aria-labelledby="annual-billing-label">
                                         <span :class="{ 'translate-x-5': permissions.notify_on_fail, 'translate-x-0': !(permissions.notify_on_fail) }"
                                               aria-hidden="true"
                                               class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
@@ -548,7 +548,7 @@
                                         @click="toggleNotification('email')"
                                         :class="{ 'bg-indigo-600': permissions.notify_via_email, 'bg-gray-200': !(permissions.notify_via_email) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="permissions.notify_via_email" aria-labelledby="annual-billing-label">
                                     <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
                                     <span :class="{ 'translate-x-5': permissions.notify_via_email, 'translate-x-0': !(permissions.notify_via_email) }"
                                           aria-hidden="true"
@@ -565,7 +565,7 @@
                                         @click="toggleNotification('slack')"
                                         :class="{ 'bg-indigo-600': permissions.notify_via_slack, 'bg-gray-200': !(permissions.notify_via_slack) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="permissions.notify_via_slack" aria-labelledby="annual-billing-label">
                                         <span :class="{ 'translate-x-5': permissions.notify_via_slack, 'translate-x-0': !(permissions.notify_via_slack) }"
                                               aria-hidden="true"
                                               class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
@@ -581,7 +581,7 @@
                                         @click="toggleNotification('telegram')"
                                         :class="{ 'bg-indigo-600': permissions.notify_via_telegram, 'bg-gray-200': !(permissions.notify_via_telegram) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="annual-billing-label">
+                                        role="switch" :aria-checked="permissions.notify_via_telegram" aria-labelledby="annual-billing-label">
                                         <span :class="{ 'translate-x-5': permissions.notify_via_telegram, 'translate-x-0': !(permissions.notify_via_telegram) }"
                                               aria-hidden="true"
                                               class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>

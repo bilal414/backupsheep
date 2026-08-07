@@ -1117,7 +1117,7 @@
                                             @click="toggleUseSSL()"
                                             :class="{ 'bg-indigo-600': selectedAuth.use_ssl, 'bg-gray-200': !(selectedAuth.use_ssl) }"
                                             class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            role="switch" :aria-checked="selectedAuth.use_ssl" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.use_ssl, 'translate-x-0': !(selectedAuth.use_ssl) }"
                                                   aria-hidden="true"
@@ -1140,7 +1140,7 @@
                                             @click="toggleIncludeStoredProcedure()"
                                             :class="{ 'bg-indigo-600': selectedAuth.include_stored_procedure, 'bg-gray-200': !(selectedAuth.include_stored_procedure) }"
                                             class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            role="switch" :aria-checked="selectedAuth.include_stored_procedure" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.include_stored_procedure, 'translate-x-0': !(selectedAuth.include_stored_procedure) }"
                                                   aria-hidden="true"
@@ -1278,7 +1278,7 @@
                                         @click="selectedAuth.ftps_use_explicit_ssl = !selectedAuth.ftps_use_explicit_ssl; selectedAuth.use_private_key=false;"
                                         :class="{ 'bg-indigo-600': selectedAuth.ftps_use_explicit_ssl, 'bg-gray-200': !(selectedAuth.ftps_use_explicit_ssl) }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                        role="switch" :aria-checked="selectedAuth.ftps_use_explicit_ssl" aria-labelledby="availability-label"
                                         aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.ftps_use_explicit_ssl, 'translate-x-0': !(selectedAuth.ftps_use_explicit_ssl) }"
                                                   aria-hidden="true"
@@ -1298,7 +1298,7 @@
                                         @click="selectedAuth.verify_ssl = !(selectedAuth.verify_ssl !== false)"
                                         :class="{ 'bg-indigo-600': selectedAuth.verify_ssl !== false, 'bg-gray-200': selectedAuth.verify_ssl === false }"
                                         class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                        role="switch" aria-checked="false">
+                                        role="switch" :aria-checked="selectedAuth.verify_ssl !== false">
                                             <span :class="{ 'translate-x-5': selectedAuth.verify_ssl !== false, 'translate-x-0': selectedAuth.verify_ssl === false }"
                                                   aria-hidden="true"
                                                   class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
@@ -1348,7 +1348,7 @@
                                             @click="selectedAuth.use_public_key = !selectedAuth.use_public_key; selectedAuth.use_private_key=false;"
                                             :class="{ 'bg-indigo-600': selectedAuth.use_public_key, 'bg-gray-200': !(selectedAuth.use_public_key) }"
                                             class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            role="switch" :aria-checked="selectedAuth.use_public_key" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.use_public_key, 'translate-x-0': !(selectedAuth.use_public_key) }"
                                                   aria-hidden="true"
@@ -1399,7 +1399,7 @@
                                             @click="selectedAuth.use_private_key = !selectedAuth.use_private_key; selectedAuth.use_public_key=false;"
                                             :class="{ 'bg-indigo-600': selectedAuth.use_private_key, 'bg-gray-200': !(selectedAuth.use_private_key) }"
                                             class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            role="switch" :aria-checked="selectedAuth.use_private_key" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.use_private_key, 'translate-x-0': !(selectedAuth.use_private_key) }"
                                                   aria-hidden="true"
@@ -1429,7 +1429,7 @@
                                             @click="selectedAuth.flag_use_sha1_key_verification = !selectedAuth.flag_use_sha1_key_verification;"
                                             :class="{ 'bg-indigo-600': selectedAuth.flag_use_sha1_key_verification, 'bg-gray-200': !(selectedAuth.flag_use_sha1_key_verification) }"
                                             class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            role="switch" :aria-checked="selectedAuth.flag_use_sha1_key_verification" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.flag_use_sha1_key_verification, 'translate-x-0': !(selectedAuth.flag_use_sha1_key_verification) }"
                                                   aria-hidden="true"
@@ -1524,7 +1524,7 @@
                                             @click="selectedAuth.all_databases = !selectedAuth.all_databases;"
                                             :class="{ 'bg-indigo-600': selectedAuth.all_databases, 'bg-gray-200': !(selectedAuth.all_databases) }"
                                             class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" aria-checked="false" aria-labelledby="availability-label"
+                                            role="switch" :aria-checked="selectedAuth.all_databases" aria-labelledby="availability-label"
                                             aria-describedby="availability-description">
                                             <span :class="{ 'translate-x-5': selectedAuth.all_databases, 'translate-x-0': !(selectedAuth.all_databases) }"
                                                   aria-hidden="true"
