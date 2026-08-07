@@ -5939,3 +5939,145 @@ body.bs-console-v3.bs-nodes-index .bs-node-filter input:focus-visible {
         white-space: nowrap;
     }
 }
+
+/* Source detail tables use the same record treatment as the inventory and
+   activity surfaces. Schedule controls and backup actions stay in the card,
+   instead of disappearing beyond a horizontal scroll boundary. */
+@media (max-width: 900px) {
+    body.bs-console-v3 .bs-node-schedule-grid .overflow-x-auto,
+    body.bs-console-v3 .bs-node-backups-grid .overflow-x-auto {
+        overflow: visible !important;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table,
+    body.bs-console-v3 .bs-node-backups-table {
+        display: block !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        border: 0 !important;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table thead,
+    body.bs-console-v3 .bs-node-backups-table thead {
+        display: none !important;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table tbody,
+    body.bs-console-v3 .bs-node-backups-table tbody {
+        display: block !important;
+        width: 100% !important;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table tbody tr,
+    body.bs-console-v3 .bs-node-backups-table tbody tr {
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        column-gap: 14px !important;
+        row-gap: 10px !important;
+        width: 100% !important;
+        padding: 15px !important;
+        border-bottom: 1px solid var(--bs-shell-line) !important;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table tbody tr:last-child,
+    body.bs-console-v3 .bs-node-backups-table tbody tr:last-child {
+        border-bottom: 0 !important;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td,
+    body.bs-console-v3 .bs-node-backups-table td {
+        display: block !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow-wrap: anywhere;
+        text-align: left !important;
+        white-space: normal !important;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td::before,
+    body.bs-console-v3 .bs-node-backups-table td::before {
+        display: block;
+        margin-bottom: 5px;
+        color: #7b898b;
+        font: 500 9px/1.2 "DM Mono", monospace;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td:nth-child(1),
+    body.bs-console-v3 .bs-node-schedule-table td:nth-child(4),
+    body.bs-console-v3 .bs-node-schedule-table td:nth-child(6),
+    body.bs-console-v3 .bs-node-backups-table td:nth-child(4),
+    body.bs-console-v3 .bs-node-backups-table td:nth-child(5),
+    body.bs-console-v3 .bs-node-backups-table td:last-child {
+        grid-column: 1 / -1 !important;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td:nth-child(1)::before {
+        content: "Name";
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td:nth-child(2)::before,
+    body.bs-console-v3 .bs-node-backups-table td:nth-child(2)::before {
+        content: "Status";
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td:nth-child(3)::before {
+        content: "Timezone";
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td:nth-child(4)::before {
+        content: "When";
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td:nth-child(5)::before {
+        content: "Retention";
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td:last-child::before,
+    body.bs-console-v3 .bs-node-backups-table td:last-child::before {
+        content: "Actions";
+    }
+
+    body.bs-console-v3 .bs-node-backups-table td:nth-child(1)::before {
+        content: "Created";
+    }
+
+    body.bs-console-v3 .bs-node-backups-table td:nth-child(3)::before {
+        content: "Type";
+    }
+
+    body.bs-console-v3 .bs-node-backups-table td:nth-child(4)::before {
+        content: "Size";
+    }
+
+    body.bs-console-v3 .bs-node-backups-table td:nth-child(5)::before {
+        content: "Files";
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td:last-child,
+    body.bs-console-v3 .bs-node-backups-table td:last-child {
+        display: flex !important;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 7px;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td:last-child::before,
+    body.bs-console-v3 .bs-node-backups-table td:last-child::before {
+        flex: 0 0 100%;
+        margin-bottom: 0;
+    }
+
+    body.bs-console-v3 .bs-node-schedule-table td a,
+    body.bs-console-v3 .bs-node-schedule-table td button,
+    body.bs-console-v3 .bs-node-backups-table td a,
+    body.bs-console-v3 .bs-node-backups-table td button {
+        min-height: 34px;
+        margin: 0 !important;
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+}
