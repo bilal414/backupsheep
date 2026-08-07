@@ -5451,13 +5451,18 @@ body.bs-console-v3 .bs-node-page .bg-indigo-500 svg {
     color: #fff !important;
 }
 
+body.bs-console-v3.page_console .bs-node-page .bg-indigo-500:not([role="switch"]) {
+    color: #fff !important;
+    background: var(--bs-shell-ink) !important;
+}
+
 body.bs-console-v3 .bs-node-page .bg-white {
     background: #fffefa !important;
 }
 
 body.bs-console-v3 .bs-node-page .shadow-sm.overflow-hidden {
     border: 1px solid var(--bs-shell-line);
-    border-radius: 12px;
+    border-radius: 12px !important;
     box-shadow: 0 7px 24px rgba(16, 44, 53, .04) !important;
 }
 
