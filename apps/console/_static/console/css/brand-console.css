@@ -2081,12 +2081,18 @@ body.brand-console::before {
 
 /* Settings suite */
 .brand-console.page_settings .bs-main-content > [class~="lg:grid"] {
+    display: grid;
     grid-template-columns: 230px minmax(0, 1fr);
     gap: 34px;
 }
 
 .brand-console.page_settings aside {
+    grid-column: auto !important;
     padding: 0 !important;
+}
+
+.brand-console.page_settings [class~="lg:col-span-9"] {
+    grid-column: auto !important;
 }
 
 .brand-console.page_settings aside nav {
@@ -2315,6 +2321,11 @@ body.brand-onboarding [class~="bg-white"] {
     .brand-console.page_settings .bs-main-content > [class~="lg:grid"] {
         grid-template-columns: 1fr;
         gap: 20px;
+    }
+
+    .brand-console.page_settings aside,
+    .brand-console.page_settings [class~="lg:col-span-9"] {
+        grid-column: auto !important;
     }
 
     .brand-console.page_settings aside nav {
