@@ -5,7 +5,6 @@
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <meta name="author" content="{% block author %}BackupSheep{% endblock %}">
-    <!-- Fonts -->
     <link rel="shortcuticon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
     <link rel="icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -16,11 +15,11 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flowbite@4.0.2/dist/flowbite.min.css"/>
     <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet"/>
 </head>
-<body class="h-full antialiased brand-console {% block page_class %}{% endblock %}">
+<body class="h-full antialiased brand-console bs-console-v3 {% block page_class %}{% endblock %}">
 {% csrf_token %}
 <script>
     // Attach Django's CSRF token to every same-origin state-changing fetch() so the
-    // session-authenticated API (now CSRF-protected) accepts console requests.
+    // session-authenticated API accepts console requests.
     (function () {
         function getCookie(name) {
             const value = "; " + document.cookie;
@@ -45,20 +44,24 @@
         };
     })();
 </script>
-<div x-data="{ sideBar: false }" class="bs-console-layout">
+
+<div x-data="{ sideBar: false }" class="bs-shell-v3">
     {% include "_sidebar.html" %}
-    <div class="lg:pl-72 bs-console-content">
+    <div class="bs-shell-v3__body">
         {% include "_header.html" %}
-        <main class="py-8 flex flex-col min-h-screen justify-between bs-main">
-            <div class="px-4 sm:px-6 lg:px-10 mb-auto w-full bs-main-content">
-                {% block content %}{% endblock %}
+        <main class="bs-shell-v3__main">
+            <div class="bs-shell-v3__content">
+                <div class="bs-page-frame-v3">
+                    {% block content %}{% endblock %}
+                </div>
             </div>
-            {% include "_footer.html" %}
-
+            <div class="bs-shell-v3__footer">
+                {% include "_footer.html" %}
+            </div>
         </main>
-
     </div>
 </div>
+
 {% block extra_scripts %}{% endblock %}
 <script src="https://cdn.jsdelivr.net/npm/flowbite@4.0.2/dist/flowbite.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js"></script>

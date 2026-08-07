@@ -8,6 +8,17 @@
 {% load tz %}
 
 {% block content %}
+    <header class="bs-nodes-hero-v3">
+        <div>
+            <p class="bs-kicker">Protection inventory</p>
+            <h1>Sources under watch.</h1>
+            <p>Keep every protected server, volume, website, and database visible in one operating view. Search by ownership, provider, endpoint, or state.</p>
+        </div>
+        <div class="bs-page-hero-v3__meta">
+            <span class="bs-page-hero-v3__count">{{ node_count }} protected source{{ node_count|pluralize }}</span>
+            <a href="{% url 'console:setup:integration_select' %}" class="bs-page-action-v3">Connect a source <span aria-hidden="true">↗</span></a>
+        </div>
+    </header>
     <div class="bs-node-summary">
         <dl class="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-5">
             <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-soft ring-1 ring-slate-900/5 rounded-2xl overflow-hidden">

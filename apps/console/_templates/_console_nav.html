@@ -1,0 +1,74 @@
+<nav class="bs-nav-v3" aria-label="Console navigation">
+    <div class="bs-nav-v3__section">
+        <p class="bs-nav-v3__label">Monitor</p>
+        <a href="{% url 'console:home:index' %}"
+           @click="sideBar = false"
+           class="bs-nav-v3__item {% if active_url == 'dashboard' %}is-active{% endif %}">
+            <span class="bs-nav-v3__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.5 12 4l9 9.5M5.25 11.25v8.25a1.5 1.5 0 0 0 1.5 1.5h10.5a1.5 1.5 0 0 0 1.5-1.5v-8.25M9 21v-5.25h6V21"/>
+                </svg>
+            </span>
+            <span class="bs-nav-v3__copy"><strong>Overview</strong><small>Protection posture</small></span>
+            <span class="bs-nav-v3__arrow" aria-hidden="true">↗</span>
+        </a>
+        <a href="{% url 'console:log:index' %}"
+           @click="sideBar = false"
+           class="bs-nav-v3__item {% if active_url == 'logs' %}is-active{% endif %}">
+            <span class="bs-nav-v3__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path stroke-linecap="round" d="M7 5h13M7 12h13M7 19h13"/><path stroke-linecap="round" stroke-linejoin="round" d="M3.5 5h.01M3.5 12h.01M3.5 19h.01"/>
+                </svg>
+            </span>
+            <span class="bs-nav-v3__copy"><strong>Activity</strong><small>Every system event</small></span>
+            <span class="bs-nav-v3__arrow" aria-hidden="true">↗</span>
+        </a>
+    </div>
+
+    <div class="bs-nav-v3__section">
+        <p class="bs-nav-v3__label">Protect</p>
+        <a href="{% url 'console:node:index' %}"
+           @click="sideBar = false"
+           class="bs-nav-v3__item {% if active_url == 'nodes' %}is-active{% endif %}">
+            <span class="bs-nav-v3__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 8.25h15M4.5 15.75h15M6.75 4.5h10.5A2.25 2.25 0 0 1 19.5 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25H6.75a2.25 2.25 0 0 1-2.25-2.25V6.75A2.25 2.25 0 0 1 6.75 4.5Z"/><path stroke-linecap="round" d="M8 8.25h.01M8 15.75h.01"/>
+                </svg>
+            </span>
+            <span class="bs-nav-v3__copy"><strong>Sources</strong><small>Servers, volumes & apps</small></span>
+            <span class="bs-nav-v3__arrow" aria-hidden="true">↗</span>
+        </a>
+        <a href="{% url 'console:setup:integration_select' %}"
+           @click="sideBar = false"
+           class="bs-nav-v3__item {% if active_url == 'setup' %}is-active{% endif %}">
+            <span class="bs-nav-v3__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/><circle cx="12" cy="12" r="8.25"/>
+                </svg>
+            </span>
+            <span class="bs-nav-v3__copy"><strong>Add source</strong><small>Connect a provider</small></span>
+            <span class="bs-nav-v3__arrow" aria-hidden="true">↗</span>
+        </a>
+    </div>
+
+    <div class="bs-nav-v3__section">
+        <p class="bs-nav-v3__label">Workspace</p>
+        <a href="{% url 'console:settings:profile' %}"
+           @click="sideBar = false"
+           class="bs-nav-v3__item {% if active_url == 'profile' or active_url == 'account' or active_url == 'password' or active_url == 'multifactor' or active_url == 'group' or active_url == 'user' or active_url == 'invite' or active_url == 'notifications' %}is-active{% endif %}">
+            <span class="bs-nav-v3__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <circle cx="12" cy="8" r="3.25"/><path stroke-linecap="round" stroke-linejoin="round" d="M5.5 20a6.5 6.5 0 0 1 13 0M19.5 4.5l.8 1.6 1.7.25-1.25 1.2.3 1.7-1.55-.8-1.55.8.3-1.7L17 6.35l1.7-.25.8-1.6Z"/>
+                </svg>
+            </span>
+            <span class="bs-nav-v3__copy"><strong>Settings</strong><small>Account & access</small></span>
+            <span class="bs-nav-v3__arrow" aria-hidden="true">↗</span>
+        </a>
+    </div>
+
+    <div class="bs-nav-v3__help">
+        <span class="bs-nav-v3__help-mark" aria-hidden="true">?</span>
+        <div><strong>Need a hand?</strong><small>Read the setup guide</small></div>
+        <span aria-hidden="true">↗</span>
+    </div>
+</nav>

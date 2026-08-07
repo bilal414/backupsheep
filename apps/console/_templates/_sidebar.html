@@ -1,225 +1,40 @@
-<!-- Off-canvas menu for mobile, show/hide based on off-canvas menu state. -->
-<div x-show="sideBar"
-     x-transition:enter="transition ease-out duration-100"
-     x-transition:enter-start="transform opacity-0 scale-95"
-     x-transition:enter-end="transform opacity-100 scale-10"
-     x-transition:leave="transition ease-in duration-75"
-     x-transition:leave-start="transform opacity-100 scale-100"
-     x-transition:leave-end="transform opacity-0 scale-95"
-     @click.away="sideBar = false"
-     style="display: none;" class="relative z-50 lg:hidden bs-sidebar-mobile" role="dialog" aria-modal="true">
-    <div class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm"></div>
+<div x-cloak x-show="sideBar" x-transition.opacity @click="sideBar = false" class="bs-shell-v3__scrim lg:hidden" aria-hidden="true"></div>
 
-    <div class="fixed inset-0 flex">
-        <div class="relative mr-16 flex w-full max-w-xs flex-1">
-            <div class="absolute left-full top-0 flex w-16 justify-center pt-5">
-                <button @click="sideBar = false" type="button" class="-m-2.5 p-2.5">
-                    <span class="sr-only">Close sidebar</span>
-                    <svg class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
-                         stroke="currentColor" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path>
-                    </svg>
+<aside class="bs-shell-v3__rail" :class="{ 'is-open': sideBar }" aria-label="BackupSheep console navigation">
+    <div class="bs-shell-v3__rail-inner">
+        <div class="bs-shell-v3__brand">
+            <a href="{% url 'console:home:index' %}" class="bs-shell-v3__brand-link">
+                <span class="bs-shell-v3__brand-mark" aria-hidden="true">B</span>
+                <span class="bs-shell-v3__brand-copy">
+                    <strong>BackupSheep</strong>
+                    <small>Control plane</small>
+                </span>
+            </a>
+            <button type="button" @click="sideBar = false" class="bs-shell-v3__rail-close lg:hidden" aria-label="Close navigation">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/></svg>
+            </button>
+        </div>
+
+        <div class="bs-shell-v3__workspace">
+            <span class="bs-shell-v3__workspace-dot" aria-hidden="true"></span>
+            <span><strong>Production workspace</strong><small>All systems operational</small></span>
+            <span class="bs-shell-v3__workspace-pulse" aria-hidden="true"></span>
+        </div>
+
+        {% include "_console_nav.html" %}
+
+        <div class="bs-shell-v3__account">
+            <div class="bs-shell-v3__account-avatar">{{ request.user.member.full_name|slice:":1"|upper }}</div>
+            <div class="bs-shell-v3__account-copy">
+                <strong>{{ request.user.member.full_name }}</strong>
+                <small>Workspace member</small>
+            </div>
+            <form id="sidebar-logout-form" method="post" action="{% url 'console:auth:logout' %}">
+                {% csrf_token %}
+                <button type="submit" aria-label="Sign out" title="Sign out">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M10 5H6.75A1.75 1.75 0 0 0 5 6.75v10.5A1.75 1.75 0 0 0 6.75 19H10M14 8l4 4-4 4M18 12H9"/></svg>
                 </button>
-            </div>
-
-            <!-- Sidebar component -->
-            <div class="flex grow flex-col gap-y-5 overflow-y-auto bg-white px-5 pb-4 bs-sidebar-panel">
-                <div class="flex h-16 shrink-0 items-center border-b border-slate-100 bs-sidebar-brand">
-                    <a href="{% url 'console:home:index' %}"><img class="h-8 w-auto bs-brand-logo"
-                                                                  src="{{ STATIC_URL }}console/images/logo.webp"
-                                                                  alt="BackupSheep"></a>
-                    <span class="bs-sidebar-caption">OPERATIONS CONSOLE</span>
-                </div>
-                <nav class="flex flex-1 flex-col">
-                    <ul role="list" class="flex flex-1 flex-col gap-y-7">
-                        <li>
-                            <div class="text-xs font-semibold uppercase tracking-wider text-slate-400 px-2 mb-2 bs-nav-label">Menu</div>
-                            <ul role="list" class="-mx-2 space-y-1">
-                                <li>
-                                    <a href="{% url 'console:home:index' %}"
-                                       class="{% if active_url == "dashboard" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
-                                        <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "dashboard" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
-                                             fill="none" viewBox="0 0 24 24"
-                                             stroke-width="1.5" stroke="currentColor" aria-hidden="true">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                  d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"></path>
-                                        </svg>
-                                        Dashboard
-                                    </a>
-                                </li>
-                                <li>
-                                    <a href="{% url 'console:node:index' %}"
-                                       class="{% if active_url == "nodes" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
-                                        <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "nodes" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
-                                             fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
-                                             aria-hidden="true">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                  d="M5.25 14.25h13.5m-13.5 0a3 3 0 0 1-3-3m3 3a3 3 0 1 0 0 6h13.5a3 3 0 1 0 0-6m-16.5-3a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3m-19.5 0a4.5 4.5 0 0 1 .9-2.7L5.737 5.1a3.375 3.375 0 0 1 2.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 0 1 .9 2.7m0 0a3 3 0 0 1-3 3m0 3h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Zm-3 6h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Z"></path>
-                                        </svg>
-                                        Nodes
-                                    </a>
-                                </li>
-                                <li>
-                                    <a href="{% url 'console:setup:integration_select' %}"
-                                       class="{% if active_url == "setup" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
-                                        <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "setup" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
-                                             fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
-                                             aria-hidden="true">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                  d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z"></path>
-                                        </svg>
-                                        Integrations
-                                    </a>
-                                </li>
-                                <li>
-                                    <a href="{% url 'console:log:index' %}"
-                                       class="{% if active_url == "logs" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
-                                        <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "logs" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
-                                             fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
-                                             aria-hidden="true">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                  d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z"></path>
-                                        </svg>
-                                        Activity Logs
-                                    </a>
-                                </li>
-                                <li>
-                                    <a href="{% url 'console:settings:profile' %}"
-                                       class="{% if active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
-                                        <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
-                                             fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
-                                             aria-hidden="true">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                  d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z"></path>
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                  d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"></path>
-                                        </svg>
-                                        Settings
-                                    </a>
-                                </li>
-                            </ul>
-                        </li>
-                        <li class="mt-auto -mx-2">
-                            <div class="flex items-center gap-x-3 rounded-lg p-2.5 text-sm font-medium leading-6 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors bs-nav-logout">
-                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-                                     stroke-width="1.5"
-                                     stroke="currentColor"
-                                     class="h-5 w-5 shrink-0 text-slate-400">
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                          d="M8.25 9V5.25A2.25 2.25 0 0 1 10.5 3h6a2.25 2.25 0 0 1 2.25 2.25v13.5A2.25 2.25 0 0 1 16.5 21h-6a2.25 2.25 0 0 1-2.25-2.25V15m-3 0-3-3m0 0 3-3m-3 3H15"></path>
-                                </svg>
-
-                                <form id="logout-form" method="post" action="{% url 'console:auth:logout' %}">
-                                    {% csrf_token %}
-                                    <button type="submit" class="cursor-pointer">
-                                        Sign out
-                                    </button>
-                                </form>
-                            </div>
-                        </li>
-                    </ul>
-                </nav>
-            </div>
+            </form>
         </div>
     </div>
-</div>
-
-<!-- Static sidebar for desktop -->
-<div class="hidden lg:fixed lg:inset-y-0 lg:z-50 lg:flex lg:w-72 lg:flex-col bs-sidebar-desktop">
-    <div class="flex grow flex-col gap-y-5 overflow-y-auto border-r border-slate-200 bg-white px-5 pb-4 bs-sidebar-panel">
-        <div class="flex h-16 shrink-0 items-center border-b border-slate-100 bs-sidebar-brand">
-            <a href="{% url 'console:home:index' %}"><img class="h-8 w-auto bs-brand-logo"
-                                                          src="{{ STATIC_URL }}console/images/logo.webp"
-                                                          alt="BackupSheep"></a>
-            <span class="bs-sidebar-caption">OPERATIONS CONSOLE</span>
-        </div>
-        <nav class="flex flex-1 flex-col">
-            <ul role="list" class="flex flex-1 flex-col gap-y-7">
-                <li>
-                    <div class="text-xs font-semibold uppercase tracking-wider text-slate-400 px-2 mb-2 bs-nav-label">Menu</div>
-                    <ul role="list" class="-mx-2 space-y-1">
-                        <li>
-                            <a href="{% url 'console:home:index' %}"
-                               class="{% if active_url == "dashboard" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
-                                <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "dashboard" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
-                                     fill="none" viewBox="0 0 24 24"
-                                     stroke-width="1.5" stroke="currentColor" aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                          d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"></path>
-                                </svg>
-                                Dashboard
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{% url 'console:node:index' %}"
-                               class="{% if active_url == "nodes" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
-                                <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "nodes" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
-                                     fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
-                                     aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                          d="M5.25 14.25h13.5m-13.5 0a3 3 0 0 1-3-3m3 3a3 3 0 1 0 0 6h13.5a3 3 0 1 0 0-6m-16.5-3a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3m-19.5 0a4.5 4.5 0 0 1 .9-2.7L5.737 5.1a3.375 3.375 0 0 1 2.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 0 1 .9 2.7m0 0a3 3 0 0 1-3 3m0 3h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Zm-3 6h.008v.008h-.008v-.008Zm0-6h.008v.008h-.008v-.008Z"></path>
-                                </svg>
-                                Nodes
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{% url 'console:setup:integration_select' %}"
-                               class="{% if active_url == "setup" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
-                                <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "setup" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
-                                     fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
-                                     aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                          d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z"></path>
-                                </svg>
-                                Integrations
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{% url 'console:log:index' %}"
-                               class="{% if active_url == "logs" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
-                                <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "logs" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
-                                     fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
-                                     aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                          d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z"></path>
-                                </svg>
-                                Activity Logs
-                            </a>
-                        </li>
-                        <li>
-                            <a href="{% url 'console:settings:profile' %}"
-                               class="{% if active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
-                                <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
-                                     fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
-                                     aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                          d="M9.594 3.94c.09-.542.56-.94 1.11-.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z"></path>
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                          d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"></path>
-                                </svg>
-                                Settings
-                            </a>
-                        </li>
-                    </ul>
-                </li>
-                <li class="mt-auto -mx-2">
-                        <div class="flex items-center gap-x-3 rounded-lg p-2.5 text-sm font-medium leading-6 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors bs-nav-logout">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
-                             stroke="currentColor"
-                             class="h-5 w-5 shrink-0 text-slate-400">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                  d="M8.25 9V5.25A2.25 2.25 0 0 1 10.5 3h6a2.25 2.25 0 0 1 2.25 2.25v13.5A2.25 2.25 0 0 1 16.5 21h-6a2.25 2.25 0 0 1-2.25-2.25V15m-3 0-3-3m0 0 3-3m-3 3H15"></path>
-                        </svg>
-
-                        <form id="logout-form" method="post" action="{% url 'console:auth:logout' %}">
-                            {% csrf_token %}
-                            <button type="submit" class="cursor-pointer">
-                                Sign out
-                            </button>
-                        </form>
-                    </div>
-                </li>
-            </ul>
-        </nav>
-    </div>
-</div>
+</aside>
