@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full bg-slate-50">
+<html lang="en" class="h-full bs-console-html">
 <head>
     <title>{% block title %}Dashboard{% endblock %} · {{ site.app_name }}</title>
     <meta charset="UTF-8"/>
@@ -10,12 +10,13 @@
     <link rel="icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
     <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
+    <link type="text/css" href="{{ STATIC_URL }}console/css/brand-console.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flowbite@4.0.2/dist/flowbite.min.css"/>
     <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet"/>
 </head>
-<body class="h-full antialiased{% block page_class %}{% endblock %}">
+<body class="h-full antialiased brand-console{% block page_class %}{% endblock %}">
 {% csrf_token %}
 <script>
     // Attach Django's CSRF token to every same-origin state-changing fetch() so the
@@ -44,12 +45,12 @@
         };
     })();
 </script>
-<div x-data="{ sideBar: false }">
+<div x-data="{ sideBar: false }" class="bs-console-layout">
     {% include "_sidebar.html" %}
-    <div class="lg:pl-72">
+    <div class="lg:pl-72 bs-console-content">
         {% include "_header.html" %}
-        <main class="py-8 flex flex-col min-h-screen justify-between">
-            <div class="px-4 sm:px-6 lg:px-10 mb-auto w-full">
+        <main class="py-8 flex flex-col min-h-screen justify-between bs-main">
+            <div class="px-4 sm:px-6 lg:px-10 mb-auto w-full bs-main-content">
                 {% block content %}{% endblock %}
             </div>
             {% include "_footer.html" %}

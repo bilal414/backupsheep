@@ -7,7 +7,7 @@
      x-transition:leave-start="transform opacity-100 scale-100"
      x-transition:leave-end="transform opacity-0 scale-95"
      @click.away="sideBar = false"
-     style="display: none;" class="relative z-50 lg:hidden" role="dialog" aria-modal="true">
+     style="display: none;" class="relative z-50 lg:hidden bs-sidebar-mobile" role="dialog" aria-modal="true">
     <div class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm"></div>
 
     <div class="fixed inset-0 flex">
@@ -23,20 +23,21 @@
             </div>
 
             <!-- Sidebar component -->
-            <div class="flex grow flex-col gap-y-5 overflow-y-auto bg-white px-5 pb-4">
-                <div class="flex h-16 shrink-0 items-center border-b border-slate-100">
-                    <a href="{% url 'console:home:index' %}"><img class="h-8 w-auto"
+            <div class="flex grow flex-col gap-y-5 overflow-y-auto bg-white px-5 pb-4 bs-sidebar-panel">
+                <div class="flex h-16 shrink-0 items-center border-b border-slate-100 bs-sidebar-brand">
+                    <a href="{% url 'console:home:index' %}"><img class="h-8 w-auto bs-brand-logo"
                                                                   src="{{ STATIC_URL }}console/images/logo.webp"
                                                                   alt="BackupSheep"></a>
+                    <span class="bs-sidebar-caption">OPERATIONS CONSOLE</span>
                 </div>
                 <nav class="flex flex-1 flex-col">
                     <ul role="list" class="flex flex-1 flex-col gap-y-7">
                         <li>
-                            <div class="text-xs font-semibold uppercase tracking-wider text-slate-400 px-2 mb-2">Menu</div>
+                            <div class="text-xs font-semibold uppercase tracking-wider text-slate-400 px-2 mb-2 bs-nav-label">Menu</div>
                             <ul role="list" class="-mx-2 space-y-1">
                                 <li>
                                     <a href="{% url 'console:home:index' %}"
-                                       class="{% if active_url == "dashboard" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors">
+                                       class="{% if active_url == "dashboard" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
                                         <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "dashboard" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
                                              fill="none" viewBox="0 0 24 24"
                                              stroke-width="1.5" stroke="currentColor" aria-hidden="true">
@@ -48,7 +49,7 @@
                                 </li>
                                 <li>
                                     <a href="{% url 'console:node:index' %}"
-                                       class="{% if active_url == "nodes" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors">
+                                       class="{% if active_url == "nodes" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
                                         <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "nodes" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
                                              fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
                                              aria-hidden="true">
@@ -60,7 +61,7 @@
                                 </li>
                                 <li>
                                     <a href="{% url 'console:setup:integration_select' %}"
-                                       class="{% if active_url == "setup" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors">
+                                       class="{% if active_url == "setup" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
                                         <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "setup" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
                                              fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
                                              aria-hidden="true">
@@ -72,7 +73,7 @@
                                 </li>
                                 <li>
                                     <a href="{% url 'console:log:index' %}"
-                                       class="{% if active_url == "logs" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors">
+                                       class="{% if active_url == "logs" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
                                         <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "logs" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
                                              fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
                                              aria-hidden="true">
@@ -84,7 +85,7 @@
                                 </li>
                                 <li>
                                     <a href="{% url 'console:settings:profile' %}"
-                                       class="{% if active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors">
+                                       class="{% if active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
                                         <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
                                              fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
                                              aria-hidden="true">
@@ -99,7 +100,7 @@
                             </ul>
                         </li>
                         <li class="mt-auto -mx-2">
-                            <div class="flex items-center gap-x-3 rounded-lg p-2.5 text-sm font-medium leading-6 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors">
+                            <div class="flex items-center gap-x-3 rounded-lg p-2.5 text-sm font-medium leading-6 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors bs-nav-logout">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
                                      stroke-width="1.5"
                                      stroke="currentColor"
@@ -124,21 +125,22 @@
 </div>
 
 <!-- Static sidebar for desktop -->
-<div class="hidden lg:fixed lg:inset-y-0 lg:z-50 lg:flex lg:w-72 lg:flex-col">
-    <div class="flex grow flex-col gap-y-5 overflow-y-auto border-r border-slate-200 bg-white px-5 pb-4">
-        <div class="flex h-16 shrink-0 items-center border-b border-slate-100">
-            <a href="{% url 'console:home:index' %}"><img class="h-8 w-auto"
+<div class="hidden lg:fixed lg:inset-y-0 lg:z-50 lg:flex lg:w-72 lg:flex-col bs-sidebar-desktop">
+    <div class="flex grow flex-col gap-y-5 overflow-y-auto border-r border-slate-200 bg-white px-5 pb-4 bs-sidebar-panel">
+        <div class="flex h-16 shrink-0 items-center border-b border-slate-100 bs-sidebar-brand">
+            <a href="{% url 'console:home:index' %}"><img class="h-8 w-auto bs-brand-logo"
                                                           src="{{ STATIC_URL }}console/images/logo.webp"
                                                           alt="BackupSheep"></a>
+            <span class="bs-sidebar-caption">OPERATIONS CONSOLE</span>
         </div>
         <nav class="flex flex-1 flex-col">
             <ul role="list" class="flex flex-1 flex-col gap-y-7">
                 <li>
-                    <div class="text-xs font-semibold uppercase tracking-wider text-slate-400 px-2 mb-2">Menu</div>
+                    <div class="text-xs font-semibold uppercase tracking-wider text-slate-400 px-2 mb-2 bs-nav-label">Menu</div>
                     <ul role="list" class="-mx-2 space-y-1">
                         <li>
                             <a href="{% url 'console:home:index' %}"
-                               class="{% if active_url == "dashboard" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors">
+                               class="{% if active_url == "dashboard" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
                                 <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "dashboard" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
                                      fill="none" viewBox="0 0 24 24"
                                      stroke-width="1.5" stroke="currentColor" aria-hidden="true">
@@ -150,7 +152,7 @@
                         </li>
                         <li>
                             <a href="{% url 'console:node:index' %}"
-                               class="{% if active_url == "nodes" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors">
+                               class="{% if active_url == "nodes" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
                                 <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "nodes" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
                                      fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
                                      aria-hidden="true">
@@ -162,7 +164,7 @@
                         </li>
                         <li>
                             <a href="{% url 'console:setup:integration_select' %}"
-                               class="{% if active_url == "setup" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors">
+                               class="{% if active_url == "setup" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
                                 <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "setup" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
                                      fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
                                      aria-hidden="true">
@@ -174,7 +176,7 @@
                         </li>
                         <li>
                             <a href="{% url 'console:log:index' %}"
-                               class="{% if active_url == "logs" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors">
+                               class="{% if active_url == "logs" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
                                 <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "logs" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
                                      fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
                                      aria-hidden="true">
@@ -186,7 +188,7 @@
                         </li>
                         <li>
                             <a href="{% url 'console:settings:profile' %}"
-                               class="{% if active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors">
+                               class="{% if active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:text-slate-900 hover:bg-slate-100{% endif %} group flex gap-x-3 rounded-lg p-2.5 text-sm leading-6 font-medium transition-colors bs-nav-link">
                                 <svg class="h-5 w-5 shrink-0 mt-0.5 {% if active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}text-indigo-600{% else %}text-slate-400 group-hover:text-slate-500{% endif %}"
                                      fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
                                      aria-hidden="true">
@@ -201,7 +203,7 @@
                     </ul>
                 </li>
                 <li class="mt-auto -mx-2">
-                    <div class="flex items-center gap-x-3 rounded-lg p-2.5 text-sm font-medium leading-6 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors">
+                        <div class="flex items-center gap-x-3 rounded-lg p-2.5 text-sm font-medium leading-6 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors bs-nav-logout">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
                              stroke="currentColor"
                              class="h-5 w-5 shrink-0 text-slate-400">

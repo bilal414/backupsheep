@@ -8,8 +8,27 @@
 {% load humanize %}
 
 {% block content %}
-    <div x-data="nodeDetails('{{ object.notify_on_success|yesno:"true,false" }}', '{{ object.notify_on_fail|yesno:"true,false" }}')">
-        <div class="grid grid-cols-1 gap-4 lg:grid-cols-2 md:grid-cols-2">
+    <div class="bs-node-page" x-data="nodeDetails('{{ object.notify_on_success|yesno:"true,false" }}', '{{ object.notify_on_fail|yesno:"true,false" }}')">
+        <header class="bs-node-hero">
+            <div>
+                <a class="bs-node-back" href="{% url 'console:node:index' %}">← All nodes</a>
+                <p class="bs-node-eyebrow">Protected resource / {{ object.get_type_display }}</p>
+                <div class="bs-node-title-row">
+                    <span class="bs-node-icon" aria-hidden="true">{% if object.type == 3 or object.type == 4 %}▣{% else %}◌{% endif %}</span>
+                    <div>
+                        <h1 class="bs-node-title">{{ object.name }}</h1>
+                        <p class="bs-node-subtitle">{{ object.connection.integration.name }} · {{ object.connection.name }}</p>
+                    </div>
+                </div>
+            </div>
+            <div class="bs-node-hero-status">
+                <span class="bs-status bs-status-success">Protected</span>
+                <strong>{{ object.get_status_display }}</strong>
+                <small>Node health</small>
+            </div>
+        </header>
+
+        <div class="grid grid-cols-1 gap-4 lg:grid-cols-2 md:grid-cols-2 bs-node-top-grid">
             <div>
                 <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg">
                     <div class="px-2 py-3 sm:px-2  bg-indigo-500">
@@ -130,7 +149,7 @@
             </div>
         </div>
 
-        <div class="grid grid-cols-1 gap-4 lg:grid-cols-2 md:grid-cols-2">
+        <div class="grid grid-cols-1 gap-4 lg:grid-cols-2 md:grid-cols-2 bs-node-meta-grid">
             <div>
                 <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6">
                     <div class="px-2 py-3 sm:px-2  bg-indigo-500">
@@ -340,7 +359,7 @@
             </div>
         </div>
 
-        <div class="grid grid-cols-1 gap-4 mt-6">
+        <div class="grid grid-cols-1 gap-4 mt-6 bs-node-schedule-grid">
             <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg  ">
 
                 {% if object.schedules.count > 0 %}
@@ -485,7 +504,7 @@
         </div>
 
         {% if backup_count > 0 %}
-            <div class="grid grid-cols-1 gap-4 mt-6" id="section-backup">
+            <div class="grid grid-cols-1 gap-4 mt-6 bs-node-backups-grid" id="section-backup">
                 <div>
                     <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg">
                         <div class="px-2 py-3 sm:px-2  bg-indigo-500">

@@ -1,5 +1,5 @@
 <div x-data="headerNav"
-     class="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-slate-200 bg-white/80 backdrop-blur-md px-4 sm:gap-x-6 sm:px-6 lg:px-10">
+     class="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-slate-200 bg-white/80 backdrop-blur-md px-4 sm:gap-x-6 sm:px-6 lg:px-10 bs-header">
     <button @click="sideBar = ! sideBar" type="button" class="-m-2.5 p-2.5 text-slate-600 lg:hidden">
         <span class="sr-only">Open sidebar</span>
         <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"
@@ -11,7 +11,13 @@
 
     <div class="h-6 w-px bg-slate-900/10 lg:hidden" aria-hidden="true"></div>
 
-    <div class="flex flex-1 gap-x-4 self-stretch lg:gap-x-6 justify-end">
+    <div class="flex flex-1 gap-x-4 self-stretch lg:gap-x-6 justify-between">
+        <div class="hidden items-center gap-3 md:flex bs-header-context">
+            <span class="bs-header-mark" aria-hidden="true">B</span>
+            <span class="bs-header-product">BackupSheep</span>
+            <span class="bs-header-divider" aria-hidden="true">/</span>
+            <span class="bs-header-view">{% if active_url == "dashboard" %}Overview{% elif active_url == "nodes" %}Nodes{% elif active_url == "logs" %}Activity log{% elif active_url == "setup" %}Integrations{% else %}Control plane{% endif %}</span>
+        </div>
         <div class="flex items-center gap-x-4 lg:gap-x-6 ">
 
             <!-- Profile dropdown -->
