@@ -2868,24 +2868,24 @@ body.brand-console::before {
     background: rgba(219, 216, 208, .55) !important;
 }
 
-.brand-console.page_console .bg-indigo-500,
-.brand-console.page_console .bg-indigo-600,
-.brand-console.page_console .bg-teal-500,
-.brand-console.page_console .bg-teal-600,
-.brand-console.page_console .bg-green-600,
-.brand-console.page_settings .bg-indigo-500,
-.brand-console.page_settings .bg-indigo-600,
-.brand-console.page_settings .bg-teal-500,
-.brand-console.page_settings .bg-teal-600,
-.brand-console.page_settings .bg-green-600 {
+.brand-console.page_console .bg-indigo-500:not([role="switch"]),
+.brand-console.page_console .bg-indigo-600:not([role="switch"]),
+.brand-console.page_console .bg-teal-500:not([role="switch"]),
+.brand-console.page_console .bg-teal-600:not([role="switch"]),
+.brand-console.page_console .bg-green-600:not([role="switch"]),
+.brand-console.page_settings .bg-indigo-500:not([role="switch"]),
+.brand-console.page_settings .bg-indigo-600:not([role="switch"]),
+.brand-console.page_settings .bg-teal-500:not([role="switch"]),
+.brand-console.page_settings .bg-teal-600:not([role="switch"]),
+.brand-console.page_settings .bg-green-600:not([role="switch"]) {
     background: var(--bs-ink) !important;
     color: var(--bs-paper) !important;
 }
 
-.brand-console.page_console .hover\:bg-indigo-500:hover,
-.brand-console.page_console .hover\:bg-indigo-700:hover,
-.brand-console.page_settings .hover\:bg-indigo-500:hover,
-.brand-console.page_settings .hover\:bg-indigo-700:hover {
+.brand-console.page_console .hover\:bg-indigo-500:not([role="switch"]):hover,
+.brand-console.page_console .hover\:bg-indigo-700:not([role="switch"]):hover,
+.brand-console.page_settings .hover\:bg-indigo-500:not([role="switch"]):hover,
+.brand-console.page_settings .hover\:bg-indigo-700:not([role="switch"]):hover {
     background: var(--bs-ink-soft) !important;
 }
 
