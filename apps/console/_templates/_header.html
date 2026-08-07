@@ -16,7 +16,7 @@
             <span class="bs-header-mark" aria-hidden="true">B</span>
             <span class="bs-header-product">BackupSheep</span>
             <span class="bs-header-divider" aria-hidden="true">/</span>
-            <span class="bs-header-view">{% if active_url == "dashboard" %}Overview{% elif active_url == "nodes" %}Nodes{% elif active_url == "logs" %}Activity log{% elif active_url == "setup" %}Integrations{% else %}Control plane{% endif %}</span>
+            <span class="bs-header-view">{% if active_url == "dashboard" %}Overview{% elif active_url == "nodes" %}Nodes{% elif active_url == "logs" %}Activity log{% elif active_url == "setup" %}Integrations{% elif active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}Settings{% else %}Control plane{% endif %}</span>
         </div>
         <div class="flex items-center gap-x-4 lg:gap-x-6 ">
 

@@ -3,12 +3,21 @@
 {% block meta_title %}{{ heading }}{% endblock %}
 {% block meta_description %}{{ heading }}{% endblock %}
 {% block meta_keywords %}{{ heading }}{% endblock %}
-{% block page_class %}page_console console-page sb-l-o sb-r-c{% endblock %}
+{% block page_class %}page_console console-page bs-logs-page sb-l-o sb-r-c{% endblock %}
 {% block content %}
+
+    <header class="bs-page-hero bs-logs-hero">
+        <div>
+            <p class="bs-kicker">Audit trail</p>
+            <h1 class="bs-page-title">Activity you can trace.</h1>
+            <p class="bs-page-subtitle">A searchable record of backup, schedule, integration, and account events across your current access scope.</p>
+        </div>
+        <span class="bs-live-chip">{{ logs_count }} events in view</span>
+    </header>
 
     <!-- Server-side filter bar: type dropdown + substring search on message/error.
          node/backup/integration drill-down params ride along as hidden inputs. -->
-    <form method="get" action="{% url 'console:log:index' %}" class="mt-6">
+    <form method="get" action="{% url 'console:log:index' %}" class="mt-6 bs-log-filter">
         {% if node %}<input type="hidden" name="node" value="{{ node }}">{% endif %}
         {% if backup %}<input type="hidden" name="backup" value="{{ backup }}">{% endif %}
         {% if integration %}<input type="hidden" name="integration" value="{{ integration }}">{% endif %}

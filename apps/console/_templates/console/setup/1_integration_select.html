@@ -3,12 +3,12 @@
 {% block meta_title %}{{ heading }}{% endblock %}
 {% block meta_description %}{{ heading }}{% endblock %}
 {% block meta_keywords %}{{ heading }}{% endblock %}
-{% block page_class %}page_console console-page sb-l-o sb-r-c{% endblock %}
+{% block page_class %}page_console console-page bs-integrations-page sb-l-o sb-r-c{% endblock %}
 {% block heading %}false{% endblock %}
 {% block content %}
     <div x-data="setupSelectIntegration()">
         <!-- Page header -->
-        <div class="md:flex md:items-center md:justify-between">
+        <div class="md:flex md:items-center md:justify-between bs-page-hero">
             <div class="flex-1 min-w-0">
                 <p class="text-sm font-medium text-indigo-600">Setup</p>
                 <h1 class="mt-1 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">Connect an

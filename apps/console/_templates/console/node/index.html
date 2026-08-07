@@ -3,12 +3,12 @@
 {% block meta_title %}{{ heading }}{% endblock %}
 {% block meta_description %}{{ heading }}{% endblock %}
 {% block meta_keywords %}{{ heading }}{% endblock %}
-{% block page_class %}page_console console-page sb-l-o sb-r-c{% endblock %}
+{% block page_class %}page_console console-page bs-nodes-index sb-l-o sb-r-c{% endblock %}
 {% load humanize %}
 {% load tz %}
 
 {% block content %}
-    <div>
+    <div class="bs-node-summary">
         <dl class="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-5">
             <div class="relative bg-white pt-5 px-4 sm:pt-6 sm:px-6 shadow-soft ring-1 ring-slate-900/5 rounded-2xl overflow-hidden">
                 <dt>
@@ -166,8 +166,8 @@
     </div>
 
     {% if node_count > 0 %}
-        <div x-data="nodeListPage">
-            <div class="pb-6 mt-10 rounded-2xl bg-white p-6 shadow-soft ring-1 ring-slate-900/5">
+        <div x-data="nodeListPage" class="bs-node-index-workspace">
+            <div class="pb-6 mt-10 rounded-2xl bg-white p-6 shadow-soft ring-1 ring-slate-900/5 bs-node-filter">
                 <div class="-ml-2 -mt-2 flex flex-wrap items-baseline">
                     <h3 class="ml-2 mt-2 text-lg leading-6 font-semibold text-slate-900">
                         {{ node_type|default:'Total'|title }} Nodes {% if not node_type %}({{ total_clouds|add:total_volumes|add:total_websites|add:total_database }}){% endif %}
@@ -232,7 +232,7 @@
                 <div class="flex flex-col mt-6">
                     <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
                         <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
-                            <div class="shadow-soft overflow-hidden ring-1 ring-slate-900/5 sm:rounded-2xl">
+                            <div class="shadow-soft overflow-hidden ring-1 ring-slate-900/5 sm:rounded-2xl bs-node-table-shell">
                                 <div class="overflow-x-auto">
                                     <table id="section-nodes" class="min-w-full divide-y divide-slate-200">
                                         <thead class="bg-slate-50">

@@ -8,15 +8,16 @@
     <link rel="icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
     <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
+    <link type="text/css" href="{{ STATIC_URL }}console/css/brand-console.css" rel="stylesheet">
     <style>
         [x-cloak] { display: none !important; }
         /* Widget classes live in onboarding/forms.py; round them to match the auth pages. */
         #onboarding-card input, #onboarding-card select, #onboarding-card textarea { border-radius: 0.5rem; }
     </style>
 </head>
-<body class="h-full bg-slate-50 text-slate-900 antialiased">
+<body class="brand-onboarding h-full bg-slate-50 text-slate-900 antialiased">
 <div class="relative min-h-full isolate">
     <!-- Decorative background -->
     <div class="absolute inset-0 -z-10 overflow-hidden" aria-hidden="true">

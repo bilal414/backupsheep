@@ -30,6 +30,7 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
 
     def get(self, request, *args, **kwargs):
         context = self.get_context_data(**kwargs)
+        context["active_url"] = "setup"
         p_no = self.request.GET.get("p_no", 1)
         p_size = self.request.GET.get("p_size", 10)
         integration_code = self.kwargs.get("integration_code")
@@ -81,6 +82,7 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
 
     def get(self, request, *args, **kwargs):
         context = self.get_context_data(**kwargs)
+        context["active_url"] = "setup"
         p_no = self.request.GET.get("p_no", 1)
         p_size = self.request.GET.get("p_size", 10)
         integration_code = self.kwargs.get("integration_code")
@@ -181,6 +183,7 @@ class IntegrationCreateNodeView(LoginRequiredMixin, TemplateView):
 
     def get(self, request, *args, **kwargs):
         context = self.get_context_data(**kwargs)
+        context["active_url"] = "setup"
         integration_code = self.kwargs.get("integration_code")
         connection_id = self.kwargs.get("connection_id")
 
@@ -213,6 +216,7 @@ class IntegrationModifyNodeView(LoginRequiredMixin, TemplateView):
 
     def get(self, request, *args, **kwargs):
         context = self.get_context_data(**kwargs)
+        context["active_url"] = "setup"
         integration_code = self.kwargs.get("integration_code")
         connection_id = self.kwargs.get("connection_id")
         node_id = self.kwargs.get("node_id")

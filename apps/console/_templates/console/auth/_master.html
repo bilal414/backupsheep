@@ -35,7 +35,11 @@
     <link rel="shortcuticon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
     <link rel="icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
     <link rel="canonical" href="{% url 'console:auth:signup' %}"/>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
     <link type="text/css" href="{{ STATIC_URL }}css/compiled.css" rel="stylesheet">
+    <link type="text/css" href="{{ STATIC_URL }}console/css/brand-console.css" rel="stylesheet">
     <script>(function (w, r) {
         w._rwq = r;
         w[r] = w[r] || function () {
@@ -44,7 +48,7 @@
     })(window, 'rewardful');</script>
     <script async src='https://r.wdfl.co/rw.js' data-rewardful='f2191d'></script>
 </head>
-<body class="{% block page_class %}{% endblock %}">
+<body class="brand-auth {% block page_class %}{% endblock %}">
 {% block content %}{% endblock %}
 <script src="{{ STATIC_URL }}js/cdn.min.js" defer></script>
 {% if not is_impersonated_session %}
