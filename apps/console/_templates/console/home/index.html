@@ -3,232 +3,144 @@
 {% block meta_title %}{{ heading }}{% endblock %}
 {% block meta_description %}{{ heading }}{% endblock %}
 {% block meta_keywords %}{{ heading }}{% endblock %}
-{% block page_class %}page_console console-page sb-l-o sb-r-c{% endblock %}
+{% block page_class %}page_console console-page bs-dashboard-route sb-l-o sb-r-c{% endblock %}
 {% block heading %}false{% endblock %}
 {% load humanize %}
 {% load tz %}
 
 {% block content %}
-    <div class="bs-dashboard">
-        <header class="bs-page-hero">
-            <div>
-                <p class="bs-kicker">BackupSheep / Control room</p>
-                <h1 class="bs-page-title">Your backup operations,<br><span>at a glance.</span></h1>
-                <p class="bs-page-subtitle">A calm view of what is protected, what is scheduled, and what needs a decision across your current access scope.</p>
+    <div class="bs-dashboard-v2">
+        <header class="bs-command-header">
+            <div class="bs-command-title">
+                <p class="bs-command-eyebrow"><span>Backup operations</span><span class="bs-eyebrow-divider">/</span><span>Live account</span></p>
+                <h1>Protection, under control.</h1>
+                <p class="bs-command-intro">A focused view of coverage, the next run, and the work that deserves a closer look.</p>
             </div>
-            <div class="bs-head-actions">
-                <span class="bs-live-chip">Live account</span>
-                <a href="{% url 'console:setup:integration_select' %}" class="bs-button bs-button-primary">Connect integration <span aria-hidden="true">↗</span></a>
+            <div class="bs-command-actions">
+                <a href="{% url 'console:setup:integration_select' %}" class="bs-command-button is-primary"><span class="bs-button-glyph" aria-hidden="true">＋</span>Add integration</a>
+                <a href="{% url 'console:node:index' %}" class="bs-command-button is-quiet">View nodes <span aria-hidden="true">↗</span></a>
             </div>
         </header>
 
-        <section class="bs-pulse" aria-labelledby="operations-heading">
-            <div class="bs-section-heading">
-                <div class="bs-section-heading-inner">
-                    <span class="bs-section-index">01</span>
+        <div class="bs-dashboard-v2-grid">
+            <section class="bs-posture-panel" aria-labelledby="posture-heading">
+                <div class="bs-posture-header">
                     <div>
-                        <p class="bs-kicker">Operational pulse</p>
-                        <h2 id="operations-heading" class="bs-section-title">Keep the important things moving.</h2>
+                        <p class="bs-command-label">Protection posture</p>
+                        <h2 id="posture-heading">{% if failed_backups %}Review the exception queue.{% else %}Backup coverage is live.{% endif %}</h2>
+                        <p class="bs-posture-description">{% if failed_backups %}A few runs need attention before the next clean handoff.{% else %}Your visible infrastructure is connected to an active recovery path.{% endif %}</p>
+                    </div>
+                    <span class="bs-posture-chip {% if failed_backups %}is-warning{% else %}is-good{% endif %}"><i aria-hidden="true"></i>{% if failed_backups %}Needs review{% else %}Nominal{% endif %}</span>
+                </div>
+                <div class="bs-posture-body">
+                    <div class="bs-posture-orbit" aria-label="{{ visible_node_count }} nodes covered">
+                        <span class="bs-orbit-ring is-outer" aria-hidden="true"></span>
+                        <span class="bs-orbit-ring is-inner" aria-hidden="true"></span>
+                        <span class="bs-orbit-marker is-one" aria-hidden="true"></span>
+                        <span class="bs-orbit-marker is-two" aria-hidden="true"></span>
+                        <div class="bs-orbit-core"><span>Covered</span><strong>{{ visible_node_count }}</strong><small>nodes</small></div>
+                    </div>
+                    <div class="bs-posture-readouts">
+                        <div><span>Active schedules</span><strong>{{ active_schedule_count }}</strong><small>ready to run</small></div>
+                        <div><span>Open exceptions</span><strong>{{ failed_backups|length }}</strong><small>{% if failed_backups %}needs review{% else %}nothing blocked{% endif %}</small></div>
+                        <div><span>Storage footprint</span><strong>{% if storage_used is not None %}{{ storage_used|filesizeformat }}{% else %}—{% endif %}</strong><small>across destinations</small></div>
                     </div>
                 </div>
-                <a class="bs-text-link" href="{% url 'console:log:index' %}">View activity <span aria-hidden="true">↗</span></a>
-            </div>
+                <div class="bs-posture-footer"><span class="bs-signal-dot" aria-hidden="true"></span><span>Control plane connected</span><span class="bs-posture-footer-rule" aria-hidden="true"></span><span>Current access scope</span></div>
+            </section>
 
-            <div class="bs-metric-grid">
-                <article class="bs-metric-card is-positive">
-                    <span class="bs-metric-label">Visible nodes</span>
-                    <strong class="bs-metric-value">{{ visible_node_count }}</strong>
-                    <span class="bs-metric-note">In your current access scope</span>
-                </article>
-                <article class="bs-metric-card is-positive">
-                    <span class="bs-metric-label">Active schedules</span>
-                    <strong class="bs-metric-value">{{ active_schedule_count }}</strong>
-                    <span class="bs-metric-note">Ready to run automatically</span>
-                </article>
-                <article class="bs-metric-card {% if failed_backups|length > 0 %}is-attention{% else %}is-positive{% endif %}">
-                    <span class="bs-metric-label">Needs attention</span>
-                    <strong class="bs-metric-value">{{ failed_backups|length }}</strong>
-                    <span class="bs-metric-note">Failed runs in scope</span>
-                </article>
-                <article class="bs-metric-card is-dark">
-                    <span class="bs-metric-label">Storage used</span>
-                    <strong class="bs-metric-value">{% if storage_used is not None %}{{ storage_used|filesizeformat }}{% else %}—{% endif %}</strong>
-                    <span class="bs-metric-note">Across account destinations</span>
-                </article>
-            </div>
-
-            {% if storage_cost_summary %}
-                <section class="bs-surface bs-economics" aria-labelledby="economics-heading">
-                    <div class="bs-surface-head">
-                        <div>
-                            <p class="bs-panel-label">Storage economics</p>
-                            <h3 id="economics-heading">Projected storage cost by destination and source</h3>
-                            <p>Know the shape of your retention bill before it becomes a surprise.</p>
-                        </div>
-                        <div class="bs-cost-total">${{ storage_cost_summary.estimated_monthly_storage_usd|floatformat:4 }} / month<small>{{ storage_cost_summary.stored_bytes|filesizeformat }} recorded across destinations</small></div>
-                    </div>
-                    <div class="bs-surface-columns">
-                        <div class="bs-surface-column">
-                            <p class="bs-list-label">Destinations</p>
-                            <ul class="bs-list">
-                                {% for destination in storage_cost_summary.destinations %}
-                                    <li>
-                                        <div>
-                                            <strong>{{ destination.storage_name }}</strong>
-                                            <small>{{ destination.storage_type }} · {{ destination.stored_bytes|filesizeformat }}{% if destination.is_air_gapped %} · protected copy{% endif %}</small>
-                                        </div>
-                                        <em>${{ destination.estimated_monthly_storage_usd|floatformat:4 }}</em>
-                                    </li>
-                                {% empty %}
-                                    <li class="bs-empty">No storage destinations yet.</li>
-                                {% endfor %}
-                            </ul>
-                        </div>
-                        <div class="bs-surface-column">
-                            <p class="bs-list-label">Sources</p>
-                            <ul class="bs-list">
-                                {% for source in storage_cost_summary.sources %}
-                                    <li>
-                                        <div>
-                                            <strong>{{ source.source_name }}</strong>
-                                            <small>{{ source.stored_bytes|filesizeformat }} across copies</small>
-                                        </div>
-                                        <em>${{ source.estimated_monthly_storage_usd|floatformat:4 }}</em>
-                                    </li>
-                                {% empty %}
-                                    <li class="bs-empty">No completed backup data yet.</li>
-                                {% endfor %}
-                            </ul>
-                        </div>
-                    </div>
-                    <p class="bs-surface-foot">Estimates use the rates entered on each destination and the configured lifecycle age. Retrieval estimate for one full restore: ${{ storage_cost_summary.estimated_full_retrieval_usd|floatformat:4 }}.</p>
-                </section>
-            {% endif %}
-
-            <div class="bs-two-column">
-                <section class="bs-surface" aria-labelledby="runs-heading">
-                    <div class="bs-surface-head">
-                        <div>
-                            <p class="bs-panel-label">Recent activity</p>
-                            <h3 id="runs-heading">Recent backup runs</h3>
-                            <p>The latest work across your visible nodes.</p>
-                        </div>
-                        <a class="bs-text-link" href="{% url 'console:node:index' %}">All nodes ↗</a>
-                    </div>
-                    <ul class="bs-run-list" aria-label="Recent backup runs">
-                        {% for backup in recent_backups %}
-                            <li>
-                                <div>
-                                    {% if backup.dashboard_node %}
-                                        <a class="bs-run-name" href="{% url 'console:node:detail' backup.dashboard_node.id %}">{{ backup.dashboard_node.name }}</a>
-                                    {% else %}
-                                        <span class="bs-run-name">{{ backup.uuid_str }}</span>
-                                    {% endif %}
-                                    <span class="bs-run-meta">{{ backup.uuid_str }} · {{ backup.modified|naturaltime }}</span>
-                                </div>
-                                <span class="bs-status {% if backup.status == 3 %}bs-status-success{% elif backup.status == 4 or backup.status == 7 or backup.status == 11 or backup.status == 21 or backup.status == 30 %}bs-status-danger{% else %}bs-status-warning{% endif %}">{{ backup.get_status_display }}</span>
-                            </li>
+            <aside class="bs-dashboard-rail" aria-label="Runway and attention">
+                <section class="bs-runway-panel" aria-labelledby="runway-heading">
+                    <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Runway</p><h2 id="runway-heading">Next scheduled</h2></div><span class="bs-panel-index">01</span></div>
+                    <ul class="bs-runway-list">
+                        {% for schedule in upcoming_schedules|slice:':3' %}
+                            <li><span class="bs-runway-dot" aria-hidden="true"></span><div><a href="{% url 'console:node:detail' schedule.node_id %}">{{ schedule.name }}</a><small>{{ schedule.node.name }} · {{ schedule.next_run|naturaltime }}</small></div></li>
                         {% empty %}
-                            <li class="bs-empty">No backup runs yet. Connect an integration and add a node to get started.</li>
+                            <li class="bs-empty-v2">No active schedules in this access scope.</li>
                         {% endfor %}
                     </ul>
+                    <a class="bs-panel-link" href="{% url 'console:node:index' %}">Open node inventory <span aria-hidden="true">↗</span></a>
                 </section>
 
-                <section class="bs-surface bs-schedule-panel" aria-labelledby="schedule-heading">
-                    <div class="bs-surface-head">
-                        <div>
-                            <p class="bs-panel-label">Next up</p>
-                            <h3 id="schedule-heading">Scheduled work</h3>
-                            <p>What the control plane will run next.</p>
-                        </div>
-                        <span class="bs-section-index">02</span>
-                    </div>
-                    <ul class="bs-schedule-list" aria-label="Upcoming schedules">
-                        {% for schedule in upcoming_schedules %}
-                            <li>
-                                <a class="bs-schedule-name" href="{% url 'console:node:detail' schedule.node_id %}">{{ schedule.name }}</a>
-                                <span class="bs-schedule-meta">{{ schedule.node.name }} · {{ schedule.next_run|naturaltime }}</span>
-                            </li>
-                        {% empty %}
-                            <li class="bs-empty">No active schedules in your current access scope.</li>
-                        {% endfor %}
-                    </ul>
-                </section>
-            </div>
-
-            <div class="bs-lower-grid">
-                <section class="bs-surface bs-alert-panel" aria-labelledby="failures-heading">
-                    <div class="bs-surface-head">
-                        <div>
-                            <p class="bs-panel-label">Exception queue</p>
-                            <h3 id="failures-heading">Failures needing attention</h3>
-                        </div>
-                        <span class="bs-count">{{ failed_backups|length|default:0 }}</span>
-                    </div>
+                <section class="bs-attention-panel" aria-labelledby="attention-heading">
+                    <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Attention</p><h2 id="attention-heading">Exception queue</h2></div><span class="bs-attention-count">{{ failed_backups|length }}</span></div>
                     {% if failed_backups %}
-                        <ul class="bs-activity-list">
-                            {% for backup in failed_backups %}
-                                <li>
-                                    <span>{% if backup.dashboard_node %}<a href="{% url 'console:node:detail' backup.dashboard_node.id %}"><strong>{{ backup.dashboard_node.name }}</strong></a>{% else %}<strong>{{ backup.uuid_str }}</strong>{% endif %} · {{ backup.get_status_display }}</span>
-                                </li>
+                        <ul class="bs-attention-list">
+                            {% for backup in failed_backups|slice:':2' %}
+                                <li><span class="bs-attention-mark" aria-hidden="true">!</span><div>{% if backup.dashboard_node %}<a href="{% url 'console:node:detail' backup.dashboard_node.id %}">{{ backup.dashboard_node.name }}</a>{% else %}<strong>{{ backup.uuid_str }}</strong>{% endif %}<small>{{ backup.get_status_display }} · {{ backup.modified|naturaltime }}</small></div></li>
                             {% endfor %}
                         </ul>
                     {% else %}
-                        <p class="bs-empty">No failed backups in your visible nodes.</p>
+                        <div class="bs-clear-state"><span aria-hidden="true">✓</span><p>All visible backup runs are clear.</p></div>
                     {% endif %}
+                    <a class="bs-panel-link" href="{% url 'console:log:index' %}">Review activity log <span aria-hidden="true">↗</span></a>
                 </section>
+            </aside>
 
-                <section class="bs-surface bs-activity-panel" aria-labelledby="activity-heading">
-                    <div class="bs-surface-head">
-                        <div>
-                            <p class="bs-panel-label">Audit trail</p>
-                            <h3 id="activity-heading">Latest activity</h3>
-                        </div>
-                        <a class="bs-text-link" href="{% url 'console:log:index' %}">Open log ↗</a>
-                    </div>
-                    <ul class="bs-activity-list">
-                        {% for log in recent_activity %}
-                            <li><span><strong>{{ log.get_type_display|title }}</strong> · {{ log.data.message|default:'Activity recorded' }} <time>{{ log.created|naturaltime }}</time></span></li>
+            <section class="bs-runs-panel" aria-labelledby="runs-v2-heading">
+                <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Work queue</p><h2 id="runs-v2-heading">Recent backup runs</h2><p class="bs-panel-description">The latest work across your visible nodes.</p></div><a class="bs-panel-link" href="{% url 'console:log:index' %}">Full activity log <span aria-hidden="true">↗</span></a></div>
+                <div class="bs-run-table" role="table" aria-label="Recent backup runs">
+                    <div class="bs-run-table-head" role="row"><span role="columnheader">Source</span><span role="columnheader">Backup</span><span role="columnheader">State</span><span role="columnheader">Updated</span><span aria-hidden="true"></span></div>
+                    <ul class="bs-run-table-body">
+                        {% for backup in recent_backups %}
+                            <li class="bs-run-table-row" role="row">
+                                <span class="bs-run-source-mark {% if backup.dashboard_node.type == 2 %}is-volume{% else %}is-cloud{% endif %}" aria-hidden="true">{% if backup.dashboard_node.type == 2 %}▱{% else %}⌁{% endif %}</span>
+                                <div class="bs-run-table-source" role="cell">{% if backup.dashboard_node %}<a href="{% url 'console:node:detail' backup.dashboard_node.id %}">{{ backup.dashboard_node.name }}</a><small>{{ backup.dashboard_node.get_type_display }} · {{ backup.dashboard_node.connection.integration.name }}</small>{% else %}<strong>{{ backup.uuid_str }}</strong><small>Backup record</small>{% endif %}</div>
+                                <div class="bs-run-table-backup" role="cell"><span>{{ backup.uuid_str }}</span><small>Snapshot / backup</small></div>
+                                <div class="bs-run-state" role="cell"><span class="bs-state-pill {% if backup.status == 3 %}is-success{% elif backup.status == 4 or backup.status == 7 or backup.status == 11 or backup.status == 21 or backup.status == 30 %}is-danger{% else %}is-pending{% endif %}"><i aria-hidden="true"></i>{{ backup.get_status_display }}</span></div>
+                                <time class="bs-run-updated" role="cell" datetime="{{ backup.modified|date:'c' }}">{{ backup.modified|naturaltime }}</time>
+                                <a class="bs-row-arrow" href="{% if backup.dashboard_node %}{% url 'console:node:detail' backup.dashboard_node.id %}{% else %}{% url 'console:log:index' %}{% endif %}" aria-label="Open backup details">↗</a>
+                            </li>
                         {% empty %}
-                            <li>Activity will appear here as your team works.</li>
+                            <li class="bs-empty-v2">No backup runs yet. Connect an integration and add a node to get started.</li>
                         {% endfor %}
                     </ul>
+                </div>
+            </section>
+
+            <section class="bs-activity-panel-v2" aria-labelledby="activity-v2-heading">
+                <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Audit trail</p><h2 id="activity-v2-heading">Latest activity</h2></div><span class="bs-panel-index">02</span></div>
+                <ol class="bs-activity-stream">
+                    {% for log in recent_activity|slice:':5' %}
+                        <li><span class="bs-stream-dot" aria-hidden="true"></span><div><strong>{{ log.get_type_display|title }}</strong><p>{{ log.data.message|default:'Activity recorded' }}</p><time>{{ log.created|naturaltime }}</time></div></li>
+                    {% empty %}
+                        <li class="bs-empty-v2">Activity will appear here as your team works.</li>
+                    {% endfor %}
+                </ol>
+                <a class="bs-panel-link" href="{% url 'console:log:index' %}">Open audit log <span aria-hidden="true">↗</span></a>
+            </section>
+
+            <section class="bs-coverage-panel" aria-labelledby="coverage-heading">
+                <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Coverage map</p><h2 id="coverage-heading">Protected sources</h2><p class="bs-panel-description">The nodes included in your current access scope.</p></div><a class="bs-panel-link" href="{% url 'console:node:index' %}">Manage sources <span aria-hidden="true">↗</span></a></div>
+                <div class="bs-coverage-grid">
+                    {% for node in dashboard_nodes %}
+                        <a class="bs-coverage-card" href="{% url 'console:node:detail' node.id %}"><span class="bs-coverage-type {% if node.type == 2 %}is-volume{% elif node.type == 3 %}is-website{% elif node.type == 4 %}is-database{% else %}is-cloud{% endif %}" aria-hidden="true">{% if node.type == 2 %}▱{% elif node.type == 3 %}◌{% elif node.type == 4 %}◎{% else %}⌁{% endif %}</span><span class="bs-coverage-copy"><strong>{{ node.name }}</strong><small>{{ node.get_type_display }} · {{ node.connection.integration.name }}</small></span><span class="bs-node-status {% if node.status == 1 or node.status == 2 %}is-good{% elif node.status == 5 or node.status == 6 or node.status == 8 %}is-warning{% else %}is-neutral{% endif %}"><i aria-hidden="true"></i>{{ node.get_status_display }}</span></a>
+                    {% empty %}
+                        <div class="bs-empty-v2">No nodes are visible in this access scope yet.</div>
+                    {% endfor %}
+                </div>
+            </section>
+
+            {% if storage_cost_summary %}
+                <section class="bs-cost-panel" aria-labelledby="cost-heading">
+                    <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Cost lens</p><h2 id="cost-heading">Storage economics</h2></div><span class="bs-cost-total-v2">${{ storage_cost_summary.estimated_monthly_storage_usd|floatformat:4 }}<small>/ month</small></span></div>
+                    <p class="bs-panel-description">{{ storage_cost_summary.stored_bytes|filesizeformat }} recorded across destinations.</p>
+                    <ul class="bs-cost-list">
+                        {% for destination in storage_cost_summary.destinations|slice:':3' %}
+                            <li><span><strong>{{ destination.storage_name }}</strong><small>{{ destination.storage_type }} · {{ destination.stored_bytes|filesizeformat }}</small></span><em>${{ destination.estimated_monthly_storage_usd|floatformat:4 }}</em></li>
+                        {% empty %}
+                            <li class="bs-empty-v2">No storage destinations yet.</li>
+                        {% endfor %}
+                    </ul>
+                    <p class="bs-cost-foot">Full restore estimate: ${{ storage_cost_summary.estimated_full_retrieval_usd|floatformat:4 }}</p>
                 </section>
-            </div>
-        </section>
+            {% endif %}
+        </div>
 
-        <section class="bs-runbook" aria-label="Common actions">
-            <a class="bs-runbook-card" href="{% url 'console:setup:integration_select' %}">
-                <span class="bs-runbook-glyph">＋</span>
-                <h3>Connect integration</h3>
-                <p>Link cloud, database, website, or storage accounts.</p>
-            </a>
-            <a class="bs-runbook-card" href="{% url 'console:node:index' %}">
-                <span class="bs-runbook-glyph">◌</span>
-                <h3>Manage nodes</h3>
-                <p>Review the infrastructure under protection.</p>
-            </a>
-            <a class="bs-runbook-card" href="{% url 'console:log:index' %}">
-                <span class="bs-runbook-glyph">≡</span>
-                <h3>Read the audit log</h3>
-                <p>Trace backup, snapshot, and restore activity.</p>
-            </a>
-            <a class="bs-runbook-card" href="{% url 'console:settings:profile' %}">
-                <span class="bs-runbook-glyph">◍</span>
-                <h3>Account settings</h3>
-                <p>Manage identity, security, and team preferences.</p>
-            </a>
-        </section>
-
-        <section class="bs-setup-band">
-            <div class="bs-setup-copy">
-                <h2>Protect your infrastructure in minutes.</h2>
-                <p>Connect an integration, add a node, set a schedule, and keep the recovery path visible to the whole team.</p>
-            </div>
-            <div class="bs-setup-actions">
-                <a class="bs-button bs-button-primary" href="{% url 'console:setup:integration_select' %}">Start setup <span aria-hidden="true">↗</span></a>
-                <a class="bs-button bs-button-quiet" href="{% url 'console:node:index' %}">View nodes</a>
-            </div>
-        </section>
+        <nav class="bs-utility-strip" aria-label="Dashboard shortcuts">
+            <a href="{% url 'console:setup:integration_select' %}"><span aria-hidden="true">＋</span><span><strong>Connect integration</strong><small>Link a new provider or storage destination.</small></span><b aria-hidden="true">↗</b></a>
+            <a href="{% url 'console:node:index' %}"><span aria-hidden="true">⌁</span><span><strong>Manage nodes</strong><small>Review sources, schedules, and status.</small></span><b aria-hidden="true">↗</b></a>
+            <a href="{% url 'console:settings:profile' %}"><span aria-hidden="true">◍</span><span><strong>Account settings</strong><small>Keep access and notifications current.</small></span><b aria-hidden="true">↗</b></a>
+        </nav>
     </div>
 {% endblock %}

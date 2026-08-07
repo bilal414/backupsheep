@@ -69,6 +69,10 @@ class IndexView(LoginRequiredMixin, TemplateView):
         account = member.get_current_account()
         nodes = visible_nodes(member)
         node_ids = list(nodes.values_list("id", flat=True))
+        dashboard_nodes = list(
+            nodes.select_related("connection__integration")
+            .order_by("-created")[:8]
+        )
         now = timezone.now()
 
         recent_backups = _set_backup_node(
@@ -108,6 +112,7 @@ class IndexView(LoginRequiredMixin, TemplateView):
         context["member"] = member
         context["account"] = account
         context["visible_node_count"] = len(node_ids)
+        context["dashboard_nodes"] = dashboard_nodes
         context["active_schedule_count"] = schedules.count()
         context["recent_backups"] = recent_backups
         context["failed_backups"] = failed_backups
