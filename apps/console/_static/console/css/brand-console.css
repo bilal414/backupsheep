@@ -5547,3 +5547,251 @@ body.bs-console-v3 .bs-node-page table td {
         grid-template-columns: 1fr !important;
     }
 }
+
+/* Responsive quality pass: keep source inventory scannable and actionable at
+   phone and tablet widths. This intentionally sits last so legacy utility
+   rules cannot reintroduce the old overflowing table/card treatment. */
+body.bs-console-v3.bs-nodes-index .bs-node-filter select {
+    min-height: 40px !important;
+    padding: 0 28px 0 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background-color: transparent !important;
+    color: #fff !important;
+    font-size: 12px !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter select option {
+    color: var(--bs-shell-ink);
+    background: #fffefa;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter input:focus,
+body.bs-console-v3.bs-nodes-index .bs-node-filter select:focus {
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > span {
+    display: flex !important;
+    width: min(100%, 390px);
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > span button {
+    min-height: 38px;
+    flex: 1 1 50%;
+    cursor: pointer;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > span button:first-child {
+    color: var(--bs-shell-ink) !important;
+    background: var(--bs-shell-lime) !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > span button:last-child {
+    color: #e9f0e9 !important;
+    background: rgba(255, 255, 255, .08) !important;
+    border-color: rgba(255, 255, 255, .2) !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > span button:focus-visible,
+body.bs-console-v3.bs-nodes-index .bs-node-filter select:focus-visible,
+body.bs-console-v3.bs-nodes-index .bs-node-filter input:focus-visible {
+    outline: 2px solid var(--bs-shell-lime) !important;
+    outline-offset: 2px;
+}
+
+@media (max-width: 900px) {
+    body.bs-console-v3.bs-nodes-index .bs-node-table-shell {
+        overflow: visible !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-table-shell > div {
+        overflow: visible !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes {
+        display: block !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        border: 0 !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes thead {
+        display: none !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes tbody {
+        display: block !important;
+        width: 100% !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes tbody tr {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) !important;
+        gap: 0 !important;
+        width: 100% !important;
+        padding: 15px !important;
+        border-bottom: 1px solid var(--bs-shell-line) !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes tbody tr:last-child {
+        border-bottom: 0 !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td {
+        display: block !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        padding: 0 !important;
+        overflow-wrap: anywhere;
+        text-align: left !important;
+        white-space: normal !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td + td {
+        margin-top: 12px !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(1) > div {
+        min-width: 0;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(1) svg {
+        width: 32px !important;
+        height: 32px !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(1) .ml-4 {
+        min-width: 0;
+        margin-left: 10px !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(1) .text-sm {
+        overflow-wrap: anywhere;
+        white-space: normal;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(2)::before,
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(3)::before,
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(4)::before,
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(5)::before {
+        display: block;
+        margin-bottom: 6px;
+        color: #7b898b;
+        font: 500 9px/1.2 "DM Mono", monospace;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(2)::before {
+        content: "Status";
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(3)::before {
+        content: "Last backup / storage";
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(4)::before {
+        content: "Integration";
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(5) {
+        display: flex !important;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 7px;
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(5)::before {
+        flex: 0 0 100%;
+        margin-bottom: 0;
+        content: "Actions";
+    }
+
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(5) a,
+    body.bs-console-v3.bs-nodes-index #section-nodes td:nth-child(5) button {
+        min-height: 34px;
+        margin: 0 !important;
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+}
+
+@media (max-width: 640px) {
+    body.bs-console-v3.bs-nodes-index .bs-node-summary > dl {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        gap: 8px !important;
+        border: 0 !important;
+        background: transparent !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-summary > dl > div {
+        min-height: 112px !important;
+        padding: 14px !important;
+        border: 1px solid var(--bs-shell-line) !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-summary dl dt {
+        display: flex !important;
+        align-items: center !important;
+        gap: 7px !important;
+        min-height: 28px;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-summary dl dt > div.absolute {
+        position: static !important;
+        display: inline-flex !important;
+        flex: 0 0 28px;
+        width: 28px !important;
+        height: 28px !important;
+        margin: 0 !important;
+        padding: 5px !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-summary dl dt > div.absolute svg {
+        width: 16px !important;
+        height: 16px !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-summary dl dt p {
+        position: static !important;
+        min-width: 0;
+        max-width: none !important;
+        margin: 0 !important;
+        overflow: hidden;
+        color: var(--bs-muted) !important;
+        font-size: 8px !important;
+        line-height: 1.15 !important;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-summary dl dd {
+        padding: 14px 0 0 !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-summary dl dd p {
+        font-size: 28px !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-filter > .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        max-width: none !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-filter > span {
+        width: 100%;
+    }
+}
+
+@media (max-width: 340px) {
+    body.bs-console-v3.bs-nodes-index .bs-node-summary > dl > div {
+        min-height: 106px !important;
+        padding: 12px !important;
+    }
+
+    body.bs-console-v3.bs-nodes-index .bs-node-summary dl dd {
+        padding-top: 11px !important;
+    }
+}

@@ -196,20 +196,20 @@
                 </div>
                 <div class="mt-4 flex  items-baseline">
                     <div class="grow mr-4 rounded-md border border-gray-300 px-3 py-2 shadow-xs focus-within:border-indigo-600 focus-within:ring-1 focus-within:ring-indigo-600">
-                        <label for="s_node" class="block text-xs font-medium text-gray-900">Node</label>
-                        <input x-model="search.s_node" type="text" name="node" id="node"
+                        <label for="node-filter-name" class="block text-xs font-medium text-gray-900">Node</label>
+                        <input x-model="search.s_node" type="text" name="node" id="node-filter-name"
                                class="block w-full border-0 p-0 text-gray-900 placeholder-gray-500 focus:ring-0 sm:text-sm"
                                placeholder="">
                     </div>
                     <div class="grow mr-4 rounded-md border border-gray-300 px-3 py-2 shadow-xs focus-within:border-indigo-600 focus-within:ring-1 focus-within:ring-indigo-600">
-                        <label for="s_integration" class="block text-xs font-medium text-gray-900">Integration</label>
-                        <input x-model="search.s_integration" type="text" name="integration" id="integration"
+                        <label for="node-filter-integration" class="block text-xs font-medium text-gray-900">Integration</label>
+                        <input x-model="search.s_integration" type="text" name="integration" id="node-filter-integration"
                                class="block w-full border-0 p-0 text-gray-900 placeholder-gray-500 focus:ring-0 sm:text-sm"
                                placeholder="">
                     </div>
                     <div class="grow  rounded-md border border-gray-300 px-3 py-2 shadow-xs focus-within:border-indigo-600 focus-within:ring-1 focus-within:ring-indigo-600">
-                        <label for="s_endpoint" class="block text-xs font-medium text-gray-900">Endpoint</label>
-                        <input x-model="search.s_endpoint" type="text" name="endpoint" id="endpoint"
+                        <label for="node-filter-endpoint" class="block text-xs font-medium text-gray-900">Endpoint</label>
+                        <input x-model="search.s_endpoint" type="text" name="endpoint" id="node-filter-endpoint"
                                class="block w-full border-0 p-0 text-gray-900 placeholder-gray-500 focus:ring-0 sm:text-sm"
                                placeholder="">
                     </div>
@@ -217,26 +217,39 @@
                 </div>
                 <div class="grid grid-cols-3 gap-4 mt-4">
                     <div>
-                        <label for="type" class="mb-3 block text-xs font-medium text-gray-900">Type</label>
+                        <label for="node-type" class="mb-3 block text-xs font-medium text-gray-900">Type</label>
 
-                        <select id="node-type" class="block w-full "
-                                data-placeholder="Node type..."
-                                data-allow-clear="true"></select>
+                        <select id="node-type" x-model="search.s_type" class="block w-full"
+                                aria-label="Filter sources by type">
+                            <option value="">Any type</option>
+                            <option value="1">Cloud</option>
+                            <option value="2">Volume</option>
+                            <option value="3">Website</option>
+                            <option value="4">Database</option>
+                            <option value="5">SaaS</option>
+                        </select>
                     </div>
                     <div>
-                        <label for="status" class="mb-3 block text-xs font-medium text-gray-900">Status</label>
+                        <label for="node-status" class="mb-3 block text-xs font-medium text-gray-900">Status</label>
 
-                        <select id="node-status" class="block w-full "
-                                data-placeholder="Node status..."
-                                data-allow-clear="true"></select>
+                        <select id="node-status" x-model="search.s_status" class="block w-full"
+                                aria-label="Filter sources by status">
+                            <option value="">Any status</option>
+                            <option value="1">Active</option>
+                            <option value="3">Backup in progress</option>
+                            <option value="4">Retrying backup</option>
+                            <option value="6">Paused</option>
+                            <option value="8">Paused (max retries)</option>
+                            <option value="7">Delete requested</option>
+                        </select>
                     </div>
                 </div>
 
                 <span class="mt-4 isolate inline-flex rounded-lg shadow-sm">
-                  <a @click="executeSearch()"
-                     class="relative cursor-pointer inline-flex items-center rounded-l-lg border border-transparent bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 focus:z-10 focus:outline-hidden focus:ring-2 focus:ring-indigo-600 transition-colors">Search Nodes</a>
-                  <a @click="resetSearch()"
-                     class="relative cursor-pointer -ml-px inline-flex items-center rounded-r-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:z-10 focus:outline-hidden focus:ring-2 focus:ring-indigo-600 transition-colors">Reset Filters</a>
+                  <button type="button" @click="executeSearch()"
+                     class="relative inline-flex items-center rounded-l-lg border border-transparent bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 focus:z-10 focus:outline-hidden focus:ring-2 focus:ring-indigo-600 transition-colors">Search Nodes</button>
+                  <button type="button" @click="resetSearch()"
+                     class="relative -ml-px inline-flex items-center rounded-r-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:z-10 focus:outline-hidden focus:ring-2 focus:ring-indigo-600 transition-colors">Reset Filters</button>
                 </span>
             </div>
             {% if page.object_list.count > 0 %}
@@ -637,103 +650,14 @@
                             this.search.s_integration = searchParams.get('s_integration');
                         }
                         if (searchParams.get('s_status')) {
-                            this.search.s_status = parseInt(searchParams.get('s_status'));
+                            this.search.s_status = searchParams.get('s_status');
                         }
                         if (searchParams.get('s_endpoint')) {
                             this.search.s_endpoint = searchParams.get('s_endpoint');
                         }
-
-                        $(document).ready(function () {
-                            let nodeStatusOptions = [
-                                {
-                                    id: '1',
-                                    text: 'Active'
-                                },
-                                {
-                                    id: '3',
-                                    text: 'Backup In-Progress'
-                                },
-                                {
-                                    id: '4',
-                                    text: 'Retrying Backup'
-                                },
-                                {
-                                    id: '6',
-                                    text: 'Paused'
-                                },
-                                {
-                                    id: '8',
-                                    text: 'Paused (Max Retries)'
-                                },
-                                {
-                                    id: '7',
-                                    text: 'Delete Requested'
-                                }
-                            ];
-                            let nodeTypeOptions = [
-                                {
-                                    id: '1',
-                                    text: 'Cloud'
-                                },
-                                {
-                                    id: '2',
-                                    text: 'Volume'
-                                },
-                                {
-                                    id: '3',
-                                    text: 'Website'
-                                },
-                                {
-                                    id: '4',
-                                    text: 'Database'
-                                },
-                                {
-                                    id: '5',
-                                    text: 'SaaS'
-                                },
-                            ];
-
-                            /**
-                             * Node Status
-                             */
-                            if (searchParams.get('s_status')) {
-                                let nodeStatusOption = _.find(nodeStatusOptions, {'id': searchParams.get('s_status')});
-                                if (nodeStatusOption) {
-                                    nodeStatusOption.selected = true;
-                                }
-                            } else {
-                                setTimeout(function () {
-                                    $("#node-status").val(null).trigger('change');
-                                }, 500);
-                            }
-                            /**
-                             * Initiate Dropdown
-                             */
-                            $("#node-status").select2({
-                                data: nodeStatusOptions,
-                            });
-
-                            /**
-                             * Node Type
-                             */
-                            if (searchParams.get('s_type')) {
-                                let nodeTypeOption = _.find(nodeTypeOptions, {'id': searchParams.get('s_type')});
-                                if (nodeTypeOption) {
-                                    nodeTypeOption.selected = true;
-                                }
-                            } else {
-                                setTimeout(function () {
-                                    $("#node-type").val(null).trigger('change');
-                                }, 500);
-                            }
-                            /**
-                             * Initiate Dropdown
-                             */
-                            $("#node-type").select2({
-                                data: nodeTypeOptions,
-                            });
-
-                        });
+                        if (searchParams.get('s_type')) {
+                            this.search.s_type = searchParams.get('s_type');
+                        }
                     },
 
                     openModal(node_id, node_name, location_id, integration_code, node_type) {
@@ -807,28 +731,14 @@
                         if(p_size){
                             this.search.p_size = p_size;
                         }
-                        /**
-                         * Node Status
-                         */
-                        if($('#node-status').select2('data').length > 0) {
-                            this.search.s_status = $('#node-status').select2('data')[0].id
-                        }
-                        else {
-                            this.search.s_status = null;
-                        }
-
-                        /**
-                         * Node Type
-                         */
-                        if($('#node-type').select2('data').length > 0) {
-                            this.search.s_type = $('#node-type').select2('data')[0].id
-                        }
-                        else {
-                            this.search.s_type = null;
-                        }
-
-                        let url = "/console/nodes/?" + new URLSearchParams(_.omitBy(this.search, _.isNull));
-                        window.location.href = url+"#section-nodes";
+                        const params = new URLSearchParams();
+                        Object.entries(this.search).forEach(([key, value]) => {
+                            if (value !== null && value !== undefined && value !== '') {
+                                params.set(key, value);
+                            }
+                        });
+                        const query = params.toString();
+                        window.location.href = "/console/nodes/" + (query ? "?" + query : "") + "#section-nodes";
                     },
                     resetSearch() {
                         let url = "/console/nodes/";
