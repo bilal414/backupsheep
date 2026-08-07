@@ -5322,6 +5322,11 @@ body.bs-console-v3.bs-nodes-index .bs-node-summary dt > div svg {
     fill: none !important;
 }
 
+body.bs-console-v3.page_console.bs-nodes-index .bs-node-summary dt > div.bg-indigo-600:not([role="switch"]) {
+    color: #5c7748 !important;
+    background: #e8efcf !important;
+}
+
 body.bs-console-v3.bs-nodes-index .bs-node-filter {
     color: #e9f0e9 !important;
     background: var(--bs-shell-ink) !important;
@@ -5413,6 +5418,117 @@ body.bs-console-v3.bs-integrations-page section > div:nth-child(2) > a,
 body.bs-console-v3.bs-integrations-page section > div:nth-child(2) > div {
     background: #fffefa !important;
     border-color: var(--bs-shell-line) !important;
+}
+
+body.bs-console-v3.bs-integrations-page .bs-page-hero h1 {
+    color: #fff !important;
+}
+
+body.bs-console-v3.bs-integrations-page .bs-page-hero p:last-child {
+    color: rgba(233, 240, 233, .63) !important;
+}
+
+body.bs-console-v3.bs-integrations-page section > div:nth-child(2) {
+    gap: 10px !important;
+}
+
+body.bs-console-v3.bs-integrations-page section > div:nth-child(2) > a,
+body.bs-console-v3.bs-integrations-page section > div:nth-child(2) > div {
+    min-height: 152px !important;
+    border-radius: 11px !important;
+    box-shadow: 0 6px 22px rgba(16, 44, 53, .025) !important;
+}
+
+/* Source detail is a dense operating surface: consistent dark section bars,
+   warm cards, and the same control colors as the new shell. */
+body.bs-console-v3 .bs-node-page .bg-indigo-500 {
+    color: #fff !important;
+    background: var(--bs-shell-ink) !important;
+}
+
+body.bs-console-v3 .bs-node-page .bg-indigo-500 h3,
+body.bs-console-v3 .bs-node-page .bg-indigo-500 svg {
+    color: #fff !important;
+}
+
+body.bs-console-v3 .bs-node-page .bg-white {
+    background: #fffefa !important;
+}
+
+body.bs-console-v3 .bs-node-page .shadow-sm.overflow-hidden {
+    border: 1px solid var(--bs-shell-line);
+    border-radius: 12px;
+    box-shadow: 0 7px 24px rgba(16, 44, 53, .04) !important;
+}
+
+body.bs-console-v3 .bs-node-page .border-gray-200,
+body.bs-console-v3 .bs-node-page table,
+body.bs-console-v3 .bs-node-page tbody tr {
+    border-color: var(--bs-shell-line) !important;
+}
+
+body.bs-console-v3 .bs-node-page .bs-node-top-grid button,
+body.bs-console-v3 .bs-node-page .bs-node-top-grid a,
+body.bs-console-v3 .bs-node-page table button,
+body.bs-console-v3 .bs-node-page table a {
+    border-radius: 7px;
+}
+
+body.bs-console-v3 .bs-node-page .bs-node-top-grid button:first-child {
+    color: var(--bs-shell-ink) !important;
+    background: var(--bs-shell-lime) !important;
+    border-color: var(--bs-shell-lime) !important;
+}
+
+body.bs-console-v3 .bs-node-page [role="switch"] {
+    width: 44px !important;
+    height: 24px !important;
+    background: #c9d1ce !important;
+    border: 2px solid transparent !important;
+    border-radius: 999px !important;
+}
+
+body.bs-console-v3 .bs-node-page [role="switch"].bg-indigo-600 {
+    background: var(--bs-shell-lime) !important;
+}
+
+body.bs-console-v3 .bs-node-page [role="switch"] > span {
+    width: 20px !important;
+    height: 20px !important;
+    background: #fffefa !important;
+}
+
+body.bs-console-v3 .bs-node-page dt {
+    color: #7b898b !important;
+    font: 500 9px/1.3 "DM Mono", monospace;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+}
+
+body.bs-console-v3 .bs-node-page dd {
+    color: var(--bs-shell-ink) !important;
+    font-size: 12px;
+}
+
+body.bs-console-v3 .bs-node-page dd a,
+body.bs-console-v3 .bs-node-page dt a {
+    color: #6f8d4a !important;
+}
+
+body.bs-console-v3 .bs-node-page table thead {
+    background: #edf1eb !important;
+}
+
+body.bs-console-v3 .bs-node-page table th {
+    color: #718087 !important;
+    font: 500 9px/1.2 "DM Mono", monospace;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+}
+
+body.bs-console-v3 .bs-node-page table td {
+    color: #54666b !important;
+    font-size: 11px;
 }
 
 @media (max-width: 640px) {
