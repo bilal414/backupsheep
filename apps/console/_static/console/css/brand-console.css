@@ -77,6 +77,100 @@ body.brand-console::before {
     outline-offset: 3px;
 }
 
+/*
+ * Interactive controls
+ *
+ * The console uses native inputs for radios and checkboxes, plus Alpine
+ * buttons with role="switch" for boolean settings. Keep the visual language
+ * deliberate and consistent across settings, node detail, and setup flows.
+ */
+.brand-console input[type="checkbox"],
+.brand-console input[type="radio"] {
+    width: 18px !important;
+    height: 18px !important;
+    flex: 0 0 auto;
+    margin: 0;
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    border: 1px solid var(--bs-muted-2) !important;
+    border-radius: 3px;
+    background: var(--bs-surface) !important;
+    box-shadow: none !important;
+    color: var(--bs-ink);
+    cursor: pointer;
+    vertical-align: middle;
+}
+
+.brand-console input[type="radio"] {
+    border-radius: 50%;
+}
+
+.brand-console input[type="checkbox"]:checked {
+    border-color: var(--bs-ink) !important;
+    background-color: var(--bs-pasture) !important;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5 6.5 12 13 5.5' fill='none' stroke='%23171717' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'/%3E%3C/svg%3E") !important;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: 14px 14px;
+}
+
+.brand-console input[type="radio"]:checked {
+    border: 2px solid var(--bs-ink) !important;
+    background: radial-gradient(circle, var(--bs-ink) 0 4px, var(--bs-surface) 4.5px 100%) !important;
+}
+
+.brand-console input[type="checkbox"]:focus-visible,
+.brand-console input[type="radio"]:focus-visible {
+    outline: 2px solid var(--bs-pasture-deep) !important;
+    outline-offset: 3px;
+}
+
+.brand-console [role="switch"] {
+    position: relative;
+    display: inline-flex !important;
+    width: 44px !important;
+    height: 24px !important;
+    min-height: 24px !important;
+    flex: 0 0 auto;
+    align-items: center;
+    padding: 1px !important;
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    border: 1px solid var(--bs-line) !important;
+    border-radius: 999px !important;
+    background: var(--bs-line) !important;
+    box-shadow: none !important;
+    cursor: pointer;
+    transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.brand-console [role="switch"].bg-indigo-600,
+.brand-console [role="switch"].bg-green-600,
+.brand-console [role="switch"].bg-emerald-600 {
+    border-color: var(--bs-pasture-deep) !important;
+    background: var(--bs-pasture-deep) !important;
+}
+
+.brand-console [role="switch"].bg-gray-200,
+.brand-console [role="switch"].bg-gray-300 {
+    border-color: var(--bs-line) !important;
+    background: var(--bs-line) !important;
+}
+
+.brand-console [role="switch"] > span {
+    display: block;
+    width: 20px !important;
+    height: 20px !important;
+    flex: 0 0 auto;
+    border-radius: 999px !important;
+    background: var(--bs-surface) !important;
+    box-shadow: 0 1px 3px rgba(23, 23, 23, .22) !important;
+}
+
+.brand-console [role="switch"]:hover {
+    border-color: var(--bs-pasture-deep) !important;
+}
+
 .bs-console-content {
     padding-left: 260px;
 }
@@ -1097,23 +1191,6 @@ body.brand-console::before {
 
 .bs-node-page .bs-node-top-grid button:first-child:hover {
     background: var(--bs-ink-soft) !important;
-}
-
-.bs-node-page [role="switch"] {
-    width: 40px;
-    height: 22px;
-    border-color: transparent !important;
-    background: var(--bs-line) !important;
-    box-shadow: none !important;
-}
-
-.bs-node-page [role="switch"].bg-indigo-600 {
-    background: var(--bs-pasture-deep) !important;
-}
-
-.bs-node-page [role="switch"] > span {
-    width: 18px;
-    height: 18px;
 }
 
 .bs-node-page .text-gray-700,
@@ -3529,8 +3606,8 @@ body.brand-console::before {
     background: var(--bs-paper-2) !important;
 }
 
-.brand-console.page_settings [class~="lg:col-span-9"] button.bg-indigo-600,
-.brand-console.page_settings [class~="lg:col-span-9"] button.bg-green-600 {
+.brand-console.page_settings [class~="lg:col-span-9"] button.bg-indigo-600:not([role="switch"]),
+.brand-console.page_settings [class~="lg:col-span-9"] button.bg-green-600:not([role="switch"]) {
     min-height: 40px;
     border: 1px solid var(--bs-ink) !important;
     border-radius: 0 !important;
@@ -3539,8 +3616,8 @@ body.brand-console::before {
     box-shadow: none !important;
 }
 
-.brand-console.page_settings [class~="lg:col-span-9"] button.bg-indigo-600:hover,
-.brand-console.page_settings [class~="lg:col-span-9"] button.bg-green-600:hover {
+.brand-console.page_settings [class~="lg:col-span-9"] button.bg-indigo-600:not([role="switch"]):hover,
+.brand-console.page_settings [class~="lg:col-span-9"] button.bg-green-600:not([role="switch"]):hover {
     background: var(--bs-ink-soft) !important;
 }
 
