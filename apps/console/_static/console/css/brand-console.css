@@ -5299,3 +5299,130 @@ body.brand-onboarding [class~="bg-white"] {
         min-height: 160px;
     }
 }
+
+/* Final v3 cascade: the legacy utility layer is intentionally retained for
+   nested action/modals, so these shell surfaces need to win after it. */
+@media (min-width: 1024px) {
+    body.bs-console-v3 .bs-shell-v3__menu,
+    body.bs-console-v3 .bs-shell-v3__rail-close {
+        display: none;
+    }
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-summary dt > div {
+    color: #5c7748 !important;
+    background: #e8efcf !important;
+    border-radius: 7px !important;
+    box-shadow: none !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-summary dt > div svg {
+    color: #5c7748 !important;
+    background: transparent !important;
+    fill: none !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter {
+    color: #e9f0e9 !important;
+    background: var(--bs-shell-ink) !important;
+    border-color: transparent !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter h3 {
+    color: #fff !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter p {
+    color: rgba(233, 240, 233, .6) !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > div:nth-child(2),
+body.bs-console-v3.bs-nodes-index .bs-node-filter > div:nth-child(3) {
+    display: grid !important;
+    gap: 10px !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > div:nth-child(2) {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > div:nth-child(3) {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    max-width: calc(66.666% + 7px) !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > div:nth-child(2) > div,
+body.bs-console-v3.bs-nodes-index .bs-node-filter > div:nth-child(3) > div {
+    color: #fff !important;
+    background: rgba(255, 255, 255, .055) !important;
+    border-color: rgba(255, 255, 255, .17) !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter label {
+    color: rgba(233, 240, 233, .56) !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter input,
+body.bs-console-v3.bs-nodes-index .bs-node-filter select {
+    color: #fff !important;
+    background: transparent !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter input::placeholder {
+    color: rgba(233, 240, 233, .35) !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > span a:first-child {
+    color: var(--bs-shell-ink) !important;
+    background: var(--bs-shell-lime) !important;
+}
+
+body.bs-console-v3.bs-nodes-index .bs-node-filter > span a:last-child {
+    color: #e9f0e9 !important;
+    background: rgba(255, 255, 255, .08) !important;
+    border-color: rgba(255, 255, 255, .2) !important;
+}
+
+body.bs-console-v3.bs-logs-page .bs-log-filter {
+    background: #fffefa !important;
+    border-color: var(--bs-shell-line) !important;
+}
+
+body.bs-console-v3.bs-logs-page .bs-log-filter > div {
+    display: grid !important;
+    grid-template-columns: minmax(150px, .8fr) minmax(190px, 1.35fr) minmax(190px, 1.35fr) auto !important;
+    gap: 10px !important;
+}
+
+body.bs-console-v3.bs-logs-page .bs-log-filter > div > div {
+    background: #f8f9f5 !important;
+    border-color: var(--bs-shell-line) !important;
+}
+
+body.bs-console-v3.bs-logs-page .bs-log-filter button {
+    color: var(--bs-shell-ink) !important;
+    background: var(--bs-shell-lime) !important;
+}
+
+body.bs-console-v3.bs-integrations-page .bs-page-hero {
+    background: var(--bs-shell-ink) !important;
+    border-color: transparent !important;
+}
+
+body.bs-console-v3.bs-integrations-page section > div:nth-child(2) > a,
+body.bs-console-v3.bs-integrations-page section > div:nth-child(2) > div {
+    background: #fffefa !important;
+    border-color: var(--bs-shell-line) !important;
+}
+
+@media (max-width: 640px) {
+    body.bs-console-v3.bs-nodes-index .bs-node-filter > div:nth-child(2),
+    body.bs-console-v3.bs-nodes-index .bs-node-filter > div:nth-child(3) {
+        grid-template-columns: 1fr !important;
+        max-width: none !important;
+    }
+
+    body.bs-console-v3.bs-logs-page .bs-log-filter > div {
+        grid-template-columns: 1fr !important;
+    }
+}
