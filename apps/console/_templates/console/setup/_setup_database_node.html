@@ -1,379 +1,254 @@
 <div x-data="setupDatabaseNode()">
-    <div class="grid grid-cols-2 gap-4">
-        <div>
+    <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <!-- Database explorer -->
+        <section class="self-start rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="database-explorer-heading">
+            <div class="border-b border-slate-200 px-5 py-4">
+                <h2 id="database-explorer-heading" class="text-sm font-semibold text-slate-900">Database Explorer</h2>
+                <p class="mt-0.5 text-xs text-slate-500">Databases and tables available through this connection.</p>
+            </div>
             <template x-if="loading===true">
-                <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg pb-4 pt-4">
-                    <div class="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-indigo-500">
-                        <svg class="animate-spin h-14 w-14 text-white" xmlns="http://www.w3.org/2000/svg" fill="none"
-                             viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
-                                    stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor"
-                                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                    </div>
+                <div class="flex items-center justify-center px-5 py-12">
+                    <svg class="h-8 w-8 animate-spin text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span class="sr-only">Loading...</span>
                 </div>
             </template>
-            <div class="flex flex-col x-cloak" x-show="loading===false">
-                <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
-                    <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
-                        <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg">
-                            <div x-show="errorObjectList" class="overflow-x-auto">
-                                <div class="rounded-md bg-red-50 p-4">
-                                    <div class="flex">
-                                        <div class="shrink-0">
-                                            <svg class="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg"
-                                                 viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                                <path fill-rule="evenodd"
-                                                      d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
-                                                      clip-rule="evenodd"></path>
-                                            </svg>
-                                        </div>
-                                        <div class="ml-3">
-                                            <h3 class="text-sm font-medium text-red-800">Error fetching objects from
-                                                integration.</h3>
-                                            <div class="mt-2 text-sm text-red-700">
-                                                <ul role="list" class="list-disc pl-5 space-y-1">
-                                                    <li x-text="errorObjectList?.message"></li>
-                                                </ul>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div x-show="!errorObjectList" class="overflow-x-auto">
-                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200"
-                                       x-show="loading===false">
-                                    <thead class="bg-gray-50">
-                                    <tr>
-                                        <th scope="col"
-                                            class="px-2 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                            Database Explorer
-                                        </th>
-                                        <th scope="col"
-                                            class="px-2 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider"
-                                            x-show="!database.all_databases && !database.all_tables">
-
-                                        </th>
-                                    </tr>
-                                    </thead>
-                                    <tbody class="bg-white divide-y divide-gray-200">
-                                    <template x-for="object in objectList">
-                                        <tr>
-                                            <td class="px-2 py-2 whitespace-nowrap">
-                                                <div class="flex items-center">
-                                                    <div class="shrink-0 h-6 w-6">
-                                                        <svg xmlns="http://www.w3.org/2000/svg"
-                                                             class="h-6 w-6 rounded-full text-indigo-600" fill="none"
-                                                             viewBox="0 0 24 24" stroke="currentColor">
-                                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                                  stroke-width="2"
-                                                                  d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path>
-                                                        </svg>
-                                                    </div>
-                                                    <div class="ml-2">
-                                                        <div class="text-sm font-sm text-gray-700">
-                                                            <a x-text="object.name"></a>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </td>
-
-                                            <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium"
-                                                x-show="!database.all_databases && !database.all_tables">
-                                                {% if connection.auth_database.database_name %}
-                                                    <button @click="addTable(object.name)" type="button"
-                                                            class="mt-3 inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-2 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
-                                                        Include
-                                                    </button>
-                                                {% elif connection.auth_database.all_databases %}
-                                                    <button @click="addDatabase(object.name)" type="button"
-                                                            class="mt-3 inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-2 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
-                                                        Include
-                                                    </button>
-                                                {% endif %}
-                                            </td>
-                                        </tr>
-                                    </template>
-                                    <tr x-show="objectList?.length === 0">
-                                        <td class="px-2 py-2 whitespace-nowrap">
-                                            <div class="rounded-md bg-blue-50 p-4">
-                                                <div class="flex">
-                                                    <div class="shrink-0">
-                                                        <svg class="h-5 w-5 text-blue-400"
-                                                             xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
-                                                             fill="currentColor" aria-hidden="true">
-                                                            <path fill-rule="evenodd"
-                                                                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
-                                                                  clip-rule="evenodd"></path>
-                                                        </svg>
-                                                    </div>
-                                                    <div class="ml-3 flex-1 md:flex md:justify-between">
-                                                        <p class="text-sm text-blue-700">No objects found from
-                                                            integration.</p>
-
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                        </td>
-                                    </tr>
-
-                                    </tbody>
-                                </table>
-                            </div>
+            <div x-cloak x-show="loading===false">
+                <div x-show="errorObjectList" class="p-5">
+                    <div class="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
+                        <svg class="mt-0.5 h-5 w-5 flex-none text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
+                        </svg>
+                        <div class="min-w-0 flex-1">
+                            <p class="font-medium leading-6">Error fetching objects from integration.</p>
+                            <ul role="list" class="mt-1 list-disc space-y-1 pl-5 text-red-700">
+                                <li x-text="errorObjectList?.message"></li>
+                            </ul>
                         </div>
                     </div>
                 </div>
-            </div>
-        </div>
-
-        <div>
-            <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg">
-                <div class="px-2 py-3 sm:px-2  bg-indigo-500">
-                    <h3 class="text-md leading-6  text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                        </svg>
-                        Configurations
-                    </h3>
+                <div x-show="!errorObjectList" class="overflow-x-auto">
+                    <table id="section-nodes" class="min-w-full divide-y divide-slate-200 text-sm" x-show="loading===false">
+                        <thead>
+                            <tr class="bg-slate-50">
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Object</th>
+                                <th scope="col" class="px-4 py-3" x-show="!database.all_databases && !database.all_tables">
+                                    <span class="sr-only">Actions</span>
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            <template x-for="object in objectList">
+                                <tr class="transition hover:bg-slate-50">
+                                    <td class="px-4 py-3">
+                                        <div class="flex items-center gap-3">
+                                            <span class="grid h-8 w-8 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                                                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
+                                                </svg>
+                                            </span>
+                                            <span class="min-w-0 truncate text-sm font-medium text-slate-900" x-text="object.name"></span>
+                                        </div>
+                                    </td>
+                                    <td class="whitespace-nowrap px-4 py-3 text-right" x-show="!database.all_databases && !database.all_tables">
+                                        {% if connection.auth_database.database_name %}
+                                            <button @click="addTable(object.name)" type="button"
+                                                    class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                                Include
+                                            </button>
+                                        {% elif connection.auth_database.all_databases %}
+                                            <button @click="addDatabase(object.name)" type="button"
+                                                    class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                                Include
+                                            </button>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            </template>
+                            <tr x-show="objectList?.length === 0">
+                                <td colspan="2" class="px-4 py-6">
+                                    <div class="flex items-start gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800" role="alert">
+                                        <svg class="mt-0.5 h-5 w-5 flex-none text-sky-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/>
+                                        </svg>
+                                        <p class="min-w-0 flex-1 font-medium leading-6">No objects found from integration.</p>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
-                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
-                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
-                        <div class="sm:col-span-1">
-                            <label for="name" class="block text-sm font-medium text-gray-700">
-                                Name
-                            </label>
-                            <div class="mt-1">
-                                <input x-model="database.name" type="text" name="name" id="name" autocomplete="name"
-                                       class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md">
-                                <p x-show="databaseErrors?.name" class="mt-2 text-sm text-red-600" id="name-error"
-                                   x-text="databaseErrors?.name"></p>
-                            </div>
-                        </div>
-                        {% if connection.auth_database.all_databases == True %}
-                            <div class="sm:col-span-1">
-                                <label for="name" class="block text-sm font-medium text-gray-700">
-                                    Backup All Databases
-                                </label>
-                                <div class="mt-1">
-                                    <button type="button"
-                                            @click="database.all_databases = !database.all_databases;"
-                                            :class="{ 'bg-indigo-600': database.all_databases, 'bg-gray-200': !(database.all_databases) }"
-                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" :aria-checked="database.all_databases" aria-labelledby="annual-billing-label">
-                                        <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
-                                        <span :class="{ 'translate-x-5': database.all_databases, 'translate-x-0': !(database.all_databases) }"
-                                              aria-hidden="true"
-                                              class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
-                                    </button>
-                                    <p x-show="databaseErrors?.all_databases" class="mt-2 text-sm text-red-600"
-                                       id="name-error" x-text="databaseErrors?.all_databases"></p>
-                                </div>
-                            </div>
-                        {% endif %}
-                        {% if connection.auth_database.database_name %}
-                            <div class="sm:col-span-1">
-                                <label for="name" class="block text-sm font-medium text-gray-700">
-                                    Backup All Tables
-                                </label>
-                                <div class="mt-1">
-                                    <button type="button"
-                                            @click="database.all_tables = !database.all_tables;"
-                                            :class="{ 'bg-indigo-600': database.all_tables, 'bg-gray-200': !(database.all_tables) }"
-                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" :aria-checked="database.all_tables" aria-labelledby="annual-billing-label">
-                                        <!-- Enabled: "translate-x-5", Not Enabled: "translate-x-0" -->
-                                        <span :class="{ 'translate-x-5': database.all_tables, 'translate-x-0': !(database.all_tables) }"
-                                              aria-hidden="true"
-                                              class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
-                                    </button>
-                                    <p x-show="databaseErrors?.all_tables" class="mt-2 text-sm text-red-600"
-                                       id="name-error" x-text="databaseErrors?.all_tables"></p>
-                                </div>
-                            </div>
-                        {% endif %}
+            </div>
+        </section>
 
-{#                        {% if connection.auth_database.type == 3 %}#}
-{#                            <div class="sm:col-span-1">#}
-{#                                <label for="option_postgres_format_custom" class="block text-sm font-medium text-gray-700">#}
-{#                                    Flag -Fc (most flexible output file format)#}
-{#                                </label>#}
-{#                                <div class="mt-1">#}
-{#                                    <button type="button"#}
-{#                                            @click="database.option_postgres_format_custom = !database.option_postgres_format_custom;"#}
-{#                                            :class="{ 'bg-indigo-600': database.option_postgres_format_custom, 'bg-gray-200': !(database.option_postgres_format_custom) }"#}
-{#                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"#}
-{#                                            role="switch" aria-checked="false" aria-labelledby="annual-billing-label">#}
-{#                                    <span :class="{ 'translate-x-5': database.option_postgres_format_custom, 'translate-x-0': !(database.option_postgres_format_custom) }"#}
-{#                                          aria-hidden="true"#}
-{#                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>#}
-{#                                    </button>#}
-{#                                    <p x-show="databaseErrors?.option_postgres_format_custom" class="mt-2 text-sm text-red-600"#}
-{#                                       id="name-error"#}
-{#                                       x-text="databaseErrors?.option_postgres_format_custom"></p>#}
-{#                                </div>#}
-{#                            </div>#}
-{#                        {% endif %}#}
-                        {% if connection.auth_database.type == 1 %}
-                            <div class="sm:col-span-1">
-                                <label for="option_gtid_purged_off" class="block text-sm font-medium text-gray-700">
-                                    Flag --set-gtid-purged=OFF (default is ON - don't change if unsure)
-                                </label>
-                                <div class="mt-1">
-                                    <button type="button"
-                                            @click="database.option_gtid_purged_off = !database.option_gtid_purged_off;"
-                                            :class="{ 'bg-indigo-600': database.option_gtid_purged_off, 'bg-gray-200': !(database.option_gtid_purged_off) }"
-                                            class="bg-gray-200 relative inline-flex shrink-0 h-6 w-11 border-2 border-transparent rounded-full cursor-pointer transition-colors ease-in-out duration-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                            role="switch" :aria-checked="database.option_gtid_purged_off" aria-labelledby="annual-billing-label">
-                                    <span :class="{ 'translate-x-5': database.option_gtid_purged_off, 'translate-x-0': !(database.option_gtid_purged_off) }"
+        <div class="space-y-6">
+            <!-- Configuration -->
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="database-config-heading">
+                <div class="border-b border-slate-200 px-5 py-4">
+                    <h2 id="database-config-heading" class="text-sm font-semibold text-slate-900">Configurations</h2>
+                    <p class="mt-0.5 text-xs text-slate-500">Name and backup options for this node.</p>
+                </div>
+                <div class="space-y-5 p-5">
+                    <div>
+                        <label for="name" class="block text-sm font-medium text-slate-700">Name</label>
+                        <input x-model="database.name" type="text" name="name" id="name" autocomplete="name"
+                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                        <p x-show="databaseErrors?.name" class="mt-1.5 text-xs font-medium text-red-600" id="name-error"
+                           x-text="databaseErrors?.name"></p>
+                    </div>
+                    {% if connection.auth_database.all_databases == True %}
+                        <div>
+                            <div class="flex items-center justify-between gap-4">
+                                <span id="all_databases-label" class="block text-sm font-medium text-slate-700">Backup All Databases</span>
+                                <button type="button"
+                                        @click="database.all_databases = !database.all_databases;"
+                                        :class="database.all_databases ? 'bg-indigo-600' : 'bg-slate-200'"
+                                        class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                                        role="switch" :aria-checked="database.all_databases" aria-labelledby="all_databases-label">
+                                    <span :class="database.all_databases ? 'translate-x-5' : 'translate-x-0'"
                                           aria-hidden="true"
-                                          class="translate-x-0 pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transform ring-0 transition ease-in-out duration-200"></span>
-                                    </button>
-                                    <p x-show="databaseErrors?.option_gtid_purged_off" class="mt-2 text-sm text-red-600"
-                                       id="name-error"
-                                       x-text="databaseErrors?.option_gtid_purged_off"></p>
-                                </div>
+                                          class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                </button>
                             </div>
-                        {% endif %}
-                        {% if connection.auth_database.type == 3 %}
-                            <div class="sm:col-span-1">
-                                <label for="option_postgres" class="block text-sm font-medium text-gray-700">
-                                    PostgresSQL(pg_dump) Options (<a class="text-indigo-500" target="_blank" href="https://support.backupsheep.com/docs/postgresql-pg_dump-options">allowed options</a>)
-                                </label>
-                               <div class="mt-1">
-                                          <textarea placeholder="Example: --column-inserts --no-owner --no-comments --no-privileges --rows-per-insert=500 --if-exists --clean" x-model="database.option_postgres" id="option_postgres" name="option_postgres" rows="3"
-                                                    class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md mt-3"></textarea>
-                                <p x-show="databaseErrors?.option_postgres" class="mt-2 text-sm text-red-600" id="notes-error"
-                                   x-text="databaseErrors?.option_postgres"></p>
+                            <p x-show="databaseErrors?.all_databases" class="mt-1.5 text-xs font-medium text-red-600"
+                               id="all_databases-error" x-text="databaseErrors?.all_databases"></p>
+                        </div>
+                    {% endif %}
+                    {% if connection.auth_database.database_name %}
+                        <div>
+                            <div class="flex items-center justify-between gap-4">
+                                <span id="all_tables-label" class="block text-sm font-medium text-slate-700">Backup All Tables</span>
+                                <button type="button"
+                                        @click="database.all_tables = !database.all_tables;"
+                                        :class="database.all_tables ? 'bg-indigo-600' : 'bg-slate-200'"
+                                        class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                                        role="switch" :aria-checked="database.all_tables" aria-labelledby="all_tables-label">
+                                    <span :class="database.all_tables ? 'translate-x-5' : 'translate-x-0'"
+                                          aria-hidden="true"
+                                          class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                </button>
                             </div>
+                            <p x-show="databaseErrors?.all_tables" class="mt-1.5 text-xs font-medium text-red-600"
+                               id="all_tables-error" x-text="databaseErrors?.all_tables"></p>
+                        </div>
+                    {% endif %}
+
+{#                    {% if connection.auth_database.type == 3 %}#}
+{#                        <div>#}
+{#                            <div class="flex items-center justify-between gap-4">#}
+{#                                <span id="option_postgres_format_custom-label" class="block text-sm font-medium text-slate-700">Flag -Fc (most flexible output file format)</span>#}
+{#                                <button type="button"#}
+{#                                        @click="database.option_postgres_format_custom = !database.option_postgres_format_custom;"#}
+{#                                        :class="database.option_postgres_format_custom ? 'bg-indigo-600' : 'bg-slate-200'"#}
+{#                                        class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"#}
+{#                                        role="switch" :aria-checked="database.option_postgres_format_custom" aria-labelledby="option_postgres_format_custom-label">#}
+{#                                    <span :class="database.option_postgres_format_custom ? 'translate-x-5' : 'translate-x-0'"#}
+{#                                          aria-hidden="true"#}
+{#                                          class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>#}
+{#                                </button>#}
+{#                            </div>#}
+{#                            <p x-show="databaseErrors?.option_postgres_format_custom" class="mt-1.5 text-xs font-medium text-red-600"#}
+{#                               id="option_postgres_format_custom-error"#}
+{#                               x-text="databaseErrors?.option_postgres_format_custom"></p>#}
+{#                        </div>#}
+{#                    {% endif %}#}
+                    {% if connection.auth_database.type == 1 %}
+                        <div>
+                            <div class="flex items-center justify-between gap-4">
+                                <span id="option_gtid_purged_off-label" class="block text-sm font-medium text-slate-700">Flag --set-gtid-purged=OFF <span class="block text-xs font-normal text-slate-500">Default is ON — don't change if unsure.</span></span>
+                                <button type="button"
+                                        @click="database.option_gtid_purged_off = !database.option_gtid_purged_off;"
+                                        :class="database.option_gtid_purged_off ? 'bg-indigo-600' : 'bg-slate-200'"
+                                        class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                                        role="switch" :aria-checked="database.option_gtid_purged_off" aria-labelledby="option_gtid_purged_off-label">
+                                    <span :class="database.option_gtid_purged_off ? 'translate-x-5' : 'translate-x-0'"
+                                          aria-hidden="true"
+                                          class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                </button>
                             </div>
-                        {% endif %}
-                        <div class="sm:col-span-1">
-                            <label for="notes" class="block text-sm font-medium text-gray-700">
-                                Notes
+                            <p x-show="databaseErrors?.option_gtid_purged_off" class="mt-1.5 text-xs font-medium text-red-600"
+                               id="option_gtid_purged_off-error"
+                               x-text="databaseErrors?.option_gtid_purged_off"></p>
+                        </div>
+                    {% endif %}
+                    {% if connection.auth_database.type == 3 %}
+                        <div>
+                            <label for="option_postgres" class="block text-sm font-medium text-slate-700">
+                                PostgresSQL(pg_dump) Options (<a class="font-medium text-indigo-600 transition hover:text-indigo-700" target="_blank" href="https://support.backupsheep.com/docs/postgresql-pg_dump-options">allowed options</a>)
                             </label>
-                            <div class="mt-1">
-                                          <textarea x-model="database.notes" id="notes" name="notes" rows="3"
-                                                    class="shadow-xs focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border border-gray-300 rounded-md mt-3"></textarea>
-                                <p x-show="databaseErrors?.notes" class="mt-2 text-sm text-red-600" id="notes-error"
-                                   x-text="databaseErrors?.notes"></p>
-                            </div>
+                            <textarea placeholder="Example: --column-inserts --no-owner --no-comments --no-privileges --rows-per-insert=500 --if-exists --clean" x-model="database.option_postgres" id="option_postgres" name="option_postgres" rows="3"
+                                      class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
+                            <p x-show="databaseErrors?.option_postgres" class="mt-1.5 text-xs font-medium text-red-600" id="option_postgres-error"
+                               x-text="databaseErrors?.option_postgres"></p>
                         </div>
+                    {% endif %}
+                    <div>
+                        <label for="notes" class="block text-sm font-medium text-slate-700">Notes</label>
+                        <textarea x-model="database.notes" id="notes" name="notes" rows="3"
+                                  class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
+                        <p x-show="databaseErrors?.notes" class="mt-1.5 text-xs font-medium text-red-600" id="notes-error"
+                           x-text="databaseErrors?.notes"></p>
+                    </div>
 
-                        <div class="sm:col-span-1" x-show="!errorObjectList">
-                            <button @click="saveDatabase()" type="button"
-                                    class="w-full inline-flex justify-center rounded-md border border-transparent shadow-xs px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:col-start-2 sm:text-sm">
-                                {% if not node.id %}
-                                    <span>Create Node</span>
-                                {% elif node.id %}
-                                    <span>Modify Node</span>
-                                {% endif %}
-                            </button>
-                        </div>
-                    </dl>
+                    <div x-show="!errorObjectList">
+                        <button @click="saveDatabase()" type="button"
+                                class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+                            {% if not node.id %}
+                                <span>Create Node</span>
+                            {% elif node.id %}
+                                <span>Modify Node</span>
+                            {% endif %}
+                        </button>
+                    </div>
                 </div>
-            </div>
+            </section>
 
-
-            <div class="bg-white shadow-sm overflow-hidden sm:rounded-lg mt-6"
-                 x-show="(database.tables?.length>0 || database.databases?.length>0)  && (!database.all_tables && !database.all_databases)">
-                <div class="px-2 py-3 sm:px-2  bg-indigo-500">
-                    <h3 class="text-md leading-6  text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 float-left mr-1" fill="none"
-                             viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M12 4v16m8-8H4"></path>
-                        </svg>
-                        Included {% if connection.auth_database.database_name %}
-                        Tables{% elif connection.auth_database.all_databases %}Databases{% endif %}
-                    </h3>
+            <!-- Included objects -->
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="database-included-heading"
+                     x-cloak
+                     x-show="(database.tables?.length>0 || database.databases?.length>0)  && (!database.all_tables && !database.all_databases)">
+                <div class="border-b border-slate-200 px-5 py-4">
+                    <h2 id="database-included-heading" class="text-sm font-semibold text-slate-900">
+                        Included {% if connection.auth_database.database_name %}Tables{% elif connection.auth_database.all_databases %}Databases{% endif %}
+                    </h2>
+                    <p class="mt-0.5 text-xs text-slate-500">Objects selected for this backup node.</p>
                 </div>
-                <div class="border-t border-gray-200 px-4 py-6 pb-7 sm:px-6">
-                    <dl class="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-1">
-                        <div class="border-t border-gray-200 ">
-                            <div class="overflow-x-auto">
-                                <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
-                                    <tbody class="bg-white divide-y divide-gray-200">
-
-                                    {% if connection.auth_database.database_name %}
-                                        <template x-for="object in database.tables">
-                                            <tr>
-                                                <td class="px-2 py-2 whitespace-nowrap">
-                                                    <div class="flex items-center">
-                                                        <div class="shrink-0 h-6 w-6">
-                                                            <svg xmlns="http://www.w3.org/2000/svg"
-                                                                 class="h-6 w-6 rounded-full text-indigo-600"
-                                                                 fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                                <path stroke-linecap="round" stroke-linejoin="round"
-                                                                      stroke-width="2"
-                                                                      d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path>
-                                                            </svg>
-                                                        </div>
-                                                        <div class="ml-2">
-                                                            <div class="text-sm font-medium text-gray-700">
-                                                                <a class="cursor-pointer" x-text="object"></a>
-                                                            </div>
-                                                            <div class="text-xs text-gray-700" x-text="object"></div>
-                                                        </div>
-                                                    </div>
-                                                </td>
-
-                                                <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
-                                                    <button @click="removeTable(object)" type="button"
-                                                            class="mt-3 inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-2 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
-                                                        Remove
-                                                    </button>
-                                                </td>
-                                            </tr>
-                                        </template>
-
-                                    {% elif connection.auth_database.all_databases %}
-                                        <template x-for="object in database.databases">
-                                            <tr>
-                                                <td class="px-2 py-2 whitespace-nowrap">
-                                                    <div class="flex items-center">
-                                                        <div class="shrink-0 h-6 w-6">
-                                                            <svg xmlns="http://www.w3.org/2000/svg"
-                                                                 class="h-6 w-6 rounded-full text-indigo-600"
-                                                                 fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                                <path stroke-linecap="round" stroke-linejoin="round"
-                                                                      stroke-width="2"
-                                                                      d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path>
-                                                            </svg>
-                                                        </div>
-                                                        <div class="ml-2">
-                                                            <div class="text-sm font-medium text-gray-700">
-                                                                <a class="cursor-pointer" x-text="object"></a>
-                                                            </div>
-                                                            <div class="text-xs text-gray-700" x-text="object"></div>
-                                                        </div>
-                                                    </div>
-                                                </td>
-
-                                                <td class="px-2 py-2 whitespace-nowrap text-right text-sm font-medium">
-                                                    <button @click="removeDatabase(object)" type="button"
-                                                            class="mt-3 inline-flex justify-center rounded-md border border-gray-300 shadow-xs px-2 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:col-start-1 sm:text-sm">
-                                                        Remove
-                                                    </button>
-                                                </td>
-                                            </tr>
-                                        </template>
-
-                                    {% endif %}
-
-
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </dl>
-                </div>
-            </div>
+                <ul class="divide-y divide-slate-100">
+                    {% if connection.auth_database.database_name %}
+                        <template x-for="object in database.tables">
+                            <li class="flex items-center gap-3 px-5 py-3">
+                                <span class="grid h-8 w-8 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
+                                    </svg>
+                                </span>
+                                <span class="min-w-0 flex-1 truncate text-sm font-medium text-slate-900" x-text="object"></span>
+                                <button @click="removeTable(object)" type="button"
+                                        class="inline-flex flex-none items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                    Remove
+                                </button>
+                            </li>
+                        </template>
+                    {% elif connection.auth_database.all_databases %}
+                        <template x-for="object in database.databases">
+                            <li class="flex items-center gap-3 px-5 py-3">
+                                <span class="grid h-8 w-8 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
+                                    </svg>
+                                </span>
+                                <span class="min-w-0 flex-1 truncate text-sm font-medium text-slate-900" x-text="object"></span>
+                                <button @click="removeDatabase(object)" type="button"
+                                        class="inline-flex flex-none items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                    Remove
+                                </button>
+                            </li>
+                        </template>
+                    {% endif %}
+                </ul>
+            </section>
         </div>
     </div>
 </div>

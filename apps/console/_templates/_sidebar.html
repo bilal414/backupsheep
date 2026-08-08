@@ -1,40 +1,66 @@
-<div x-cloak x-show="sideBar" x-transition.opacity @click="sideBar = false" class="bs-shell-v3__scrim lg:hidden" aria-hidden="true"></div>
+<!-- Mobile backdrop -->
+<div
+    x-cloak
+    x-show="sideBar"
+    x-transition:enter="transition-opacity ease-linear duration-200"
+    x-transition:enter-start="opacity-0"
+    x-transition:enter-end="opacity-100"
+    x-transition:leave="transition-opacity ease-linear duration-200"
+    x-transition:leave-start="opacity-100"
+    x-transition:leave-end="opacity-0"
+    @click="sideBar = false"
+    class="fixed inset-0 z-40 bg-slate-900/50 lg:hidden"
+    aria-hidden="true"
+></div>
 
-<aside class="bs-shell-v3__rail" :class="{ 'is-open': sideBar }" aria-label="BackupSheep console navigation">
-    <div class="bs-shell-v3__rail-inner">
-        <div class="bs-shell-v3__brand">
-            <a href="{% url 'console:home:index' %}" class="bs-shell-v3__brand-link">
-                <span class="bs-shell-v3__brand-mark" aria-hidden="true">B</span>
-                <span class="bs-shell-v3__brand-copy">
-                    <strong>BackupSheep</strong>
-                    <small>Control plane</small>
-                </span>
-            </a>
-            <button type="button" @click="sideBar = false" class="bs-shell-v3__rail-close lg:hidden" aria-label="Close navigation">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/></svg>
-            </button>
-        </div>
+<aside
+    x-cloak
+    :class="sideBar ? 'translate-x-0' : '-translate-x-full'"
+    class="fixed inset-y-0 left-0 z-50 flex w-72 flex-col border-r border-slate-200 bg-white transition-transform duration-200 ease-in-out lg:translate-x-0"
+    aria-label="Sidebar"
+>
+    <!-- Brand lockup -->
+    <div class="flex h-16 flex-none items-center justify-between gap-3 border-b border-slate-200 px-5">
+        <a href="{% url 'console:home:index' %}" class="flex min-w-0 items-center gap-2.5">
+            <img class="h-8 w-8 flex-none rounded-lg" src="{{ STATIC_URL }}console/images/logo.webp" alt="{{ site.app_name }} logo">
+            <span class="truncate text-sm font-semibold tracking-tight text-slate-900">{{ site.app_name }}</span>
+        </a>
+        <button
+            type="button"
+            @click="sideBar = false"
+            class="grid h-9 w-9 flex-none place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 lg:hidden"
+            aria-label="Close navigation"
+        >
+            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+        </button>
+    </div>
 
-        <div class="bs-shell-v3__workspace">
-            <span class="bs-shell-v3__workspace-dot" aria-hidden="true"></span>
-            <span><strong>Production workspace</strong><small>All systems operational</small></span>
-            <span class="bs-shell-v3__workspace-pulse" aria-hidden="true"></span>
-        </div>
+    {% include "_console_nav.html" %}
 
-        {% include "_console_nav.html" %}
-
-        <div class="bs-shell-v3__account">
-            <div class="bs-shell-v3__account-avatar">{{ request.user.member.full_name|slice:":1"|upper }}</div>
-            <div class="bs-shell-v3__account-copy">
-                <strong>{{ request.user.member.full_name }}</strong>
-                <small>Workspace member</small>
+    <!-- User card + sign out -->
+    <div class="flex-none border-t border-slate-200 p-4">
+        <div class="flex items-center gap-3">
+            <span class="grid h-9 w-9 flex-none place-items-center rounded-full bg-indigo-600 text-sm font-semibold text-white" aria-hidden="true">
+                {{ request.user.member.full_name|slice:":1"|upper }}
+            </span>
+            <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-semibold text-slate-900">{{ request.user.member.full_name }}</p>
+                <p class="truncate text-xs text-slate-500">{{ request.user.email }}</p>
             </div>
-            <form id="sidebar-logout-form" method="post" action="{% url 'console:auth:logout' %}">
-                {% csrf_token %}
-                <button type="submit" aria-label="Sign out" title="Sign out">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M10 5H6.75A1.75 1.75 0 0 0 5 6.75v10.5A1.75 1.75 0 0 0 6.75 19H10M14 8l4 4-4 4M18 12H9"/></svg>
-                </button>
-            </form>
         </div>
+        <form id="sidebar-logout-form" method="post" action="{% url 'console:auth:logout' %}">
+            {% csrf_token %}
+            <button
+                type="submit"
+                class="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+            >
+                <svg class="h-4 w-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9"/>
+                </svg>
+                Sign out
+            </button>
+        </form>
     </div>
 </aside>

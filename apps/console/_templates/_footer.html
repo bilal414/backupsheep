@@ -1,6 +1,6 @@
-{% for message in messages %}
-    <div class="bs-shell-v3__message {% if message.tags == 'error' %}is-error{% endif %}">
-        <span class="bs-shell-v3__message-icon" aria-hidden="true">{% if message.tags == 'error' %}!{% else %}✓{% endif %}</span>
-        <p>{{ message }}</p>
+<footer class="border-t border-slate-200 bg-white">
+    <div class="mx-auto flex w-full max-w-7xl flex-col items-center justify-between gap-2 px-4 py-4 sm:flex-row sm:px-6 lg:px-8">
+        <p class="text-xs text-slate-400">&copy; {% now "Y" %} {{ site.app_name }}. All rights reserved.</p>
+        <p class="text-xs text-slate-400">Automated backups for servers, sites and databases.</p>
     </div>
-{% endfor %}
+</footer>

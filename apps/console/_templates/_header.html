@@ -1,34 +1,96 @@
-<header class="bs-shell-v3__topbar">
-    <div class="bs-shell-v3__topbar-main">
-        <button @click="sideBar = !sideBar" type="button" class="bs-shell-v3__menu lg:hidden" aria-label="Open navigation">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" d="M4 7h16M4 12h16M4 17h16"/></svg>
-        </button>
-        <div class="bs-shell-v3__crumbs">
-            <span class="bs-shell-v3__crumb-root">BACKUPSHEEP</span>
-            <span class="bs-shell-v3__crumb-separator" aria-hidden="true">/</span>
-            <strong>{% if active_url == "dashboard" %}Overview{% elif active_url == "nodes" %}Sources{% elif active_url == "logs" %}Activity{% elif active_url == "setup" %}Add source{% elif active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}Settings{% else %}Operations{% endif %}</strong>
-        </div>
-    </div>
-
-    <div class="bs-shell-v3__topbar-actions">
-        <span class="bs-shell-v3__topbar-health"><i aria-hidden="true"></i><span>Live</span></span>
-        <a href="{% url 'console:setup:integration_select' %}" class="bs-shell-v3__quick-action">
-            <span aria-hidden="true">+</span><span class="hidden sm:inline">Add source</span>
-        </a>
-
-        <div class="bs-shell-v3__user" x-data="{ isOpen: false }">
-            <button @click="isOpen = !isOpen" type="button" class="bs-shell-v3__user-trigger" id="user-menu-button" aria-expanded="false" aria-haspopup="true">
-                <span class="bs-shell-v3__user-avatar">{{ request.user.member.full_name|slice:":1"|upper }}</span>
-                <span class="bs-shell-v3__user-name hidden md:inline">{{ request.user.member.full_name }}</span>
-                <svg class="bs-shell-v3__user-chevron" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.168l3.71-3.938a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z" clip-rule="evenodd"/></svg>
+<header class="sticky top-0 z-30 border-b border-slate-200 bg-white/80 backdrop-blur">
+    <div class="flex h-16 items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
+        <div class="flex min-w-0 items-center gap-3">
+            <button
+                type="button"
+                @click="sideBar = true"
+                class="grid h-9 w-9 flex-none place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 lg:hidden"
+                aria-label="Open navigation"
+            >
+                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"/>
+                </svg>
             </button>
-            <div x-cloak x-show="isOpen" x-transition @click.away="isOpen = false" class="bs-shell-v3__user-menu" role="menu" aria-labelledby="user-menu-button">
-                <div class="bs-shell-v3__user-menu-head"><span>Signed in as</span><strong>{{ request.user.member.full_name }}</strong></div>
-                <a href="{% url 'console:settings:profile' %}" role="menuitem">Profile &amp; account <span aria-hidden="true">↗</span></a>
-                <form method="post" action="{% url 'console:auth:logout' %}" role="none">
-                    {% csrf_token %}
-                    <button type="submit" role="menuitem">Sign out <span aria-hidden="true">↗</span></button>
-                </form>
+            <div class="min-w-0">
+                <p class="hidden text-xs font-semibold uppercase tracking-wider text-slate-400 sm:block">{{ site.app_name }}</p>
+                <h1 class="truncate text-sm font-semibold text-slate-900 sm:text-base">{% if active_url == "dashboard" %}Overview{% elif active_url == "logs" %}Activity{% elif active_url == "nodes" %}Sources{% elif active_url == "setup" %}Add source{% elif active_url == "profile" or active_url == "account" or active_url == "password" or active_url == "multifactor" or active_url == "group" or active_url == "user" or active_url == "invite" or active_url == "notifications" %}Settings{% else %}Operations{% endif %}</h1>
+            </div>
+        </div>
+
+        <div class="flex flex-none items-center gap-2 sm:gap-3">
+            <a
+                href="{% url 'console:setup:integration_select' %}"
+                class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 sm:px-4"
+            >
+                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>
+                </svg>
+                <span class="hidden sm:inline">Add source</span>
+                <span class="sr-only sm:hidden">Add source</span>
+            </a>
+
+            <div x-data="{ isOpen: false }" class="relative">
+                <button
+                    type="button"
+                    @click="isOpen = !isOpen"
+                    id="user-menu-button"
+                    aria-expanded="false"
+                    aria-haspopup="true"
+                    class="flex items-center gap-2 rounded-full p-1 transition hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 sm:rounded-lg sm:px-2 sm:py-1.5"
+                >
+                    <span class="grid h-8 w-8 flex-none place-items-center rounded-full bg-indigo-600 text-xs font-semibold text-white" aria-hidden="true">
+                        {{ request.user.member.full_name|slice:":1"|upper }}
+                    </span>
+                    <span class="hidden max-w-36 truncate text-sm font-medium text-slate-700 md:inline">{{ request.user.member.full_name }}</span>
+                    <svg class="hidden h-4 w-4 text-slate-400 md:inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5"/>
+                    </svg>
+                </button>
+
+                <div
+                    x-cloak
+                    x-show="isOpen"
+                    x-transition:enter="transition ease-out duration-100"
+                    x-transition:enter-start="opacity-0 scale-95"
+                    x-transition:enter-end="opacity-100 scale-100"
+                    x-transition:leave="transition ease-in duration-75"
+                    x-transition:leave-start="opacity-100 scale-100"
+                    x-transition:leave-end="opacity-0 scale-95"
+                    @click.away="isOpen = false"
+                    class="absolute right-0 top-full z-20 mt-2 w-64 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg"
+                    role="menu"
+                    aria-orientation="vertical"
+                    aria-labelledby="user-menu-button"
+                >
+                    <div class="border-b border-slate-100 px-3 py-2.5">
+                        <p class="text-xs font-medium text-slate-400">Signed in as</p>
+                        <p class="mt-0.5 truncate text-sm font-semibold text-slate-900">{{ request.user.member.full_name }}</p>
+                        <p class="truncate text-xs text-slate-500">{{ request.user.email }}</p>
+                    </div>
+                    <a
+                        href="{% url 'console:settings:profile' %}"
+                        class="mt-1 flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"
+                        role="menuitem"
+                    >
+                        <svg class="h-4 w-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"/>
+                        </svg>
+                        Profile and account
+                    </a>
+                    <form method="post" action="{% url 'console:auth:logout' %}">
+                        {% csrf_token %}
+                        <button
+                            type="submit"
+                            class="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"
+                            role="menuitem"
+                        >
+                            <svg class="h-4 w-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9"/>
+                            </svg>
+                            Sign out
+                        </button>
+                    </form>
+                </div>
             </div>
         </div>
     </div>

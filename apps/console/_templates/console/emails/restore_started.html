@@ -1,29 +1,23 @@
 {% extends "console/emails/_master.html" %}
 {% block content %}
-    <h2>Restore Started</h2>
-    <p>A restore of node <strong>{{ node_name }}</strong> has started.</p>
+    <h2 style="margin:0 0 16px; font-family:'Inter',Arial,Helvetica,sans-serif; font-size:20px; line-height:28px; font-weight:700; color:#0f172a;">Restore started</h2>
 
-    <p>Restore: <strong>{{ restore_name }}</strong><br>
+    <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#475569;">A restore of node <strong>{{ node_name }}</strong> has started.</p>
+
+    <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#475569;">Restore: <strong>{{ restore_name }}</strong><br>
         Backup ID: {{ backup_name }}</p>
 
-    <p>You will receive another notification once the restore is complete or if it fails.</p>
+    <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#475569;">You will receive another notification once the restore is complete or if it fails.</p>
 
     <!-- Action -->
-    <table class="body-action" align="center" width="100%" cellpadding="0" cellspacing="0">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; margin:24px 0;">
         <tr>
             <td align="center">
                 <!-- Border based button https://litmus.com/blog/a-guide-to-bulletproof-buttons-in-email-design -->
-                <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                <table role="presentation" border="0" cellspacing="0" cellpadding="0">
                     <tr>
-                        <td align="center">
-                            <table border="0" cellspacing="0" cellpadding="0">
-                                <tr>
-                                    <td>
-                                        <a href="{{ site_app_url }}/console/nodes/{{ node_id }}/" class="button button--" target="_blank">view
-                                            node</a>
-                                    </td>
-                                </tr>
-                            </table>
+                        <td align="center" bgcolor="#4f46e5" style="border-radius:6px; background-color:#4f46e5;">
+                            <a href="{{ site_app_url }}/console/nodes/{{ node_id }}/" target="_blank" style="display:inline-block; padding:12px 28px; font-family:'Inter',Arial,Helvetica,sans-serif; font-size:15px; font-weight:600; line-height:20px; color:#ffffff; text-decoration:none; border:1px solid #4f46e5; border-radius:6px;">View node</a>
                         </td>
                     </tr>
                 </table>
@@ -31,19 +25,16 @@
         </tr>
     </table>
 
-    <p>Thanks,
-        <br>{{ sender_name }}</p>
-    <p><strong>P.S.</strong> Need immediate help getting started? Check out our <a href="{{ help_url }}">help
-        documentation</a>. Or, just reply to this email, support team is always ready to help!</p>
+    <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#475569;">Thanks,<br>{{ sender_name }}</p>
+    <p style="margin:0; font-size:13px; line-height:1.6; color:#64748b;"><strong>P.S.</strong> Need immediate help getting started? Check out our <a href="{{ help_url }}" style="color:#4f46e5; text-decoration:underline;">help documentation</a>. Or, just reply to this email, support team is always ready to help!</p>
+
     <!-- Sub copy -->
-    <table class="body-sub">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; margin-top:24px; border-top:1px solid #e2e8f0;">
         <tr>
-            <td>
-                <p class="sub">If you’re having trouble with the button above, copy and paste the URL below into your
-                    web browser.</p>
-                <p class="sub">{{ site_app_url }}/console/nodes/{{ node_id }}/</p>
+            <td style="padding-top:20px;">
+                <p style="margin:0 0 8px; font-size:13px; line-height:1.5; color:#94a3b8;">If you’re having trouble with the button above, copy and paste the URL below into your web browser.</p>
+                <p style="margin:0; font-size:13px; line-height:1.5; color:#94a3b8; word-break:break-all;">{{ site_app_url }}/console/nodes/{{ node_id }}/</p>
             </td>
         </tr>
     </table>
-
 {% endblock %}

@@ -33,18 +33,18 @@
   --color-gray-900: #0f172a;
   --color-gray-950: #020617;
 
-  /* Remap legacy teal -> indigo so the whole console shares one brand accent */
-  --color-teal-50: #eef2ff;
-  --color-teal-100: #e0e7ff;
-  --color-teal-200: #c7d2fe;
-  --color-teal-300: #a5b4fc;
-  --color-teal-400: #818cf8;
-  --color-teal-500: #6366f1;
-  --color-teal-600: #4f46e5;
-  --color-teal-700: #4338ca;
-  --color-teal-800: #3730a3;
-  --color-teal-900: #312e81;
-  --color-teal-950: #1e1b4b;
+  /* Full amber scale (warning semantic) — the legacy config only exposed amber-500 */
+  --color-amber-50: #fffbeb;
+  --color-amber-100: #fef3c7;
+  --color-amber-200: #fde68a;
+  --color-amber-300: #fcd34d;
+  --color-amber-400: #fbbf24;
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #d97706;
+  --color-amber-700: #b45309;
+  --color-amber-800: #92400e;
+  --color-amber-900: #78350f;
+  --color-amber-950: #451a03;
 
   /* Extra accents for integration provider chips */
   --color-blue-50: #eff6ff;
@@ -61,7 +61,6 @@
   --color-cyan-500: #06b6d4;
   --color-cyan-600: #0891b2;
   --color-pink-500: #ec4899;
-  --color-amber-500: #f59e0b;
   --color-purple-50: #faf5ff;
   --color-purple-100: #f3e8ff;
   --color-purple-200: #e9d5ff;
@@ -100,33 +99,7 @@
   }
 }
 
-.mdl-shadow--2dp {
-    box-shadow: none;
+/* Alpine.js cloak — hides x-cloak elements until Alpine has initialised */
+[x-cloak] {
+  display: none !important;
 }
-.select2-container .select2-selection--single {
-    height: 38px;
-}
-.select2-container--classic .select2-selection--single .select2-selection__clear {
-    height: 34px;
-    padding-right: 8px;
-}
-.select2-container--classic .select2-selection--single .select2-selection__rendered {
-    line-height: 34px;
-}
-.select2-container--classic .select2-selection--single .select2-selection__arrow {
-    height: 36px;
-}
-.select2-container .select2-selection--single .select2-selection__clear {
-    height: 34px;
-    padding-right: 8px;
-}
-.select2-container .select2-selection--single .select2-selection__rendered {
-    line-height: 34px;
-}
-.select2-container .select2-selection--single .select2-selection__arrow {
-    height: 36px;
-}
-
-  .lg\:w-128 {
-    width: 36rem;
-  }

@@ -3,144 +3,387 @@
 {% block meta_title %}{{ heading }}{% endblock %}
 {% block meta_description %}{{ heading }}{% endblock %}
 {% block meta_keywords %}{{ heading }}{% endblock %}
-{% block page_class %}page_console console-page bs-dashboard-route sb-l-o sb-r-c{% endblock %}
+{% block page_class %}page_console console-page{% endblock %}
 {% block heading %}false{% endblock %}
 {% load humanize %}
 {% load tz %}
 
 {% block content %}
-    <div class="bs-dashboard-v2">
-        <header class="bs-command-header">
-            <div class="bs-command-title">
-                <p class="bs-command-eyebrow"><span>Backup operations</span><span class="bs-eyebrow-divider">/</span><span>Live account</span></p>
-                <h1>Protection, under control.</h1>
-                <p class="bs-command-intro">A focused view of coverage, the next run, and the work that deserves a closer look.</p>
+    <div class="space-y-6">
+        <!-- Page header -->
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+                <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Overview</h2>
+                <p class="mt-1 text-sm text-slate-500">{% if failed_backups %}A few runs need attention before the next clean handoff.{% else %}Your visible infrastructure is connected to an active recovery path.{% endif %}</p>
             </div>
-            <div class="bs-command-actions">
-                <a href="{% url 'console:setup:integration_select' %}" class="bs-command-button is-primary"><span class="bs-button-glyph" aria-hidden="true">＋</span>Add integration</a>
-                <a href="{% url 'console:node:index' %}" class="bs-command-button is-quiet">View nodes <span aria-hidden="true">↗</span></a>
+            <div class="flex flex-none items-center gap-2">
+                <a href="{% url 'console:node:index' %}" class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">View sources</a>
+                <a href="{% url 'console:setup:integration_select' %}" class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>
+                    </svg>
+                    Add source
+                </a>
             </div>
-        </header>
+        </div>
 
-        <div class="bs-dashboard-v2-grid">
-            <section class="bs-posture-panel" aria-labelledby="posture-heading">
-                <div class="bs-posture-header">
-                    <div>
-                        <p class="bs-command-label">Protection posture</p>
-                        <h2 id="posture-heading">{% if failed_backups %}Review the exception queue.{% else %}Backup coverage is live.{% endif %}</h2>
-                        <p class="bs-posture-description">{% if failed_backups %}A few runs need attention before the next clean handoff.{% else %}Your visible infrastructure is connected to an active recovery path.{% endif %}</p>
-                    </div>
-                    <span class="bs-posture-chip {% if failed_backups %}is-warning{% else %}is-good{% endif %}"><i aria-hidden="true"></i>{% if failed_backups %}Needs review{% else %}Nominal{% endif %}</span>
+        <!-- Stat cards -->
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div class="flex items-center justify-between gap-3">
+                    <p class="text-sm font-medium text-slate-500">Protected sources</p>
+                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/>
+                        </svg>
+                    </span>
                 </div>
-                <div class="bs-posture-body">
-                    <div class="bs-posture-orbit" aria-label="{{ visible_node_count }} nodes covered">
-                        <span class="bs-orbit-ring is-outer" aria-hidden="true"></span>
-                        <span class="bs-orbit-ring is-inner" aria-hidden="true"></span>
-                        <span class="bs-orbit-marker is-one" aria-hidden="true"></span>
-                        <span class="bs-orbit-marker is-two" aria-hidden="true"></span>
-                        <div class="bs-orbit-core"><span>Covered</span><strong>{{ visible_node_count }}</strong><small>nodes</small></div>
-                    </div>
-                    <div class="bs-posture-readouts">
-                        <div><span>Active schedules</span><strong>{{ active_schedule_count }}</strong><small>ready to run</small></div>
-                        <div><span>Open exceptions</span><strong>{{ failed_backups|length }}</strong><small>{% if failed_backups %}needs review{% else %}nothing blocked{% endif %}</small></div>
-                        <div><span>Storage footprint</span><strong>{% if storage_used is not None %}{{ storage_used|filesizeformat }}{% else %}—{% endif %}</strong><small>across destinations</small></div>
-                    </div>
+                <p class="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{{ visible_node_count }}</p>
+                <p class="mt-1 text-xs text-slate-500">nodes covered in this access scope</p>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div class="flex items-center justify-between gap-3">
+                    <p class="text-sm font-medium text-slate-500">Active schedules</p>
+                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5"/>
+                        </svg>
+                    </span>
                 </div>
-                <div class="bs-posture-footer"><span class="bs-signal-dot" aria-hidden="true"></span><span>Control plane connected</span><span class="bs-posture-footer-rule" aria-hidden="true"></span><span>Current access scope</span></div>
+                <p class="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{{ active_schedule_count }}</p>
+                <p class="mt-1 text-xs text-slate-500">ready to run</p>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div class="flex items-center justify-between gap-3">
+                    <p class="text-sm font-medium text-slate-500">Open exceptions</p>
+                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg {% if failed_backups %}bg-amber-50 text-amber-600{% else %}bg-emerald-50 text-emerald-600{% endif %}">
+                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/>
+                        </svg>
+                    </span>
+                </div>
+                <p class="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{{ failed_backups|length }}</p>
+                <p class="mt-1 text-xs text-slate-500">{% if failed_backups %}needs review{% else %}nothing blocked{% endif %}</p>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div class="flex items-center justify-between gap-3">
+                    <p class="text-sm font-medium text-slate-500">Storage footprint</p>
+                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
+                        </svg>
+                    </span>
+                </div>
+                <p class="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{% if storage_used is not None %}{{ storage_used|filesizeformat }}{% else %}—{% endif %}</p>
+                <p class="mt-1 text-xs text-slate-500">across destinations</p>
+            </div>
+        </div>
+
+        <!-- Main grid: recent runs + right rail -->
+        <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm lg:col-span-2" aria-labelledby="runs-heading">
+                <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                    <div class="min-w-0">
+                        <h2 id="runs-heading" class="text-sm font-semibold text-slate-900">Recent backup runs</h2>
+                        <p class="mt-0.5 text-xs text-slate-500">The latest work across your visible nodes.</p>
+                    </div>
+                    <a href="{% url 'console:log:index' %}" class="flex-none text-sm font-medium text-indigo-600 transition hover:text-indigo-700">Full activity log</a>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200 text-sm">
+                        <thead>
+                            <tr class="bg-slate-50">
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Source</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Backup</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Updated</th>
+                                <th scope="col" class="px-4 py-3"><span class="sr-only">Open</span></th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            {% for backup in recent_backups %}
+                                <tr class="transition hover:bg-slate-50">
+                                    <td class="px-4 py-3">
+                                        {% if backup.dashboard_node %}
+                                            <a href="{% url 'console:node:detail' backup.dashboard_node.id %}" class="font-medium text-slate-900 transition hover:text-indigo-600">{{ backup.dashboard_node.name }}</a>
+                                            <p class="mt-0.5 text-xs text-slate-500">{{ backup.dashboard_node.get_type_display }} · {{ backup.dashboard_node.connection.integration.name }}</p>
+                                        {% else %}
+                                            <span class="font-medium text-slate-900">{{ backup.uuid_str }}</span>
+                                            <p class="mt-0.5 text-xs text-slate-500">Backup record</p>
+                                        {% endif %}
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <span class="font-mono text-xs text-slate-700">{{ backup.uuid_str }}</span>
+                                        <p class="mt-0.5 text-xs text-slate-500">Snapshot / backup</p>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset {% if backup.status == 3 %}bg-emerald-50 text-emerald-700 ring-emerald-600/20{% elif backup.status == 4 or backup.status == 7 or backup.status == 11 or backup.status == 21 or backup.status == 30 %}bg-red-50 text-red-700 ring-red-600/20{% else %}bg-amber-50 text-amber-700 ring-amber-600/20{% endif %}">
+                                            <span class="h-1.5 w-1.5 rounded-full {% if backup.status == 3 %}bg-emerald-500{% elif backup.status == 4 or backup.status == 7 or backup.status == 11 or backup.status == 21 or backup.status == 30 %}bg-red-500{% else %}bg-amber-500{% endif %}"></span>
+                                            {{ backup.get_status_display }}
+                                        </span>
+                                    </td>
+                                    <td class="whitespace-nowrap px-4 py-3 text-slate-500">
+                                        <time datetime="{{ backup.modified|date:'c' }}">{{ backup.modified|naturaltime }}</time>
+                                    </td>
+                                    <td class="px-4 py-3 text-right">
+                                        <a href="{% if backup.dashboard_node %}{% url 'console:node:detail' backup.dashboard_node.id %}{% else %}{% url 'console:log:index' %}{% endif %}" class="inline-flex rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600" aria-label="Open backup details">
+                                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/>
+                                            </svg>
+                                        </a>
+                                    </td>
+                                </tr>
+                            {% empty %}
+                                <tr>
+                                    <td colspan="5" class="px-4 py-10">
+                                        <div class="flex flex-col items-center justify-center text-center">
+                                            <span class="grid h-11 w-11 place-items-center rounded-full bg-slate-100 text-slate-400">
+                                                <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/>
+                                                </svg>
+                                            </span>
+                                            <p class="mt-3 text-sm font-medium text-slate-900">No backup runs yet</p>
+                                            <p class="mt-1 text-sm text-slate-500">Connect an integration and add a node to get started.</p>
+                                            <a href="{% url 'console:setup:integration_select' %}" class="mt-4 inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Add source</a>
+                                        </div>
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
             </section>
 
-            <aside class="bs-dashboard-rail" aria-label="Runway and attention">
-                <section class="bs-runway-panel" aria-labelledby="runway-heading">
-                    <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Runway</p><h2 id="runway-heading">Next scheduled</h2></div><span class="bs-panel-index">01</span></div>
-                    <ul class="bs-runway-list">
+            <div class="space-y-6">
+                <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="runway-heading">
+                    <div class="border-b border-slate-200 px-5 py-4">
+                        <h2 id="runway-heading" class="text-sm font-semibold text-slate-900">Next scheduled</h2>
+                        <p class="mt-0.5 text-xs text-slate-500">Upcoming runs in this access scope.</p>
+                    </div>
+                    <ul class="divide-y divide-slate-100">
                         {% for schedule in upcoming_schedules|slice:':3' %}
-                            <li><span class="bs-runway-dot" aria-hidden="true"></span><div><a href="{% url 'console:node:detail' schedule.node_id %}">{{ schedule.name }}</a><small>{{ schedule.node.name }} · {{ schedule.next_run|naturaltime }}</small></div></li>
+                            <li class="flex items-start gap-3 px-5 py-3.5">
+                                <span class="mt-0.5 grid h-8 w-8 flex-none place-items-center rounded-lg bg-slate-100 text-slate-500">
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                    </svg>
+                                </span>
+                                <div class="min-w-0 flex-1">
+                                    <a href="{% url 'console:node:detail' schedule.node_id %}" class="block truncate text-sm font-medium text-slate-900 transition hover:text-indigo-600">{{ schedule.name }}</a>
+                                    <p class="mt-0.5 text-xs text-slate-500">{{ schedule.node.name }} · {{ schedule.next_run|naturaltime }}</p>
+                                </div>
+                            </li>
                         {% empty %}
-                            <li class="bs-empty-v2">No active schedules in this access scope.</li>
+                            <li class="px-5 py-6 text-sm text-slate-500">No active schedules in this access scope.</li>
                         {% endfor %}
                     </ul>
-                    <a class="bs-panel-link" href="{% url 'console:node:index' %}">Open node inventory <span aria-hidden="true">↗</span></a>
+                    <div class="border-t border-slate-200 px-5 py-3">
+                        <a href="{% url 'console:node:index' %}" class="text-sm font-medium text-indigo-600 transition hover:text-indigo-700">Open node inventory</a>
+                    </div>
                 </section>
 
-                <section class="bs-attention-panel" aria-labelledby="attention-heading">
-                    <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Attention</p><h2 id="attention-heading">Exception queue</h2></div><span class="bs-attention-count">{{ failed_backups|length }}</span></div>
+                <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="attention-heading">
+                    <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                        <div class="min-w-0">
+                            <h2 id="attention-heading" class="text-sm font-semibold text-slate-900">Exception queue</h2>
+                            <p class="mt-0.5 text-xs text-slate-500">Runs that need a closer look.</p>
+                        </div>
+                        <span class="inline-flex flex-none items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset {% if failed_backups %}bg-red-50 text-red-700 ring-red-600/20{% else %}bg-slate-100 text-slate-600 ring-slate-500/10{% endif %}">{{ failed_backups|length }}</span>
+                    </div>
                     {% if failed_backups %}
-                        <ul class="bs-attention-list">
+                        <ul class="divide-y divide-slate-100">
                             {% for backup in failed_backups|slice:':2' %}
-                                <li><span class="bs-attention-mark" aria-hidden="true">!</span><div>{% if backup.dashboard_node %}<a href="{% url 'console:node:detail' backup.dashboard_node.id %}">{{ backup.dashboard_node.name }}</a>{% else %}<strong>{{ backup.uuid_str }}</strong>{% endif %}<small>{{ backup.get_status_display }} · {{ backup.modified|naturaltime }}</small></div></li>
+                                <li class="flex items-start gap-3 px-5 py-3.5">
+                                    <span class="mt-0.5 grid h-8 w-8 flex-none place-items-center rounded-lg bg-red-50 text-red-600">
+                                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
+                                        </svg>
+                                    </span>
+                                    <div class="min-w-0 flex-1">
+                                        {% if backup.dashboard_node %}
+                                            <a href="{% url 'console:node:detail' backup.dashboard_node.id %}" class="block truncate text-sm font-medium text-slate-900 transition hover:text-indigo-600">{{ backup.dashboard_node.name }}</a>
+                                        {% else %}
+                                            <span class="block truncate font-mono text-xs font-medium text-slate-900">{{ backup.uuid_str }}</span>
+                                        {% endif %}
+                                        <p class="mt-0.5 text-xs text-slate-500">{{ backup.get_status_display }} · {{ backup.modified|naturaltime }}</p>
+                                    </div>
+                                </li>
                             {% endfor %}
                         </ul>
                     {% else %}
-                        <div class="bs-clear-state"><span aria-hidden="true">✓</span><p>All visible backup runs are clear.</p></div>
+                        <div class="flex items-center gap-3 px-5 py-5">
+                            <span class="grid h-8 w-8 flex-none place-items-center rounded-full bg-emerald-50 text-emerald-600">
+                                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                </svg>
+                            </span>
+                            <p class="text-sm text-slate-500">All visible backup runs are clear.</p>
+                        </div>
                     {% endif %}
-                    <a class="bs-panel-link" href="{% url 'console:log:index' %}">Review activity log <span aria-hidden="true">↗</span></a>
+                    <div class="border-t border-slate-200 px-5 py-3">
+                        <a href="{% url 'console:log:index' %}" class="text-sm font-medium text-indigo-600 transition hover:text-indigo-700">Review activity log</a>
+                    </div>
                 </section>
-            </aside>
-
-            <section class="bs-runs-panel" aria-labelledby="runs-v2-heading">
-                <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Work queue</p><h2 id="runs-v2-heading">Recent backup runs</h2><p class="bs-panel-description">The latest work across your visible nodes.</p></div><a class="bs-panel-link" href="{% url 'console:log:index' %}">Full activity log <span aria-hidden="true">↗</span></a></div>
-                <div class="bs-run-table" role="table" aria-label="Recent backup runs">
-                    <div class="bs-run-table-head" role="row"><span role="columnheader">Source</span><span role="columnheader">Backup</span><span role="columnheader">State</span><span role="columnheader">Updated</span><span aria-hidden="true"></span></div>
-                    <ul class="bs-run-table-body">
-                        {% for backup in recent_backups %}
-                            <li class="bs-run-table-row" role="row">
-                                <span class="bs-run-source-mark {% if backup.dashboard_node.type == 2 %}is-volume{% else %}is-cloud{% endif %}" aria-hidden="true">{% if backup.dashboard_node.type == 2 %}▱{% else %}⌁{% endif %}</span>
-                                <div class="bs-run-table-source" role="cell">{% if backup.dashboard_node %}<a href="{% url 'console:node:detail' backup.dashboard_node.id %}">{{ backup.dashboard_node.name }}</a><small>{{ backup.dashboard_node.get_type_display }} · {{ backup.dashboard_node.connection.integration.name }}</small>{% else %}<strong>{{ backup.uuid_str }}</strong><small>Backup record</small>{% endif %}</div>
-                                <div class="bs-run-table-backup" role="cell"><span>{{ backup.uuid_str }}</span><small>Snapshot / backup</small></div>
-                                <div class="bs-run-state" role="cell"><span class="bs-state-pill {% if backup.status == 3 %}is-success{% elif backup.status == 4 or backup.status == 7 or backup.status == 11 or backup.status == 21 or backup.status == 30 %}is-danger{% else %}is-pending{% endif %}"><i aria-hidden="true"></i>{{ backup.get_status_display }}</span></div>
-                                <time class="bs-run-updated" role="cell" datetime="{{ backup.modified|date:'c' }}">{{ backup.modified|naturaltime }}</time>
-                                <a class="bs-row-arrow" href="{% if backup.dashboard_node %}{% url 'console:node:detail' backup.dashboard_node.id %}{% else %}{% url 'console:log:index' %}{% endif %}" aria-label="Open backup details">↗</a>
-                            </li>
-                        {% empty %}
-                            <li class="bs-empty-v2">No backup runs yet. Connect an integration and add a node to get started.</li>
-                        {% endfor %}
-                    </ul>
-                </div>
-            </section>
-
-            <section class="bs-activity-panel-v2" aria-labelledby="activity-v2-heading">
-                <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Audit trail</p><h2 id="activity-v2-heading">Latest activity</h2></div><span class="bs-panel-index">02</span></div>
-                <ol class="bs-activity-stream">
-                    {% for log in recent_activity|slice:':5' %}
-                        <li><span class="bs-stream-dot" aria-hidden="true"></span><div><strong>{{ log.get_type_display|title }}</strong><p>{{ log.data.message|default:'Activity recorded' }}</p><time>{{ log.created|naturaltime }}</time></div></li>
-                    {% empty %}
-                        <li class="bs-empty-v2">Activity will appear here as your team works.</li>
-                    {% endfor %}
-                </ol>
-                <a class="bs-panel-link" href="{% url 'console:log:index' %}">Open audit log <span aria-hidden="true">↗</span></a>
-            </section>
-
-            <section class="bs-coverage-panel" aria-labelledby="coverage-heading">
-                <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Coverage map</p><h2 id="coverage-heading">Protected sources</h2><p class="bs-panel-description">The nodes included in your current access scope.</p></div><a class="bs-panel-link" href="{% url 'console:node:index' %}">Manage sources <span aria-hidden="true">↗</span></a></div>
-                <div class="bs-coverage-grid">
-                    {% for node in dashboard_nodes %}
-                        <a class="bs-coverage-card" href="{% url 'console:node:detail' node.id %}"><span class="bs-coverage-type {% if node.type == 2 %}is-volume{% elif node.type == 3 %}is-website{% elif node.type == 4 %}is-database{% else %}is-cloud{% endif %}" aria-hidden="true">{% if node.type == 2 %}▱{% elif node.type == 3 %}◌{% elif node.type == 4 %}◎{% else %}⌁{% endif %}</span><span class="bs-coverage-copy"><strong>{{ node.name }}</strong><small>{{ node.get_type_display }} · {{ node.connection.integration.name }}</small></span><span class="bs-node-status {% if node.status == 1 or node.status == 2 %}is-good{% elif node.status == 5 or node.status == 6 or node.status == 8 %}is-warning{% else %}is-neutral{% endif %}"><i aria-hidden="true"></i>{{ node.get_status_display }}</span></a>
-                    {% empty %}
-                        <div class="bs-empty-v2">No nodes are visible in this access scope yet.</div>
-                    {% endfor %}
-                </div>
-            </section>
-
-            {% if storage_cost_summary %}
-                <section class="bs-cost-panel" aria-labelledby="cost-heading">
-                    <div class="bs-panel-heading-v2"><div><p class="bs-command-label">Cost lens</p><h2 id="cost-heading">Storage economics</h2></div><span class="bs-cost-total-v2">${{ storage_cost_summary.estimated_monthly_storage_usd|floatformat:4 }}<small>/ month</small></span></div>
-                    <p class="bs-panel-description">{{ storage_cost_summary.stored_bytes|filesizeformat }} recorded across destinations.</p>
-                    <ul class="bs-cost-list">
-                        {% for destination in storage_cost_summary.destinations|slice:':3' %}
-                            <li><span><strong>{{ destination.storage_name }}</strong><small>{{ destination.storage_type }} · {{ destination.stored_bytes|filesizeformat }}</small></span><em>${{ destination.estimated_monthly_storage_usd|floatformat:4 }}</em></li>
-                        {% empty %}
-                            <li class="bs-empty-v2">No storage destinations yet.</li>
-                        {% endfor %}
-                    </ul>
-                    <p class="bs-cost-foot">Full restore estimate: ${{ storage_cost_summary.estimated_full_retrieval_usd|floatformat:4 }}</p>
-                </section>
-            {% endif %}
+            </div>
         </div>
 
-        <nav class="bs-utility-strip" aria-label="Dashboard shortcuts">
-            <a href="{% url 'console:setup:integration_select' %}"><span aria-hidden="true">＋</span><span><strong>Connect integration</strong><small>Link a new provider or storage destination.</small></span><b aria-hidden="true">↗</b></a>
-            <a href="{% url 'console:node:index' %}"><span aria-hidden="true">⌁</span><span><strong>Manage nodes</strong><small>Review sources, schedules, and status.</small></span><b aria-hidden="true">↗</b></a>
-            <a href="{% url 'console:settings:profile' %}"><span aria-hidden="true">◍</span><span><strong>Account settings</strong><small>Keep access and notifications current.</small></span><b aria-hidden="true">↗</b></a>
+        <!-- Secondary grid: activity + coverage -->
+        <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="activity-heading">
+                <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                    <div class="min-w-0">
+                        <h2 id="activity-heading" class="text-sm font-semibold text-slate-900">Latest activity</h2>
+                        <p class="mt-0.5 text-xs text-slate-500">Audit trail for your workspace.</p>
+                    </div>
+                    <a href="{% url 'console:log:index' %}" class="flex-none text-sm font-medium text-indigo-600 transition hover:text-indigo-700">Open audit log</a>
+                </div>
+                <ol class="space-y-5 px-5 py-5">
+                    {% for log in recent_activity|slice:':5' %}
+                        <li class="flex gap-3">
+                            <span class="mt-1.5 h-2 w-2 flex-none rounded-full bg-indigo-500" aria-hidden="true"></span>
+                            <div class="min-w-0 flex-1">
+                                <p class="text-sm font-medium text-slate-900">{{ log.get_type_display|title }}</p>
+                                <p class="mt-0.5 text-sm text-slate-500">{{ log.data.message|default:'Activity recorded' }}</p>
+                                <time class="mt-1 block text-xs text-slate-400" datetime="{{ log.created|date:'c' }}">{{ log.created|naturaltime }}</time>
+                            </div>
+                        </li>
+                    {% empty %}
+                        <li class="text-sm text-slate-500">Activity will appear here as your team works.</li>
+                    {% endfor %}
+                </ol>
+            </section>
+
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm lg:col-span-2" aria-labelledby="coverage-heading">
+                <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                    <div class="min-w-0">
+                        <h2 id="coverage-heading" class="text-sm font-semibold text-slate-900">Protected sources</h2>
+                        <p class="mt-0.5 text-xs text-slate-500">The nodes included in your current access scope.</p>
+                    </div>
+                    <a href="{% url 'console:node:index' %}" class="flex-none text-sm font-medium text-indigo-600 transition hover:text-indigo-700">Manage sources</a>
+                </div>
+                <div class="grid grid-cols-1 gap-3 p-5 sm:grid-cols-2">
+                    {% for node in dashboard_nodes %}
+                        <a href="{% url 'console:node:detail' node.id %}" class="group flex items-center gap-3 rounded-lg border border-slate-200 p-3.5 transition hover:border-slate-300 hover:bg-slate-50">
+                            <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-slate-100 text-slate-500 transition group-hover:bg-indigo-50 group-hover:text-indigo-600">
+                                {% if node.type == 2 %}
+                                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 17.25v-.228a4.5 4.5 0 00-.12-1.03l-2.268-9.64a3.375 3.375 0 00-3.285-2.602H7.923a3.375 3.375 0 00-3.285 2.602l-2.268 9.64a4.5 4.5 0 00-.12 1.03v.228m19.5 0a3 3 0 01-3 3H5.25a3 3 0 01-3-3m19.5 0a3 3 0 00-3-3H5.25a3 3 0 00-3 3m16.5 0h.008v.008h-.008v-.008zm-3 0h.008v.008h-.008v-.008z"/>
+                                    </svg>
+                                {% elif node.type == 3 %}
+                                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418"/>
+                                    </svg>
+                                {% elif node.type == 4 %}
+                                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
+                                    </svg>
+                                {% else %}
+                                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/>
+                                    </svg>
+                                {% endif %}
+                            </span>
+                            <span class="min-w-0 flex-1">
+                                <span class="block truncate text-sm font-medium text-slate-900">{{ node.name }}</span>
+                                <span class="mt-0.5 block truncate text-xs text-slate-500">{{ node.get_type_display }} · {{ node.connection.integration.name }}</span>
+                            </span>
+                            <span class="inline-flex flex-none items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset {% if node.status == 1 or node.status == 2 %}bg-emerald-50 text-emerald-700 ring-emerald-600/20{% elif node.status == 5 or node.status == 6 or node.status == 8 %}bg-amber-50 text-amber-700 ring-amber-600/20{% else %}bg-slate-100 text-slate-600 ring-slate-500/10{% endif %}">
+                                <span class="h-1.5 w-1.5 rounded-full {% if node.status == 1 or node.status == 2 %}bg-emerald-500{% elif node.status == 5 or node.status == 6 or node.status == 8 %}bg-amber-500{% else %}bg-slate-400{% endif %}"></span>
+                                {{ node.get_status_display }}
+                            </span>
+                        </a>
+                    {% empty %}
+                        <div class="flex flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 px-6 py-10 text-center sm:col-span-2">
+                            <span class="grid h-11 w-11 place-items-center rounded-full bg-slate-100 text-slate-400">
+                                <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/>
+                                </svg>
+                            </span>
+                            <p class="mt-3 text-sm font-medium text-slate-900">No protected sources yet</p>
+                            <p class="mt-1 text-sm text-slate-500">No nodes are visible in this access scope yet.</p>
+                            <a href="{% url 'console:setup:integration_select' %}" class="mt-4 inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Add source</a>
+                        </div>
+                    {% endfor %}
+                </div>
+            </section>
+        </div>
+
+        {% if storage_cost_summary %}
+            <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="cost-heading">
+                <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                    <div class="min-w-0">
+                        <h2 id="cost-heading" class="text-sm font-semibold text-slate-900">Storage economics</h2>
+                        <p class="mt-0.5 text-xs text-slate-500">{{ storage_cost_summary.stored_bytes|filesizeformat }} recorded across destinations.</p>
+                    </div>
+                    <p class="flex-none text-lg font-semibold tracking-tight text-slate-900">${{ storage_cost_summary.estimated_monthly_storage_usd|floatformat:4 }}<span class="text-xs font-medium text-slate-500"> / month</span></p>
+                </div>
+                <ul class="divide-y divide-slate-100">
+                    {% for destination in storage_cost_summary.destinations|slice:':3' %}
+                        <li class="flex items-center justify-between gap-3 px-5 py-3.5">
+                            <div class="min-w-0">
+                                <p class="truncate text-sm font-medium text-slate-900">{{ destination.storage_name }}</p>
+                                <p class="mt-0.5 text-xs text-slate-500">{{ destination.storage_type }} · {{ destination.stored_bytes|filesizeformat }}</p>
+                            </div>
+                            <p class="flex-none text-sm font-semibold text-slate-900">${{ destination.estimated_monthly_storage_usd|floatformat:4 }}</p>
+                        </li>
+                    {% empty %}
+                        <li class="px-5 py-6 text-sm text-slate-500">No storage destinations yet.</li>
+                    {% endfor %}
+                </ul>
+                <div class="border-t border-slate-200 px-5 py-3">
+                    <p class="text-xs text-slate-500">Full restore estimate: <span class="font-semibold text-slate-700">${{ storage_cost_summary.estimated_full_retrieval_usd|floatformat:4 }}</span></p>
+                </div>
+            </section>
+        {% endif %}
+
+        <!-- Quick links -->
+        <nav class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-label="Dashboard shortcuts">
+            <a href="{% url 'console:setup:integration_select' %}" class="group flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-slate-300 hover:bg-slate-50">
+                <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                </span>
+                <span class="min-w-0 flex-1">
+                    <span class="block text-sm font-semibold text-slate-900">Connect integration</span>
+                    <span class="mt-0.5 block text-xs text-slate-500">Link a new provider or storage destination.</span>
+                </span>
+                <svg class="h-4 w-4 flex-none text-slate-400 transition group-hover:text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/>
+                </svg>
+            </a>
+            <a href="{% url 'console:node:index' %}" class="group flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-slate-300 hover:bg-slate-50">
+                <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"/>
+                    </svg>
+                </span>
+                <span class="min-w-0 flex-1">
+                    <span class="block text-sm font-semibold text-slate-900">Manage nodes</span>
+                    <span class="mt-0.5 block text-xs text-slate-500">Review sources, schedules, and status.</span>
+                </span>
+                <svg class="h-4 w-4 flex-none text-slate-400 transition group-hover:text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/>
+                </svg>
+            </a>
+            <a href="{% url 'console:settings:profile' %}" class="group flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-slate-300 hover:bg-slate-50">
+                <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"/>
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                    </svg>
+                </span>
+                <span class="min-w-0 flex-1">
+                    <span class="block text-sm font-semibold text-slate-900">Account settings</span>
+                    <span class="mt-0.5 block text-xs text-slate-500">Keep access and notifications current.</span>
+                </span>
+                <svg class="h-4 w-4 flex-none text-slate-400 transition group-hover:text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/>
+                </svg>
+            </a>
         </nav>
     </div>
 {% endblock %}

@@ -1,21 +1,24 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full bs-console-html">
+<html lang="en" class="h-full">
 <head>
     <title>{% block title %}Dashboard{% endblock %} · {{ site.app_name }}</title>
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <meta name="author" content="{% block author %}BackupSheep{% endblock %}">
+    <meta name="title" content="{% block meta_title %}{% endblock %}">
+    <meta name="description" content="{% block meta_description %}Automated backups for servers, sites and databases.{% endblock %}">
+    <meta name="keywords" content="{% block meta_keywords %}automate cloud backups, cloud backups, website backups, database backups{% endblock %}">
+    <meta property="og:title" content="{% block og_title %}{{ site.app_name }}{% endblock %}">
+    <meta property="og:description" content="{% block og_description %}Automated backups for servers, sites and databases.{% endblock %}">
+    <meta property="og:image" content="{% block og_image %}{{ STATIC_URL }}console/images/logo.png{% endblock %}">
     <link rel="shortcuticon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
     <link rel="icon" href="{{ STATIC_URL }}console/images/favicon.ico" type="image/x-icon">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link type="text/css" href="{{ STATIC_URL }}console/css/compiled.css" rel="stylesheet">
-    <link type="text/css" href="{{ STATIC_URL }}console/css/brand-console.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flowbite@4.0.2/dist/flowbite.min.css"/>
-    <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet"/>
 </head>
-<body class="h-full antialiased brand-console bs-console-v3 {% block page_class %}{% endblock %}">
+<body class="h-full bg-slate-50 text-slate-900 antialiased {% block page_class %}{% endblock %}">
 {% csrf_token %}
 <script>
     // Attach Django's CSRF token to every same-origin state-changing fetch() so the
@@ -45,25 +48,62 @@
     })();
 </script>
 
-<div x-data="{ sideBar: false }" class="bs-shell-v3">
+<!-- Legacy "heading" flag block: some child templates override it with the literal value false; the shell intentionally ignores the value and derives the header title from active_url. {% block heading %}{% endblock %} -->
+
+<div x-data="{ sideBar: false }">
     {% include "_sidebar.html" %}
-    <div class="bs-shell-v3__body">
+
+    <div class="flex min-h-screen flex-col lg:pl-72">
         {% include "_header.html" %}
-        <main class="bs-shell-v3__main">
-            <div class="bs-shell-v3__content">
-                <div class="bs-page-frame-v3">
-                    {% block content %}{% endblock %}
-                </div>
-            </div>
-            <div class="bs-shell-v3__footer">
-                {% include "_footer.html" %}
+
+        <main id="main-content" class="flex-1">
+            <div class="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+                {% if messages %}
+                    <div class="mb-6 space-y-3">
+                        {% for message in messages %}
+                            <div
+                                x-data="{ show: true }"
+                                x-show="show"
+                                x-transition:leave="transition ease-in duration-100"
+                                x-transition:leave-start="opacity-100"
+                                x-transition:leave-end="opacity-0"
+                                class="flex items-start gap-3 rounded-xl border px-4 py-3 text-sm shadow-sm {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-800{% elif message.tags == 'warning' %}border-amber-200 bg-amber-50 text-amber-800{% elif message.tags == 'info' %}border-sky-200 bg-sky-50 text-sky-800{% else %}border-emerald-200 bg-emerald-50 text-emerald-800{% endif %}"
+                                role="alert"
+                            >
+                                <svg class="mt-0.5 h-5 w-5 flex-none {% if message.tags == 'error' %}text-red-500{% elif message.tags == 'warning' %}text-amber-500{% elif message.tags == 'info' %}text-sky-600{% else %}text-emerald-500{% endif %}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                    {% if message.tags == 'error' or message.tags == 'warning' %}
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/>
+                                    {% elif message.tags == 'info' %}
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/>
+                                    {% else %}
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                    {% endif %}
+                                </svg>
+                                <p class="min-w-0 flex-1 font-medium leading-6">{{ message }}</p>
+                                <button
+                                    type="button"
+                                    @click="show = false"
+                                    class="flex-none rounded-lg p-1 opacity-70 transition hover:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                                    aria-label="Dismiss message"
+                                >
+                                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+
+                {% block content %}{% endblock %}
             </div>
         </main>
+
+        {% include "_footer.html" %}
     </div>
 </div>
 
 {% block extra_scripts %}{% endblock %}
-<script src="https://cdn.jsdelivr.net/npm/flowbite@4.0.2/dist/flowbite.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js"></script>
 {% include "_notifications.html" %}
 {% include "_loading.html" %}

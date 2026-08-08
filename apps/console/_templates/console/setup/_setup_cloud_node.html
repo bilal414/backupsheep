@@ -1,179 +1,133 @@
 <div x-data="setupOpenConnection()">
-    <div>
-        <nav class="relative z-0 rounded-lg shadow-sm flex divide-x divide-gray-200" aria-label="Tabs">
-            {% if integration.code != "upcloud" and integration.code != "oracle" %}
-                <a x-bind:class="object_type === 'cloud' ? 'text-gray-700' : 'text-gray-700 hover:text-gray-700'" href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
-                   class="rounded-l-lg group relative min-w-0 flex-1 overflow-hidden bg-white py-4 px-4 text-sm font-medium text-center hover:bg-gray-50 focus:z-10" aria-current="page">
-                    <span>Servers</span>
-                    <span x-bind:class="object_type === 'cloud' ? 'bg-indigo-500' : 'bg-transparent'" aria-hidden="true" class="absolute inset-x-0 bottom-0 h-0.5"></span>
-                </a>
-            {% endif %}
-            {% if integration.code != "aws_rds" and integration.code != "hetzner" %}
-                <a x-bind:class="object_type === 'volume' ? 'text-gray-700' : 'text-gray-700 hover:text-gray-700'" href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
-                   class="group relative min-w-0 flex-1 overflow-hidden bg-white py-4 px-4 text-sm font-medium text-center hover:bg-gray-50 focus:z-10">
-                    <span>Volumes</span>
-                    <span x-bind:class="object_type === 'volume' ? 'bg-indigo-500' : 'bg-transparent'" aria-hidden="true" class="absolute inset-x-0 bottom-0 h-0.5"></span>
-                </a>
-            {% endif %}
-            {% if integration.code == "aws" %}
-                <a x-bind:class="object_type === 's3' ? 'text-gray-700' : 'text-gray-700 hover:text-gray-700'" href="{% url 'console:setup:integration_create_node' integration.code connection.id 's3' %}"
-                   class="group relative min-w-0 flex-1 overflow-hidden bg-white py-4 px-4 text-sm font-medium text-center hover:bg-gray-50 focus:z-10">
-                    <span>S3 Buckets</span>
-                    <span x-bind:class="object_type === 's3' ? 'bg-indigo-500' : 'bg-transparent'" aria-hidden="true" class="absolute inset-x-0 bottom-0 h-0.5"></span>
-                </a>
-                <a x-bind:class="object_type === 'dynamodb' ? 'text-gray-700' : 'text-gray-700 hover:text-gray-700'" href="{% url 'console:setup:integration_create_node' integration.code connection.id 'dynamodb' %}"
-                   class="rounded-r-lg group relative min-w-0 flex-1 overflow-hidden bg-white py-4 px-4 text-sm font-medium text-center hover:bg-gray-50 focus:z-10">
-                    <span>DynamoDB Tables</span>
-                    <span x-bind:class="object_type === 'dynamodb' ? 'bg-indigo-500' : 'bg-transparent'" aria-hidden="true" class="absolute inset-x-0 bottom-0 h-0.5"></span>
-                </a>
-            {% endif %}
-        </nav>
-    </div>
-    <div class="flex flex-col mt-4">
-        <div class="-my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
-            <div class="py-2 align-middle min-w-full sm:px-6 lg:px-8">
-                <template x-if="loading">
-                    <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg pb-4 pt-4">
-                        <div class="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-indigo-500">
-                            <svg class="animate-spin h-14 w-14 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                        </div>
-                    </div>
-                </template>
-                <template x-if="error">
-                    <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg">
-                        <div class="rounded-md bg-red-50 p-4">
-                            <div class="flex">
-                                <div class="shrink-0">
-                                    <!-- Heroicon name: solid/x-circle -->
-                                    <svg class="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                        <path fill-rule="evenodd"
-                                              d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
-                                              clip-rule="evenodd"></path>
-                                    </svg>
-                                </div>
-                                <div class="ml-3">
-                                    <h3 class="text-sm font-medium text-red-800">
-                                        There was error with your request
-                                    </h3>
-                                    <div class="mt-2 text-sm text-red-700">
-                                        <ul role="list" class="list-disc pl-5 space-y-1">
-                                            <li x-text="error"></li>
-                                        </ul>
-                                    </div>
-                                </div>
+    <div class="space-y-6">
+        <!-- Object type tabs -->
+        <div class="border-b border-slate-200">
+            <nav class="-mb-px flex gap-4 overflow-x-auto sm:gap-6" aria-label="Tabs">
+                {% if integration.code != "upcloud" and integration.code != "oracle" %}
+                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
+                       x-bind:class="object_type === 'cloud' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
+                       class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">Servers</a>
+                {% endif %}
+                {% if integration.code != "aws_rds" and integration.code != "hetzner" %}
+                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
+                       x-bind:class="object_type === 'volume' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
+                       class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">Volumes</a>
+                {% endif %}
+                {% if integration.code == "aws" %}
+                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 's3' %}"
+                       x-bind:class="object_type === 's3' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
+                       class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">S3 Buckets</a>
+                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'dynamodb' %}"
+                       x-bind:class="object_type === 'dynamodb' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
+                       class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">DynamoDB Tables</a>
+                {% endif %}
+            </nav>
+        </div>
 
-                            </div>
-                        </div>
-                        <button @click="openUrl(oauth_url)" type="button"
-                                class="relative block w-full border-2 border-gray-300 border-dashed rounded-lg p-12 text-center hover:border-gray-400 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 mt-3">
+        <!-- Loading -->
+        <template x-if="loading">
+            <div class="flex items-center justify-center rounded-xl border border-slate-200 bg-white px-6 py-12 shadow-sm">
+                <svg class="h-8 w-8 animate-spin text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span class="sr-only">Loading...</span>
+            </div>
+        </template>
 
-                            <img class="max-h-10 mx-auto" src="{{ STATIC_URL }}{{ integration.image }}" alt="{{ integration.name }} Backups">
-
-                            <a class="mt-2 block  text-1xl font-normal leading-7 text-gray-700">
-                                Reconnect {{ integration.name }} ({{ connection.name }}) Connection
-                            </a>
-                        </button>
-                    </div>
-                </template>
-                <div class="bg-white shadow-sm sm:rounded-lg" x-show="objectList?.length === 0">
-                    <div class="px-4 py-5 sm:p-6">
-                        <h3 class="text-lg leading-6 font-medium text-gray-700">
-                            No {% if object_code == "cloud" %}servers{% else %}{{ object_code }}s{% endif %} found
-                        </h3>
-                        <div class="mt-2 max-w-xl text-sm text-gray-700">
-                            <p>
-                                Unable to fetch any {% if object_code == "cloud" %}servers{% else %}{{ object_code }}s{% endif %} from your {{ integration.name }} account. If you are using Teams, then switch to team account before
-                                setting up integration.
-                            </p>
-                        </div>
-                        <div class="mt-3 text-sm">
-                            <a href="{% url 'console:setup:integration_open' integration_code %}" class="font-medium text-indigo-600 hover:text-indigo-500"> Select or add different {{ integration.name }} integration <span
-                                    aria-hidden="true">&rarr;</span></a>
-                        </div>
+        <!-- Error + reconnect -->
+        <template x-if="error">
+            <div class="space-y-4">
+                <div class="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
+                    <svg class="mt-0.5 h-5 w-5 flex-none text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
+                    </svg>
+                    <div class="min-w-0 flex-1">
+                        <p class="font-medium leading-6">There was error with your request</p>
+                        <ul role="list" class="mt-1 list-disc space-y-1 pl-5 text-red-700">
+                            <li x-text="error"></li>
+                        </ul>
                     </div>
                 </div>
-
-                <template x-if="objectList?.length > 0">
-                    <div class="shadow-sm overflow-hidden border-b border-gray-200 sm:rounded-lg">
-                        <div class="overflow-x-auto">
-                            <table id="section-nodes" class="min-w-full divide-y divide-gray-200">
-                                <thead class="bg-gray-50">
-                                <tr>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Name
-                                    </th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Region
-                                    </th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                                        Size
-                                    </th>
-                                    <th scope="col" class="relative px-6 py-3">
-                                        <span class="sr-only">Actions</span>
-                                    </th>
-                                </tr>
-                                </thead>
-                                <tbody class="bg-white divide-y divide-gray-200">
-
-                                <template x-for="object in objectList">
-                                    <tr>
-                                        <td class="px-6 py-4 whitespace-nowrap">
-                                            <div class="flex items-center">
-                                                <div class="shrink-0 h-10 w-10">
-                                                    <svg x-show="object_type==='cloud'" xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 rounded-full text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
-                                                    </svg>
-                                                    <svg x-show="object_type==='volume'" xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 rounded-full text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                                              d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
-                                                    </svg>
-                                                    <svg x-show="object_type==='s3' || object_type==='dynamodb'" xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 rounded-full text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h16M4 12h16M4 17h16"></path>
-                                                    </svg>
-                                                </div>
-                                                <div class="ml-4">
-                                                    <div class="text-sm font-medium text-gray-700">
-                                                        <span x-text="object._bs_name"></span>
-                                                        <span x-show="object._bs_vol_type" class="inline-flex items-center rounded-sm bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800">
-                                                          <svg class="mr-1.5 h-2 w-2 text-indigo-400" fill="currentColor" viewBox="0 0 8 8">
-                                                            <circle cx="4" cy="4" r="3"></circle>
-                                                          </svg>
-                                                          <span x-text="object._bs_vol_type"></span>
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </td>
-                                        <td class="px-6 py-4 whitespace-nowrap">
-                                            <div class="text-sm text-gray-700">
-                                                <span x-text="object._bs_region"></span>
-                                            </div>
-                                        </td>
-                                        <td class="px-6 py-4 whitespace-nowrap">
-                                            <div class="text-sm text-gray-700">
-                                                <span x-text="object._bs_size"></span> <span x-show="object._bs_size">GB</span>
-                                            </div>
-                                        </td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                            <span class="relative z-0 inline-flex shadow-xs rounded-md">
-                                              <button @click="linkObject(object)" x-bind:disabled="object._bs_attached===true" type="button"
-                                                      class="ml-4 shrink-0 px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50">
-                                                Link Node
-                                              </button>
-                                            </span>
-                                        </td>
-                                    </tr>
-                                </template>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </template>
+                <button @click="openUrl(oauth_url)" type="button"
+                        class="flex w-full flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white px-6 py-10 text-center transition hover:border-slate-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                    <img class="h-10 max-h-10" src="{{ STATIC_URL }}{{ integration.image }}" alt="{{ integration.name }} Backups">
+                    <span class="mt-3 block text-sm font-semibold text-slate-900">Reconnect {{ integration.name }} ({{ connection.name }}) Connection</span>
+                </button>
             </div>
+        </template>
+
+        <!-- Empty state -->
+        <div x-cloak x-show="objectList?.length === 0" class="rounded-xl border border-slate-200 bg-white px-5 py-6 shadow-sm sm:px-6">
+            <h3 class="text-sm font-semibold text-slate-900">
+                No {% if object_code == "cloud" %}servers{% else %}{{ object_code }}s{% endif %} found
+            </h3>
+            <p class="mt-2 max-w-xl text-sm text-slate-500">
+                Unable to fetch any {% if object_code == "cloud" %}servers{% else %}{{ object_code }}s{% endif %} from your {{ integration.name }} account. If you are using Teams, then switch to team account before
+                setting up integration.
+            </p>
+            <a href="{% url 'console:setup:integration_open' integration_code %}" class="mt-3 inline-flex items-center gap-1.5 text-sm font-medium text-indigo-600 transition hover:text-indigo-700">
+                Select or add different {{ integration.name }} integration
+                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
+                </svg>
+            </a>
         </div>
+
+        <!-- Object list -->
+        <template x-if="objectList?.length > 0">
+            <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+                <table id="section-nodes" class="min-w-full divide-y divide-slate-200 text-sm">
+                    <thead>
+                        <tr class="bg-slate-50">
+                            <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Name</th>
+                            <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Region</th>
+                            <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Size</th>
+                            <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        <template x-for="object in objectList">
+                            <tr class="transition hover:bg-slate-50">
+                                <td class="px-4 py-3">
+                                    <div class="flex items-center gap-3">
+                                        <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                                            <svg x-cloak x-show="object_type==='cloud'" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/>
+                                            </svg>
+                                            <svg x-cloak x-show="object_type==='volume'" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
+                                            </svg>
+                                            <svg x-cloak x-show="object_type==='s3' || object_type==='dynamodb'" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z"/>
+                                            </svg>
+                                        </span>
+                                        <div class="min-w-0">
+                                            <span class="block truncate text-sm font-medium text-slate-900" x-text="object._bs_name"></span>
+                                            <span x-show="object._bs_vol_type" class="mt-0.5 inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/20">
+                                                <span x-text="object._bs_vol_type"></span>
+                                            </span>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-3 text-slate-500">
+                                    <span x-text="object._bs_region"></span>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-3 text-slate-500">
+                                    <span x-text="object._bs_size"></span> <span x-show="object._bs_size">GB</span>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-3 text-right">
+                                    <button @click="linkObject(object)" x-bind:disabled="object._bs_attached===true" type="button"
+                                            class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+                                        Link Node
+                                    </button>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </template>
     </div>
 </div>
 <script>

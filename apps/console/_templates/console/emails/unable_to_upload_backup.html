@@ -1,31 +1,22 @@
 {% extends "console/emails/_master.html" %}
 {% block content %}
-    <h2>Whoops!</h2>
-    <p>The backup of node <strong>{{ node_name }}</strong> (<strong>{{ node_type }}</strong>) failed to upload to your
-        <strong>{{ storage_type }}</strong> storage <strong>{{ storage_name }}</strong> at
-        <strong>{{ backup_time }}</strong>. </p>
+    <h2 style="margin:0 0 16px; font-family:'Inter',Arial,Helvetica,sans-serif; font-size:20px; line-height:28px; font-weight:700; color:#0f172a;">Backup upload failed</h2>
 
-    <p>This error could be temporary, and we will keep retrying backup upload <strong>every 15 minutes for next 24
-        hours</strong>.</p>
+    <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#475569;">The backup of node <strong>{{ node_name }}</strong> (<strong>{{ node_type }}</strong>) failed to upload to your <strong>{{ storage_type }}</strong> storage <strong>{{ storage_name }}</strong> at <strong>{{ backup_time }}</strong>.</p>
 
-    <p>Backup ID: {{ backup_name }}</p>
+    <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#475569;">This error could be temporary, and we will keep retrying backup upload <strong>every 15 minutes for next 24 hours</strong>.</p>
+
+    <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#475569;">Backup ID: {{ backup_name }}</p>
 
     <!-- Action -->
-    <table class="body-action" align="center" width="100%" cellpadding="0" cellspacing="0">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; margin:24px 0;">
         <tr>
             <td align="center">
                 <!-- Border based button https://litmus.com/blog/a-guide-to-bulletproof-buttons-in-email-design -->
-                <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                <table role="presentation" border="0" cellspacing="0" cellpadding="0">
                     <tr>
-                        <td align="center">
-                            <table border="0" cellspacing="0" cellpadding="0">
-                                <tr>
-                                    <td>
-                                        <a href="{{ action_url }}" class="button button--" target="_blank">check
-                                            node</a>
-                                    </td>
-                                </tr>
-                            </table>
+                        <td align="center" bgcolor="#4f46e5" style="border-radius:6px; background-color:#4f46e5;">
+                            <a href="{{ action_url }}" target="_blank" style="display:inline-block; padding:12px 28px; font-family:'Inter',Arial,Helvetica,sans-serif; font-size:15px; font-weight:600; line-height:20px; color:#ffffff; text-decoration:none; border:1px solid #4f46e5; border-radius:6px;">Check node</a>
                         </td>
                     </tr>
                 </table>
@@ -33,26 +24,23 @@
         </tr>
     </table>
 
-    <p><strong>Error:</strong> {{ error_details }}</p>
-
-
-    <p>If your storage is using any firewall then make sure BackupSheep server <strong>{{ endpoint_location }}</strong>
-        IPv4 <strong>{{ endpoint_ip }}</strong> and IPv6 <strong>{{ endpoint_ipv6 }}</strong> is allowed. To view other
-        backup server IPs <a href="{{ site_app_url }}">click here</a>
-    </p>
-
-    <p>Thanks,
-        <br>{{ sender_name }}</p>
-    <p><strong>P.S.</strong> Need immediate help getting started? Check out our <a
-            href="{{ help_url }}">help documentation</a>. Or, just reply to this email, support
-        team is always ready to help!</p>
-    <!-- Sub copy -->
-    <table class="body-sub">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; margin:0 0 16px; background-color:#fef2f2; border:1px solid #fecaca; border-radius:6px;">
         <tr>
-            <td>
-                <p class="sub">If you’re having trouble with the button above, copy and paste the URL below into your
-                    web browser.</p>
-                <p class="sub">{{ action_url }}</p>
+            <td style="padding:12px 16px; font-size:14px; line-height:1.5; color:#b91c1c; word-break:break-word;"><strong>Error:</strong> {{ error_details }}</td>
+        </tr>
+    </table>
+
+    <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#475569;">If your storage is using any firewall then make sure BackupSheep server <strong>{{ endpoint_location }}</strong> IPv4 <strong>{{ endpoint_ip }}</strong> and IPv6 <strong>{{ endpoint_ipv6 }}</strong> is allowed. To view other backup server IPs <a href="{{ site_app_url }}" style="color:#4f46e5; text-decoration:underline;">click here</a></p>
+
+    <p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#475569;">Thanks,<br>{{ sender_name }}</p>
+    <p style="margin:0; font-size:13px; line-height:1.6; color:#64748b;"><strong>P.S.</strong> Need immediate help getting started? Check out our <a href="{{ help_url }}" style="color:#4f46e5; text-decoration:underline;">help documentation</a>. Or, just reply to this email, support team is always ready to help!</p>
+
+    <!-- Sub copy -->
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; margin-top:24px; border-top:1px solid #e2e8f0;">
+        <tr>
+            <td style="padding-top:20px;">
+                <p style="margin:0 0 8px; font-size:13px; line-height:1.5; color:#94a3b8;">If you’re having trouble with the button above, copy and paste the URL below into your web browser.</p>
+                <p style="margin:0; font-size:13px; line-height:1.5; color:#94a3b8; word-break:break-all;">{{ action_url }}</p>
             </td>
         </tr>
     </table>

@@ -1,20 +1,38 @@
 {% extends "console/onboarding/_base.html" %}
 {% block step %}
-    <h2 class="text-lg font-semibold text-slate-900 mb-1">Add a storage destination</h2>
-    <p class="text-sm text-slate-500 mb-5">Pick where backups are stored. A provider opens in a new tab; come back here when you're done. You can add more later.</p>
+    <h2 class="text-lg font-semibold tracking-tight text-slate-900">Add a storage destination</h2>
+    <p class="mt-1 text-sm text-slate-500">Pick where backups are stored. A provider opens in a new tab; come back here when you're done. You can add more later.</p>
 
-    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-80 overflow-y-auto pr-1">
+    <div class="mt-5 grid max-h-80 grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
         {% for p in providers %}
             <a href="{% url 'console:setup:integration_storage_open' p.code %}" target="_blank" rel="noopener"
-               class="block rounded-xl bg-white ring-1 ring-slate-200 px-3 py-3 text-sm font-medium text-slate-700 shadow-soft hover:ring-indigo-400 hover:text-indigo-700 transition-colors">
-                {{ p.name }}
+               class="group flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-3 text-sm font-medium text-slate-700 shadow-sm transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                <span class="min-w-0 truncate">{{ p.name }}</span>
+                <svg class="h-4 w-4 flex-none text-slate-400 transition group-hover:text-indigo-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"/>
+                </svg>
             </a>
+        {% empty %}
+            <div class="col-span-full rounded-lg border border-dashed border-slate-300 px-6 py-8 text-center">
+                <p class="text-sm font-medium text-slate-900">No storage providers available</p>
+                <p class="mt-1 text-sm text-slate-500">You can continue and add a destination later from settings.</p>
+            </div>
         {% endfor %}
     </div>
 
-    <div class="flex items-center justify-between mt-6">
-        <a href="{% url 'console:onboarding:app_settings' %}" class="text-sm font-medium text-slate-500 hover:text-slate-700">&larr; Back</a>
+    <div class="mt-6 flex flex-wrap items-center justify-between gap-3">
+        <a href="{% url 'console:onboarding:app_settings' %}" class="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 transition hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
+            </svg>
+            Back
+        </a>
         <a href="{% url 'console:onboarding:source' %}"
-           class="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Continue &rarr;</a>
+           class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+            Continue
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
+            </svg>
+        </a>
     </div>
 {% endblock %}
