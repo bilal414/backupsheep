@@ -638,6 +638,13 @@ class UtilBackup(TimeStampedModel):
                 state.phase = terminal_phase
                 state.finished_at = now
                 update_fields.extend(["phase", "finished_at"])
+            elif state.phase not in {"complete", "failed", "cancelled"}:
+                # Older workers could mark a phase finished while it still said
+                # ``poll``/``upload``.  A terminal backup redelivery must repair
+                # that impossible state without changing the original completion
+                # timestamp.  Already-terminal duplicate finalizers remain a no-op.
+                state.phase = terminal_phase
+                update_fields.append("phase")
 
             # A terminal decision is the fence boundary.  A worker that was paused
             # or resumed after this commit must not be able to heartbeat, release, or

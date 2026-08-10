@@ -805,13 +805,48 @@ def _finish_cloud_backup(backup, status, flag_name):
         # remain visible as "Recovery Required" after a worker reboot.
         terminal_phase = (
             "complete"
-            if status == UtilBackup.Status.COMPLETE
+            if status in UtilBackup.SUCCESS_STATUSES
             else "cancelled"
             if status == UtilBackup.Status.CANCELLED
             else "failed"
         )
         fresh.finalize_execution(terminal_phase=terminal_phase)
         return fresh, not already_finished
+
+
+def _notify_cloud_success_once(node, backup, should_notify):
+    if not should_notify:
+        return
+    if backup.schedule and (backup.schedule.keep_last or 0) > 0:
+        keep_last = backup.schedule.keep_last
+        completed = list(
+            backup.__class__.objects.filter(
+                schedule=backup.schedule, status=UtilBackup.Status.COMPLETE
+            ).order_by("created")
+        )
+        for old_backup in completed[:-keep_last]:
+            old_backup.soft_delete()
+    node.notify_backup_success(backup)
+
+
+def _notify_cloud_failure_once(node, backup, should_notify, status):
+    if not should_notify:
+        return
+    if status == UtilBackup.Status.TIMEOUT:
+        from apps._tasks.exceptions import NodeBackupStatusCheckTimeOutError
+
+        error = NodeBackupStatusCheckTimeOutError(node, backup.uuid_str)
+    else:
+        from apps._tasks.exceptions import NodeBackupFailedError
+
+        error = NodeBackupFailedError(
+            node,
+            backup.uuid_str,
+            backup.attempt_no,
+            backup.type,
+            "Cloud provider reported the snapshot as errored.",
+        )
+    node.notify_backup_fail(error, backup.type)
 
 
 def _reset_node_if_no_active_backup(node, backup=None):
@@ -1209,10 +1244,6 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
     only after `timeout` seconds of polling.
     """
     from apps.console.node.models import CoreNode
-    from apps._tasks.exceptions import (
-        NodeBackupFailedError,
-        NodeBackupStatusCheckTimeOutError,
-    )
 
     try:
         node = CoreNode.objects.get(id=node_id)
@@ -1236,6 +1267,36 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
         UtilBackup.Status.DELETE_COMPLETED,
     )
     if backup.status in terminal:
+        # A provider adapter may commit the terminal backup status and then the
+        # worker can die before the poll-control flags, execution ledger, node
+        # reset, retention, or notification are committed.  Redelivery repairs
+        # that split commit idempotently instead of returning with a terminal row
+        # still presented as Recovery Required.
+        if backup.status in UtilBackup.SUCCESS_STATUSES:
+            backup, should_notify = _finish_cloud_backup(
+                backup, backup.status, "success_notified"
+            )
+            _reset_node_if_no_active_backup(node, backup)
+            _notify_cloud_success_once(node, backup, should_notify)
+            return
+        if backup.status in (UtilBackup.Status.FAILED, UtilBackup.Status.TIMEOUT):
+            flag_name = (
+                "timeout_notified"
+                if backup.status == UtilBackup.Status.TIMEOUT
+                else "failure_notified"
+            )
+            backup, should_notify = _finish_cloud_backup(
+                backup, backup.status, flag_name
+            )
+            _reset_node_if_no_active_backup(node, backup)
+            _notify_cloud_failure_once(
+                node, backup, should_notify, backup.status
+            )
+            return
+        if backup.status == UtilBackup.Status.CANCELLED:
+            backup, _ = _finish_cloud_backup(
+                backup, backup.status, "cancel_finalized"
+            )
         _reset_node_if_no_active_backup(node, backup)
         return
 
@@ -1276,19 +1337,7 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
             backup, UtilBackup.Status.COMPLETE, "success_notified"
         )
         _reset_node_if_no_active_backup(node, backup)
-        if should_notify:
-            # Retention: keep only the newest keep_last completed backups for the
-            # schedule. The DB flag above makes this block safe if two pollers race.
-            if backup.schedule and (backup.schedule.keep_last or 0) > 0:
-                keep_last = backup.schedule.keep_last
-                completed = list(
-                    backup.__class__.objects.filter(
-                        schedule=backup.schedule, status=UtilBackup.Status.COMPLETE
-                    ).order_by("created")
-                )
-                for old_backup in completed[:-keep_last]:
-                    old_backup.soft_delete()
-            node.notify_backup_success(backup)
+        _notify_cloud_success_once(node, backup, should_notify)
         return
 
     if status == UtilBackup.Status.FAILED:
@@ -1296,14 +1345,9 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
             backup, UtilBackup.Status.FAILED, "failure_notified"
         )
         _reset_node_if_no_active_backup(node, backup)
-        if should_notify:
-            node.notify_backup_fail(
-                NodeBackupFailedError(
-                    node, backup.uuid_str, backup.attempt_no, backup.type,
-                    "Cloud provider reported the snapshot as errored.",
-                ),
-                backup.type,
-            )
+        _notify_cloud_failure_once(
+            node, backup, should_notify, UtilBackup.Status.FAILED
+        )
         return
 
     # Still in progress (or a transient check failure). Give up only past the hard
@@ -1313,10 +1357,9 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
             backup, UtilBackup.Status.TIMEOUT, "timeout_notified"
         )
         _reset_node_if_no_active_backup(node, backup)
-        if should_notify:
-            node.notify_backup_fail(
-                NodeBackupStatusCheckTimeOutError(node, backup.uuid_str), backup.type
-            )
+        _notify_cloud_failure_once(
+            node, backup, should_notify, UtilBackup.Status.TIMEOUT
+        )
         return
 
     # Keep the lease alive until just after the ETA message. If the worker dies

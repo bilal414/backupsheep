@@ -195,3 +195,60 @@ class CloudPollRecoveryHandoffTests(BaseTestCase):
         self.assertEqual(
             state.reconciliation_reason, "stale_execution_lease"
         )
+
+    def test_terminal_redelivery_repairs_split_commit_exactly_once(self):
+        node, backup = self._backup()
+        state = backup.claim_execution(
+            lease_owner="worker-that-crashed-after-provider-completion",
+            phase="poll",
+            lease_seconds=300,
+        )
+        self.assertIsNotNone(state)
+        original_finished_at = timezone.now() - timedelta(seconds=5)
+        state.finished_at = original_finished_at
+        state.reconciliation_state = CoreBackupExecution.ReconciliationState.REQUIRED
+        state.reconciliation_reason = "stale_execution_lease"
+        state.save(
+            update_fields=[
+                "finished_at",
+                "reconciliation_state",
+                "reconciliation_reason",
+                "modified",
+            ]
+        )
+        metadata = dict(backup.metadata or {})
+        metadata["_backup_control"] = {
+            "poll_task_id": state.lease_owner,
+            "poll_lease_token": str(state.lease_token),
+            "poll_lease_until": state.lease_expires_at.timestamp(),
+        }
+        backup.metadata = metadata
+        backup.status = UtilBackup.Status.COMPLETE
+        backup.save(update_fields=["metadata", "status", "modified"])
+
+        with mock.patch.object(
+            CoreDigitalOceanBackup, "poll_status"
+        ) as poll_status, mock.patch.object(
+            CoreNode, "notify_backup_success"
+        ) as notify:
+            helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+            helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+
+        poll_status.assert_not_called()
+        notify.assert_called_once()
+        backup.refresh_from_db()
+        state.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.COMPLETE)
+        self.assertEqual(state.phase, "complete")
+        self.assertEqual(state.finished_at, original_finished_at)
+        self.assertFalse(state.lease_owner)
+        self.assertIsNone(state.lease_token)
+        self.assertEqual(
+            state.reconciliation_state,
+            CoreBackupExecution.ReconciliationState.RESOLVED,
+        )
+        self.assertEqual(state.reconciliation_reason, "backup_finalized")
+        control = backup.metadata["_backup_control"]
+        self.assertTrue(control["success_notified"])
+        self.assertNotIn("poll_task_id", control)
+        self.assertNotIn("poll_lease_token", control)
