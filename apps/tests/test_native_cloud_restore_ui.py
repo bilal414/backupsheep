@@ -88,6 +88,18 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
         self.assertIn("this.nativeRestoreStatusIsTerminal(this.nativeRestoreStatus)", self.source)
         self.assertIn("A lost response can still mean the API created the durable", self.source)
 
+    def test_terminal_restore_can_start_another_unique_copy(self):
+        self.assertIn("Restore another copy", self.source)
+        self.assertIn("prepareAnotherNativeCloudRestore()", self.source)
+        self.assertIn("nextNativeRestoreName()", self.source)
+        self.assertIn("for (let sequence = 2; sequence <= 999; sequence += 1)", self.source)
+        self.assertIn("base.slice(0, 63 - suffix.length)", self.source)
+        self.assertIn("if (!existing.has(candidate)) return candidate", self.source)
+        self.assertIn("this.nativeRestore.requestId = null", self.source)
+        self.assertIn("this.nativeRestore.requestTargetName = ''", self.source)
+        self.assertIn("this.nativeRestore.confirm = false", self.source)
+        self.assertIn("this.nativeRestoreStarted = false", self.source)
+
     def test_status_categories_are_distinct_and_diagnostics_are_surfaceable(self):
         for category in (
             "queued",
