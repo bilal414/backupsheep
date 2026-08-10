@@ -276,6 +276,31 @@ def _claim_cloud_poll(backup, task_id, interval):
             return None
         metadata, control = _backup_control(fresh)
         now = time.time()
+        state = fresh.get_execution_state(create=False)
+        handoff_token = control.get("poll_handoff_lease_token")
+        handoff_owned = bool(
+            state is not None
+            and control.get("poll_handoff_task_id") == str(task_id)
+            and control.get("poll_task_id") == str(task_id)
+            and state.lease_matches(
+                task_id,
+                handoff_token,
+                phase="poll",
+            )
+        )
+        if handoff_owned:
+            # The recovery sweep reserves the DB lease before publishing so two
+            # Beat deliveries cannot enqueue competing pollers.  Exactly one
+            # delivered task consumes this handoff and continues under the same
+            # fencing token.  A duplicate carrying the same Celery id arrives
+            # after these fields are removed and is blocked by the live lease.
+            control.pop("poll_handoff_task_id", None)
+            control.pop("poll_handoff_lease_token", None)
+            control.pop("recovery_task_id", None)
+            control.pop("recovery_lease_until", None)
+            control.pop("recovery_lease_token", None)
+            _save_backup_control(fresh, control, metadata)
+            return fresh
         try:
             active_until = float(control.get("poll_lease_until") or 0)
         except (TypeError, ValueError):
@@ -301,6 +326,8 @@ def _claim_cloud_poll(backup, task_id, interval):
         if state is None:
             return None
         control.pop("poll_next_run_at", None)
+        control.pop("poll_handoff_task_id", None)
+        control.pop("poll_handoff_lease_token", None)
         control["poll_task_id"] = str(task_id)
         control["poll_lease_until"] = state.lease_expires_at.timestamp()
         control["poll_lease_token"] = str(state.lease_token)
@@ -308,11 +335,40 @@ def _claim_cloud_poll(backup, task_id, interval):
         # needs to block the real poller or the next recovery cycle.
         control.pop("recovery_task_id", None)
         control.pop("recovery_lease_until", None)
+        control.pop("recovery_lease_token", None)
         if not control.get("started_at"):
             try:
                 control["started_at"] = fresh.created.timestamp()
             except (AttributeError, TypeError, ValueError):
                 control["started_at"] = now
+        _save_backup_control(fresh, control, metadata)
+        return fresh
+
+
+def _mark_cloud_poll_handoff(backup, task_id):
+    """Authorize one recovery poll delivery to consume its reserved lease.
+
+    ``claim_execution`` intentionally rejects duplicate deliveries, even when
+    they use the same Celery id.  The recovery sweep, however, must reserve the
+    lease before publishing.  This one-use token bridges those two boundaries:
+    the first delivered poller adopts the exact lease; all later deliveries are
+    rejected until it expires or schedules its successor.
+    """
+    with transaction.atomic():
+        fresh = backup.__class__.objects.select_for_update().get(pk=backup.pk)
+        if fresh.status not in UtilBackup.ACTIVE_STATUSES:
+            return None
+        metadata, control = _backup_control(fresh)
+        state = fresh.get_execution_state(create=False)
+        lease_token = control.get("poll_lease_token")
+        if (
+            state is None
+            or control.get("poll_task_id") != str(task_id)
+            or not state.lease_matches(task_id, lease_token, phase="poll")
+        ):
+            return None
+        control["poll_handoff_task_id"] = str(task_id)
+        control["poll_handoff_lease_token"] = str(lease_token)
         _save_backup_control(fresh, control, metadata)
         return fresh
 
@@ -735,21 +791,26 @@ def _finish_cloud_backup(backup, status, flag_name):
         control[flag_name] = True
         control.pop("poll_task_id", None)
         control.pop("poll_lease_until", None)
-        poll_token = control.pop("poll_lease_token", None)
+        control.pop("poll_lease_token", None)
+        control.pop("poll_handoff_task_id", None)
+        control.pop("poll_handoff_lease_token", None)
         control.pop("recovery_task_id", None)
         control.pop("recovery_lease_until", None)
         control.pop("recovery_lease_token", None)
         _save_backup_control(fresh, control, metadata, include_status=True)
-        state = fresh.get_execution_state(create=False)
-        if state is not None and state.lease_token:
-            # The terminal status is already committed under the backup-row lock. Mark
-            # the execution finished with the same fencing token when available.
-            fresh.release_execution(
-                lease_owner=state.lease_owner,
-                lease_token=poll_token or state.lease_token,
-                phase=state.phase,
-                finished=True,
-            )
+        # Terminalize the execution ledger with the backup status under the same
+        # transaction. This clears the poll fence/next retry and resolves a stale
+        # required/in-progress reconciliation state, while preserving explicit
+        # manual review for an operator. A completed provider backup must never
+        # remain visible as "Recovery Required" after a worker reboot.
+        terminal_phase = (
+            "complete"
+            if status == UtilBackup.Status.COMPLETE
+            else "cancelled"
+            if status == UtilBackup.Status.CANCELLED
+            else "failed"
+        )
+        fresh.finalize_execution(terminal_phase=terminal_phase)
         return fresh, not already_finished
 
 
@@ -944,6 +1005,9 @@ def resume_in_progress_backups(self):
                         recovery_id,
                         getattr(settings, "BACKUP_POLL_INTERVAL", 120),
                     )
+                    if claimed is None:
+                        continue
+                    claimed = _mark_cloud_poll_handoff(claimed, recovery_id)
                     if claimed is None:
                         continue
                     _, control = _backup_control(claimed)

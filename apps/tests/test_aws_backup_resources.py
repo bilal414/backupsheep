@@ -182,7 +182,21 @@ class AWSBackupResourceTests(BaseTestCase):
         )
         start_restore.return_value = {"RestoreJobId": "restore-job-1"}
         s3 = mock.MagicMock()
+        s3.head_bucket.return_value = {}
         s3.get_bucket_versioning.return_value = {"Status": "Enabled"}
+        s3.list_objects_v2.return_value = {
+            "Contents": [],
+            "IsTruncated": False,
+        }
+        s3.list_object_versions.return_value = {
+            "Versions": [],
+            "DeleteMarkers": [],
+            "IsTruncated": False,
+        }
+        s3.list_multipart_uploads.return_value = {
+            "Uploads": [],
+            "IsTruncated": False,
+        }
 
         with mock.patch.object(
             node.connection.auth_aws,

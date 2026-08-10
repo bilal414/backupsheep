@@ -1,5 +1,6 @@
 """Focused safety tests for logical database restore policy and resumption."""
 
+import hashlib
 import os
 import stat
 import tempfile
@@ -12,12 +13,14 @@ from django.test import override_settings
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps._tasks.exceptions import NodeBackupFailedError
+from apps._tasks.integration import restore as restore_tasks
 from apps._tasks.integration import restore_database as RD
 from apps._tasks.integration.restore_common import RestoreError
 from apps.api.v1.backup.database.views import (
     CoreDatabaseBackupView,
     _in_place_confirmation,
 )
+from apps.api.v1.backup import serializers as backup_serializers
 from apps.console.backup.models import (
     CoreDatabaseBackup,
     CoreDatabaseBackupStoragePoints,
@@ -184,6 +187,365 @@ class DatabaseRestorePolicyTests(BaseTestCase):
         restore = CoreDatabaseRestore.objects.get(backup=backup)
         self.assertEqual(restore.params["mode"], "in_place")
         self.assertEqual(restore.params["target_mapping"], mapping)
+
+
+class DatabaseRestorePermissionPreflightTests(BaseTestCase):
+    def _auth(self, database_type):
+        auth = _fake_auth(database_type)
+        auth.username = "encrypted-user"
+        auth.password = "encrypted-password"
+        return auth
+
+    def _fenced_restore(self):
+        restore = _FakeRestore()
+        restore._required_restore_lease_owner = "database-worker"
+        restore._required_restore_lease_token = "fence-token"
+        return restore
+
+    def _mysql_preflight_result(self, grants):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL)
+        try:
+            with mock.patch.object(RD, "_mysql_query", return_value=grants), \
+                 mock.patch.object(RD, "_write_log") as log:
+                result = RD._preflight_database_restore_permissions(
+                    SimpleNamespace(),
+                    _fake_backup(),
+                    _FakeRestore(),
+                    auth,
+                    "dbuser",
+                    "password-do-not-persist",
+                    mode="fork",
+                    mapping={"source_db": "bs_restore_target"},
+                )
+            return result, log.call_args_list, None
+        except RestoreError as error:
+            return None, log.call_args_list, error
+
+    def test_postgresql_direct_preflight_allows_createdb_without_mutation(self):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        restore = _FakeRestore()
+        with mock.patch.object(RD, "_postgres_query", return_value="1\n") as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            result = RD._preflight_database_restore_permissions(
+                SimpleNamespace(),
+                _fake_backup(),
+                restore,
+                auth,
+                "dbuser",
+                "db-password",
+                mode="fork",
+                mapping={"source_db": "bs_restore_target"},
+            )
+
+        self.assertEqual(result, {"createdb": True})
+        run.assert_not_called()
+        self.assertIn("rolcreatedb", query.call_args.args[6])
+        self.assertIn("rolsuper", query.call_args.args[6])
+
+    def test_postgresql_direct_preflight_denial_is_safe_and_terminal(self):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        error = None
+        with mock.patch.object(RD, "_postgres_query", return_value="0\n"):
+            with self.assertRaises(RestoreError) as raised:
+                RD._preflight_database_restore_permissions(
+                    SimpleNamespace(),
+                    _fake_backup(),
+                    _FakeRestore(),
+                    auth,
+                    "dbuser",
+                    "password-do-not-persist",
+                    mode="fork",
+                    mapping={"source_db": "bs_restore_target"},
+                )
+            error = raised.exception
+
+        self.assertEqual(error.code, RD.DATABASE_RESTORE_PERMISSION_ERROR_CODE)
+        self.assertFalse(error.retryable)
+        self.assertNotIn("password-do-not-persist", str(error))
+        self.assertIn("CREATEDB", str(error))
+
+    def test_postgresql_ssh_preflight_uses_remote_pgpass_and_no_target_command(self):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        auth.use_private_key = True
+        ssh = mock.Mock()
+        auth.get_ssh_client = mock.Mock(return_value=(ssh, None))
+        with mock.patch.object(RD, "_sftp_write") as write, \
+             mock.patch.object(RD, "_sftp_remove") as remove, \
+             mock.patch.object(RD, "_postgres_query", return_value="1\n") as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            result = RD._preflight_database_restore_permissions(
+                SimpleNamespace(),
+                _fake_backup(),
+                _FakeRestore(),
+                auth,
+                "dbuser",
+                "db-password",
+                mode="fork",
+                mapping={"source_db": "bs_restore_target"},
+            )
+
+        self.assertEqual(result, {"createdb": True})
+        write.assert_called_once()
+        remove.assert_called_once_with(ssh, mock.ANY)
+        query.assert_called_once()
+        self.assertIs(query.call_args.kwargs["ssh"], ssh)
+        self.assertIsNotNone(query.call_args.kwargs["remote_pgpass"])
+        run.assert_not_called()
+        ssh.close.assert_called_once()
+
+    def test_mysql_direct_preflight_requires_global_create_and_drop(self):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL)
+        grants = "GRANT CREATE, DROP ON *.* TO 'backup'@'%';\n"
+        with mock.patch.object(RD, "_mysql_query", return_value=grants) as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            result = RD._preflight_database_restore_permissions(
+                SimpleNamespace(),
+                _fake_backup(),
+                _FakeRestore(),
+                auth,
+                "dbuser",
+                "db-password",
+                mode="fork",
+                mapping={"source_db": "bs_restore_target"},
+            )
+
+        self.assertEqual(result, {"create": True, "drop": True})
+        self.assertEqual(query.call_args.args[4], "SHOW GRANTS;")
+        run.assert_not_called()
+
+    def test_mysql_scoped_grants_cover_exact_and_matching_wildcard_targets(self):
+        exact_result, exact_logs, exact_error = self._mysql_preflight_result(
+            "GRANT CREATE, DROP ON `bs_restore_target`.* TO 'fixture'@'%' "
+            "IDENTIFIED BY 'grant-secret';\n"
+        )
+        self.assertEqual(exact_result, {"create": True, "drop": True})
+        self.assertIsNone(exact_error)
+
+        wildcard_result, wildcard_logs, wildcard_error = self._mysql_preflight_result(
+            "GRANT CREATE, DROP ON `bs_restore_%`.* TO 'fixture'@'%';\n"
+        )
+        self.assertEqual(wildcard_result, {"create": True, "drop": True})
+        self.assertIsNone(wildcard_error)
+
+        unrelated_result, unrelated_logs, unrelated_error = self._mysql_preflight_result(
+            "GRANT CREATE, DROP ON `other_%`.* TO 'fixture'@'%' "
+            "IDENTIFIED BY 'grant-secret';\n"
+        )
+        self.assertIsNone(unrelated_result)
+        self.assertEqual(
+            unrelated_error.code,
+            RD.DATABASE_RESTORE_PERMISSION_ERROR_CODE,
+        )
+
+        missing_result, missing_logs, missing_error = self._mysql_preflight_result(
+            "GRANT CREATE ON `bs_restore_target`.* TO 'fixture'@'%';\n"
+        )
+        self.assertIsNone(missing_result)
+        self.assertEqual(
+            missing_error.code,
+            RD.DATABASE_RESTORE_PERMISSION_ERROR_CODE,
+        )
+        for error in (unrelated_error, missing_error):
+            self.assertNotIn("fixture", str(error))
+            self.assertNotIn("grant-secret", str(error))
+        for logs in (exact_logs, wildcard_logs, unrelated_logs, missing_logs):
+            joined_logs = " ".join(str(item) for item in logs)
+            self.assertNotIn("GRANT ", joined_logs)
+            self.assertNotIn("grant-secret", joined_logs)
+
+    def test_mysql_scoped_grants_must_cover_every_resolved_target(self):
+        capabilities = RD._mysql_grant_capabilities(
+            "GRANT CREATE, DROP ON `bs_restore_target`.* TO 'fixture'@'%';\n",
+            ["bs_restore_target", "bs_restore_other"],
+        )
+        self.assertTrue(capabilities["bs_restore_target"]["create"])
+        self.assertTrue(capabilities["bs_restore_target"]["drop"])
+        self.assertFalse(capabilities["bs_restore_other"]["create"])
+        self.assertFalse(capabilities["bs_restore_other"]["drop"])
+
+    def test_mysql_ssh_preflight_denial_does_not_issue_create_or_drop(self):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.MARIADB)
+        auth.use_public_key = True
+        ssh = mock.Mock()
+        auth.get_ssh_client = mock.Mock(return_value=(ssh, None))
+        with mock.patch.object(RD, "_sftp_write") as write, \
+             mock.patch.object(RD, "_sftp_remove") as remove, \
+             mock.patch.object(
+                 RD,
+                 "_mysql_query",
+                 return_value="GRANT SELECT ON *.* TO 'backup'@'%';\n",
+             ) as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaises(RestoreError) as raised:
+                RD._preflight_database_restore_permissions(
+                    SimpleNamespace(),
+                    _fake_backup(),
+                    _FakeRestore(),
+                    auth,
+                    "dbuser",
+                    "db-password",
+                    mode="fork",
+                    mapping={"source_db": "bs_restore_target"},
+                )
+
+        self.assertEqual(
+            raised.exception.code,
+            RD.DATABASE_RESTORE_PERMISSION_ERROR_CODE,
+        )
+        self.assertIn("CREATE", str(raised.exception))
+        self.assertIn("DROP", str(raised.exception))
+        query.assert_called_once()
+        self.assertNotIn("CREATE DATABASE", query.call_args.args[4])
+        self.assertNotIn("DROP DATABASE", query.call_args.args[4])
+        write.assert_called_once()
+        remove.assert_called_once_with(ssh, mock.ANY)
+        run.assert_not_called()
+        ssh.close.assert_called_once()
+
+    def test_in_place_mode_preserves_semantics_and_skips_fork_preflight(self):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        with mock.patch.object(RD, "_postgres_query") as query, \
+             mock.patch.object(RD, "_mysql_query") as mysql_query:
+            result = RD._preflight_database_restore_permissions(
+                SimpleNamespace(),
+                _fake_backup(),
+                _FakeRestore(mode="in_place"),
+                auth,
+                "dbuser",
+                "db-password",
+                mode="in_place",
+                mapping={"source_db": "source_db"},
+            )
+        self.assertIsNone(result)
+        query.assert_not_called()
+        mysql_query.assert_not_called()
+
+    def test_restore_database_stops_before_family_engine_when_preflight_denies(self):
+        backup = _fake_backup()
+        auth = self._auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        auth.check_connection = mock.Mock()
+        node = SimpleNamespace(
+            id=1,
+            name="db-node",
+            connection=SimpleNamespace(
+                id=1,
+                name="db-connection",
+                auth_database=auth,
+                account=SimpleNamespace(
+                    get_encryption_key=lambda: b"unused",
+                    create_log=lambda data: None,
+                ),
+            ),
+        )
+        backup.database = SimpleNamespace(node=node)
+        restore = _FakeRestore()
+        restore.storage_point = SimpleNamespace(storage=SimpleNamespace(name="local"))
+        targets = OrderedDict({"source_db": ["/tmp/source.sql"]})
+        source_digests = {"source_db": []}
+
+        with mock.patch.object(RD, "ensure_disk_space"), \
+             mock.patch.object(RD, "fetch_backup_zip"), \
+             mock.patch.object(RD, "extract_backup_zip"), \
+             mock.patch.object(RD, "_validate_extracted_archive", return_value=(targets, source_digests)), \
+             mock.patch.object(RD, "_load_or_create_mapping", return_value={"source_db": "bs_restore_target"}), \
+             mock.patch.object(RD, "bs_decrypt", side_effect=["dbuser", "password"]), \
+             mock.patch.object(RD, "_postgres_query", return_value="0\n") as privilege_query, \
+             mock.patch.object(RD, "_run_direct") as run, \
+             mock.patch.object(RD, "_restore_postgresql") as restore_engine, \
+             mock.patch.object(RD, "delete_from_disk"):
+            with self.assertRaises(RestoreError) as raised:
+                RD.restore_database(backup, restore)
+
+        self.assertEqual(raised.exception.code, RD.DATABASE_RESTORE_PERMISSION_ERROR_CODE)
+        privilege_query.assert_called_once()
+        run.assert_not_called()
+        restore_engine.assert_not_called()
+        self.assertNotIn("password", str(raised.exception))
+
+    def test_new_postgresql_fork_marker_is_importable_but_existing_importing_is_fail_closed(self):
+        backup = _fake_backup()
+        auth = self._auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        sql_path = os.path.join(tempfile.gettempdir(), "bs-postgres-restore.sql")
+        with open(sql_path, "wb") as output:
+            output.write(b"CREATE TABLE restored(id integer);\n")
+        self.addCleanup(lambda: os.path.exists(sql_path) and os.remove(sql_path))
+        source_digests = {
+            "source_db": [{
+                "file": os.path.basename(sql_path),
+                "bytes": 36,
+                "sha256": hashlib.sha256(b"CREATE TABLE restored(id integer);\n").hexdigest(),
+            }]
+        }
+        mapping = {"source_db": "bs_restore_new_target"}
+
+        new_restore = self._fenced_restore()
+        digest = RD._source_digest(source_digests, "source_db")
+        complete = _marker(
+            new_restore,
+            backup,
+            "source_db",
+            mapping["source_db"],
+            digest,
+            "complete",
+        )
+        with mock.patch.object(
+            RD,
+            "_postgres_query",
+            side_effect=["", "", "1\n", complete],
+        ), mock.patch.object(RD, "_run_direct", return_value="") as run, \
+             mock.patch.object(RD, "_verify_source_files"):
+            RD._restore_postgresql(
+                SimpleNamespace(),
+                backup,
+                new_restore,
+                auth,
+                OrderedDict({"source_db": [sql_path]}),
+                mapping,
+                source_digests,
+                "dbuser",
+                "db-password",
+            )
+        self.assertEqual(run.call_count, 2)  # createdb, then the import
+
+        existing_restore = self._fenced_restore()
+        importing = _marker(
+            existing_restore,
+            backup,
+            "source_db",
+            mapping["source_db"],
+            digest,
+            "importing",
+        )
+        with mock.patch.object(
+            RD,
+            "_postgres_query",
+            side_effect=["1\n", importing],
+        ), mock.patch.object(RD, "_run_direct") as reimport:
+            with self.assertRaisesRegex(RestoreError, "import outcome is ambiguous"):
+                RD._restore_postgresql(
+                    SimpleNamespace(),
+                    backup,
+                    existing_restore,
+                    auth,
+                    OrderedDict({"source_db": [sql_path]}),
+                    mapping,
+                    source_digests,
+                    "dbuser",
+                    "db-password",
+                )
+        reimport.assert_not_called()
+
+    def test_permission_error_classification_and_api_allowlist_are_public_safe(self):
+        error = RD._database_restore_permission_error(
+            CoreAuthDatabase.DatabaseType.POSTGRESQL
+        )
+        code, message, retryable = restore_tasks._restore_error_outcome(error)
+        self.assertEqual(code, RD.DATABASE_RESTORE_PERMISSION_ERROR_CODE)
+        self.assertFalse(retryable)
+        self.assertIn("CREATEDB", message)
+        self.assertNotIn("password", message.lower())
+        self.assertEqual(backup_serializers._safe_error_code(code), code)
+        self.assertIn("in-place", backup_serializers._safe_error_message(code))
 
 
 class DatabaseRestoreEngineHardeningTests(BaseTestCase):

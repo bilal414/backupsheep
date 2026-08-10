@@ -131,6 +131,7 @@ _PUBLIC_ERROR_CODES = set(UtilBackup.EXECUTION_ERROR_MESSAGES) | {
     "CONNECTION_VALIDATION_FAILED",
     "DATABASE_COMMAND_TIMEOUT",
     "DATABASE_CONNECT_TIMEOUT",
+    "DATABASE_RESTORE_PERMISSION_DENIED",
     "DATABASE_VALIDATION_COMMAND_TIMEOUT",
     "DNS_FAILURE",
     "DROPBOX_API_TIMEOUT",
@@ -221,6 +222,14 @@ _GENERIC_ERROR_MESSAGE = (
     "The operation could not be completed. Review secured diagnostics using "
     "the correlation ID."
 )
+_PUBLIC_ERROR_MESSAGES = {
+    "DATABASE_RESTORE_PERMISSION_DENIED": (
+        "The configured database account lacks privileges required for a safe fork "
+        "restore. Grant PostgreSQL CREATEDB or MySQL/MariaDB CREATE and DROP globally "
+        "or with a matching target/database grant, "
+        "or choose an explicit in-place restore target. No target was changed."
+    ),
+}
 
 
 def _isoformat(value):
@@ -305,7 +314,10 @@ def _safe_error_code(value):
 def _safe_error_message(code):
     if not code:
         return None
-    return UtilBackup.EXECUTION_ERROR_MESSAGES.get(code, _GENERIC_ERROR_MESSAGE)
+    return _PUBLIC_ERROR_MESSAGES.get(
+        code,
+        UtilBackup.EXECUTION_ERROR_MESSAGES.get(code, _GENERIC_ERROR_MESSAGE),
+    )
 
 
 def _safe_provider_status(value):

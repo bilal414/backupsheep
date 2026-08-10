@@ -17,16 +17,24 @@ Example:
       BACKUPSHEEP_E2E_LEDGER_PATH=/code/_storage/e2e-ledgers/aws.json \
       BACKUPSHEEP_E2E_APPLY=YES BACKUPSHEEP_E2E_CLEANUP=YES \
       python scripts/aws_s3_dynamodb_rds_e2e.py
+
+To continue the exact run after a worker/process crash, set
+``BACKUPSHEEP_E2E_MODE=RESUME`` and provide the original RDS password through
+``AWS_E2E_RDS_PASSWORD``. RESUME is guarded and never recreates a backup or
+restore job.
 """
 
+import fcntl
 import ipaddress
 import json
 import os
 import secrets
 import sys
+import tempfile
 import time
 import traceback
 import urllib.request
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -54,6 +62,7 @@ from apps.console.connection.models import (  # noqa: E402
 from apps.console.node.models import CoreAWS, CoreAWSRDS, CoreNode  # noqa: E402
 from apps.console.utils.models import UtilBackup  # noqa: E402
 from apps.tests import factories  # noqa: E402
+from apps._tasks.integration.aws_backup import idempotency_token  # noqa: E402
 from scripts.live_e2e_ledger import (  # noqa: E402
     DurableResourceLedger,
     LedgerError,
@@ -64,10 +73,12 @@ from scripts.live_e2e_ledger import (  # noqa: E402
 REGION = os.environ.get("AWS_E2E_REGION", "us-east-2")
 POLL_SECONDS = max(int(os.environ.get("AWS_E2E_POLL_SECONDS", "20")), 5)
 TIMEOUT_SECONDS = max(int(os.environ.get("AWS_E2E_TIMEOUT_SECONDS", "3600")), 300)
+TAG_POLL_SECONDS = max(int(os.environ.get("AWS_E2E_TAG_POLL_SECONDS", "5")), 1)
 _RUN_ID = os.environ.get("BACKUPSHEEP_E2E_RUN_ID")
 PREFIX = require_run_id(_RUN_ID) if _RUN_ID else ""
 APPLY = os.environ.get("BACKUPSHEEP_E2E_APPLY") == "YES"
 CLEANUP = os.environ.get("BACKUPSHEEP_E2E_CLEANUP") == "YES"
+RESUME = os.environ.get("BACKUPSHEEP_E2E_MODE", "").strip().upper() == "RESUME"
 BOTO_CONFIG = Config(
     connect_timeout=10,
     read_timeout=60,
@@ -87,6 +98,189 @@ ROLE_NAME = f"{PREFIX}-role"
 OBJECT_KEY = "fixture/marker.txt"
 MARKER = f"{PREFIX}:backup-restore-marker"
 OWNERSHIP_TAG = "BackupSheepE2E"
+
+
+class RestoreRecoveryError(RuntimeError):
+    """A restore reconciliation invariant failed closed."""
+
+    def __init__(self, code, message=None):
+        self.code = str(code)
+        super().__init__(message or self.code)
+
+
+class _ResumeComplete(Exception):
+    """Internal control flow marker so the shared cleanup/final report still runs."""
+
+
+class RestoreIntentStore:
+    """Atomic, locked, fsynced intent state for AWS Backup restore requests.
+
+    The intent is written before the provider mutation.  Immutable identity fields
+    cannot be changed later; only the provider outcome and finalization state may
+    advance.  This is deliberately local to this harness so its recovery contract
+    cannot depend on private implementation details of another live E2E script.
+    """
+
+    _REQUIRED = frozenset(
+        {
+            "marker",
+            "resource_type",
+            "source_recovery_point_arn",
+            "target_name",
+            "target_arn",
+            "restore_id",
+            "restore_token",
+        }
+    )
+    _IMMUTABLE = frozenset(
+        {
+            "marker",
+            "resource_type",
+            "source_recovery_point_arn",
+            "target_name",
+            "target_arn",
+            "restore_id",
+            "restore_correlation_id",
+            "restore_token",
+        }
+    )
+
+    def __init__(self, path, *, run_id, scope):
+        if not path:
+            raise LedgerError("A ledger path is required for restore intents.")
+        self.path = Path(path).expanduser().resolve().with_name(
+            Path(path).name + ".restore-intents.json"
+        )
+        self.run_id = require_run_id(run_id)
+        self.scope = str(scope)
+        if not self.scope:
+            raise LedgerError("An AWS account and region scope are required.")
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.lock_path = self.path.with_name(self.path.name + ".lock")
+        with self._locked():
+            if self.path.exists():
+                self._validate(self._read_unlocked())
+            else:
+                self._write_unlocked(
+                    {
+                        "schema": 1,
+                        "run_id": self.run_id,
+                        "scope": self.scope,
+                        "pending": {},
+                    }
+                )
+
+    def _locked(self):
+        store = self
+
+        class Lock:
+            def __enter__(self):
+                self.handle = open(store.lock_path, "a+", encoding="utf-8")
+                os.chmod(store.lock_path, 0o600)
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+                return self.handle
+
+            def __exit__(self, exc_type, exc, tb):
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+                self.handle.close()
+
+        return Lock()
+
+    def _read_unlocked(self):
+        try:
+            with open(self.path, encoding="utf-8") as source:
+                return json.load(source)
+        except (OSError, ValueError) as error:
+            raise LedgerError("The AWS restore intent state could not be read.") from error
+
+    def _validate(self, payload):
+        if not isinstance(payload, dict) or payload.get("schema") != 1:
+            raise LedgerError("The AWS restore intent state is malformed.")
+        if payload.get("run_id") != self.run_id or payload.get("scope") != self.scope:
+            raise LedgerError("The AWS restore intent state scope does not match.")
+        pending = payload.get("pending")
+        if not isinstance(pending, dict):
+            raise LedgerError("The AWS restore intent pending map is malformed.")
+        if any(not isinstance(key, str) or not isinstance(value, dict) for key, value in pending.items()):
+            raise LedgerError("The AWS restore intent contains a malformed entry.")
+        if any(not self._REQUIRED.issubset(value) for value in pending.values()):
+            raise LedgerError("The AWS restore intent is missing an immutable witness.")
+        return payload
+
+    def _write_unlocked(self, payload):
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", dir=self.path.parent
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                json.dump(payload, output, indent=2, sort_keys=True)
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, self.path)
+            directory_fd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def get(self, key):
+        with self._locked():
+            payload = self._validate(self._read_unlocked())
+            value = payload["pending"].get(str(key))
+            return dict(value) if isinstance(value, dict) else None
+
+    def put(self, key, value):
+        if not isinstance(value, dict) or not self._REQUIRED.issubset(value):
+            raise LedgerError("A restore intent is missing its immutable witness.")
+        key = str(key)
+        with self._locked():
+            payload = self._validate(self._read_unlocked())
+            current = payload["pending"].get(key)
+            if current is not None:
+                if any(current.get(field) != value.get(field) for field in self._IMMUTABLE):
+                    raise LedgerError("A restore intent already exists with another witness.")
+                merged = dict(current)
+                # Reopening an intent during RESUME must preserve an accepted or
+                # unknown provider outcome. Resetting mutation_state to prepared
+                # would make a retry eligible to issue a duplicate request.
+                for field, candidate in value.items():
+                    if field in self._IMMUTABLE or field not in merged:
+                        merged[field] = candidate
+                value = merged
+            payload["pending"][key] = dict(value)
+            self._write_unlocked(payload)
+        return dict(value)
+
+    def update(self, key, **updates):
+        key = str(key)
+        with self._locked():
+            payload = self._validate(self._read_unlocked())
+            current = payload["pending"].get(key)
+            if not isinstance(current, dict):
+                raise LedgerError("Cannot update an unknown restore intent.")
+            if any(field in self._IMMUTABLE for field in updates):
+                raise LedgerError("Immutable restore intent fields cannot be updated.")
+            current = dict(current)
+            current.update(updates)
+            payload["pending"][key] = current
+            self._write_unlocked(payload)
+        return current
+
+    def clear(self, key):
+        with self._locked():
+            payload = self._validate(self._read_unlocked())
+            payload["pending"].pop(str(key), None)
+            self._write_unlocked(payload)
+
+    def pending(self):
+        with self._locked():
+            payload = self._validate(self._read_unlocked())
+            return {key: dict(value) for key, value in payload["pending"].items()}
 
 
 def _not_found(error):
@@ -326,6 +520,615 @@ def _backup_vault_exists(backup_client, name):
         seen_tokens.add(next_token)
 
 
+def _provider_error_code(error):
+    """Classify provider failures without treating them as IN_PROGRESS."""
+    if isinstance(error, RestoreRecoveryError):
+        return error.code
+    if isinstance(error, ClientError):
+        error_data = error.response.get("Error") or {}
+        provider_code = str(error_data.get("Code") or "").lower()
+        status_code = int(
+            ((error.response or {}).get("ResponseMetadata") or {}).get(
+                "HTTPStatusCode", 0
+            )
+            or 0
+        )
+        if _not_found(error) or status_code == 404:
+            return "PROVIDER_NOT_FOUND"
+        if provider_code in {
+            "throttling",
+            "throttlingexception",
+            "toomanyrequestsexception",
+            "limitexceededexception",
+            "requestlimitexceeded",
+        } or status_code == 429:
+            return "PROVIDER_RATE_LIMIT"
+        if provider_code in {
+            "requesttimeout",
+            "requesttimeoutexception",
+            "serviceunavailable",
+            "serviceunavailableexception",
+            "internalfailure",
+            "internalservererror",
+        } or status_code >= 500:
+            return "PROVIDER_TRANSIENT_OUTAGE"
+        return "PROVIDER_FAILED"
+    if isinstance(error, (TimeoutError, OSError)):
+        return "PROVIDER_TRANSIENT_OUTAGE"
+    return "PROVIDER_FAILED"
+
+
+def _restore_target_arn(resource_type, target_name, account_id):
+    if resource_type == "s3":
+        return f"arn:aws:s3:::{target_name}"
+    if resource_type == "dynamodb":
+        return f"arn:aws:dynamodb:{REGION}:{account_id}:table/{target_name}"
+    raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+
+
+def _restore_intent_key(resource_type, restore):
+    return f"{resource_type}:{restore.pk}"
+
+
+def _prepare_restore_intent(
+    intent_store,
+    restore,
+    *,
+    resource_type,
+    source_recovery_point_arn,
+    target_name,
+    account_id,
+):
+    """Persist the immutable restore witness before calling AWS Backup."""
+    resource_type = str(resource_type)
+    target_name = str(target_name or "").strip()
+    source_recovery_point_arn = str(source_recovery_point_arn or "").strip()
+    if resource_type not in {"s3", "dynamodb"} or not target_name or not source_recovery_point_arn:
+        raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+    marker = f"backupsheep-restore-{restore.id}"[:128]
+    token = idempotency_token("restore", restore.id)
+    target_arn = _restore_target_arn(resource_type, target_name, account_id)
+    intent = {
+        "marker": marker,
+        "resource_type": resource_type,
+        "source_recovery_point_arn": source_recovery_point_arn,
+        "target_name": target_name,
+        "target_arn": target_arn,
+        "restore_id": str(restore.id),
+        "restore_correlation_id": str(getattr(restore, "correlation_id", "") or ""),
+        "restore_token": token,
+        "mutation_state": "prepared",
+    }
+    key = _restore_intent_key(resource_type, restore)
+    try:
+        intent_store.put(key, intent)
+    except LedgerError as error:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH", str(error)) from error
+
+    params = dict(restore.params) if isinstance(restore.params, dict) else {}
+    existing_token = str(params.get("_aws_backup_restore_token") or "")
+    if existing_token and existing_token != token:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    existing_marker = str(getattr(restore, "restore_marker", "") or "")
+    if existing_marker and existing_marker != marker:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    params["_aws_backup_restore_token"] = token
+    params["_bs_restore_intent"] = {
+        "run_id": PREFIX,
+        "resource_type": resource_type,
+        "restore_id": str(restore.id),
+        "restore_correlation_id": intent["restore_correlation_id"],
+        "source_recovery_point_arn": source_recovery_point_arn,
+        "target_name": target_name,
+        "target_arn": target_arn,
+        "marker": marker,
+        "restore_token": token,
+    }
+    restore.restore_marker = marker
+    restore.params = params
+    restore.save(update_fields=["restore_marker", "params", "modified"])
+    return key, intent
+
+
+def _assert_restore_intent_row(restore, intent):
+    """Verify that a local restore row still represents the intent on disk."""
+    if str(restore.id) != str(intent.get("restore_id")):
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    correlation_id = str(getattr(restore, "correlation_id", "") or "")
+    if correlation_id != str(intent.get("restore_correlation_id") or ""):
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    params = restore.params if isinstance(restore.params, dict) else {}
+    if str(params.get("_aws_backup_restore_token") or "") != str(
+        intent.get("restore_token") or ""
+    ):
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if str(getattr(restore, "restore_marker", "") or "") != str(
+        intent.get("marker") or ""
+    ):
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if restore.provider_job_id and intent.get("provider_job_id"):
+        if str(restore.provider_job_id) != str(intent["provider_job_id"]):
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if restore.resource_id and str(restore.resource_id) != str(intent.get("target_name")):
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+
+
+def _restore_job_metadata_target(job, intent):
+    metadata = job.get("RestoreMetadata")
+    if metadata is None:
+        metadata = job.get("Metadata")
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+    resource_type = str(intent.get("resource_type") or "")
+    key = "DestinationBucketName" if resource_type == "s3" else "TargetTableName"
+    target = metadata.get(key)
+    if target is None:
+        return None
+    return str(target)
+
+
+def _validate_restore_job(job, intent, *, require_target=False):
+    if not isinstance(job, dict):
+        raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+    job_id = str(job.get("RestoreJobId") or "").strip()
+    source = str(job.get("RecoveryPointArn") or "").strip()
+    resource_type = str(job.get("ResourceType") or "").strip().lower()
+    if not job_id or not source or not resource_type or "Status" not in job:
+        raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+    expected_type = str(intent.get("resource_type") or "").lower()
+    if source != str(intent.get("source_recovery_point_arn") or ""):
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if resource_type != expected_type:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    created_arn = str(job.get("CreatedResourceArn") or "").strip()
+    target_metadata = _restore_job_metadata_target(job, intent)
+    target_name = str(intent.get("target_name") or "")
+    if created_arn and created_arn != str(intent.get("target_arn") or ""):
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if target_metadata and target_metadata != target_name:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    marker = None
+    metadata = job.get("RestoreMetadata") or job.get("Metadata")
+    if isinstance(metadata, dict) and metadata.get("BackupSheepRestoreMarker") is not None:
+        marker = str(metadata.get("BackupSheepRestoreMarker"))
+        if marker != str(intent.get("marker") or ""):
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if require_target and not created_arn and target_metadata != target_name:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    return job
+
+
+def _describe_restore_job_exact(backup_client, intent, job_id, *, require_target=False):
+    try:
+        job = backup_client.describe_restore_job(RestoreJobId=str(job_id))
+    except Exception as error:
+        raise RestoreRecoveryError(_provider_error_code(error)) from error
+    _validate_restore_job(job, intent, require_target=require_target)
+    if str(job.get("RestoreJobId") or "") != str(job_id):
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    return job
+
+
+def _list_restore_jobs_exact(backup_client, intent):
+    """Find one exact restore job using AWS Backup's cursor contract."""
+    matches = []
+    next_token = None
+    seen_tokens = set()
+    for _ in range(1000):
+        request = {
+            "RecoveryPointArn": str(intent["source_recovery_point_arn"]),
+            "MaxResults": 100,
+        }
+        if next_token:
+            request["NextToken"] = next_token
+        try:
+            response = backup_client.list_restore_jobs(**request)
+        except Exception as error:
+            raise RestoreRecoveryError(_provider_error_code(error)) from error
+        if not isinstance(response, dict) or "RestoreJobs" not in response:
+            raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+        page = response["RestoreJobs"]
+        if not isinstance(page, list):
+            raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+        for job in page:
+            if not isinstance(job, dict):
+                raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+            _validate_restore_job(job, intent, require_target=False)
+            created_arn = str(job.get("CreatedResourceArn") or "")
+            target_metadata = _restore_job_metadata_target(job, intent)
+            if created_arn == str(intent["target_arn"]) or target_metadata == str(
+                intent["target_name"]
+            ):
+                matches.append(job)
+        next_value = response.get("NextToken")
+        if next_value in (None, ""):
+            break
+        if not isinstance(next_value, str) or next_value in seen_tokens or next_value == next_token:
+            raise RestoreRecoveryError("PROVIDER_REPEATED_CURSOR")
+        seen_tokens.add(next_value)
+        next_token = next_value
+    else:
+        raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+    if len(matches) > 1:
+        raise RestoreRecoveryError("PROVIDER_DUPLICATE_MATCH")
+    if not matches:
+        return None
+    return _describe_restore_job_exact(
+        backup_client,
+        intent,
+        matches[0]["RestoreJobId"],
+        require_target=True,
+    )
+
+
+def _adopt_restore_job(restore, intent_store, intent_key, intent, job):
+    _validate_restore_job(job, intent, require_target=True)
+    job_id = str(job["RestoreJobId"])
+    _assert_restore_intent_row(restore, intent)
+    params = dict(restore.params) if isinstance(restore.params, dict) else {}
+    params["_bs_create_outcome_unknown"] = False
+    params["_bs_restore_job_witness"] = {
+        "restore_job_id": job_id,
+        "source_recovery_point_arn": intent["source_recovery_point_arn"],
+        "target_arn": intent["target_arn"],
+        "target_name": intent["target_name"],
+        "restore_token": intent["restore_token"],
+    }
+    restore.provider_job_id = job_id
+    restore.resource_id = intent["target_name"]
+    restore.params = params
+    restore.status = CoreCloudRestore.Status.IN_PROGRESS
+    restore.operation_phase = "polling"
+    restore.error = ""
+    restore.save(
+        update_fields=[
+            "provider_job_id",
+            "resource_id",
+            "params",
+            "status",
+            "operation_phase",
+            "error",
+            "modified",
+        ]
+    )
+    intent_store.update(
+        intent_key,
+        provider_job_id=job_id,
+        provider_status=str(job.get("Status") or "")[:64],
+        mutation_state="accepted",
+    )
+    return job
+
+
+def _start_or_reconcile_restore(
+    node_object,
+    backup_client,
+    restore,
+    intent_store,
+    intent_key,
+    *,
+    start_callback,
+):
+    """Start once, or adopt the exact already-accepted AWS Backup job."""
+    intent = intent_store.get(intent_key)
+    if not intent:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    restore.refresh_from_db()
+    _assert_restore_intent_row(restore, intent)
+    if restore.provider_job_id:
+        job = _describe_restore_job_exact(
+            backup_client, intent, restore.provider_job_id, require_target=False
+        )
+        intent_store.update(
+            intent_key,
+            provider_job_id=str(restore.provider_job_id),
+            provider_status=str(job.get("Status") or "")[:64],
+            mutation_state="accepted",
+        )
+        return job
+
+    existing = _list_restore_jobs_exact(backup_client, intent)
+    if existing is not None:
+        return _adopt_restore_job(restore, intent_store, intent_key, intent, existing)
+
+    if str(intent.get("mutation_state") or "prepared") != "prepared":
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    # This fsynced transition is the process-crash fence. A retry seeing it must
+    # reconcile the provider and may not call start_restore_job again.
+    intent = intent_store.update(intent_key, mutation_state="request_started")
+    try:
+        start_callback()
+    except BaseException as error:
+        code = _provider_error_code(error)
+        intent_store.update(
+            intent_key,
+            mutation_state="outcome_unknown",
+            last_error_code=code,
+        )
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise RestoreRecoveryError(code) from error
+
+    restore.refresh_from_db()
+    _assert_restore_intent_row(restore, intent)
+    if restore.provider_job_id:
+        job = _describe_restore_job_exact(
+            backup_client, intent, restore.provider_job_id, require_target=False
+        )
+        intent_store.update(
+            intent_key,
+            provider_job_id=str(restore.provider_job_id),
+            provider_status=str(job.get("Status") or "")[:64],
+            mutation_state="accepted",
+        )
+        return job
+    # The provider may have accepted the request while the application process
+    # died before saving provider_job_id. Only the exact target/source witness may
+    # be adopted; zero matches is an unknown outcome, never permission to retry.
+    existing = _list_restore_jobs_exact(backup_client, intent)
+    if existing is None:
+        intent_store.update(
+            intent_key,
+            mutation_state="outcome_unknown",
+            last_error_code="PROVIDER_RECONCILIATION_REQUIRED",
+        )
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    return _adopt_restore_job(restore, intent_store, intent_key, intent, existing)
+
+
+def _verify_completed_restore_job(backup_client, intent, job_id):
+    job = _describe_restore_job_exact(
+        backup_client, intent, job_id, require_target=True
+    )
+    status = str(job.get("Status") or "").upper()
+    if status == "COMPLETED":
+        created_arn = str(job.get("CreatedResourceArn") or "")
+        if created_arn != str(intent["target_arn"]):
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+        return job
+    if status in {"PENDING", "RUNNING", "PARTIAL"}:
+        raise RestoreRecoveryError("IN_PROGRESS")
+    if status in {"FAILED", "ABORTED", "EXPIRED"}:
+        raise RestoreRecoveryError("PROVIDER_FAILED")
+    raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+
+
+def _ddb_ownership_observation(dynamodb, name, expected_arn):
+    try:
+        response = dynamodb.describe_table(TableName=name)
+    except ClientError as error:
+        if _not_found(error):
+            return {"state": "absent"}
+        raise RestoreRecoveryError(_provider_error_code(error)) from error
+    except Exception as error:
+        raise RestoreRecoveryError(_provider_error_code(error)) from error
+    if not isinstance(response, dict) or not isinstance(response.get("Table"), dict):
+        raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+    table = response["Table"]
+    if table.get("TableName") != name or str(table.get("TableArn") or "") != str(expected_arn):
+        return {"state": "mismatch", "table": table}
+    if str(table.get("TableStatus") or "") != "ACTIVE":
+        return {"state": "in_progress", "table": table}
+    try:
+        tags_response = dynamodb.list_tags_of_resource(ResourceArn=expected_arn)
+    except ClientError as error:
+        if _not_found(error):
+            return {"state": "not_yet_visible", "table": table}
+        raise RestoreRecoveryError(_provider_error_code(error)) from error
+    except Exception as error:
+        raise RestoreRecoveryError(_provider_error_code(error)) from error
+    if not isinstance(tags_response, dict) or not isinstance(tags_response.get("Tags"), list):
+        raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+    tags = _tag_map(tags_response["Tags"])
+    if tags.get(OWNERSHIP_TAG) == PREFIX:
+        return {"state": "owned", "table": table}
+    if OWNERSHIP_TAG in tags:
+        return {"state": "mismatch", "table": table}
+    return {"state": "missing", "table": table}
+
+
+def _wait_ddb_tag_readback(
+    dynamodb,
+    name,
+    expected_arn,
+    *,
+    timeout=120,
+    sleep_callback=None,
+):
+    """Boundedly distinguish delayed tag visibility, absence, and mismatch."""
+    started = time.monotonic()
+    last_state = "not_yet_visible"
+    while True:
+        observation = _ddb_ownership_observation(dynamodb, name, expected_arn)
+        state = observation["state"]
+        last_state = state
+        if state == "owned":
+            return observation["table"]
+        if state == "mismatch":
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+        if time.monotonic() - started >= timeout:
+            if state == "absent":
+                raise RestoreRecoveryError("PROVIDER_NOT_FOUND")
+            if state == "in_progress":
+                raise RestoreRecoveryError("IN_PROGRESS")
+            raise RestoreRecoveryError("PROVIDER_TAG_NOT_YET_VISIBLE")
+        if sleep_callback:
+            sleep_callback()
+        else:
+            time.sleep(TAG_POLL_SECONDS)
+
+
+def _restore_provenance(intent, job):
+    return json.dumps(
+        {
+            "restore_job_id": str(job.get("RestoreJobId") or ""),
+            "source_recovery_point_arn": intent["source_recovery_point_arn"],
+            "target_arn": intent["target_arn"],
+            "target_name": intent["target_name"],
+            "restore_id": intent["restore_id"],
+            "restore_correlation_id": intent.get("restore_correlation_id", ""),
+            "restore_token": intent["restore_token"],
+        },
+        sort_keys=True,
+    )
+
+
+def _record_or_verify_restore_ledger(
+    ledger,
+    kind,
+    resource_id,
+    *,
+    name,
+    intent,
+    job,
+):
+    """Idempotently accept only an exact prior restore ledger witness.
+
+    The interrupted live run recorded one DynamoDB restore manually before this
+    harness gained structured JSON provenance. Preserve that append-only record
+    only when every immutable provider identifier matches the completed job.
+    """
+    expected_json = _restore_provenance(intent, job)
+    expected_legacy = (
+        f"{intent['source_recovery_point_arn']}"
+        f"|restore-job:{job['RestoreJobId']}"
+        f"|created-resource:{intent['target_arn']}"
+    )
+    existing = [
+        entry
+        for entry in ledger.entries(kind)
+        if str(entry.get("resource_id") or "") == str(resource_id)
+    ]
+    if len(existing) > 1:
+        raise RestoreRecoveryError("PROVIDER_DUPLICATE_MATCH")
+    if existing:
+        entry = existing[0]
+        ownership = entry.get("ownership") or {}
+        if (
+            str(entry.get("name") or "") != str(name)
+            or ownership.get("tag_key") != OWNERSHIP_TAG
+            or ownership.get("tag_value") != PREFIX
+            or str(entry.get("source_witness") or "")
+            not in {expected_json, expected_legacy}
+        ):
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+        return entry
+    _ledger_record(
+        ledger,
+        kind,
+        resource_id,
+        name=name,
+        source=expected_json,
+    )
+    return None
+
+
+def _finalize_ddb_restore(
+    dynamodb,
+    backup_client,
+    restore,
+    intent_store,
+    intent_key,
+    ledger,
+    *,
+    marker,
+):
+    intent = intent_store.get(intent_key)
+    if not intent:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    restore.refresh_from_db()
+    _assert_restore_intent_row(restore, intent)
+    if not restore.provider_job_id:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    job = _verify_completed_restore_job(
+        backup_client, intent, restore.provider_job_id
+    )
+    try:
+        item = dynamodb.get_item(
+            TableName=intent["target_name"],
+            Key={"id": {"S": "fixture"}},
+        ).get("Item") or {}
+    except Exception as error:
+        raise RestoreRecoveryError(_provider_error_code(error)) from error
+    if item.get("marker", {}).get("S") != marker:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    observation = _ddb_ownership_observation(
+        dynamodb, intent["target_name"], intent["target_arn"]
+    )
+    if observation["state"] == "mismatch":
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if observation["state"] != "owned":
+        # A missing tag is safe to add only after the exact table ARN was read.
+        try:
+            dynamodb.tag_resource(
+                ResourceArn=intent["target_arn"],
+                Tags=[{"Key": OWNERSHIP_TAG, "Value": PREFIX}],
+            )
+        except Exception as error:
+            raise RestoreRecoveryError(_provider_error_code(error)) from error
+    _wait_ddb_tag_readback(
+        dynamodb,
+        intent["target_name"],
+        intent["target_arn"],
+    )
+    _record_or_verify_restore_ledger(
+        ledger,
+        "dynamodb_table",
+        intent["target_name"],
+        name=intent["target_name"],
+        intent=intent,
+        job=job,
+    )
+    # The ledger write is itself atomic/fsynced. Only after it succeeds may the
+    # pre-mutation intent be removed.
+    intent_store.update(intent_key, mutation_state="ledgered")
+    intent_store.clear(intent_key)
+    return job
+
+
+def _finalize_s3_restore(
+    s3,
+    backup_client,
+    restore,
+    intent_store,
+    intent_key,
+    ledger,
+    *,
+    marker,
+):
+    intent = intent_store.get(intent_key)
+    if not intent:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    restore.refresh_from_db()
+    _assert_restore_intent_row(restore, intent)
+    if not restore.provider_job_id:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    job = _verify_completed_restore_job(
+        backup_client, intent, restore.provider_job_id
+    )
+    try:
+        restored = s3.get_object(
+            Bucket=intent["target_name"], Key=OBJECT_KEY
+        )["Body"].read().decode()
+    except Exception as error:
+        raise RestoreRecoveryError(_provider_error_code(error)) from error
+    if restored != marker:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    _record_or_verify_restore_ledger(
+        ledger,
+        "restore_provenance",
+        f"{intent['resource_type']}:{intent['restore_id']}",
+        name=intent["target_name"],
+        intent=intent,
+        job=job,
+    )
+    intent_store.update(intent_key, mutation_state="ledgered")
+    intent_store.clear(intent_key)
+    return job
+
+
 def _exact_preflight(s3, dynamodb, rds, ec2, backup_client, iam):
     """Refuse every exact target collision before the first mutation."""
     collisions = {
@@ -534,9 +1337,400 @@ def _recover_local_fixture():
     return account, user
 
 
+def _exact_one(queryset, label):
+    rows = list(queryset[:2])
+    if len(rows) != 1:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED", f"Expected exactly one {label}.")
+    return rows[0]
+
+
+def _resume_provider_preflight(s3, dynamodb, rds):
+    """Prove the existing run-owned provider graph before RESUME mutations."""
+    for bucket in (S3_SOURCE, S3_RESTORE, S3_STORAGE):
+        if not _s3_bucket_exists(s3, bucket):
+            raise RestoreRecoveryError("PROVIDER_NOT_FOUND")
+        if not _s3_owned(s3, bucket):
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    source_table = _ddb_description_owned(
+        dynamodb, DDB_SOURCE
+    )
+    if source_table is None:
+        raise RestoreRecoveryError("PROVIDER_NOT_FOUND")
+    if source_table is False:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    source_rds = _rds_description_owned(rds, RDS_SOURCE)
+    if source_rds is None:
+        raise RestoreRecoveryError("PROVIDER_NOT_FOUND")
+    if source_rds is False:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+
+
+def _resume_local_graph(account, user, *, rds_password):
+    """Adopt the exact failed-run graph, creating only a missing local RDS tail."""
+    member = getattr(user, "member", None)
+    if member is None:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    aws_connection = _exact_one(
+        account.connections.filter(name=f"{PREFIX}-aws-connection"),
+        "AWS connection",
+    )
+    s3_node = _exact_one(aws_connection.nodes.filter(name=S3_SOURCE), "S3 node")
+    ddb_node = _exact_one(aws_connection.nodes.filter(name=DDB_SOURCE), "DynamoDB node")
+    if s3_node.type != CoreNode.Type.CLOUD or ddb_node.type != CoreNode.Type.CLOUD:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if s3_node.aws.resource_type != CoreAWS.ResourceType.S3:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if ddb_node.aws.resource_type != CoreAWS.ResourceType.DYNAMODB:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if s3_node.aws.unique_id != S3_SOURCE or ddb_node.aws.unique_id != DDB_SOURCE:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    ddb_backup = _exact_one(
+        CoreAWSBackup.objects.filter(
+            aws=ddb_node.aws, uuid=f"{PREFIX}-ddb-backup"
+        ),
+        "DynamoDB backup",
+    )
+    ddb_restore = _exact_one(
+        CoreCloudRestore.objects.filter(node=ddb_node, name=DDB_RESTORE),
+        "DynamoDB restore",
+    )
+    if ddb_restore.backup_id != ddb_backup.id:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+
+    rds_connection_rows = list(
+        account.connections.filter(name=f"{PREFIX}-rds-connection")[:2]
+    )
+    if len(rds_connection_rows) > 1:
+        raise RestoreRecoveryError("PROVIDER_DUPLICATE_MATCH")
+    if rds_connection_rows:
+        rds_connection = rds_connection_rows[0]
+        if rds_connection.integration.code != "aws_rds":
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+        rds_node = _exact_one(rds_connection.nodes.filter(name=RDS_SOURCE), "RDS node")
+        if rds_node.type != CoreNode.Type.CLOUD:
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+        rds_aws = rds_node.aws_rds
+        if rds_aws.unique_id != RDS_SOURCE:
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    else:
+        if not rds_password:
+            raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+        key = account.get_encryption_key()
+        rds_connection = factories.make_connection(
+            account,
+            member,
+            code="aws_rds",
+            name=f"{PREFIX}-rds-connection",
+        )
+        CoreAuthAWSRDS.objects.create(
+            connection=rds_connection,
+            region=CoreAWSRegion.objects.get(code=REGION),
+            access_key=bs_encrypt(os.environ["AWS_ACCESS_KEY_ID"], key),
+            secret_key=bs_encrypt(os.environ["AWS_SECRET_ACCESS_KEY"], key),
+        )
+        rds_node = CoreNode.objects.create(
+            connection=rds_connection,
+            type=CoreNode.Type.CLOUD,
+            name=RDS_SOURCE,
+            added_by=member,
+        )
+        rds_aws = CoreAWSRDS.objects.create(
+            node=rds_node,
+            name=RDS_SOURCE,
+            unique_id=RDS_SOURCE,
+        )
+    rds_backup_rows = list(
+        CoreAWSRDSBackup.objects.filter(
+            aws_rds=rds_aws, uuid=f"{PREFIX}-rds-snapshot"
+        )[:2]
+    )
+    if len(rds_backup_rows) > 1:
+        raise RestoreRecoveryError("PROVIDER_DUPLICATE_MATCH")
+    if rds_backup_rows:
+        rds_backup = rds_backup_rows[0]
+    else:
+        rds_backup = CoreAWSRDSBackup.objects.create(
+            aws_rds=rds_aws,
+            uuid=f"{PREFIX}-rds-snapshot",
+            unique_id=f"{PREFIX}-rds-snapshot",
+            status=UtilBackup.Status.IN_PROGRESS,
+            type=UtilBackup.Type.ON_DEMAND,
+            attempt_no=1,
+        )
+    rds_restore_rows = list(
+        CoreCloudRestore.objects.filter(node=rds_node, name=RDS_RESTORE)[:2]
+    )
+    if len(rds_restore_rows) > 1:
+        raise RestoreRecoveryError("PROVIDER_DUPLICATE_MATCH")
+    if rds_restore_rows:
+        rds_restore = rds_restore_rows[0]
+        if rds_restore.backup_id != rds_backup.id:
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    else:
+        rds_restore = CoreCloudRestore.objects.create(
+            node=rds_node,
+            backup_id=rds_backup.id,
+            name=RDS_RESTORE,
+            params={
+                "db_instance_class": os.environ.get("AWS_E2E_RDS_CLASS", "db.t3.micro"),
+                "db_subnet_group_name": RDS_SUBNET_GROUP,
+                "publicly_accessible": True,
+                "vpc_security_group_ids": [
+                    # The provider-side security group is resolved from the ledger
+                    # by the caller before this graph is used for a restore.
+                ],
+            },
+        )
+    return {
+        "account": account,
+        "user": user,
+        "aws_connection": aws_connection,
+        "s3_node": s3_node,
+        "ddb_node": ddb_node,
+        "ddb_backup": ddb_backup,
+        "ddb_restore": ddb_restore,
+        "rds_connection": rds_connection,
+        "rds_node": rds_node,
+        "rds_aws": rds_aws,
+        "rds_backup": rds_backup,
+        "rds_restore": rds_restore,
+    }
+
+
+def _resume_rds_continuation(rds, graph, ledger, *, security_group_id, rds_password, report):
+    """Continue the RDS half without duplicating an accepted snapshot/restore."""
+    rds_backup = graph["rds_backup"]
+    snapshot_identifier = f"{PREFIX}-rds-snapshot"
+    snapshot_rows = []
+    try:
+        snapshot_rows = rds.describe_db_snapshots(
+            DBSnapshotIdentifier=snapshot_identifier
+        ).get("DBSnapshots") or []
+    except ClientError as error:
+        if not _not_found(error):
+            raise RestoreRecoveryError(_provider_error_code(error)) from error
+    if len(snapshot_rows) > 1:
+        raise RestoreRecoveryError("PROVIDER_DUPLICATE_MATCH")
+    if not snapshot_rows:
+        graph["rds_node"].aws_rds.create_snapshot(rds_backup)
+        rds_backup.refresh_from_db()
+    else:
+        snapshot = snapshot_rows[0]
+        if (
+            snapshot.get("DBSnapshotIdentifier") != snapshot_identifier
+            or snapshot.get("DBInstanceIdentifier") != RDS_SOURCE
+            or snapshot.get("SnapshotType") != "manual"
+        ):
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+        rds_backup.unique_id = snapshot_identifier
+        rds_backup.save(update_fields=["unique_id", "modified"])
+    snapshot_identifier = str(rds_backup.unique_id or snapshot_identifier)
+    _register_rds_snapshot(
+        ledger,
+        rds,
+        snapshot_identifier,
+        source=RDS_SOURCE,
+    )
+    report["tests"]["RDS native snapshot resume"] = _wait_backup(
+        rds_backup, "RDS native snapshot resume"
+    )
+
+    rds_restore = graph["rds_restore"]
+    if not rds_restore.params:
+        rds_restore.params = {
+            "db_instance_class": os.environ.get("AWS_E2E_RDS_CLASS", "db.t3.micro"),
+            "db_subnet_group_name": RDS_SUBNET_GROUP,
+            "publicly_accessible": True,
+            "vpc_security_group_ids": [security_group_id],
+        }
+        rds_restore.save(update_fields=["params", "modified"])
+    else:
+        params = dict(rds_restore.params)
+        groups = params.get("vpc_security_group_ids") or []
+        if groups and groups != [security_group_id]:
+            raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+        params["vpc_security_group_ids"] = [security_group_id]
+        rds_restore.params = params
+        rds_restore.save(update_fields=["params", "modified"])
+    rds_restore.refresh_from_db()
+    if not rds_restore.resource_id:
+        # The application restore adapter owns deterministic reconciliation. It
+        # verifies the BackupSheepRestore/BackupSheepSource tags before adopting
+        # an exact-name instance whose create response was lost; the harness must
+        # never bypass that ownership proof by setting resource_id itself.
+        graph["rds_node"].aws_rds.restore_snapshot(rds_backup, rds_restore)
+    rds_restore.refresh_from_db()
+    if rds_restore.resource_id and rds_restore.resource_id != RDS_RESTORE:
+        raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+    if not rds_restore.resource_id:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+
+    started = time.monotonic()
+    restoring_instance = None
+    while True:
+        try:
+            rows = rds.describe_db_instances(
+                DBInstanceIdentifier=RDS_RESTORE
+            ).get("DBInstances") or []
+        except ClientError as error:
+            if _not_found(error):
+                rows = []
+            else:
+                raise RestoreRecoveryError(_provider_error_code(error)) from error
+        if len(rows) > 1:
+            raise RestoreRecoveryError("PROVIDER_DUPLICATE_MATCH")
+        if rows:
+            instance = rows[0]
+            if instance.get("DBInstanceIdentifier") != RDS_RESTORE:
+                raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+            provider_tags = _tag_map(
+                rds.list_tags_for_resource(
+                    ResourceName=instance["DBInstanceArn"]
+                ).get("TagList")
+                or []
+            )
+            if (
+                provider_tags.get("BackupSheepRestore")
+                != str(rds_restore.restore_marker)
+                or provider_tags.get("BackupSheepSource") != snapshot_identifier
+            ):
+                raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
+            rds.add_tags_to_resource(
+                ResourceName=instance["DBInstanceArn"],
+                Tags=[{"Key": OWNERSHIP_TAG, "Value": PREFIX}],
+            )
+            _register_rds_instance(
+                ledger,
+                rds,
+                RDS_RESTORE,
+                source=snapshot_identifier,
+            )
+            restoring_instance = instance
+            break
+        if time.monotonic() - started > 120:
+            raise RestoreRecoveryError("PROVIDER_NOT_FOUND")
+        _sleep()
+
+    status = str((restoring_instance or {}).get("DBInstanceStatus") or "")
+    if status != "available":
+        _wait(
+            "restored RDS availability",
+            lambda: rds.describe_db_instances(
+                DBInstanceIdentifier=RDS_RESTORE
+            )["DBInstances"][0]["DBInstanceStatus"],
+            {"available"},
+            {
+                "failed",
+                "incompatible-restore",
+                "incompatible-network",
+                "incompatible-parameters",
+            },
+            timeout=TIMEOUT_SECONDS,
+        )
+    if not rds_password:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    _assert_rds_marker(rds, RDS_RESTORE, rds_password)
+    rds_restore.status = CoreCloudRestore.Status.COMPLETE
+    rds_restore.save(update_fields=["status", "modified"])
+    report["tests"]["RDS restore and data verification resume"] = {"status": "PASS"}
+
+
+def _resume_existing_run(
+    s3,
+    dynamodb,
+    rds,
+    backup_client,
+    ledger,
+    intent_store,
+    report,
+    *,
+    rds_password,
+):
+    """Resume only the exact failed run; no source/restore backup is recreated."""
+    if not APPLY:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED", "RESUME requires APPLY=YES.")
+    if not rds_password:
+        raise RestoreRecoveryError(
+            "PROVIDER_RECONCILIATION_REQUIRED",
+            "RESUME requires AWS_E2E_RDS_PASSWORD for the final data verification.",
+        )
+    account, user = _recover_local_fixture()
+    if account is None or user is None:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    _resume_provider_preflight(s3, dynamodb, rds)
+    graph = _resume_local_graph(account, user, rds_password=rds_password)
+    ddb_backup = graph["ddb_backup"]
+    ddb_restore = graph["ddb_restore"]
+    ddb_state = dict((ddb_backup.metadata or {}).get("_aws_backup") or {})
+    ddb_recovery_point = str(ddb_state.get("recovery_point_arn") or "")
+    if not ddb_recovery_point:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    matching_points = [
+        entry
+        for entry in ledger.entries("recovery_point")
+        if str(entry.get("resource_id") or "") == ddb_recovery_point
+        and str(entry.get("source_witness") or "") == DDB_SOURCE
+    ]
+    if len(matching_points) != 1:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    ddb_intent_key, _ = _prepare_restore_intent(
+        intent_store,
+        ddb_restore,
+        resource_type="dynamodb",
+        source_recovery_point_arn=ddb_recovery_point,
+        target_name=DDB_RESTORE,
+        account_id=str(report["account"]),
+    )
+    _start_or_reconcile_restore(
+        graph["ddb_node"].aws,
+        backup_client,
+        ddb_restore,
+        intent_store,
+        ddb_intent_key,
+        start_callback=lambda: graph["ddb_node"].aws.restore_snapshot(
+            ddb_backup, ddb_restore
+        ),
+    )
+    report["tests"]["DynamoDB restore resume adoption"] = {"status": "PASS"}
+    _wait_restore(
+        graph["ddb_node"].aws,
+        ddb_restore,
+        "DynamoDB restore resume job",
+    )
+    _finalize_ddb_restore(
+        dynamodb,
+        backup_client,
+        ddb_restore,
+        intent_store,
+        ddb_intent_key,
+        ledger,
+        marker=MARKER,
+    )
+    report["tests"]["DynamoDB restore resume finalization"] = {"status": "PASS"}
+    security_entries = ledger.entries("security_group")
+    exact_security = [
+        entry
+        for entry in security_entries
+        if str(entry.get("name") or "") == RDS_SECURITY_GROUP
+    ]
+    if len(exact_security) != 1:
+        raise RestoreRecoveryError("PROVIDER_RECONCILIATION_REQUIRED")
+    _resume_rds_continuation(
+        rds,
+        graph,
+        ledger,
+        security_group_id=str(exact_security[0]["resource_id"]),
+        rds_password=rds_password,
+        report=report,
+    )
+    report["mode"] = "resume"
+    report["status"] = "PASS"
+
+
 def main():
     report = {"prefix": PREFIX, "region": REGION, "tests": {}, "cleanup": []}
     ledger = None
+    intent_store = None
     created = {
         "role": False,
         "vault": False,
@@ -556,7 +1750,11 @@ def main():
     vault = None
     subnet_ids = []
     security_group_id = None
-    rds_password = secrets.token_urlsafe(24)
+    rds_password = (
+        os.environ.get("AWS_E2E_RDS_PASSWORD", "")
+        if RESUME
+        else secrets.token_urlsafe(24)
+    )
     rds_snapshot_identifier = f"{PREFIX}-rds-snapshot"
     rds = boto3.client("rds", region_name=REGION, config=BOTO_CONFIG)
     ec2 = boto3.client("ec2", region_name=REGION, config=BOTO_CONFIG)
@@ -577,6 +1775,26 @@ def main():
             run_id=PREFIX,
             scope=f"{report['account']}:{REGION}",
         )
+        intent_store = RestoreIntentStore(
+            os.environ.get("BACKUPSHEEP_E2E_LEDGER_PATH"),
+            run_id=PREFIX,
+            scope=f"{report['account']}:{REGION}",
+        )
+
+        if RESUME:
+            report["mode"] = "resume"
+            report["exact_preflight"] = {"mode": "resume", "status": "GUARDED"}
+            _resume_existing_run(
+                s3,
+                dynamodb,
+                rds,
+                backup_client,
+                ledger,
+                intent_store,
+                report,
+                rds_password=rds_password,
+            )
+            raise _ResumeComplete()
 
         report["exact_preflight"] = _exact_preflight(
             s3, dynamodb, rds, ec2, backup_client, iam
@@ -911,11 +2129,34 @@ def main():
                 "RestoreLatestVersionsUpTo": "all",
             },
         )
-        s3_node.aws.restore_snapshot(s3_backup, s3_restore)
+        s3_intent_key, _ = _prepare_restore_intent(
+            intent_store,
+            s3_restore,
+            resource_type="s3",
+            source_recovery_point_arn=s3_recovery_point,
+            target_name=S3_RESTORE,
+            account_id=str(report["account"]),
+        )
+        _start_or_reconcile_restore(
+            s3_node.aws,
+            backup_client,
+            s3_restore,
+            intent_store,
+            s3_intent_key,
+            start_callback=lambda: s3_node.aws.restore_snapshot(
+                s3_backup, s3_restore
+            ),
+        )
         report["tests"]["S3 restore"] = _wait_restore(s3_node.aws, s3_restore, "S3 restore job")
-        restored = s3.get_object(Bucket=S3_RESTORE, Key=OBJECT_KEY)["Body"].read().decode()
-        if restored != MARKER:
-            raise AssertionError(f"S3 restore marker mismatch: {restored!r}")
+        _finalize_s3_restore(
+            s3,
+            backup_client,
+            s3_restore,
+            intent_store,
+            s3_intent_key,
+            ledger,
+            marker=MARKER,
+        )
         report["tests"]["S3 restore data verification"] = {"status": "PASS", "key": OBJECT_KEY}
 
         ddb_backup = CoreAWSBackup.objects.create(
@@ -945,28 +2186,35 @@ def main():
             name=DDB_RESTORE,
             params={"target_table_name": DDB_RESTORE},
         )
-        ddb_node.aws.restore_snapshot(ddb_backup, ddb_restore)
+        ddb_intent_key, _ = _prepare_restore_intent(
+            intent_store,
+            ddb_restore,
+            resource_type="dynamodb",
+            source_recovery_point_arn=ddb_recovery_point,
+            target_name=DDB_RESTORE,
+            account_id=str(report["account"]),
+        )
+        _start_or_reconcile_restore(
+            ddb_node.aws,
+            backup_client,
+            ddb_restore,
+            intent_store,
+            ddb_intent_key,
+            start_callback=lambda: ddb_node.aws.restore_snapshot(
+                ddb_backup, ddb_restore
+            ),
+        )
         report["tests"]["DynamoDB restore"] = _wait_restore(
             ddb_node.aws, ddb_restore, "DynamoDB restore job"
         )
-        item = dynamodb.get_item(
-            TableName=DDB_RESTORE,
-            Key={"id": {"S": "fixture"}},
-        ).get("Item") or {}
-        if item.get("marker", {}).get("S") != MARKER:
-            raise AssertionError(f"DynamoDB restore marker mismatch: {item!r}")
-        restored_table = dynamodb.describe_table(TableName=DDB_RESTORE)["Table"]
-        dynamodb.tag_resource(
-            ResourceArn=restored_table["TableArn"],
-            Tags=[{"Key": OWNERSHIP_TAG, "Value": PREFIX}],
-        )
-        if not _ddb_description_owned(dynamodb, DDB_RESTORE):
-            raise RuntimeError("AWS DynamoDB restore ownership read-back failed.")
-        _ledger_record(
+        _finalize_ddb_restore(
+            dynamodb,
+            backup_client,
+            ddb_restore,
+            intent_store,
+            ddb_intent_key,
             ledger,
-            "dynamodb_table",
-            DDB_RESTORE,
-            source=ddb_recovery_point,
+            marker=MARKER,
         )
         created["ddb_restore"] = True
         report["tests"]["DynamoDB restore data verification"] = {"status": "PASS"}
@@ -1099,6 +2347,8 @@ def main():
         rds_restore.save(update_fields=["status", "modified"])
         report["tests"]["RDS restore and data verification"] = {"status": "PASS"}
         report["status"] = "PASS"
+    except _ResumeComplete:
+        pass
     except Exception as error:
         report["status"] = "FAIL"
         report["error"] = str(error)

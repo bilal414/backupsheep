@@ -51,13 +51,19 @@ class RestoreEndpointTests(BaseTestCase):
 
     def test_unknown_backup_rejected(self):
         node = factories.make_cloud_node(self.account, self.member)
-        resp = self._post(node, {"backup_id": 999999, "name": "restored"})
+        resp = self._post(
+            node,
+            {"backup_id": 999999, "name": "restored", "confirm": True},
+        )
         self.assertEqual(resp.status_code, 404)
 
     def test_incomplete_backup_rejected(self):
         node = factories.make_cloud_node(self.account, self.member)
         backup = make_completed_backup(node, status=UtilBackup.Status.IN_PROGRESS)
-        resp = self._post(node, {"backup_id": backup.id, "name": "restored"})
+        resp = self._post(
+            node,
+            {"backup_id": backup.id, "name": "restored", "confirm": True},
+        )
         self.assertEqual(resp.status_code, 404)
 
     def test_restore_creates_record_and_dispatches_task(self):
@@ -65,9 +71,15 @@ class RestoreEndpointTests(BaseTestCase):
         backup = make_completed_backup(node)
         with mock.patch(
             "apps._tasks.integration.restore.restore_cloud_backup.apply_async"
-        ) as dispatch:
+        ) as dispatch, self.captureOnCommitCallbacks(execute=True):
             resp = self._post(
-                node, {"backup_id": backup.id, "name": "restored", "params": {"size": "s-1vcpu-1gb"}}
+                node,
+                {
+                    "backup_id": backup.id,
+                    "name": "restored",
+                    "params": {"size": "s-1vcpu-1gb"},
+                    "confirm": True,
+                },
             )
         self.assertEqual(resp.status_code, 201)
         dispatch.assert_called_once()
@@ -1076,7 +1088,12 @@ class DatabaseRestoreEngineTests(RestoreBackendBase):
     def _run_engine(self, backup, restore, fake_run):
         with mock.patch.object(CoreAuthDatabase, "check_connection", lambda *a, **k: None), \
              mock.patch.object(RD.subprocess, "run", side_effect=fake_run), \
-             mock.patch.object(RD, "delete_from_disk"):
+             mock.patch.object(RD, "delete_from_disk"), \
+             mock.patch.object(
+                 RD,
+                 "_preflight_database_restore_permissions",
+                 return_value={},
+             ):
             RD.restore_database(backup, restore)
 
     def _db_restore(self, backup, members):
@@ -1285,7 +1302,7 @@ class DatabaseRestoreTaskTests(RestoreBackendBase):
         )
         calls = []
         fake = DatabaseRestoreEngineTests._recorded_run(calls, [
-            (0, b"", b""),
+            (0, b"GRANT CREATE, DROP ON *.* TO 'test'@'%';\n", b""),
             (1, b"", b"import boom"),
         ])
         with mock.patch.object(CoreAuthDatabase, "check_connection", lambda *a, **k: None), \

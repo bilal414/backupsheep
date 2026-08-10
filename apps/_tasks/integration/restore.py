@@ -75,6 +75,15 @@ def _restore_error_outcome(error):
                 "The storage provider rejected the configured restore credentials or permissions.",
                 False,
             )
+        if declared_code == "DATABASE_RESTORE_PERMISSION_DENIED":
+            return (
+                "DATABASE_RESTORE_PERMISSION_DENIED",
+                "The configured database account lacks privileges required for a safe fork restore. "
+                "Grant PostgreSQL CREATEDB or MySQL/MariaDB CREATE and DROP globally "
+                "or with a matching target/database grant, "
+                "or choose an explicit in-place restore target. No target was changed.",
+                False,
+            )
         if declared_code in {"PROVIDER_NOT_FOUND", "STORAGE_DESTINATION_NOT_FOUND"}:
             return (
                 "RESTORE_SOURCE_UNAVAILABLE",

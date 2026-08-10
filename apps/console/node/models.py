@@ -236,7 +236,11 @@ def _prepare_cloud_restore(restore, *, provider, source_id, target_kind, target_
             "provider": str(provider),
             "source_id": str(source_id),
             "target_kind": str(target_kind),
-            "target_name": str(params.get("_bs_provider_name") or target_name or restore.name),
+            # When an adapter has already derived the provider's real target
+            # identifier, preserve it as the reconciliation identity. The
+            # separate provider-name marker remains the cross-provider
+            # idempotency/ownership tag and must not replace an explicit target.
+            "target_name": str(target_name or params.get("_bs_provider_name") or restore.name),
             "marker": marker,
         }
     )
@@ -1678,9 +1682,13 @@ class CoreDigitalOcean(UtilCloud):
                     return
 
                 if target_kind == "s3":
-                    client.head_bucket(Bucket=target_id)
-                    if client.get_bucket_versioning(Bucket=target_id).get("Status") != "Enabled":
-                        raise _RestoreProviderError("PROVIDER_FAILED")
+                    preflight = getattr(self, "_aws_s3_restore_destination_preflight", None)
+                    if callable(preflight):
+                        preflight(client, backup, restore, target_id)
+                    else:
+                        client.head_bucket(Bucket=target_id)
+                        if client.get_bucket_versioning(Bucket=target_id).get("Status") != "Enabled":
+                            raise _RestoreProviderError("PROVIDER_FAILED")
                     restore_metadata = {"DestinationBucketName": target_id}
                     for key in ("EncryptionType", "KMSKey", "ItemsToRestore", "RestoreLatestVersionsUpTo", "RestoreTime"):
                         if key in params and params[key] is not None:
@@ -4000,6 +4008,180 @@ class CoreAWS(UtilCloud):
     _restore_snapshot_aws = CoreDigitalOcean._restore_snapshot_aws
     _check_restore_aws = CoreDigitalOcean._check_restore_aws
 
+    def _aws_s3_restore_source_buckets(self, backup):
+        """Return source bucket identifiers without retaining provider details."""
+        source_buckets = {str(self.unique_id or "").strip()}
+        metadata = backup.metadata if isinstance(backup.metadata, dict) else {}
+        aws_backup = metadata.get("_aws_backup") or {}
+        resource_arn = str(aws_backup.get("resource_arn") or "").strip()
+        if ":s3:::" in resource_arn:
+            source_buckets.add(resource_arn.split(":s3:::", 1)[1].split("/", 1)[0])
+        return {value.casefold() for value in source_buckets if value}
+
+    @staticmethod
+    def _aws_s3_restore_empty_page(response, collections):
+        if not isinstance(response, dict) or response.get("IsTruncated") is not False:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        result = {}
+        for collection in collections:
+            values = response[collection] if collection in response else []
+            if not isinstance(values, list) or any(
+                not isinstance(item, dict) for item in values
+            ):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            result[collection] = values
+        return result
+
+    def _record_aws_s3_restore_preflight(self, restore, *, result, reason=None,
+                                         versioning_status=None):
+        """Persist only safe facts about the S3 destination preflight."""
+        witness = {
+            "schema": 1,
+            "result": str(result),
+            "checked_at": timezone.now().isoformat(),
+        }
+        if reason:
+            witness["reason"] = str(reason)
+        if versioning_status is not None:
+            witness["versioning_status"] = str(versioning_status)
+        if result == "passed":
+            witness.update({
+                "destination_exists": True,
+                "versioning": "Enabled",
+                "empty": True,
+                "current_object_count": 0,
+                "noncurrent_version_count": 0,
+                "delete_marker_count": 0,
+                "multipart_upload_count": 0,
+                "scan_complete": True,
+            })
+        params = _restore_params(restore)
+        params["_bs_s3_restore_preflight"] = witness
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+
+    def _aws_s3_restore_destination_preflight(self, client, backup, restore,
+                                              destination):
+        """Prove a versioned, empty, non-source S3 restore destination."""
+        if destination.casefold() in self._aws_s3_restore_source_buckets(backup):
+            self._record_aws_s3_restore_preflight(
+                restore, result="rejected", reason="source_bucket"
+            )
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+
+        try:
+            head_response = client.head_bucket(Bucket=destination)
+            if not isinstance(head_response, dict):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            versioning_response = client.get_bucket_versioning(Bucket=destination)
+        except _RestoreProviderError:
+            self._record_aws_s3_restore_preflight(
+                restore, result="rejected", reason="malformed_response"
+            )
+            raise
+        except Exception as error:
+            classified = _restore_exception(error, mutation=False)
+            self._record_aws_s3_restore_preflight(
+                restore, result="provider_error", reason=classified.code
+            )
+            raise classified from None
+
+        if not isinstance(versioning_response, dict):
+            self._record_aws_s3_restore_preflight(
+                restore, result="rejected", reason="malformed_response"
+            )
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        versioning_status = versioning_response.get("Status")
+        if not isinstance(versioning_status, (str, type(None))) or versioning_status not in {
+            None,
+            "Enabled",
+            "Suspended",
+        }:
+            self._record_aws_s3_restore_preflight(
+                restore, result="rejected", reason="malformed_response"
+            )
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if versioning_status != "Enabled":
+            reason = (
+                "versioning_suspended"
+                if versioning_status == "Suspended"
+                else "versioning_unenabled"
+            )
+            self._record_aws_s3_restore_preflight(
+                restore,
+                result="rejected",
+                reason=reason,
+                versioning_status=versioning_status or "Unversioned",
+            )
+            raise _RestoreProviderError("PROVIDER_FAILED")
+
+        checks = (
+            ("list_objects_v2", {"Bucket": destination, "MaxKeys": 1}, ("Contents",)),
+            (
+                "list_object_versions",
+                {"Bucket": destination, "MaxKeys": 1},
+                ("Versions", "DeleteMarkers"),
+            ),
+            (
+                "list_multipart_uploads",
+                {"Bucket": destination, "MaxUploads": 1},
+                ("Uploads",),
+            ),
+        )
+        for method_name, request, collections in checks:
+            try:
+                response = getattr(client, method_name)(**request)
+                page = self._aws_s3_restore_empty_page(response, collections)
+            except _RestoreProviderError:
+                self._record_aws_s3_restore_preflight(
+                    restore, result="rejected", reason="malformed_response"
+                )
+                raise
+            except Exception as error:
+                classified = _restore_exception(error, mutation=False)
+                self._record_aws_s3_restore_preflight(
+                    restore, result="provider_error", reason=classified.code
+                )
+                raise classified from None
+
+            if method_name == "list_objects_v2" and page["Contents"]:
+                self._record_aws_s3_restore_preflight(
+                    restore, result="rejected", reason="current_objects"
+                )
+                raise _RestoreProviderError("PROVIDER_FAILED")
+            if method_name == "list_object_versions":
+                versions = page["Versions"]
+                if versions:
+                    if any(
+                        not isinstance(version.get("IsLatest"), bool)
+                        for version in versions
+                    ):
+                        self._record_aws_s3_restore_preflight(
+                            restore, result="rejected", reason="malformed_response"
+                        )
+                        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                    reason = (
+                        "current_objects"
+                        if any(version["IsLatest"] for version in versions)
+                        else "noncurrent_versions"
+                    )
+                    self._record_aws_s3_restore_preflight(
+                        restore, result="rejected", reason=reason
+                    )
+                    raise _RestoreProviderError("PROVIDER_FAILED")
+                if page["DeleteMarkers"]:
+                    self._record_aws_s3_restore_preflight(
+                        restore, result="rejected", reason="delete_markers"
+                    )
+                    raise _RestoreProviderError("PROVIDER_FAILED")
+            if method_name == "list_multipart_uploads" and page["Uploads"]:
+                self._record_aws_s3_restore_preflight(
+                    restore, result="rejected", reason="multipart_uploads"
+                )
+                raise _RestoreProviderError("PROVIDER_FAILED")
+
+        self._record_aws_s3_restore_preflight(restore, result="passed")
+
     def restore_snapshot(self, backup, restore):
         return self._restore_snapshot_aws(backup, restore)
         auth = self.node.connection.auth_aws
@@ -4955,6 +5137,14 @@ class CoreAWSRDS(UtilCloud):
         values = set(tags) | set(tags.values())
         return not tags and str(marker) not in values
 
+    @staticmethod
+    def _restore_rds_tags_owned(instance, marker, source_id):
+        tags = _restore_tags(instance.get("TagList") or [])
+        return (
+            tags.get("BackupSheepRestore") == str(marker)
+            and tags.get("BackupSheepSource") == str(source_id)
+        )
+
     def _restore_snapshot_rds(self, backup, restore):
         client = self.node.connection.auth_aws_rds.get_client()
         identifier = self._restore_identifier(restore)
@@ -4999,12 +5189,8 @@ class CoreAWSRDS(UtilCloud):
                         ),
                         mutation=False,
                     )
-                if not _restore_verify_target(
-                    restore,
-                    existing,
-                    source_id=backup.unique_id,
-                    marker=marker,
-                    source_keys=("DBSnapshotIdentifier",),
+                if not self._restore_rds_tags_owned(
+                    existing, marker, backup.unique_id
                 ):
                     return _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
                 if _restore_unknown(restore):
@@ -5042,15 +5228,19 @@ class CoreAWSRDS(UtilCloud):
                 return _restore_status("IN_PROGRESS")
             if (
                 str(created.get("DBInstanceIdentifier") or "") != identifier
-                or str(created.get("DBSnapshotIdentifier") or "")
-                != str(backup.unique_id)
             ):
                 return _restore_safe_failure(
                     restore,
                     "PROVIDER_OWNERSHIP_MISMATCH",
                     manual_review=True,
                 )
-            if "TagList" in created and not _restore_marker_matches(created, marker):
+            # RDS commonly omits DBSnapshotIdentifier and returns an empty
+            # TagList in the immediate create response even when it accepted the
+            # requested tags. Persist the exact resource id, then require both
+            # ownership tags on every reconciliation/poll before completion.
+            if created.get("TagList") and not self._restore_rds_tags_owned(
+                created, marker, backup.unique_id
+            ):
                 return _restore_safe_failure(
                     restore,
                     "PROVIDER_OWNERSHIP_MISMATCH",
@@ -5087,12 +5277,17 @@ class CoreAWSRDS(UtilCloud):
                     mutation=False,
                     raise_terminal=False,
                 )
-            if not _restore_verify_target(
-                restore,
-                instance,
-                source_id=(_restore_params(restore).get("_backupsheep_restore") or {}).get("source_id"),
-                marker=marker,
-                source_keys=("DBSnapshotIdentifier",),
+            source_id = (
+                _restore_params(restore).get("_backupsheep_restore") or {}
+            ).get("source_id")
+            if not self._restore_rds_tags_owned(instance, marker, source_id):
+                return _restore_safe_failure(
+                    restore,
+                    "PROVIDER_OWNERSHIP_MISMATCH",
+                    manual_review=True,
+                )
+            if str(instance.get("DBInstanceIdentifier") or "") != str(
+                restore.resource_id
             ):
                 return _restore_status("FAILED")
             status = instance.get("DBInstanceStatus")

@@ -610,6 +610,67 @@ class UtilBackup(TimeStampedModel):
             )
             return state
 
+    def finalize_execution(self, *, terminal_phase, now=None):
+        """Atomically close the durable execution ledger for a terminal backup.
+
+        Local website, database, and SaaS backups have a concrete backup status and
+        a shared execution ledger.  The status decision and this ledger transition
+        must commit together; otherwise a successful upload can be rendered as an
+        in-progress execution after a worker restart.  Clearing the lease also fences
+        a stale source worker before it can persist another phase or progress update.
+
+        A duplicate finalizer is intentionally a no-op once ``finished_at`` is set:
+        it preserves the original terminal timestamp and phase while still clearing
+        any leftover lease fields from legacy rows.
+        """
+        if self.pk is None:
+            raise ValueError("A backup must be saved before execution is finalized.")
+        terminal_phase = str(terminal_phase or "").strip().lower()
+        if terminal_phase not in {"complete", "failed", "cancelled"}:
+            raise ValueError("terminal_phase must be complete, failed, or cancelled.")
+        now = now or timezone.now()
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(backup)
+            update_fields = []
+
+            if state.finished_at is None:
+                state.phase = terminal_phase
+                state.finished_at = now
+                update_fields.extend(["phase", "finished_at"])
+
+            # A terminal decision is the fence boundary.  A worker that was paused
+            # or resumed after this commit must not be able to heartbeat, release, or
+            # save using the old execution token.
+            if state.lease_owner:
+                state.lease_owner = ""
+                update_fields.append("lease_owner")
+            if state.lease_token is not None:
+                state.lease_token = None
+                update_fields.append("lease_token")
+            if state.lease_expires_at is not None:
+                state.lease_expires_at = None
+                update_fields.append("lease_expires_at")
+            if state.next_retry_at is not None:
+                state.next_retry_at = None
+                update_fields.append("next_retry_at")
+
+            # Required/in-progress reconciliation is no longer actionable once all
+            # local storage points have reached a terminal outcome. Preserve manual
+            # review, which is an explicit operator decision rather than a worker
+            # lease condition.
+            if state.reconciliation_state in {
+                state.ReconciliationState.REQUIRED,
+                state.ReconciliationState.IN_PROGRESS,
+            }:
+                state.reconciliation_state = state.ReconciliationState.RESOLVED
+                state.reconciliation_reason = "backup_finalized"
+                update_fields.extend(["reconciliation_state", "reconciliation_reason"])
+
+            if update_fields:
+                state.save(update_fields=list(dict.fromkeys(update_fields + ["modified"])))
+            return state
+
     def record_execution_error(
         self,
         *,

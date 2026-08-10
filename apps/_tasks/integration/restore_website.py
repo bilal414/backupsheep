@@ -37,6 +37,7 @@ from apps._tasks.integration.backup.website import (
     _lftp_quote,
     _materialize_ssh_private_key,
     _normalize_ssh_key,
+    _redact,
 )
 from apps._tasks.integration.restore_common import (
     RestoreError,
@@ -133,9 +134,12 @@ def _run_lftp(
     password,
     *,
     what,
+    enforce_fence=True,
+    check_result=True,
 ):
     """Run lftp with credentials on stdin and only safe failure details."""
-    _ensure_restore_fence(restore)
+    if enforce_fence:
+        _ensure_restore_fence(restore)
     try:
         proc = subprocess.run(
             ["lftp"],
@@ -158,7 +162,8 @@ def _run_lftp(
 
     # A process may have completed a remote action just before losing its
     # lease.  Do not commit the result or continue to another action then.
-    _ensure_restore_fence(restore)
+    if enforce_fence:
+        _ensure_restore_fence(restore)
     output = str(proc.stdout or "")
     # lftp normally preserves a failed transfer's exit status, but some login
     # failures have historically exited zero after a trailing ``bye``. Treat only
@@ -168,10 +173,264 @@ def _run_lftp(
         r"(?im)(?:^|\s)(?:login failed|authentication failed|fatal error(?:\s*:|\b))",
         output,
     )
-    if proc.returncode != 0 or fatal_output:
+    if check_result and (proc.returncode != 0 or fatal_output):
         _capture_safe("LFTP_REJECTED")
         raise _safe_failure(node, backup, "LFTP_REJECTED") from None
     return proc
+
+
+def _safe_remote_parent(parent, username="", password=""):
+    """Return a bounded, credential-redacted remote path for diagnostics."""
+    value = str(parent or ".").replace("\r", "").replace("\n", "")
+    value = _redact(value, username, password)
+    return value[:200]
+
+
+def _website_restore_target_rejected(
+    node, backup, parent, username, password, *, reason="write/create/rename"
+):
+    """Build an actionable terminal target rejection without exposing secrets."""
+    safe_parent = _safe_remote_parent(parent, username, password)
+    message = (
+        "Permission denied: the configured SSH user cannot "
+        f"{reason} the website restore staging probe in remote parent "
+        f"{safe_parent}. Grant that user create/write/rename/delete permission "
+        "on the parent, then retry the restore."
+    )
+    _write_log(
+        backup,
+        "Website restore stopped: WEBSITE_TARGET_PERMISSION_DENIED; "
+        f"{message}\n",
+    )
+    failure = NodeBackupFailedError(
+        node,
+        backup.uuid_str,
+        getattr(backup, "attempt_no", 0),
+        getattr(backup, "type", "website"),
+        message=message,
+    )
+    # NodeBackupFailedError is the existing restore-task target rejection
+    # contract. Override its generic backup classification for direct callers
+    # and diagnostics as well; the restore task still classifies by type.
+    failure.error_code = "RESTORE_TARGET_REJECTED"
+    failure.retryable = False
+    failure.public_message = (
+        "The restore target rejected the website staging permission preflight. "
+        "Grant the configured SSH user write access to the remote parent and retry."
+    )
+    return failure
+
+
+def _website_restore_preflight_error(backup, code, *, retryable=True):
+    """Return a safe structured error for an unconfirmed remote preflight."""
+    if code == "PROVIDER_TIMEOUT":
+        message = (
+            "The restore target permission preflight timed out; no website data "
+            "was uploaded or published. The restore will resume safely."
+        )
+    elif code == "PROVIDER_AUTH_FAILED":
+        message = (
+            "The SSH/SFTP connection rejected the configured restore credentials; "
+            "no website data was uploaded or published."
+        )
+        retryable = False
+    else:
+        code = "PROVIDER_TRANSIENT_FAILURE"
+        message = (
+            "The restore target permission preflight could not confirm the remote "
+            "staging parent; no website data was uploaded or published. The restore "
+            "will resume safely."
+        )
+    error = RestoreError(message)
+    error.code = code
+    error.retryable = bool(retryable)
+    _write_log(backup, f"Website restore stopped: {code}; {message}\n")
+    return error
+
+
+def _website_restore_cleanup_error(backup, code="PROVIDER_TRANSIENT_FAILURE"):
+    """Return a safe retryable error for cleanup that was not confirmed."""
+    if code == "PROVIDER_AUTH_FAILED":
+        message = (
+            "The SSH/SFTP connection rejected the configured restore credentials "
+            "while cleaning website restore data. The restore will not publish "
+            "again."
+        )
+        retryable = False
+    else:
+        code = "PROVIDER_TRANSIENT_FAILURE"
+        message = (
+            "Website restore cleanup could not be confirmed; the restore will "
+            "retry cleanup safely without publishing the website again."
+        )
+        retryable = True
+    error = RestoreError(message)
+    error.code = code
+    error.retryable = retryable
+    _write_log(backup, f"Website restore cleanup pending: {code}.\n")
+    return error
+
+
+def _website_restore_cleanup_ownership_error(backup, *, proof=False):
+    """Return a terminal safe error when exact restore ownership is unproven."""
+    if proof:
+        message = (
+            "Website restore cleanup could not prove the newly published target "
+            "and restore marker; the previous target was retained. Manual review "
+            "is required."
+        )
+    else:
+        message = (
+            "Website restore cleanup refused an unowned or non-deterministic path; "
+            "the previous target was retained. Manual review is required."
+        )
+    error = RestoreError(message)
+    error.code = "PROVIDER_OWNERSHIP_MISMATCH"
+    error.retryable = False
+    _write_log(backup, "Website restore cleanup stopped: PROVIDER_OWNERSHIP_MISMATCH.\n")
+    return error
+
+
+def _probe_output_is_permission_denial(output):
+    """Identify target permission failures, excluding SSH authentication errors."""
+    value = str(output or "").lower()
+    if any(
+        marker in value
+        for marker in (
+            "permission denied (publickey)",
+            "publickey",
+            "login failed",
+            "authentication failed",
+            "host key verification failed",
+        )
+    ):
+        return False
+    return bool(
+        re.search(
+            r"permission denied|access denied|operation not permitted",
+            value,
+        )
+    )
+
+
+def _probe_output_is_auth_failure(output):
+    value = str(output or "").lower()
+    return any(
+        marker in value
+        for marker in (
+            "permission denied (publickey)",
+            "publickey",
+            "login failed",
+            "authentication failed",
+            "host key verification failed",
+        )
+    )
+
+
+def _probe_output_is_target_rejection(output):
+    """Identify a remote target that cannot support the staged restore plan."""
+    value = str(output or "").lower()
+    if _probe_output_is_auth_failure(value):
+        return False
+    return _probe_output_is_permission_denial(value) or bool(
+        re.search(
+            r"no such file or directory|not a directory|cannot create|file exists",
+            value,
+        )
+    )
+
+
+def _probe_output_is_transport_failure(output):
+    value = str(output or "").lower()
+    return bool(
+        re.search(
+            r"connection reset|connection closed|connection refused|"
+            r"network is unreachable|no route to host|broken pipe|"
+            r"timed out|timeout|could not connect|couldn't connect|"
+            r"failed to connect|server unexpectedly closed|not connected|"
+            r"temporary failure in name resolution|name or service not known|"
+            r"could not resolve|host not found",
+            value,
+        )
+    )
+
+
+def _remote_output_is_not_found(output):
+    value = str(output or "").lower()
+    return bool(
+        re.search(
+            r"no such file|file not found|not found|does not exist|cannot find",
+            value,
+        )
+    )
+
+
+def _run_restore_target_probe(
+    node,
+    backup,
+    restore,
+    auth,
+    script,
+    username,
+    password,
+    parent,
+):
+    """Run the same lftp/OpenSSH path used for transfers and classify safely."""
+    _ensure_restore_fence(restore)
+    try:
+        proc = subprocess.run(
+            ["lftp"],
+            input=script,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=COMMAND_TIMEOUT,
+            text=True,
+            errors="ignore",
+        )
+    except subprocess.TimeoutExpired:
+        _capture_safe("WEBSITE_TARGET_PREFLIGHT_TIMEOUT")
+        raise _website_restore_preflight_error(
+            backup, "PROVIDER_TIMEOUT", retryable=True
+        ) from None
+    except FileNotFoundError:
+        _capture_safe("WEBSITE_TARGET_PREFLIGHT_UNAVAILABLE")
+        raise _website_restore_preflight_error(
+            backup, "PROVIDER_TRANSIENT_FAILURE", retryable=True
+        ) from None
+    except OSError:
+        _capture_safe("WEBSITE_TARGET_PREFLIGHT_UNAVAILABLE")
+        raise _website_restore_preflight_error(
+            backup, "PROVIDER_TRANSIENT_FAILURE", retryable=True
+        ) from None
+
+    # A probe may have completed remotely immediately before the lease was
+    # lost. Never continue to archive transfer or publication afterward.
+    _ensure_restore_fence(restore)
+    output = str(proc.stdout or "")
+    fatal_output = re.search(
+        r"(?im)(?:^|\s)(?:login failed|authentication failed|fatal error(?:\s*:|\b))",
+        output,
+    )
+    if _probe_output_is_target_rejection(output):
+        _capture_safe("WEBSITE_TARGET_PERMISSION_DENIED")
+        raise _website_restore_target_rejected(
+            node,
+            backup,
+            parent,
+            username,
+            password,
+        ) from None
+    if _probe_output_is_auth_failure(output):
+        _capture_safe("WEBSITE_TARGET_AUTH_FAILED")
+        raise _website_restore_preflight_error(
+            backup, "PROVIDER_AUTH_FAILED", retryable=False
+        ) from None
+    if proc.returncode == 0 and not fatal_output and not _probe_output_is_transport_failure(output):
+        return proc
+    _capture_safe("WEBSITE_TARGET_PREFLIGHT_UNCERTAIN")
+    raise _website_restore_preflight_error(
+        backup, "PROVIDER_TRANSIENT_FAILURE", retryable=True
+    ) from None
 
 
 def _validate_remote_path(path):
@@ -329,6 +588,233 @@ def _remote_stage_paths(restore, record):
     }
 
 
+def _remote_restore_parent(path):
+    """Return the existing parent required by the staged publish plan."""
+    target = posixpath.normpath(path)
+    if target in {".", "/"}:
+        return None
+    return posixpath.dirname(target) or "."
+
+
+def _remote_probe_paths(restore, backup, source):
+    """Build restore-scoped probe paths without using the final target path."""
+    parent = _remote_restore_parent(source["path"])
+    if parent is None:
+        return None
+    restore_scope = hashlib.sha256(
+        f"{getattr(restore, 'correlation_id', '')}|{backup.uuid}".encode("utf-8")
+    ).hexdigest()[:16]
+    source_scope = hashlib.sha256(
+        f"{source['type']}|{posixpath.normpath(source['path'])}".encode("utf-8")
+    ).hexdigest()[:16]
+    name = f".backupsheep_restore_probe_{restore_scope}_{source_scope}"
+    root = posixpath.join(parent, name)
+    return {
+        "parent": parent,
+        "root": root,
+        "payload": posixpath.join(root, "payload"),
+        "renamed": posixpath.join(parent, f"{name}_renamed"),
+    }
+
+
+def _write_restore_probe_file():
+    """Create a tiny owner-only local payload for the SFTP probe."""
+    descriptor, path = tempfile.mkstemp(
+        prefix="website_restore_probe_", suffix=".bin", dir="_storage"
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = None
+            output.write(b"BackupSheep restore target preflight\n")
+            output.flush()
+            os.fsync(output.fileno())
+        return path
+    except Exception:
+        try:
+            if descriptor is not None:
+                os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise
+
+
+def _cleanup_restore_target_probe(
+    node,
+    backup,
+    restore,
+    auth,
+    username,
+    password,
+    ssh_key_path,
+    host_url,
+    parallel,
+    probe,
+):
+    """Best-effort cleanup of only the exact restore-owned probe paths.
+
+    Cleanup is allowed after fence loss because these names are derived solely
+    from this restore and source, never from user-controlled final targets.
+    It can therefore remove a stale probe left by a crashed worker without
+    granting a stale worker permission to publish or delete website data.
+    """
+    if not probe:
+        return True
+    try:
+        _run_lftp(
+            node,
+            backup,
+            restore,
+            auth,
+            _build_lftp_script(
+                auth=auth,
+                host_url=host_url,
+                port=auth.port,
+                username=username,
+                password=password,
+                ssh_key_path=ssh_key_path,
+                parallel=parallel,
+                transfer="\n".join(
+                    [
+                        "set cmd:fail-exit no",
+                        f"rm -r {_lftp_quote(probe['renamed'])}",
+                        f"rm -r {_lftp_quote(probe['root'])}",
+                    ]
+                ),
+                mirror=False,
+            ),
+            username,
+            password,
+            what="clean website restore permission probe",
+            enforce_fence=False,
+        )
+        return True
+    except Exception:
+        _capture_safe("WEBSITE_TARGET_PROBE_CLEANUP_FAILED")
+        return False
+
+
+def _preflight_restore_target(
+    node,
+    backup,
+    restore,
+    auth,
+    website,
+    sources,
+    host_url,
+    username,
+    password,
+    ssh_key_path,
+):
+    """Verify every non-root SFTP restore parent before archive download.
+
+    The probe creates a tiny staging directory, writes one tiny payload, moves
+    that payload to a sibling, and then removes both paths. It never addresses
+    the configured final target. A transport loss is retryable but no upload or
+    publication is attempted by this call.
+    """
+    if auth.protocol != CoreAuthWebsite.Protocol.SFTP:
+        return
+    probes = []
+    for source in sources:
+        probe = _remote_probe_paths(restore, backup, source)
+        if probe is not None:
+            probes.append((source, probe))
+    if not probes:
+        return
+
+    local_probe = _write_restore_probe_file()
+    parallel = website.parallel or 3
+    try:
+        for source, probe in probes:
+            primary_error = None
+            try:
+                _ensure_restore_fence(restore)
+                # A hard worker crash can leave the exact probe behind. It is
+                # restore-scoped and therefore safe to remove before creating
+                # the next probe attempt; this keeps redelivery convergent.
+                if not _cleanup_restore_target_probe(
+                    node,
+                    backup,
+                    restore,
+                    auth,
+                    username,
+                    password,
+                    ssh_key_path,
+                    host_url,
+                    parallel,
+                    probe,
+                ):
+                    raise _website_restore_preflight_error(
+                        backup, "PROVIDER_TRANSIENT_FAILURE", retryable=True
+                    )
+                if source["type"] == "file":
+                    payload_command = (
+                        f"put -P {_lftp_quote(local_probe)} "
+                        f"-o {_lftp_quote(probe['payload'])}"
+                    )
+                else:
+                    payload_command = f"mkdir {_lftp_quote(probe['payload'])}"
+                script = _build_lftp_script(
+                    auth=auth,
+                    host_url=host_url,
+                    port=auth.port,
+                    username=username,
+                    password=password,
+                    ssh_key_path=ssh_key_path,
+                    parallel=parallel,
+                    transfer="\n".join(
+                        [
+                            f"mkdir {_lftp_quote(probe['root'])}",
+                            payload_command,
+                            f"mv {_lftp_quote(probe['payload'])} "
+                            f"{_lftp_quote(probe['renamed'])}",
+                            f"cls -1 {_lftp_quote(probe['renamed'])}",
+                        ]
+                    ),
+                    mirror=False,
+                )
+                _run_restore_target_probe(
+                    node,
+                    backup,
+                    restore,
+                    auth,
+                    script,
+                    username,
+                    password,
+                    probe["parent"],
+                )
+            except Exception as error:
+                primary_error = error
+            cleaned = _cleanup_restore_target_probe(
+                node,
+                backup,
+                restore,
+                auth,
+                username,
+                password,
+                ssh_key_path,
+                host_url,
+                parallel,
+                probe,
+            )
+            if primary_error is not None:
+                raise primary_error
+            if not cleaned:
+                raise _website_restore_preflight_error(
+                    backup, "PROVIDER_TRANSIENT_FAILURE", retryable=True
+                )
+    finally:
+        try:
+            os.remove(local_probe)
+        except OSError:
+            pass
+
+
 def _write_stage_marker(backup, restore, record):
     descriptor, path = tempfile.mkstemp(
         prefix="website_restore_marker_", suffix=".json", dir="_storage"
@@ -379,7 +865,8 @@ def _checkpoint(restore, *, phase, manifest, records=None, progress_total=None):
         "transferring": 1,
         "staged": 2,
         "publishing": 3,
-        "complete": 4,
+        "cleanup_pending": 4,
+        "complete": 5,
     }
     file_order = {
         "pending": 0,
@@ -479,6 +966,198 @@ def _record_state(restore, record):
     )
 
 
+def _expected_restore_stage(restore, record):
+    stage = _remote_stage_paths(restore, record)
+    if stage is None:
+        return None
+    return {**stage, "target_path": record["path"]}
+
+
+def _require_exact_restore_stage(backup, restore, record, stage):
+    """Refuse cleanup unless every remote path is this restore's exact plan."""
+    expected = _expected_restore_stage(restore, record)
+    if expected is None or not isinstance(stage, dict):
+        raise _website_restore_cleanup_ownership_error(backup)
+    for name, value in expected.items():
+        if stage.get(name) != value:
+            raise _website_restore_cleanup_ownership_error(backup)
+    return expected
+
+
+def _run_observed_lftp(
+    node,
+    backup,
+    restore,
+    auth,
+    script,
+    username,
+    password,
+    *,
+    what,
+):
+    """Run a read/cleanup command while preserving its safe result for parsing."""
+    try:
+        return _run_lftp(
+            node,
+            backup,
+            restore,
+            auth,
+            script,
+            username,
+            password,
+            what=what,
+            check_result=False,
+        )
+    except (RestoreLeaseLost, RestoreExecutionLeaseLostError):
+        raise
+    except Exception:
+        _capture_safe("WEBSITE_RESTORE_CLEANUP_UNCERTAIN")
+        raise _website_restore_cleanup_error(backup) from None
+
+
+def _verify_published_target(
+    node,
+    backup,
+    restore,
+    auth,
+    username,
+    password,
+    ssh_key_path,
+    host_url,
+    parallel,
+    record,
+    stage,
+):
+    """Prove both the published target and this restore's marker exist."""
+    expected = _require_exact_restore_stage(backup, restore, record, stage)
+    script = _build_lftp_script(
+        auth=auth,
+        host_url=host_url,
+        port=auth.port,
+        username=username,
+        password=password,
+        ssh_key_path=ssh_key_path,
+        parallel=parallel,
+        transfer="\n".join(
+            [
+                "set cmd:fail-exit yes",
+                f"cls -1 {_lftp_quote(expected['target_path'])}",
+                f"cls -1 {_lftp_quote(expected['marker'])}",
+            ]
+        ),
+        mirror=False,
+    )
+    proc = _run_observed_lftp(
+        node,
+        backup,
+        restore,
+        auth,
+        script,
+        username,
+        password,
+        what="verify published website target",
+    )
+    output = str(getattr(proc, "stdout", "") or "")
+    if (
+        getattr(proc, "returncode", 1) == 0
+        and not _remote_output_is_not_found(output)
+        and not _probe_output_is_transport_failure(output)
+    ):
+        return True
+    if _probe_output_is_auth_failure(output):
+        raise _website_restore_cleanup_error(backup, "PROVIDER_AUTH_FAILED")
+    if (
+        _remote_output_is_not_found(output)
+        or _probe_output_is_permission_denial(output)
+    ):
+        raise _website_restore_cleanup_ownership_error(backup, proof=True)
+    raise _website_restore_cleanup_error(backup)
+
+
+def _cleanup_exact_remote_path(
+    node,
+    backup,
+    restore,
+    auth,
+    username,
+    password,
+    ssh_key_path,
+    host_url,
+    parallel,
+    path,
+    *,
+    what,
+):
+    """Delete one already-validated path; remote absence is idempotent success."""
+    script = _build_lftp_script(
+        auth=auth,
+        host_url=host_url,
+        port=auth.port,
+        username=username,
+        password=password,
+        ssh_key_path=ssh_key_path,
+        parallel=parallel,
+        transfer="\n".join(
+            [
+                "set cmd:fail-exit no",
+                f"rm -r {_lftp_quote(path)}",
+            ]
+        ),
+        mirror=False,
+    )
+    proc = _run_observed_lftp(
+        node,
+        backup,
+        restore,
+        auth,
+        script,
+        username,
+        password,
+        what=what,
+    )
+    output = str(getattr(proc, "stdout", "") or "")
+    if _probe_output_is_auth_failure(output):
+        raise _website_restore_cleanup_error(backup, "PROVIDER_AUTH_FAILED")
+    if _probe_output_is_permission_denial(output):
+        raise _website_restore_cleanup_ownership_error(backup)
+    if _probe_output_is_transport_failure(output):
+        raise _website_restore_cleanup_error(backup)
+    if _remote_output_is_not_found(output):
+        return True
+    if getattr(proc, "returncode", 1) != 0:
+        raise _website_restore_cleanup_error(backup)
+    return True
+
+
+def _cleanup_previous_target(
+    node,
+    backup,
+    restore,
+    auth,
+    username,
+    password,
+    ssh_key_path,
+    host_url,
+    parallel,
+    record,
+    stage,
+):
+    expected = _require_exact_restore_stage(backup, restore, record, stage)
+    return _cleanup_exact_remote_path(
+        node,
+        backup,
+        restore,
+        auth,
+        username,
+        password,
+        ssh_key_path,
+        host_url,
+        parallel,
+        expected["old"],
+        what="remove previous website target",
+    )
+
+
 def _publish_script(auth, host_url, port, username, password, ssh_key_path, parallel, stage):
     # The first mv is intentionally non-fatal because the target may not exist.
     # The second mv and final listing are fatal.  If the publish process dies
@@ -491,6 +1170,7 @@ def _publish_script(auth, host_url, port, username, password, ssh_key_path, para
             "set cmd:fail-exit yes",
             f"mv {_lftp_quote(stage['payload'])} {_lftp_quote(stage['target_path'])}",
             f"cls -1 {_lftp_quote(stage['target_path'])}",
+            f"cls -1 {_lftp_quote(stage['marker'])}",
         ]
     )
     return _build_lftp_script(
@@ -511,32 +1191,158 @@ def _cleanup_remote_stage(
 ):
     """Remove only the exact stage directory created for this restore source."""
     if not stage:
-        return
+        return True
     try:
-        _run_lftp(
+        return _cleanup_exact_remote_path(
             node,
             backup,
             restore,
             auth,
-            _build_lftp_script(
-                auth=auth,
-                host_url=host_url,
-                port=auth.port,
-                username=username,
-                password=password,
-                ssh_key_path=ssh_key_path,
-                parallel=parallel,
-                transfer=f"rm -r {_lftp_quote(stage['stage_root'])}",
-                mirror=False,
-            ),
             username,
             password,
+            ssh_key_path,
+            host_url,
+            parallel,
+            stage["stage_root"],
             what="clean restore staging",
         )
     except (RestoreLeaseLost, RestoreExecutionLeaseLostError):
         raise
+    except RestoreError:
+        _capture_safe("REMOTE_STAGE_CLEANUP_FAILED")
+        raise
     except Exception:
         _capture_safe("REMOTE_STAGE_CLEANUP_FAILED")
+        return False
+
+
+def _restore_published_source_cleanup(
+    node,
+    backup,
+    restore,
+    auth,
+    record,
+    website,
+    host_url,
+    username,
+    password,
+    ssh_key_path,
+    stage,
+    state,
+):
+    """Prove publication, remove the old target, then remove staging durably."""
+    expected = _require_exact_restore_stage(backup, restore, record, stage)
+    cleanup = dict(state.get("cleanup") or {})
+    previous_status = str(cleanup.get("previous_target") or "pending")
+    staging_status = str(cleanup.get("staging") or "pending")
+    if previous_status not in {"pending", "complete"} or staging_status not in {
+        "pending",
+        "complete",
+    }:
+        raise _website_restore_cleanup_ownership_error(backup)
+
+    parallel = website.parallel or 3
+    if previous_status != "complete":
+        # Persist this before any delete. A worker crash or lost response now
+        # redelivers into cleanup-only recovery instead of terminal complete.
+        pending_status = (
+            "complete" if str(state.get("status")) == "complete" else "cleanup_pending"
+        )
+        pending = _state_for(
+            record,
+            pending_status,
+            files_status="complete",
+            stage=expected,
+        )
+        pending["cleanup"] = {
+            "previous_target": "pending",
+            "staging": staging_status,
+        }
+        _checkpoint(
+            restore,
+            phase="website_cleanup_pending",
+            manifest=_metadata(restore).get("source_manifest") or {},
+            records=[{**record, "state": pending}],
+            progress_total=int(getattr(restore, "progress_total", 1) or 1),
+        )
+        _verify_published_target(
+            node,
+            backup,
+            restore,
+            auth,
+            username,
+            password,
+            ssh_key_path,
+            host_url,
+            parallel,
+            record,
+            expected,
+        )
+        _cleanup_previous_target(
+            node,
+            backup,
+            restore,
+            auth,
+            username,
+            password,
+            ssh_key_path,
+            host_url,
+            parallel,
+            record,
+            expected,
+        )
+        previous_status = "complete"
+        progressed = _state_for(
+            record,
+            "complete" if str(state.get("status")) == "complete" else "cleanup_pending",
+            files_status="complete",
+            stage=expected,
+        )
+        progressed["cleanup"] = {
+            "previous_target": previous_status,
+            "staging": staging_status,
+        }
+        _checkpoint(
+            restore,
+            phase="website_cleanup_pending",
+            manifest=_metadata(restore).get("source_manifest") or {},
+            records=[{**record, "state": progressed}],
+            progress_total=int(getattr(restore, "progress_total", 1) or 1),
+        )
+
+    if staging_status != "complete":
+        if not _cleanup_remote_stage(
+            node,
+            backup,
+            restore,
+            auth,
+            username,
+            password,
+            ssh_key_path,
+            host_url,
+            parallel,
+            expected,
+        ):
+            raise _website_restore_cleanup_error(backup)
+        staging_status = "complete"
+
+    complete = _state_for(
+        record,
+        "complete",
+        files_status="complete",
+        stage=expected,
+    )
+    complete["cleanup"] = {
+        "previous_target": previous_status,
+        "staging": staging_status,
+    }
+    _checkpoint(
+        restore,
+        phase="website_complete",
+        manifest=_metadata(restore).get("source_manifest") or {},
+        records=[{**record, "state": complete}],
+        progress_total=int(getattr(restore, "progress_total", 1) or 1),
+    )
 
 
 def _legacy_restore_source(
@@ -646,7 +1452,7 @@ def _staged_restore_source(
     password,
     ssh_key_path,
 ):
-    stage = _remote_stage_paths(restore, record)
+    stage = _expected_restore_stage(restore, record)
     if stage is None:
         return _legacy_restore_source(
             node,
@@ -663,7 +1469,40 @@ def _staged_restore_source(
     state = _record_state(restore, record)
     status = str(state.get("status") or "pending")
     if status == "complete":
-        return
+        cleanup = dict(state.get("cleanup") or {})
+        if cleanup.get("previous_target") == "complete" and cleanup.get(
+            "staging"
+        ) == "complete":
+            return
+        return _restore_published_source_cleanup(
+            node,
+            backup,
+            restore,
+            auth,
+            record,
+            website,
+            host_url,
+            username,
+            password,
+            ssh_key_path,
+            stage,
+            state,
+        )
+    if status == "cleanup_pending":
+        return _restore_published_source_cleanup(
+            node,
+            backup,
+            restore,
+            auth,
+            record,
+            website,
+            host_url,
+            username,
+            password,
+            ssh_key_path,
+            stage,
+            state,
+        )
     if status == "publishing":
         raise RestoreError(
             "website publish outcome is ambiguous; manual review is required."
@@ -672,7 +1511,6 @@ def _staged_restore_source(
         raise RestoreError(
             "website staging checkpoint is not safely adoptable; manual review is required."
         )
-    stage = {**stage, "target_path": record["path"]}
     stage_state = _state_for(
         record,
         "staged" if status == "staged" else "staging",
@@ -793,34 +1631,36 @@ def _staged_restore_source(
         password,
         what="publish website files",
     )
+    cleanup_pending = _state_for(
+        record,
+        "cleanup_pending",
+        files_status="complete",
+        stage=stage,
+    )
+    cleanup_pending["cleanup"] = {
+        "previous_target": "pending",
+        "staging": "pending",
+    }
     _checkpoint(
         restore,
-        phase="website_complete",
+        phase="website_cleanup_pending",
         manifest=_metadata(restore)["source_manifest"],
-        records=[
-            {
-                **record,
-                "state": _state_for(
-                    record, "complete", files_status="complete", stage=stage
-                ),
-            }
-        ],
+        records=[{**record, "state": cleanup_pending}],
         progress_total=int(getattr(restore, "progress_total", 1) or 1),
     )
-    # This is after the durable complete checkpoint.  The stage name is fully
-    # restore/fingerprint scoped; the previous target is intentionally retained
-    # for rollback and is never deleted by automatic cleanup.
-    _cleanup_remote_stage(
+    _restore_published_source_cleanup(
         node,
         backup,
         restore,
         auth,
+        record,
+        website,
+        host_url,
         username,
         password,
         ssh_key_path,
-        host_url,
-        parallel,
         stage,
+        cleanup_pending,
     )
 
 
@@ -852,15 +1692,7 @@ def restore_website(backup, restore):
             raise RestoreError(
                 "the storage point this restore was created from no longer exists."
             )
-        _ensure_restore_fence(restore)
-        fetch_backup_zip(stored_backup, local_zip)
-        _ensure_restore_fence(restore)
-        extract_backup_zip(local_zip, local_dir)
-        tree_root = maybe_extract_tar(local_dir, backup.uuid_str)
-        _ensure_restore_fence(restore)
-
         sources = _normalise_sources(website)
-        records, manifest = _prepare_sources(tree_root, sources, backup)
         params = dict(restore.params or {})
         metadata = _metadata(restore)
         old_params = metadata.get("restore_params")
@@ -871,29 +1703,6 @@ def restore_website(backup, restore):
         metadata["restore_params"] = params
         restore.execution_metadata = metadata
         _save_restore(restore, ["execution_metadata"])
-        existing_states = dict(
-            _metadata(restore).get("source_states") or {}
-        )
-        initial_records = [
-            {
-                **record,
-                "state": existing_states.get(record["fingerprint"])
-                or _state_for(
-                    record,
-                    "pending",
-                    files_status="pending",
-                    stage=_remote_stage_paths(restore, record),
-                ),
-            }
-            for record in records
-        ]
-        _checkpoint(
-            restore,
-            phase="archive_validated",
-            manifest=manifest,
-            records=initial_records,
-            progress_total=len(records),
-        )
 
         _ensure_restore_fence(restore)
         auth.check_connection()
@@ -917,6 +1726,53 @@ def restore_website(backup, restore):
         if auth.protocol == CoreAuthWebsite.Protocol.FTPS and auth.ftps_use_explicit_ssl:
             protocol = "ftp"
         host_url = f"{protocol}://{auth.host}"
+
+        # This runs before the archive download and before any remote upload or
+        # publication. Root/all_paths keeps its historical convergent mirror
+        # semantics and is intentionally excluded from sibling staging.
+        _preflight_restore_target(
+            node,
+            backup,
+            restore,
+            auth,
+            website,
+            sources,
+            host_url,
+            username,
+            password,
+            ssh_key_path,
+        )
+        _ensure_restore_fence(restore)
+        fetch_backup_zip(stored_backup, local_zip)
+        _ensure_restore_fence(restore)
+        extract_backup_zip(local_zip, local_dir)
+        tree_root = maybe_extract_tar(local_dir, backup.uuid_str)
+        _ensure_restore_fence(restore)
+
+        records, manifest = _prepare_sources(tree_root, sources, backup)
+        existing_states = dict(
+            _metadata(restore).get("source_states") or {}
+        )
+        initial_records = [
+            {
+                **record,
+                "state": existing_states.get(record["fingerprint"])
+                or _state_for(
+                    record,
+                    "pending",
+                    files_status="pending",
+                    stage=_remote_stage_paths(restore, record),
+                ),
+            }
+            for record in records
+        ]
+        _checkpoint(
+            restore,
+            phase="archive_validated",
+            manifest=manifest,
+            records=initial_records,
+            progress_total=len(records),
+        )
 
         for record in records:
             if _has_restore_fence(restore):

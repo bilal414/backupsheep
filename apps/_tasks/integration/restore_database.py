@@ -64,6 +64,28 @@ MYSQL_MARKER_TABLE = "__backupsheep_restore_marker"
 POSTGRES_MARKER_SCHEMA = "__backupsheep_restore"
 POSTGRES_MARKER_TABLE = "marker"
 MAX_DATABASE_IDENTIFIER_LENGTH = 63
+DATABASE_RESTORE_PERMISSION_ERROR_CODE = "DATABASE_RESTORE_PERMISSION_DENIED"
+
+
+def _database_restore_permission_error(database_type):
+    """Return a stable, actionable error without provider/client diagnostics."""
+    if database_type == CoreAuthDatabase.DatabaseType.POSTGRESQL:
+        message = (
+            "The configured PostgreSQL role cannot create the deterministic restore "
+            "fork. Grant CREATEDB to the role (or use a role with CREATEDB), or "
+            "choose an explicit in-place restore target. No target was changed."
+        )
+    else:
+        message = (
+            "The configured MySQL/MariaDB account lacks CREATE and DROP privileges "
+            "covering the deterministic fork target(s). Grant both privileges globally "
+            "or on each target/database wildcard, or choose an explicit in-place "
+            "restore target. No target was changed."
+        )
+    error = RestoreError(message)
+    error.code = DATABASE_RESTORE_PERMISSION_ERROR_CODE
+    error.retryable = False
+    return error
 
 
 def _write_log(backup, text):
@@ -701,6 +723,112 @@ def _mysql_query(
     )
 
 
+def _mysql_scope_pattern_matches(pattern, target):
+    """Match one MySQL/MariaDB database grant pattern without SQL execution."""
+    if pattern == target:
+        return True
+    regex = []
+    escaped = False
+    for character in str(pattern):
+        if escaped:
+            regex.append(re.escape(character))
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == "%":
+            regex.append(".*")
+        elif character == "_":
+            regex.append(".")
+        else:
+            regex.append(re.escape(character))
+    if escaped:
+        regex.append(re.escape("\\"))
+    return re.fullmatch("".join(regex), str(target)) is not None
+
+
+def _mysql_grant_capabilities(grants, target_names):
+    """Return CREATE/DROP coverage for every resolved fork target.
+
+    ``SHOW GRANTS`` output is treated as an opaque capability document.  It is
+    never persisted or included in an exception.  Global ``*.*`` grants and
+    database-scoped ``database.*`` grants are accepted only when their scope
+    covers every target.  Table/column grants and unrelated database scopes do
+    not count.
+    """
+    target_names = [str(target) for target in dict.fromkeys(target_names or ())]
+    capabilities = {
+        target: {"create": False, "drop": False} for target in target_names
+    }
+    for line in str(grants or "").splitlines():
+        match = re.search(
+            r"^\s*GRANT\s+(?P<privileges>.+?)\s+ON\s+(?P<scope>[^\s]+)\s+TO\s+",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        raw_scope = match.group("scope").strip()
+        if raw_scope.endswith(".*"):
+            database_pattern = raw_scope[:-2].strip().strip("`")
+        else:
+            continue
+        privileges = match.group("privileges").upper().strip()
+        privilege_tokens = {
+            token.strip().replace("`", "")
+            for token in privileges.split(",")
+        }
+        grants_create = "CREATE" in privilege_tokens
+        grants_drop = "DROP" in privilege_tokens
+        if "ALL" in privilege_tokens or "ALL PRIVILEGES" in privilege_tokens:
+            grants_create = True
+            grants_drop = True
+        if not grants_create and not grants_drop:
+            continue
+
+        for target in target_names:
+            covers_target = database_pattern == "*" or _mysql_scope_pattern_matches(
+                database_pattern, target
+            )
+            if covers_target:
+                capabilities[target]["create"] |= grants_create
+                capabilities[target]["drop"] |= grants_drop
+    return capabilities
+
+
+def _preflight_mysql_fork_permissions(
+    node,
+    backup,
+    restore,
+    auth,
+    username,
+    password,
+    *,
+    defaults_arg,
+    target_names,
+    ssh=None,
+):
+    """Check fork CREATE/DROP capability without creating or dropping anything."""
+    grants = _mysql_query(
+        node,
+        backup,
+        auth,
+        defaults_arg,
+        "SHOW GRANTS;",
+        username,
+        password,
+        "check MySQL restore privileges",
+        ssh=ssh,
+        restore=restore,
+    )
+    capabilities = _mysql_grant_capabilities(grants, target_names)
+    if not capabilities or any(
+        not capability["create"] or not capability["drop"]
+        for capability in capabilities.values()
+    ):
+        raise _database_restore_permission_error(auth.type)
+    return {"create": True, "drop": True}
+
+
 def _mysql_marker_sql(target, marker):
     table = f"{_mysql_identifier(target)}.{_mysql_identifier(MYSQL_MARKER_TABLE)}"
     return (
@@ -1299,6 +1427,183 @@ def _postgres_query(
     )
 
 
+def _preflight_postgresql_fork_permissions(
+    node,
+    backup,
+    restore,
+    auth,
+    username,
+    *,
+    pg_env,
+    ssh=None,
+    remote_pgpass=None,
+):
+    """Check the connected role's CREATEDB capability without mutation."""
+    result = _postgres_query(
+        node,
+        backup,
+        auth,
+        pg_env,
+        username,
+        "postgres",
+        (
+            "SELECT CASE WHEN rolsuper OR rolcreatedb THEN '1' ELSE '0' END "
+            "FROM pg_roles WHERE rolname=current_user;"
+        ),
+        "check PostgreSQL restore privileges",
+        ssh=ssh,
+        remote_pgpass=remote_pgpass,
+        restore=restore,
+    )
+    if str(result or "").strip() != "1":
+        raise _database_restore_permission_error(auth.type)
+    return {"createdb": True}
+
+
+def _preflight_database_restore_permissions(
+    node,
+    backup,
+    restore,
+    auth,
+    username,
+    password,
+    *,
+    mode,
+    mapping,
+):
+    """Run the no-mutation fork capability check for direct and SSH paths.
+
+    Explicit in-place restores retain their existing semantics and do not
+    require cluster/database creation privileges.  Fork restores are checked
+    once after archive/mapping validation and before any target mutation.
+    """
+    if mode == "in_place":
+        return None
+
+    worker_suffix = _restore_work_suffix(restore, backup)
+    target_names = list(dict.fromkeys((mapping or {}).values()))
+    ssh = None
+    ssh_key_path = None
+    remote_name = None
+    local_path = None
+    try:
+        if auth.type in (
+            CoreAuthDatabase.DatabaseType.MYSQL,
+            CoreAuthDatabase.DatabaseType.MARIADB,
+        ):
+            if auth.use_public_key or auth.use_private_key:
+                ssh, ssh_key_path = auth.get_ssh_client()
+                remote_name = (
+                    f".backupsheep_restore_preflight_{backup.uuid_str}_"
+                    f"{worker_suffix}.cnf"
+                )
+                _sftp_write(
+                    ssh,
+                    remote_name,
+                    _defaults_file_content(
+                        username, password, auth.host, auth.port, auth.use_ssl
+                    ),
+                    restore=restore,
+                )
+                return _preflight_mysql_fork_permissions(
+                    node,
+                    backup,
+                    restore,
+                    auth,
+                    username,
+                    password,
+                    defaults_arg=remote_name,
+                    target_names=target_names,
+                    ssh=ssh,
+                )
+            local_path = f"_storage/db_restore_preflight_{worker_suffix}.cnf"
+            _write_local_defaults_file(
+                local_path,
+                _defaults_file_content(
+                    username, password, auth.host, auth.port, auth.use_ssl
+                ),
+            )
+            return _preflight_mysql_fork_permissions(
+                node,
+                backup,
+                restore,
+                auth,
+                username,
+                password,
+                defaults_arg=f"--defaults-extra-file={local_path}",
+                target_names=target_names,
+            )
+
+        if auth.type == CoreAuthDatabase.DatabaseType.POSTGRESQL:
+            pg_env = os.environ.copy()
+            pg_env.pop("PGPASSWORD", None)
+            pg_env["PGCONNECT_TIMEOUT"] = str(CLIENT_CONNECT_TIMEOUT)
+            if auth.use_public_key or auth.use_private_key:
+                ssh, ssh_key_path = auth.get_ssh_client()
+                remote_name = (
+                    f".backupsheep_restore_preflight_{backup.uuid_str}_"
+                    f"{worker_suffix}.pgpass"
+                )
+                _sftp_write(
+                    ssh,
+                    remote_name,
+                    _pgpass_content(auth, username, password),
+                    restore=restore,
+                )
+                return _preflight_postgresql_fork_permissions(
+                    node,
+                    backup,
+                    restore,
+                    auth,
+                    username,
+                    pg_env=pg_env,
+                    ssh=ssh,
+                    remote_pgpass=remote_name,
+                )
+            descriptor, local_path = tempfile.mkstemp(
+                prefix="bs_restore_preflight_",
+                suffix=".pgpass",
+                dir="_storage",
+            )
+            try:
+                os.fchmod(descriptor, 0o600)
+                os.write(
+                    descriptor,
+                    _pgpass_content(auth, username, password).encode("utf-8"),
+                )
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            pg_env["PGPASSFILE"] = local_path
+            return _preflight_postgresql_fork_permissions(
+                node,
+                backup,
+                restore,
+                auth,
+                username,
+                pg_env=pg_env,
+            )
+        return None
+    finally:
+        if ssh is not None and remote_name:
+            _sftp_remove(ssh, remote_name)
+        if ssh is not None:
+            try:
+                ssh.close()
+            except Exception:
+                _capture_safe("DATABASE_PREFLIGHT_SSH_CLOSE_FAILED")
+        if ssh_key_path and os.path.exists(ssh_key_path):
+            try:
+                os.remove(ssh_key_path)
+            except OSError:
+                pass
+        if local_path and os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
+
+
 def _postgres_marker_sql(marker):
     schema = _postgres_identifier(POSTGRES_MARKER_SCHEMA)
     table = f"{schema}.{_postgres_identifier(POSTGRES_MARKER_TABLE)}"
@@ -1417,7 +1722,11 @@ def _ensure_postgres_target(
                 remote_pgpass=remote_pgpass,
                 restore=restore,
             )
-            row = expected
+            # The marker was created by this execution, so the first import
+            # may proceed even when a durable restore fence is present.  A
+            # later worker only receives ``_new`` through this acknowledged
+            # path; an exact pre-existing importing marker remains fail-closed.
+            row = dict(expected, _new=True)
         except NodeBackupFailedError as error:
             # A remote channel can lose the response after PostgreSQL has
             # accepted either the CREATE DATABASE or marker command.  Query
@@ -1802,6 +2111,33 @@ def restore_database(backup, restore):
         safe_token(auth.port, "port")
         safe_token(username, "username")
         safe_password(password, "password")
+
+        # Fork restores require a provider-side capability check before the
+        # first target mutation.  Archive validation and immutable mapping
+        # persistence have already completed, so this check cannot weaken
+        # source-integrity or target-mapping validation.  Explicit in-place
+        # restores intentionally skip the fork privilege requirement.
+        _preflight_database_restore_permissions(
+            node,
+            backup,
+            restore,
+            auth,
+            username,
+            password,
+            mode=mode,
+            mapping=mapping,
+        )
+        _checkpoint(
+            restore,
+            phase=(
+                "database_permissions_verified"
+                if mode == "fork"
+                else "database_ready"
+            ),
+            mapping=mapping,
+            source_digests=source_digests,
+            progress_total=len(mapping),
+        )
 
         if auth.type in (
             CoreAuthDatabase.DatabaseType.MYSQL,

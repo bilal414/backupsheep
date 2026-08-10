@@ -50,6 +50,7 @@ class AWSRDSReliabilityTests(BaseTestCase):
         self.backup = CoreAWSRDSBackup.objects.create(
             aws_rds=self.rds,
             uuid="rds-reliability-backup",
+            unique_id="rds-reliability-backup",
             status=UtilBackup.Status.IN_PROGRESS,
             type=UtilBackup.Type.ON_DEMAND,
             attempt_no=1,
@@ -306,6 +307,58 @@ class AWSRDSReliabilityTests(BaseTestCase):
         self.assertEqual(restore.status, CoreCloudRestore.Status.IN_PROGRESS)
         self.assertFalse(restore.params["_bs_create_outcome_unknown"])
         self.client.restore_db_instance_from_db_snapshot.assert_called_once()
+
+    def test_create_response_without_snapshot_or_visible_tags_is_adopted_for_polling(self):
+        restore = self._restore()
+        self.client.describe_db_instances.side_effect = self._client_error(
+            "DBInstanceNotFound", operation="DescribeDBInstances"
+        )
+        self.client.restore_db_instance_from_db_snapshot.return_value = {
+            "DBInstance": {
+                "DBInstanceIdentifier": restore.name,
+                "DBInstanceArn": (
+                    "arn:aws:rds:us-east-1:123456789012:db:" + restore.name
+                ),
+                "DBInstanceStatus": "creating",
+                "TagList": [],
+            }
+        }
+
+        with self._clients():
+            self.rds.restore_snapshot(self.backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, restore.name)
+        self.assertEqual(restore.status, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertEqual(restore.operation_phase, CoreCloudRestore.OperationPhase.POLLING)
+        self.assertEqual(
+            restore.params["_backupsheep_restore"]["target_name"],
+            restore.name,
+        )
+
+    def test_restore_adoption_uses_exact_source_tag_when_instance_omits_snapshot(self):
+        restore = self._restore()
+        restore.params = {"_bs_create_outcome_unknown": True}
+        restore.save(update_fields=["params", "modified"])
+        instance = self._restored_instance(
+            restore,
+            f"backupsheep-restore-{restore.id}",
+        )
+        instance.pop("DBSnapshotIdentifier")
+        self.client.describe_db_instances.return_value = {
+            "DBInstances": [instance]
+        }
+        self.client.list_tags_for_resource.return_value = {
+            "TagList": instance["TagList"]
+        }
+
+        with self._clients():
+            self.rds.restore_snapshot(self.backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, restore.name)
+        self.assertFalse(restore.params["_bs_create_outcome_unknown"])
+        self.client.restore_db_instance_from_db_snapshot.assert_not_called()
 
     def test_restore_reconciliation_waits_for_eventually_consistent_tags(self):
         restore = self._restore()

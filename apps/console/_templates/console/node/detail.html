@@ -43,9 +43,26 @@
                         {% endif %}
                     </span>
                     <div class="min-w-0">
-                        <p class="text-xs font-medium uppercase tracking-wider text-slate-400">Protected resource / {{ object.get_type_display }}</p>
+                        <p class="text-xs font-medium uppercase tracking-wider text-slate-400">Protected resource /
+                            {% if object.connection.integration.code == "aws" %}
+                                {% if object.aws.resource_type == "s3" %}S3 bucket{% elif object.aws.resource_type == "dynamodb" %}DynamoDB table{% elif object.aws.resource_type == "volume" %}EBS volume{% elif object.aws.resource_type == "instance" %}EC2 instance{% else %}{{ object.get_type_display }}{% endif %}
+                            {% elif object.connection.integration.code == "aws_rds" %}
+                                RDS database
+                            {% else %}
+                                {{ object.get_type_display }}
+                            {% endif %}
+                        </p>
                         <h2 class="mt-0.5 truncate text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">{{ object.name }}</h2>
-                        <p class="mt-0.5 truncate text-sm text-slate-500">{{ object.connection.integration.name }} · {{ object.connection.name }}</p>
+                        <p class="mt-0.5 truncate text-sm text-slate-500">
+                            {% if object.connection.integration.code == "aws" %}
+                                {% if object.aws.resource_type == "s3" %}S3 bucket{% elif object.aws.resource_type == "dynamodb" %}DynamoDB table{% elif object.aws.resource_type == "volume" %}EBS volume{% elif object.aws.resource_type == "instance" %}EC2 instance{% else %}{{ object.connection.integration.name }}{% endif %}
+                            {% elif object.connection.integration.code == "aws_rds" %}
+                                RDS database
+                            {% else %}
+                                {{ object.connection.integration.name }}
+                            {% endif %}
+                            · {{ object.connection.name }}
+                        </p>
                     </div>
                 </div>
             </div>
@@ -580,6 +597,12 @@
                                                 {% endif %}
                                                 {% if object.type == 3 or object.type == 4 %}
                                                     <button @click="openBackupRestoreModal('{{ backup.id }}', '{{ backup.uuid }}')"
+                                                            type="button"
+                                                            class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                                        Restore
+                                                    </button>
+                                                {% elif object.type == 1 or object.type == 2 %}
+                                                    <button @click="openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid }}', '{{ backup.status }}')"
                                                             type="button"
                                                             class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                                                         Restore
@@ -1279,6 +1302,194 @@
                     </div>
                     <div x-show="!loading && restoreStarted" class="flex flex-col-reverse gap-2 border-t border-slate-200 px-6 py-4 sm:flex-row sm:justify-end">
                         <button @click="closeRestoreModal()" type="button"
+                                class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                            Close
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Native cloud restore modal -->
+        <div x-cloak x-show="openNativeCloudRestore" class="fixed inset-0 z-50 overflow-y-auto"
+             aria-labelledby="native-restore-modal-title" role="dialog" aria-modal="true">
+            <div x-show="openNativeCloudRestore"
+                 x-transition:enter="transition ease-out duration-200"
+                 x-transition:enter-start="opacity-0"
+                 x-transition:enter-end="opacity-100"
+                 x-transition:leave="transition ease-in duration-150"
+                 x-transition:leave-start="opacity-100"
+                 x-transition:leave-end="opacity-0"
+                 class="fixed inset-0 bg-slate-900/50" aria-hidden="true"></div>
+            <div class="flex min-h-full items-center justify-center p-4">
+                <div x-show="openNativeCloudRestore"
+                     x-transition:enter="transition ease-out duration-200"
+                     x-transition:enter-start="opacity-0 scale-95"
+                     x-transition:enter-end="opacity-100 scale-100"
+                     x-transition:leave="transition ease-in duration-150"
+                     x-transition:leave-start="opacity-100 scale-100"
+                     x-transition:leave-end="opacity-0 scale-95"
+                     class="relative flex max-h-[calc(100vh-2rem)] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+                    <div class="flex-1 overflow-y-auto p-6">
+                        <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-indigo-50 text-indigo-600">
+                            <svg x-show="nativeRestoreLoading" class="animate-spin h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <svg x-show="!nativeRestoreLoading" class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/>
+                            </svg>
+                        </div>
+                        <div class="mt-3 text-center sm:mt-5">
+                            <h3 class="text-base font-semibold text-slate-900" id="native-restore-modal-title">
+                                Restore <span x-text="nativeRestoreResourceLabel"></span> as a new resource
+                            </h3>
+                            <p class="mt-2 text-sm text-slate-500">
+                                Source: <span class="font-medium text-slate-700">{{ object.name }}</span>
+                                · Backup <span class="font-mono text-xs" x-text="nativeRestore.backupUuid"></span>
+                            </p>
+                        </div>
+
+                        <div x-show="nativeRestoreLoading" class="mt-6 rounded-xl border border-slate-200 bg-slate-50 px-4 py-5 text-center text-sm text-slate-500" role="status" aria-live="polite">
+                            Recovering any existing restore request…
+                        </div>
+
+                        <form x-show="!nativeRestoreLoading && !nativeRestoreStarted" class="mt-6 space-y-4 text-left" @submit.prevent="startNativeCloudRestore()">
+                            {% if object.connection.integration.code == "aws" and object.aws.resource_type == "s3" %}
+                                <div>
+                                    <label for="native-restore-destination-bucket" class="block text-sm font-medium text-slate-700">
+                                        Existing destination S3 bucket <span class="text-red-600" aria-hidden="true">*</span>
+                                    </label>
+                                    <input id="native-restore-destination-bucket" type="text" required maxlength="63"
+                                           inputmode="url" autocomplete="off"
+                                           pattern="[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]"
+                                           x-model.trim="nativeRestore.destinationBucketName"
+                                           @input="adoptNativeRestoreTargetIfPresent()"
+                                           class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
+                                           placeholder="your-empty-versioned-bucket"
+                                           aria-describedby="native-restore-destination-help">
+                                    <p id="native-restore-destination-help" class="mt-1.5 text-xs leading-5 text-slate-500">
+                                        Required for AWS Backup: use an existing empty bucket that is in this account and has versioning enabled. BackupSheep will restore objects into it; it will not create, rename, or overwrite the source bucket.
+                                    </p>
+                                </div>
+                            {% else %}
+                                <div>
+                                    <label for="native-restore-target-name" class="block text-sm font-medium text-slate-700">
+                                        New <span x-text="nativeRestoreResourceLabel"></span> name
+                                    </label>
+                                    <input id="native-restore-target-name" type="text" required maxlength="63"
+                                           autocomplete="off" x-model.trim="nativeRestore.name"
+                                           @input="adoptNativeRestoreTargetIfPresent()"
+                                           class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
+                                           aria-describedby="native-restore-target-help">
+                                    <p id="native-restore-target-help" class="mt-1.5 text-xs leading-5 text-slate-500">
+                                        BackupSheep derives a deterministic provider-safe name from this source and backup. Provider defaults such as size, zone, plan, and instance class are inferred from the source or snapshot.
+                                    </p>
+                                </div>
+                            {% endif %}
+
+                            <div class="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="alert">
+                                <svg class="mt-0.5 h-5 w-5 flex-none text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/>
+                                </svg>
+                                <p class="min-w-0 flex-1 leading-6">
+                                    <strong class="font-semibold">Safe fork:</strong>
+                                    {% if object.connection.integration.code == "aws" and object.aws.resource_type == "s3" %}
+                                        this restores into the selected destination bucket and leaves the source bucket and every other existing resource untouched.
+                                    {% else %}
+                                        this creates a new provider resource and leaves the source and every other existing resource untouched. In-place restore is not available from this screen.
+                                    {% endif %}
+                                </p>
+                            </div>
+
+                            <label class="flex items-start gap-3 text-sm font-medium text-slate-700">
+                                <input type="checkbox" x-model="nativeRestore.confirm"
+                                       class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                                I understand that this is a safe fork/new-resource restore and that existing resources are not modified.
+                            </label>
+                            <p x-show="nativeRestoreError" class="text-sm font-medium text-red-700" role="alert" x-text="nativeRestoreError"></p>
+                        </form>
+
+                        <div x-show="nativeRestoreStarted" class="mt-6 space-y-4 text-left">
+                            <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                                <div class="flex flex-wrap items-center justify-between gap-3">
+                                    <div>
+                                        <p class="text-xs font-semibold uppercase tracking-wider text-slate-500">Restore target</p>
+                                        <p class="mt-1 break-all font-medium text-slate-900" x-text="nativeRestoreStatus && nativeRestoreStatus.name ? nativeRestoreStatus.name : nativeRestoreTargetName()"></p>
+                                    </div>
+                                    <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset"
+                                          :class="nativeRestoreStatusBadgeClass(nativeRestoreStatus)"
+                                          role="status" aria-live="polite">
+                                        <span class="h-1.5 w-1.5 rounded-full" :class="nativeRestoreStatusDotClass(nativeRestoreStatus)" aria-hidden="true"></span>
+                                        <span x-text="nativeRestoreStatusLabel(nativeRestoreStatus)"></span>
+                                    </span>
+                                </div>
+                                <p x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.phase" class="mt-2 text-xs text-slate-500">
+                                    Phase: <span class="font-medium text-slate-700" x-text="nativeRestorePhaseLabel(nativeRestoreStatus)"></span>
+                                </p>
+                                <p x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.provider_status" class="text-xs text-slate-500">
+                                    Provider: <span class="font-medium text-slate-700" x-text="nativeRestoreStatus.execution_status.provider_status"></span>
+                                </p>
+                                <p x-show="nativeRestoreStatus && nativeRestoreStatus.resource_id" class="mt-2 break-all text-xs text-slate-500">
+                                    Provider resource ID: <span class="font-mono text-slate-700" x-text="nativeRestoreStatus.resource_id"></span>
+                                </p>
+                                <p x-show="nativeRestoreStatus && nativeRestoreStatus.provider_job_id" class="break-all text-xs text-slate-500">
+                                    Provider job ID: <span class="font-mono text-slate-700" x-text="nativeRestoreStatus.provider_job_id"></span>
+                                </p>
+                                <p x-show="nativeRestoreStatus && nativeRestoreStatusError(nativeRestoreStatus)" class="mt-2 text-sm font-medium text-red-700" role="alert" x-text="nativeRestoreStatusError(nativeRestoreStatus)"></p>
+                                <p x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.next_retry_at" class="mt-2 text-xs font-medium text-amber-700">
+                                    Retry scheduled: <span x-text="nativeRestoreStatus.execution_status.next_retry_at"></span>
+                                </p>
+                                <details x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.correlation_id" class="mt-3 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                    <summary class="cursor-pointer text-xs font-semibold text-slate-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Technical details</summary>
+                                    <div class="mt-2 space-y-1 text-xs text-slate-500">
+                                        <div class="flex items-start justify-between gap-2">
+                                            <span>Correlation ID</span>
+                                            <button type="button" @click="$clipboard(nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.correlation_id : '')"
+                                                    class="inline-flex flex-none items-center rounded px-1.5 py-0.5 font-semibold text-indigo-600 hover:bg-indigo-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                                                    aria-label="Copy native restore correlation ID">Copy</button>
+                                        </div>
+                                        <code class="block break-all font-mono text-[11px] text-slate-700" x-text="nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.correlation_id : ''"></code>
+                                        <p x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.last_error_code">Error code: <span class="font-mono text-slate-700" x-text="nativeRestoreStatus.execution_status.last_error_code"></span></p>
+                                    </div>
+                                </details>
+                            </div>
+                            <p x-show="nativeRestoreError" class="text-sm font-medium text-red-700" role="alert" x-text="nativeRestoreError"></p>
+                            <div>
+                                <h4 class="text-sm font-medium text-slate-700">Recent native restores</h4>
+                                <ul class="mt-2 divide-y divide-slate-100">
+                                    <template x-for="restoreItem in nativeRestoreList.slice(0, 5)" :key="restoreItem.id">
+                                        <li class="flex items-start justify-between gap-3 py-2.5">
+                                            <div class="min-w-0 text-sm text-slate-700">
+                                                <p class="break-all font-medium" x-text="restoreItem.name || 'Unnamed target'"></p>
+                                                <p class="mt-0.5 text-xs text-slate-500" x-text="restoreItem.created_display || 'Restore date unavailable'"></p>
+                                            </div>
+                                            <span class="inline-flex flex-none items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset"
+                                                  :class="nativeRestoreStatusBadgeClass(restoreItem)"
+                                                  x-text="nativeRestoreStatusLabel(restoreItem)"></span>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                    <div x-show="!nativeRestoreStarted" class="flex flex-col-reverse gap-2 border-t border-slate-200 px-6 py-4 sm:flex-row sm:justify-end">
+                        <button @click="closeNativeCloudRestoreModal()" type="button"
+                                class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                            Cancel
+                        </button>
+                        <button @click="startNativeCloudRestore()" type="button"
+                                :disabled="!nativeRestoreCanSubmit()"
+                                class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+                            <svg x-show="nativeRestoreSubmitting" class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            Restore safely
+                        </button>
+                    </div>
+                    <div x-show="nativeRestoreStarted" class="flex justify-end border-t border-slate-200 px-6 py-4">
+                        <button @click="closeNativeCloudRestoreModal()" type="button"
                                 class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                             Close
                         </button>
@@ -2080,6 +2291,14 @@
         </div>
     </div>
     <script>
+        const nativeRestoreConfig = {
+            nodeId: '{{ object.id|escapejs }}',
+            provider: '{{ object.connection.integration.code|lower|escapejs }}',
+            resourceKind: '{% if object.connection.integration.code == "aws" %}{% if object.aws.resource_type == "s3" %}aws_s3{% elif object.aws.resource_type == "dynamodb" %}aws_dynamodb{% elif object.aws.resource_type == "volume" %}aws_volume{% else %}aws_instance{% endif %}{% elif object.connection.integration.code == "aws_rds" %}aws_rds{% else %}native_cloud{% endif %}',
+            resourceLabel: '{% if object.connection.integration.code == "aws" %}{% if object.aws.resource_type == "s3" %}S3 bucket{% elif object.aws.resource_type == "dynamodb" %}DynamoDB table{% elif object.aws.resource_type == "volume" %}EBS volume{% elif object.aws.resource_type == "instance" %}EC2 instance{% else %}Cloud resource{% endif %}{% elif object.connection.integration.code == "aws_rds" %}RDS database{% elif object.type == 2 %}cloud volume{% else %}cloud server{% endif %}',
+            sourceName: '{{ object.name|escapejs }}',
+        };
+
         /*
          * The API is the source of truth for durable execution state.  Keep all
          * presentation decisions here deliberately allow-listed: the dashboard
@@ -2389,6 +2608,7 @@
                 openIncrementalReset: false,
                 openBackupDownload: false,
                 openBackupRestore: false,
+                openNativeCloudRestore: false,
                 restore: {
                     storage_point_id: null,
                     delete: false,
@@ -2399,6 +2619,26 @@
                 restoreStarted: false,
                 restoreList: [],
                 restorePollHandle: null,
+                nativeRestore: {
+                    backupId: null,
+                    backupUuid: null,
+                    name: '',
+                    destinationBucketName: '',
+                    confirm: false,
+                    requestId: null,
+                    requestTargetName: '',
+                },
+                nativeRestoreResourceLabel: nativeRestoreConfig.resourceLabel,
+                nativeRestoreResourceKind: nativeRestoreConfig.resourceKind,
+                nativeRestoreLoading: false,
+                nativeRestoreSubmitting: false,
+                nativeRestoreStarted: false,
+                nativeRestoreStatus: null,
+                nativeRestoreExecutionStatus: null,
+                nativeRestoreList: [],
+                nativeRestoreError: '',
+                nativeRestorePollHandle: null,
+                nativeRestorePolling: false,
                 openBackupTransfer: false,
                 openSchedule: false,
                 openModify: false,
@@ -2616,6 +2856,305 @@
                     this.restoreExecutionStatus = null;
                     this.restoreStarted = false;
                     this.restoreList = [];
+                },
+                nativeRestoreSlug(value, fallback = 'resource') {
+                    const slug = String(value || '')
+                        .trim()
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]+/g, '-')
+                        .replace(/^-+|-+$/g, '');
+                    return slug || fallback;
+                },
+                nativeRestoreDefaultName(backupUuid) {
+                    const source = this.nativeRestoreSlug(nativeRestoreConfig.sourceName, 'source').slice(0, 24);
+                    const kind = this.nativeRestoreSlug(this.nativeRestoreResourceLabel, 'resource').slice(0, 12);
+                    const identity = String(backupUuid || 'backup')
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]/g, '')
+                        .slice(-12) || 'backup';
+                    return `bs-${source}-${kind}-${identity}`.slice(0, 63).replace(/-+$/g, '');
+                },
+                nativeRestoreTargetName() {
+                    if (this.nativeRestoreResourceKind === 'aws_s3') {
+                        return String(this.nativeRestore.destinationBucketName || '').trim().toLowerCase();
+                    }
+                    return String(this.nativeRestore.name || '').trim();
+                },
+                nativeRestoreRequestId() {
+                    const targetName = this.nativeRestoreTargetName();
+                    if (this.nativeRestore.requestId && this.nativeRestore.requestTargetName === targetName) {
+                        return this.nativeRestore.requestId;
+                    }
+                    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                        this.nativeRestore.requestId = window.crypto.randomUUID();
+                        this.nativeRestore.requestTargetName = targetName;
+                        return this.nativeRestore.requestId;
+                    }
+                    if (!window.crypto || typeof window.crypto.getRandomValues !== 'function') {
+                        throw new Error('A secure restore request ID could not be generated. Reload the page and try again.');
+                    }
+                    const bytes = window.crypto.getRandomValues(new Uint8Array(16));
+                    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                    const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+                    this.nativeRestore.requestId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+                    this.nativeRestore.requestTargetName = targetName;
+                    return this.nativeRestore.requestId;
+                },
+                nativeRestoreDestinationBucketValid() {
+                    const value = this.nativeRestoreTargetName();
+                    return value.length >= 3 && value.length <= 63 &&
+                        value === value.toLowerCase() &&
+                        /^[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])$/.test(value) &&
+                        !value.includes('..');
+                },
+                nativeRestoreNameValid() {
+                    const value = this.nativeRestoreTargetName();
+                    return value.length >= 3 && value.length <= 63 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+                },
+                nativeRestoreCanSubmit() {
+                    if (this.nativeRestoreLoading || this.nativeRestoreSubmitting || this.nativeRestoreStarted || !this.nativeRestore.confirm) {
+                        return false;
+                    }
+                    return this.nativeRestoreResourceKind === 'aws_s3'
+                        ? this.nativeRestoreDestinationBucketValid()
+                        : this.nativeRestoreNameValid();
+                },
+                nativeRestoreRequestBody() {
+                    const targetName = this.nativeRestoreTargetName();
+                    const params = {};
+                    if (this.nativeRestoreResourceKind === 'aws_s3') {
+                        params.destination_bucket_name = targetName;
+                    } else if (this.nativeRestoreResourceKind === 'aws_dynamodb') {
+                        params.target_table_name = targetName;
+                    }
+                    return {
+                        backup_id: Number(this.nativeRestore.backupId),
+                        name: targetName,
+                        params,
+                        confirm: true,
+                        request_id: this.nativeRestoreRequestId(),
+                    };
+                },
+                nativeRestoreStatusCategory(item) {
+                    const raw = item && typeof item === 'object' ? item : {};
+                    const execution = raw.execution_status && typeof raw.execution_status === 'object'
+                        ? raw.execution_status
+                        : {};
+                    const status = String(execution.status || raw.status_display || raw.status || '').toLowerCase().replace(/[_-]+/g, '_');
+                    const phase = String(execution.phase || raw.operation_phase || '').toLowerCase().replace(/[_-]+/g, '_');
+                    const reconciliation = execution.reconciliation && typeof execution.reconciliation === 'object'
+                        ? String(execution.reconciliation.state || '').toLowerCase()
+                        : '';
+                    const providerStatus = String(execution.provider_status || '').toLowerCase();
+                    const errorCode = String(execution.last_error_code || '').toUpperCase();
+                    if (status === 'complete' || status === 'completed' || phase === 'complete') return 'complete';
+                    if (reconciliation === 'manual_review' || phase === 'manual_review' || /UNKNOWN|AMBIGUOUS|DUPLICATE|OWNERSHIP|RECONCILIATION_REQUIRED|RECONCILIATION_EXHAUSTED/.test(errorCode)) return 'manual_review';
+                    if (status === 'failed' || phase === 'failed' || status === 'cancelled' || status === 'canceled') return 'failed';
+                    if (execution.next_retry_at || phase === 'retrying' || providerStatus === 'rate_limited' || /RATE_LIMIT|TIMEOUT|TRANSIENT|OUTAGE|UNAVAILABLE/.test(errorCode)) return 'retry';
+                    if (reconciliation === 'required' || reconciliation === 'in_progress' || phase === 'reconciling' || phase === 'create_unknown') return 'adopting';
+                    if (status === 'pending' || status === 'queued' || phase === 'pending') return 'queued';
+                    return 'running';
+                },
+                nativeRestoreStatusLabel(item) {
+                    return {
+                        queued: 'Queued',
+                        running: 'Running',
+                        adopting: 'Adopting provider resource',
+                        retry: 'Retry scheduled',
+                        manual_review: 'Manual review required',
+                        failed: 'Failed',
+                        complete: 'Complete',
+                    }[this.nativeRestoreStatusCategory(item)] || 'Running';
+                },
+                nativeRestoreStatusBadgeClass(item) {
+                    return {
+                        queued: 'bg-sky-50 text-sky-700 ring-sky-600/20',
+                        running: 'bg-indigo-50 text-indigo-700 ring-indigo-600/20',
+                        adopting: 'bg-violet-50 text-violet-700 ring-violet-600/20',
+                        retry: 'bg-amber-50 text-amber-700 ring-amber-600/20',
+                        manual_review: 'bg-orange-50 text-orange-700 ring-orange-600/20',
+                        failed: 'bg-red-50 text-red-700 ring-red-600/20',
+                        complete: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
+                    }[this.nativeRestoreStatusCategory(item)] || 'bg-indigo-50 text-indigo-700 ring-indigo-600/20';
+                },
+                nativeRestoreStatusDotClass(item) {
+                    return {
+                        queued: 'bg-sky-500',
+                        running: 'bg-indigo-500',
+                        adopting: 'bg-violet-500',
+                        retry: 'bg-amber-500',
+                        manual_review: 'bg-orange-500',
+                        failed: 'bg-red-500',
+                        complete: 'bg-emerald-500',
+                    }[this.nativeRestoreStatusCategory(item)] || 'bg-indigo-500';
+                },
+                nativeRestorePhaseLabel(item) {
+                    const execution = item && item.execution_status && typeof item.execution_status === 'object'
+                        ? item.execution_status
+                        : {};
+                    const phase = execution.phase || (item && item.operation_phase) || '';
+                    return window.BackupSheepExecutionStatus.humanize(String(phase));
+                },
+                nativeRestoreStatusError(item) {
+                    if (item && typeof item.error === 'string' && item.error.trim()) return item.error;
+                    const view = this.executionStatusView(item);
+                    return view && view.errorMessage ? view.errorMessage : '';
+                },
+                nativeRestoreStatusIsTerminal(item) {
+                    return ['complete', 'failed', 'manual_review'].includes(this.nativeRestoreStatusCategory(item));
+                },
+                adoptNativeRestoreTargetIfPresent() {
+                    if (this.nativeRestoreStarted) return;
+                    const targetName = this.nativeRestoreTargetName();
+                    const exact = this.nativeRestoreList.find(item => String(item.name || '').trim() === targetName);
+                    if (exact) {
+                        this.nativeRestoreStatus = exact;
+                        this.nativeRestoreExecutionStatus = this.executionStatusView(exact);
+                        this.nativeRestoreStarted = true;
+                        if (this.nativeRestoreStatusIsTerminal(exact)) this.clearNativeRestorePoll();
+                    }
+                },
+                openNativeCloudRestoreModal(backupId, backupUuid, backupStatus) {
+                    if (String(backupStatus) !== '3') return;
+                    this.clearNativeRestorePoll();
+                    this.openNativeCloudRestore = true;
+                    this.nativeRestoreLoading = true;
+                    this.nativeRestoreSubmitting = false;
+                    this.nativeRestoreStarted = false;
+                    this.nativeRestoreStatus = null;
+                    this.nativeRestoreExecutionStatus = null;
+                    this.nativeRestoreList = [];
+                    this.nativeRestoreError = '';
+                    this.nativeRestore = {
+                        backupId: backupId,
+                        backupUuid: backupUuid,
+                        name: this.nativeRestoreDefaultName(backupUuid),
+                        destinationBucketName: '',
+                        confirm: false,
+                        requestId: null,
+                        requestTargetName: '',
+                    };
+                    this.getNativeCloudRestores(true);
+                },
+                closeNativeCloudRestoreModal() {
+                    this.clearNativeRestorePoll();
+                    this.openNativeCloudRestore = false;
+                    this.nativeRestoreLoading = false;
+                    this.nativeRestoreSubmitting = false;
+                    this.nativeRestoreStarted = false;
+                    this.nativeRestoreStatus = null;
+                    this.nativeRestoreExecutionStatus = null;
+                    this.nativeRestoreList = [];
+                    this.nativeRestoreError = '';
+                    this.nativeRestore = {
+                        backupId: null,
+                        backupUuid: null,
+                        name: '',
+                        destinationBucketName: '',
+                        confirm: false,
+                        requestId: null,
+                        requestTargetName: '',
+                    };
+                },
+                clearNativeRestorePoll() {
+                    if (this.nativeRestorePollHandle) {
+                        clearInterval(this.nativeRestorePollHandle);
+                        this.nativeRestorePollHandle = null;
+                    }
+                },
+                startNativeRestorePolling() {
+                    this.clearNativeRestorePoll();
+                    this.nativeRestorePollHandle = setInterval(() => {
+                        if (!this.openNativeCloudRestore) {
+                            this.clearNativeRestorePoll();
+                            return;
+                        }
+                        this.getNativeCloudRestores(false);
+                    }, 5000);
+                },
+                async getNativeCloudRestores(showErrors = false) {
+                    if (this.nativeRestorePolling || !this.nativeRestore.backupId) return false;
+                    this.nativeRestorePolling = true;
+                    try {
+                        const url = `/api/v1/nodes/${encodeURIComponent(this.node_id || nativeRestoreConfig.nodeId)}/restores/`;
+                        const response = await fetch(url, {headers: {'Accept': 'application/json'}});
+                        if (!response.ok) throw new Error('Restore status is temporarily unavailable.');
+                        const json = await response.json();
+                        const records = Array.isArray(json)
+                            ? json.filter(item => item && typeof item === 'object' && !Array.isArray(item))
+                                .filter(item => String(item.backup_id) === String(this.nativeRestore.backupId))
+                            : [];
+                        this.nativeRestoreList = records;
+                        const targetName = this.nativeRestoreTargetName();
+                        const exact = records.find(item => String(item.name || '').trim() === targetName);
+                        if (exact) {
+                            this.nativeRestoreStatus = exact;
+                            this.nativeRestoreExecutionStatus = this.executionStatusView(exact);
+                            this.nativeRestoreStarted = true;
+                        } else if (!this.nativeRestoreStarted) {
+                            this.nativeRestoreStatus = null;
+                            this.nativeRestoreExecutionStatus = null;
+                        }
+                        this.nativeRestoreError = '';
+                        if (this.nativeRestoreStarted && this.nativeRestoreStatusIsTerminal(this.nativeRestoreStatus)) {
+                            this.clearNativeRestorePoll();
+                        }
+                        return Boolean(exact);
+                    } catch (error) {
+                        if (showErrors) this.nativeRestoreError = error.message || 'Restore status is temporarily unavailable.';
+                        return false;
+                    } finally {
+                        this.nativeRestorePolling = false;
+                        this.nativeRestoreLoading = false;
+                    }
+                },
+                async startNativeCloudRestore() {
+                    if (!this.nativeRestoreCanSubmit()) return;
+                    const targetName = this.nativeRestoreTargetName();
+                    this.nativeRestoreSubmitting = true;
+                    this.nativeRestoreError = '';
+                    try {
+                        const url = `/api/v1/nodes/${encodeURIComponent(this.node_id || nativeRestoreConfig.nodeId)}/restore_backup/`;
+                        const response = await fetch(url, {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json',
+                            },
+                            method: 'POST',
+                            body: JSON.stringify(this.nativeRestoreRequestBody()),
+                        });
+                        if (response.status !== 200 && response.status !== 201) {
+                            let payload = null;
+                            try { payload = await response.json(); } catch (_) { /* use safe fallback */ }
+                            throw new Error(payload && typeof payload.detail === 'string'
+                                ? payload.detail
+                                : 'Restore could not be started.');
+                        }
+                        const json = await response.json();
+                        const idempotentReplay = json && json.idempotent_replay === true;
+                        this.nativeRestoreStatus = json && typeof json === 'object' && !Array.isArray(json) ? json : null;
+                        this.nativeRestoreExecutionStatus = this.executionStatusView(this.nativeRestoreStatus);
+                        this.nativeRestoreStarted = true;
+                        await this.getNativeCloudRestores(false);
+                        this.startNativeRestorePolling();
+                        Alpine.store('notifications').items.push({show: true, success: true, heading: idempotentReplay ? 'Restore request recovered' : 'Restore started', details: idempotentReplay ? 'The existing idempotent restore request is now being tracked.' : 'The safe fork restore is now being tracked.'});
+                    } catch (error) {
+                        // A lost response can still mean the API created the durable
+                        // restore row. Reconcile by target name before surfacing an
+                        // error or allowing another click.
+                        const recovered = await this.getNativeCloudRestores(false);
+                        if (recovered && this.nativeRestoreStatus && String(this.nativeRestoreStatus.name || '').trim() === targetName) {
+                            this.nativeRestoreStarted = true;
+                            this.startNativeRestorePolling();
+                            Alpine.store('notifications').items.push({show: true, success: true, heading: 'Restore request recovered', details: 'The restore request was accepted and its status was recovered.'});
+                        } else {
+                            this.nativeRestoreError = error.message || 'Restore could not be started.';
+                            Alpine.store('notifications').items.push({show: true, error: true, heading: 'Restore failed', details: this.nativeRestoreError});
+                        }
+                    } finally {
+                        this.nativeRestoreSubmitting = false;
+                    }
                 },
                 clearRestorePoll() {
                     if (this.restorePollHandle) {

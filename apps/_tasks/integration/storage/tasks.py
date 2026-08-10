@@ -618,19 +618,32 @@ def finalize_backup(self, node_id, backup_id):
             )
         except (TypeError, ValueError):
             requested_storage_count = storage_point_count
-        all_uploaded = (
-            requested_storage_count > 0
-            and uploaded_count == requested_storage_count
-        )
-        if uploaded_count > 0:
-            final_status = (
-                UtilBackup.Status.COMPLETE
-                if all_uploaded
-                else UtilBackup.Status.PARTIAL
-            )
+        terminal_statuses = set(UtilBackup.SUCCESS_STATUSES) | {
+            UtilBackup.Status.FAILED,
+            UtilBackup.Status.MAX_RETRY_FAILED,
+            UtilBackup.Status.UPLOAD_FAILED,
+            UtilBackup.Status.TIMEOUT,
+            UtilBackup.Status.CANCELLED,
+            UtilBackup.Status.STORAGE_VALIDATION_FAILED,
+        }
+        if backup.status in terminal_statuses:
+            # A late callback must never downgrade or replace a cancellation or a
+            # prior terminal decision made by another worker.
+            final_status = backup.status
         else:
-            # Nothing was stored anywhere -> failure (do not silently mark complete).
-            final_status = UtilBackup.Status.UPLOAD_FAILED
+            all_uploaded = (
+                requested_storage_count > 0
+                and uploaded_count == requested_storage_count
+            )
+            if uploaded_count > 0:
+                final_status = (
+                    UtilBackup.Status.COMPLETE
+                    if all_uploaded
+                    else UtilBackup.Status.PARTIAL
+                )
+            else:
+                # Nothing was stored anywhere -> failure (do not silently mark complete).
+                final_status = UtilBackup.Status.UPLOAD_FAILED
 
         finalization = metadata.get("_backup_finalization")
         finalization = dict(finalization) if isinstance(finalization, dict) else {}
@@ -656,6 +669,16 @@ def finalize_backup(self, node_id, backup_id):
         backup.status = final_status
         backup.metadata = metadata
         backup.save(update_fields=["status", "metadata", "modified"])
+        if final_status in UtilBackup.SUCCESS_STATUSES:
+            terminal_phase = "complete"
+        elif final_status == UtilBackup.Status.CANCELLED:
+            terminal_phase = "cancelled"
+        else:
+            terminal_phase = "failed"
+        # Keep the public backup status and the durable execution ledger in the same
+        # database transaction.  This also clears any source-dispatch lease so a
+        # stale worker cannot resurrect progress after finalization.
+        backup.finalize_execution(terminal_phase=terminal_phase)
 
     should_notify_success = (
         final_status == UtilBackup.Status.COMPLETE
