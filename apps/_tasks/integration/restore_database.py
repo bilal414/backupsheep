@@ -1348,7 +1348,17 @@ def _postgres_command(
         f"--dbname={shlex.quote(str(database))}",
     ])
     if tuples_only:
-        parts.extend(["--tuples-only", "--no-align", "--quiet"])
+        # Marker reconciliation is parsed as a fixed tab-delimited record.
+        # psql's unaligned default separator is ``|``; pinning it here keeps
+        # SSH and direct execution on the same unambiguous wire format.
+        parts.extend(
+            [
+                "--tuples-only",
+                "--no-align",
+                "--quiet",
+                f"--field-separator={shlex.quote(chr(9))}",
+            ]
+        )
     if sql is not None:
         parts.append(f"--command={shlex.quote(sql)}")
     if file_path is not None:
@@ -1381,7 +1391,8 @@ def _postgres_query_direct(
             "--set=ON_ERROR_STOP=1",
             f"--host={auth.host}", f"--port={auth.port}",
             f"--username={username}", f"--dbname={database}",
-            "--tuples-only", "--no-align", "--quiet", "--command", sql,
+            "--tuples-only", "--no-align", "--quiet",
+            f"--field-separator={chr(9)}", "--command", sql,
         ],
         username, "", "PostgreSQL", what,
         env=defaults_env,

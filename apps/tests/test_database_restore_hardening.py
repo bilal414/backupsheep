@@ -836,6 +836,35 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(restore.execution_phase, "database_complete")
         self.assertEqual(restore.progress_completed, 1)
 
+    def test_postgresql_marker_queries_pin_tab_delimited_wire_format(self):
+        auth = _fake_auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        remote = RD._postgres_command(
+            auth,
+            "dbuser",
+            "target_db",
+            "SELECT 1, 2;",
+            tuples_only=True,
+        )
+        self.assertIn("--field-separator=", remote)
+        self.assertIn("\t", remote)
+
+        with mock.patch.object(
+            RD, "_run_direct", return_value="one\ttwo\n"
+        ) as run:
+            result = RD._postgres_query_direct(
+                SimpleNamespace(),
+                _fake_backup(),
+                auth,
+                {},
+                "dbuser",
+                "target_db",
+                "SELECT 1, 2;",
+                "query marker",
+            )
+
+        self.assertEqual(result, "one\ttwo\n")
+        self.assertIn("--field-separator=\t", run.call_args.args[2])
+
     def test_postgresql_combined_import_contains_source_and_marker_once(self):
         backup = _fake_backup()
         restore = _FakeRestore()
