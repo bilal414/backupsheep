@@ -480,6 +480,7 @@ class LogicalRestoreCrashSafetyTests(RestoreBackendBase):
         restore.refresh_from_db()
         checkpoint = restore.execution_metadata["target_checkpoints"][target]
         self.assertEqual(checkpoint["status"], "complete")
+        self.assertEqual(checkpoint["files"]["appdb.sql"]["status"], "complete")
         self.assertEqual(checkpoint["transaction_replay_count"], 1)
         self.assertEqual(restore.execution_phase, "database_complete")
         self.assertEqual(restore.progress_completed, 1)

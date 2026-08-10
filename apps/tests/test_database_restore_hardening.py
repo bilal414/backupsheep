@@ -715,6 +715,10 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         run.assert_not_called()
         self.assertEqual(restore.progress_completed, 1)
         self.assertEqual(query.call_count, 2)
+        checkpoint = restore.execution_metadata["target_checkpoints"][
+            "bs_restore_owned"
+        ]
+        self.assertEqual(checkpoint["files"]["source_db.sql"]["status"], "complete")
 
     def test_postgresql_import_command_contains_on_error_stop_and_no_password_argv(self):
         backup = _fake_backup()
@@ -832,6 +836,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertIn("--single-transaction", run.call_args.args[2])
         checkpoint = restore.execution_metadata["target_checkpoints"][target]
         self.assertEqual(checkpoint["status"], "complete")
+        self.assertEqual(checkpoint["files"]["source_db.sql"]["status"], "complete")
         self.assertEqual(checkpoint["transaction_replay_count"], 1)
         self.assertEqual(restore.execution_phase, "database_complete")
         self.assertEqual(restore.progress_completed, 1)

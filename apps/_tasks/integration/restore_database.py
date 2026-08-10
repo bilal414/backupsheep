@@ -1901,6 +1901,15 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                     phase="database_adopted",
                     mapping=mapping,
                     source_digests=source_digests,
+                    checkpoints={target: {
+                        "source": source,
+                        "source_digest": digest,
+                        "status": "complete",
+                        "files": {
+                            filename: dict(specification, status="complete")
+                            for filename, specification in file_specs.items()
+                        },
+                    }},
                     progress_total=len(mapping),
                 )
                 continue
@@ -1915,6 +1924,10 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                         "source_digest": digest,
                         "status": "complete",
                         "adopted": True,
+                        "files": {
+                            filename: dict(specification, status="complete")
+                            for filename, specification in file_specs.items()
+                        },
                     }},
                     progress_total=len(mapping),
                 )
@@ -2070,6 +2083,10 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                     "source": source,
                     "source_digest": digest,
                     "status": "complete",
+                    "files": {
+                        filename: dict(specification, status="complete")
+                        for filename, specification in file_specs.items()
+                    },
                 }},
                 progress_total=len(mapping),
             )
