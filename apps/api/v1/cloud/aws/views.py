@@ -20,7 +20,7 @@ from rest_framework import status
 from apps.console.utils.models import UtilBackup
 
 
-class CoreCloudAWSView(ReadWriteSerializerMixin, viewsets.GenericViewSet):
+class CoreCloudAWSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     permission_classes = (CoreCloudAWSViewPermissions, IsAuthenticated)
     read_serializer_class = CoreCloudAWSReadSerializer
     write_serializer_class = CoreCloudAWSWriteSerializer
