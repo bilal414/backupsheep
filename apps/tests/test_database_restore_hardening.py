@@ -767,6 +767,75 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(credential_evidence[-1][1], 0o600)
         self.assertIn("p@ss-secret", credential_evidence[-1][0])
 
+    def test_postgresql_interrupted_atomic_import_replays_and_completes(self):
+        backup = _fake_backup()
+        auth = _fake_auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        sql = b"CREATE TABLE restored(id integer);\n"
+        with open(sql_path, "wb") as output:
+            output.write(sql)
+        source_digests = {
+            "source_db": [
+                {
+                    "file": "source_db.sql",
+                    "bytes": len(sql),
+                    "sha256": hashlib.sha256(sql).hexdigest(),
+                }
+            ]
+        }
+        digest = RD._source_digest(source_digests, "source_db")
+        target = "bs_restore_owned"
+        restore = _FakeRestore(
+            metadata={
+                "source_to_target": {"source_db": target},
+                "source_digests": source_digests,
+                "target_checkpoints": {
+                    target: {
+                        "source": "source_db",
+                        "source_digest": digest,
+                        "status": "importing",
+                        "files": {
+                            "source_db.sql": {
+                                **source_digests["source_db"][0],
+                                "status": "in_progress",
+                            }
+                        },
+                    }
+                },
+            }
+        )
+        importing = _marker(
+            restore, backup, "source_db", target, digest, "importing"
+        )
+        complete = _marker(
+            restore, backup, "source_db", target, digest, "complete"
+        )
+
+        with mock.patch.object(
+            RD,
+            "_postgres_query",
+            side_effect=["1\n", importing, "1\n", complete],
+        ), mock.patch.object(RD, "_run_direct", return_value="") as run:
+            RD._restore_postgresql(
+                SimpleNamespace(),
+                backup,
+                restore,
+                auth,
+                OrderedDict({"source_db": [sql_path]}),
+                {"source_db": target},
+                source_digests,
+                "dbuser",
+                "password",
+            )
+
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("--single-transaction", run.call_args.args[2])
+        checkpoint = restore.execution_metadata["target_checkpoints"][target]
+        self.assertEqual(checkpoint["status"], "complete")
+        self.assertEqual(checkpoint["transaction_replay_count"], 1)
+        self.assertEqual(restore.execution_phase, "database_complete")
+        self.assertEqual(restore.progress_completed, 1)
+
     def test_postgresql_combined_import_contains_source_and_marker_once(self):
         backup = _fake_backup()
         restore = _FakeRestore()

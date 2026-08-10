@@ -86,10 +86,22 @@ class LogicalRestoreCrashSafetyTests(RestoreBackendBase):
             None,
         )
 
-    def _database_restore(self, *, contents=b"CREATE TABLE restored(id int);\n"):
+    def _database_restore(
+        self,
+        *,
+        contents=b"CREATE TABLE restored(id int);\n",
+        db_type=CoreAuthDatabase.DatabaseType.MYSQL,
+        version=None,
+    ):
+        if version is None:
+            version = (
+                "postgres_16"
+                if db_type == CoreAuthDatabase.DatabaseType.POSTGRESQL
+                else "mysql_8_0"
+            )
         node, backup = self._database_backup(
-            db_type=CoreAuthDatabase.DatabaseType.MYSQL,
-            version="mysql_8_0",
+            db_type=db_type,
+            version=version,
         )
         restore = CoreDatabaseRestore.objects.create(
             backup=backup,
@@ -395,6 +407,82 @@ class LogicalRestoreCrashSafetyTests(RestoreBackendBase):
                 )
         reimport.assert_not_called()
         drop_target.assert_not_called()
+
+    def test_postgresql_stale_lease_replays_rolled_back_atomic_import(self):
+        """An importing marker proves a crashed PostgreSQL transaction rolled back."""
+        node, backup, restore, sql_path, source_digests, mapping = self._database_restore(
+            db_type=CoreAuthDatabase.DatabaseType.POSTGRESQL,
+        )
+        target = mapping["appdb"]
+        digest = RD._source_digest(source_digests, "appdb")
+        lease, bound = self._claim(
+            restore,
+            "database_restore",
+            f"postgres-crash-{uuid.uuid4().hex}",
+        )
+        RD._checkpoint(
+            bound,
+            phase="database_importing",
+            mapping=mapping,
+            source_digests=source_digests,
+            checkpoints={
+                target: {
+                    "source": "appdb",
+                    "source_digest": digest,
+                    "status": "importing",
+                    "files": {
+                        "appdb.sql": {
+                            **source_digests["appdb"][0],
+                            "status": "in_progress",
+                        }
+                    },
+                }
+            },
+            progress_total=1,
+        )
+        importing = RD._marker_values(
+            bound, backup, "appdb", target, digest, "importing"
+        )
+        complete = RD._marker_values(
+            bound, backup, "appdb", target, digest, "complete"
+        )
+        replacement_lease, replacement = self._take_over(
+            lease,
+            restore,
+            "database_restore_retry",
+            f"postgres-retry-{uuid.uuid4().hex}",
+        )
+        self.assertIsNotNone(replacement_lease)
+
+        with mock.patch.object(
+            RD,
+            "_postgres_query",
+            side_effect=[
+                "1\n",
+                self._marker_text(importing),
+                "1\n",
+                self._marker_text(complete),
+            ],
+        ), mock.patch.object(RD, "_run_direct", return_value="") as replay:
+            RD._restore_postgresql(
+                node,
+                backup,
+                replacement,
+                node.connection.auth_database,
+                OrderedDict({"appdb": [sql_path]}),
+                mapping,
+                source_digests,
+                "dbuser",
+                "db-password",
+            )
+
+        self.assertEqual(replay.call_count, 1)
+        restore.refresh_from_db()
+        checkpoint = restore.execution_metadata["target_checkpoints"][target]
+        self.assertEqual(checkpoint["status"], "complete")
+        self.assertEqual(checkpoint["transaction_replay_count"], 1)
+        self.assertEqual(restore.execution_phase, "database_complete")
+        self.assertEqual(restore.progress_completed, 1)
 
     def test_database_marker_mismatch_fails_closed_without_destructive_sql(self):
         """A target with another restore's marker is never overwritten."""

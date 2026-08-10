@@ -1918,6 +1918,7 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                     "the PostgreSQL import outcome is ambiguous; manual review is required."
                 )
             existing_files = dict(checkpoint.get("files") or {})
+            replaying_atomic_import = False
             if existing_files:
                 for filename, expected_file in file_specs.items():
                     current_file = existing_files.get(filename)
@@ -1928,13 +1929,25 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                         raise RestoreError(
                             "the PostgreSQL file checkpoint does not match the archive."
                         )
-                if any(
-                    state.get("status") == "in_progress"
+                file_statuses = {
+                    str(state.get("status") or "pending")
                     for state in existing_files.values()
-                ):
+                }
+                if not file_statuses.issubset({"pending", "in_progress", "complete"}):
+                    raise RestoreError(
+                        "the PostgreSQL file checkpoint has an unsupported state."
+                    )
+                if "complete" in file_statuses:
                     raise RestoreError(
                         "the PostgreSQL import outcome is ambiguous; manual review is required."
                     )
+                # PostgreSQL runs every dump plus the ownership-marker update in
+                # one ON_ERROR_STOP transaction. An exact marker still in the
+                # importing state proves the previous transaction did not
+                # commit; a committed transaction would have atomically changed
+                # that marker to complete and been adopted above. Replaying the
+                # same verified archive is therefore safe after a worker crash.
+                replaying_atomic_import = "in_progress" in file_statuses
             file_states = {
                 filename: dict(
                     file_specs[filename],
@@ -1946,13 +1959,27 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
             }
             _checkpoint(
                 restore,
-                phase="database_importing",
+                phase=(
+                    "database_replaying"
+                    if replaying_atomic_import
+                    else "database_importing"
+                ),
                 mapping=mapping,
                 source_digests=source_digests,
                 checkpoints={target: {
                     "source": source,
                     "source_digest": digest,
                     "status": "importing",
+                    **(
+                        {
+                            "transaction_replay_count": int(
+                                checkpoint.get("transaction_replay_count") or 0
+                            )
+                            + 1
+                        }
+                        if replaying_atomic_import
+                        else {}
+                    ),
                     "files": {
                         filename: dict(state, status="in_progress")
                         for filename, state in file_states.items()
