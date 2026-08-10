@@ -665,7 +665,7 @@ def _cleanup_restore_target_probe(
     if not probe:
         return True
     try:
-        _run_lftp(
+        proc = _run_lftp(
             node,
             backup,
             restore,
@@ -691,8 +691,22 @@ def _cleanup_restore_target_probe(
             password,
             what="clean website restore permission probe",
             enforce_fence=False,
+            check_result=False,
         )
-        return True
+        output = str(getattr(proc, "stdout", "") or "")
+        if (
+            _probe_output_is_auth_failure(output)
+            or _probe_output_is_permission_denial(output)
+            or _probe_output_is_transport_failure(output)
+        ):
+            return False
+        # A crashed predecessor may already have removed either exact,
+        # restore-owned probe path. lftp reports that idempotent state with a
+        # non-zero process status, so inspect the bounded output before the
+        # generic return-code check.
+        if _remote_output_is_not_found(output):
+            return True
+        return getattr(proc, "returncode", 1) == 0
     except Exception:
         _capture_safe("WEBSITE_TARGET_PROBE_CLEANUP_FAILED")
         return False

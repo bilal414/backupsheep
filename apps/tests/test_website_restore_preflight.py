@@ -256,6 +256,62 @@ class WebsiteRestorePreflightTests(SimpleTestCase):
         self.assertNotIn('"public_html"', cleanup_script)
         self.assertFalse(os.path.exists(local_probe))
 
+    def test_absent_exact_probe_cleanup_is_idempotent_success(self):
+        probe = RW._remote_probe_paths(
+            self.restore,
+            self.backup,
+            {"path": "public_html", "type": "directory"},
+        )
+        result = SimpleNamespace(
+            returncode=1,
+            stdout=(
+                f"rm: Access failed: No such file ({probe['renamed']})\n"
+                f"rm: Access failed: No such file ({probe['root']})\n"
+            ),
+        )
+
+        with mock.patch.object(RW, "_run_lftp", return_value=result) as run_lftp:
+            cleaned = RW._cleanup_restore_target_probe(
+                self.node,
+                self.backup,
+                self.restore,
+                self.auth,
+                self.username,
+                self.password,
+                self.ssh_key_path,
+                "sftp://sftp.example.invalid",
+                self.website.parallel,
+                probe,
+            )
+
+        self.assertTrue(cleaned)
+        self.assertFalse(run_lftp.call_args.kwargs["enforce_fence"])
+        self.assertFalse(run_lftp.call_args.kwargs["check_result"])
+
+    def test_probe_cleanup_transport_failure_is_not_success(self):
+        probe = RW._remote_probe_paths(
+            self.restore,
+            self.backup,
+            {"path": "public_html", "type": "directory"},
+        )
+        result = SimpleNamespace(returncode=1, stdout="Connection reset by peer")
+
+        with mock.patch.object(RW, "_run_lftp", return_value=result):
+            cleaned = RW._cleanup_restore_target_probe(
+                self.node,
+                self.backup,
+                self.restore,
+                self.auth,
+                self.username,
+                self.password,
+                self.ssh_key_path,
+                "sftp://sftp.example.invalid",
+                self.website.parallel,
+                probe,
+            )
+
+        self.assertFalse(cleaned)
+
     def test_fence_loss_stops_probe_and_still_attempts_exact_probe_cleanup(self):
         local_probe = self._track_probe()
         cleanup_calls = []
