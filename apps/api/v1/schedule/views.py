@@ -21,8 +21,6 @@ from apps.console.node.models import CoreNode, CoreSchedule, CoreScheduleRun
 from rest_framework import status
 from django.utils.text import slugify
 from rest_framework.decorators import action
-from celery import current_app
-
 from apps.api.v1.utils.api_exceptions import ExceptionDefault
 
 
@@ -157,13 +155,20 @@ class CoreScheduleView(viewsets.ModelViewSet):
 
             schedule_run = serializer.instance
 
-            current_app.send_task(
-                schedule.node.backup_task_name(),
-                kwargs={
-                    "node_id": schedule.node.id,
-                    "schedule_id": schedule.id,
-                    "storage_ids": schedule.storage_ids,
-                },
+            from apps._tasks.backup_dispatch import (
+                backup_request_status,
+                create_backup_request,
+            )
+
+            backup_request = create_backup_request(
+                node=schedule.node,
+                schedule=schedule,
+                storage_ids=schedule.storage_ids,
+                requested_by=request.user.member,
+                trigger="schedule",
+                idempotency_key=(
+                    f"api-schedule:{schedule.id}:{schedule_run.request_id}"
+                ),
             )
             _log_activity(
                 request,
@@ -178,8 +183,10 @@ class CoreScheduleView(viewsets.ModelViewSet):
                     "node_name": schedule.node.name,
                 },
             )
+            response_data = dict(serializer.data)
+            response_data["backup_request"] = backup_request_status(backup_request)
             headers = self.get_success_headers(serializer.data)
-            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+            return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
         else:
             raise ExceptionDefault(detail=serializer.errors)
 

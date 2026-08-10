@@ -12,6 +12,8 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
+from sentry_sdk import capture_exception
+from apps.api.v1.utils.boto import bounded_boto3_client
 
 from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
@@ -108,7 +110,10 @@ class CoreBasecampBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                 else:
                     raise DownloadStoragePointNotFound()
             except Exception as e:
-                raise DownloadStoragePointError(e.__str__())
+                capture_exception(e)
+                raise DownloadStoragePointError(
+                    "The backup download could not be prepared safely. Please retry."
+                )
         else:
             raise DownloadMissingParams()
 
@@ -124,7 +129,7 @@ class CoreBasecampBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             access_key = settings.AWS_S3_ACCESS_KEY
             secret_key = settings.AWS_S3_SECRET_ACCESS_KEY
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3",
             endpoint_url=s3_endpoint,
             aws_access_key_id=access_key,
@@ -150,7 +155,10 @@ class CoreBasecampBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             ).data
             return Response(storage_points, status=status.HTTP_200_OK)
         except Exception as e:
-            raise StoragePointError(e.__str__())
+            capture_exception(e)
+            raise StoragePointError(
+                "Backup storage points could not be loaded. Please retry."
+            )
 
     @action(detail=False)
     def highcharts(self, request):

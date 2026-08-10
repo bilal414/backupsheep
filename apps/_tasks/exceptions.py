@@ -286,17 +286,42 @@ class NodeBackupFailedError(APIException):
         message="Unable to create backup/snapshot. "
         "This cloud be temporary because of failed API call. We will keep trying.",
     ):
+        # Command stderr and provider exceptions can contain credentials, signed
+        # URLs, SQL, endpoints, and customer file paths. Keep the original text on
+        # the in-process exception for secured diagnostics, but never persist it in
+        # the account activity log or expose it as the public failure contract.
+        try:
+            from apps._tasks.integration.backup.errors import safe_backup_failure
+
+            public_failure = safe_backup_failure(
+                RuntimeError(str(message)), stage="backup"
+            )
+            self.error_code = public_failure.code
+            self.retryable = public_failure.retryable
+            self.public_message = public_failure.detail
+        except Exception:
+            self.error_code = "BACKUP_FAILED"
+            self.retryable = True
+            self.public_message = (
+                "The backup operation failed. Review secured diagnostics using "
+                "the correlation ID."
+            )
         self.node = node
         self.backup_uuid = backup_uuid
         self.attempt_no = attempt_no
         self.backup_type = backup_type
         self.message = message
-        super().__init__(self.message)
+        self.diagnostic_message = message
+        # DRF renders ``detail`` if this exception crosses a synchronous API
+        # boundary; only the allowlisted public contract may be exposed there.
+        super().__init__(self.public_message)
         # Add to logs
         if self.node:
             data = {
                 "error": self.__class__.__name__,
-                "message": self.message,
+                "error_code": self.error_code,
+                "message": self.public_message,
+                "retryable": self.retryable,
                 "node_id": self.node.id,
                 "node_name": self.node.name,
                 "connection_id": self.node.connection.id,

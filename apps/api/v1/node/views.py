@@ -1,5 +1,6 @@
 import os
 import shutil
+import uuid
 
 from django.conf import settings
 from django.db.models import Q
@@ -106,7 +107,10 @@ class CoreNodeView(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def take_snapshot(self, request, pk=None):
-        from celery import current_app
+        from apps._tasks.backup_dispatch import (
+            backup_request_status,
+            create_backup_request,
+        )
 
         node = self.get_object()
         notes = self.request.data.get("notes")
@@ -136,19 +140,53 @@ class CoreNodeView(viewsets.ModelViewSet):
             # backup_basecamp(node.id, storage_ids=storage_point_ids)
             # backup_website(node.id, storage_ids=storage_point_ids)
 
-            result = current_app.send_task(
-                node.backup_task_name(),
-                kwargs={
-                    "node_id": pk,
-                    "schedule_id": None,
-                    "storage_ids": storage_point_ids,
-                    "notes": notes,
-                },
+            idempotency_key = (
+                request.headers.get("Idempotency-Key")
+                or self.request.data.get("request_id")
             )
-            # final_result = result.get()
-            return Response({"detail": "Backup will start in few seconds."}, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            raise SnapshotCreateError(e.__str__())
+            backup_request = create_backup_request(
+                node=node,
+                storage_ids=storage_point_ids,
+                notes=notes,
+                requested_by=request.user.member,
+                trigger="on_demand",
+                idempotency_key=idempotency_key,
+            )
+            return Response(
+                {
+                    "detail": "Backup request accepted and durably queued.",
+                    "backup_request": backup_request_status(backup_request),
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        except Exception:
+            raise SnapshotCreateError(
+                "The backup request could not be accepted. Please retry safely."
+            )
+
+    @action(detail=True, methods=["get"])
+    def backup_request_status(self, request, pk=None):
+        from apps._tasks.backup_dispatch import backup_request_status
+        from apps.console.backup.models import CoreBackupRequest
+
+        node = self.get_object()
+        request_id = str(request.query_params.get("request_id") or "").strip()
+        try:
+            request_uuid = uuid.UUID(request_id)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "Backup request was not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        backup_request = CoreBackupRequest.objects.filter(
+            node=node, correlation_id=request_uuid
+        ).first()
+        if backup_request is None:
+            return Response(
+                {"detail": "Backup request was not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(backup_request_status(backup_request))
 
     @action(detail=True, methods=["post"])
     def restore_backup(self, request, pk=None):

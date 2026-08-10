@@ -13,14 +13,17 @@
 #                         docker compose up -d --scale worker-storage=4
 #   worker-logs ..... DB log entries, Slack/Telegram/Firebase notifications, and pruning
 #                     old run logs from disk (delete_old_logs).
-#   beat ............ Celery beat scheduler. MUST stay exactly one instance or scheduled
-#                     backups fire twice (also fires the daily log-pruning task).
+#   beat ............ Celery beat scheduler. BackupSheep scheduled-backup entries use a
+#                     transactional occurrence claim, so duplicate Beat processes
+#                     converge safely; keep ordinary maintenance entries singleton.
 #
 # All disk-touching workers (database, files, storage) share the backup_workdir volume,
 # so any of them can see any backup's in-progress files. On a SINGLE host you can scale
-# any of them with `--scale` (each replica handles distinct backups / upload tasks);
-# beat is the only hard singleton. Across MULTIPLE hosts, backup_workdir must be a shared
-# network filesystem (NFS/EFS) so replicas see each other's files.
+# any of them with `--scale` (each replica handles distinct backups / upload tasks).
+# Keep Beat singleton for ordinary maintenance-task cadence; scheduled backup entries
+# themselves are protected by a transactional occurrence claim. Across MULTIPLE hosts,
+# backup_workdir must be a shared network filesystem (NFS/EFS) so replicas see each
+# other's files.
 #
 # Plus PostgreSQL and RabbitMQ (the Celery broker). Build and start everything with:
 #     docker compose up --build
@@ -91,6 +94,9 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      # Connection validation must read the exact same reviewed SSH host keys and
+      # optional managed private key used by files/database workers.
+      - backup_workdir:/code/_storage
       - backup_storage:/backups
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=3)"]
@@ -197,7 +203,7 @@ services:
   beat:
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "beat", "--loglevel=info", "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+    entrypoint: ["celery", "-A", "backupsheep", "beat", "--loglevel=info", "--scheduler", "backupsheep.scheduler:BackupDatabaseScheduler"]
     depends_on:
       db:
         condition: service_healthy

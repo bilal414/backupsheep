@@ -8,12 +8,16 @@ import tempfile
 import time
 import uuid
 import zipfile
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
 
+import requests as raw_requests
+from botocore.exceptions import ClientError
 from celery.exceptions import MaxRetriesExceededError, Retry
 from django.conf import settings
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps._tasks.exceptions import (
@@ -43,8 +47,8 @@ from apps.console.connection.models import (
     CoreConnection,
 )
 from apps.console.node.models import CoreDatabase, CoreNode, CoreWebsite
-from apps.console.storage.models import CoreStorageLocal
-from apps.console.utils.models import UtilBackup
+from apps.console.storage.models import CoreStorage, CoreStorageLocal
+from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
 
@@ -87,6 +91,64 @@ class PollCloudBackupTests(BaseTestCase):
             helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
         requeue.assert_called_once()
         self.assertIn("countdown", requeue.call_args.kwargs)
+
+    def test_escaped_timeout_is_categorized_and_requeued(self):
+        node, backup = self._backup()
+        canary = "Bearer provider-token"
+        with mock.patch.object(
+            CoreDigitalOceanBackup,
+            "poll_status",
+            side_effect=raw_requests.Timeout(canary),
+        ), mock.patch.object(helper_tasks.poll_cloud_backup, "apply_async") as requeue:
+            helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+
+        execution = backup.execution_records.get()
+        self.assertEqual(execution.last_error_code, "PROVIDER_TIMEOUT")
+        self.assertNotIn(canary, execution.last_error_message)
+        requeue.assert_called_once()
+
+    def test_escaped_auth_failure_is_terminal_not_in_progress(self):
+        node, backup = self._backup()
+        error = ClientError(
+            {
+                "Error": {"Code": "AccessDenied", "Message": "secret body"},
+                "ResponseMetadata": {"HTTPStatusCode": 403},
+            },
+            "DescribeSnapshots",
+        )
+        with mock.patch.object(
+            CoreDigitalOceanBackup, "poll_status", side_effect=error
+        ), mock.patch.object(CoreNode, "notify_backup_fail") as notify:
+            helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+
+        backup.refresh_from_db()
+        execution = backup.execution_records.get()
+        self.assertEqual(backup.status, UtilBackup.Status.FAILED)
+        self.assertEqual(execution.last_error_code, "PROVIDER_AUTH_FAILED")
+        self.assertNotIn("secret body", execution.last_error_message)
+        notify.assert_called_once()
+
+    def test_rate_limit_retry_deadline_controls_next_poll(self):
+        node, backup = self._backup()
+
+        def rate_limited(instance):
+            instance.record_execution_error(
+                code="PROVIDER_RATE_LIMIT",
+                retry_at=timezone.now() + timedelta(seconds=600),
+            )
+            return UtilBackup.Status.IN_PROGRESS
+
+        with mock.patch.object(
+            CoreDigitalOceanBackup,
+            "poll_status",
+            autospec=True,
+            side_effect=rate_limited,
+        ), mock.patch.object(helper_tasks.poll_cloud_backup, "apply_async") as requeue:
+            helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+
+        countdown = requeue.call_args.kwargs["countdown"]
+        self.assertGreaterEqual(countdown, 598)
+        self.assertLessEqual(countdown, 600)
 
     def test_second_poller_is_blocked_by_database_lease(self):
         node, backup = self._backup()
@@ -204,16 +266,19 @@ class LocalFinalizerTests(BaseTestCase):
 
 
 class ProviderPollStatusResilienceTests(BaseTestCase):
-    def test_poll_status_never_raises_on_api_error(self):
-        # No auth_digitalocean is configured, so get_client() blows up inside poll_status;
-        # the contract is to return IN_PROGRESS, never raise.
+    def test_poll_status_missing_auth_is_terminal_and_categorized(self):
+        # Missing local provider credentials are not a transient provider operation.
         node = factories.make_cloud_node(self.account, self.member, code="digitalocean")
         backup = CoreDigitalOceanBackup.objects.create(
             digitalocean=node.digitalocean, status=UtilBackup.Status.IN_PROGRESS, action_id="A1",
         )
-        self.assertEqual(backup.poll_status(), UtilBackup.Status.IN_PROGRESS)
+        self.assertEqual(backup.poll_status(), UtilBackup.Status.FAILED)
+        self.assertEqual(
+            backup.execution_records.get().last_error_code,
+            "PROVIDER_AUTH_FAILED",
+        )
 
-    def test_digitalocean_volume_waits_for_snapshot(self):
+    def test_digitalocean_persisted_snapshot_404_is_terminal(self):
         node = factories.make_cloud_node(
             self.account,
             self.member,
@@ -225,19 +290,25 @@ class ProviderPollStatusResilienceTests(BaseTestCase):
             status=UtilBackup.Status.IN_PROGRESS,
             unique_id="snapshot-1",
         )
-        not_found = SimpleNamespace(status_code=404, json=lambda: {})
-        empty_list = SimpleNamespace(
-            status_code=200,
-            json=lambda: {"snapshots": None, "meta": {"total": 0}},
+        CoreAuthDigitalOcean.objects.create(
+            connection=node.connection,
+            api_key=bs_encrypt(
+                "test-token", self.account.get_encryption_key()
+            ),
         )
+        not_found = SimpleNamespace(status_code=404, json=lambda: {})
         with mock.patch(
             "apps.console.connection.models.CoreAuthDigitalOcean.get_client",
             return_value={},
         ), mock.patch(
             "apps.console.backup.models.requests.get",
-            side_effect=[not_found, empty_list],
+            return_value=not_found,
         ):
-            self.assertEqual(backup.poll_status(), UtilBackup.Status.IN_PROGRESS)
+            self.assertEqual(backup.poll_status(), UtilBackup.Status.FAILED)
+        self.assertEqual(
+            backup.execution_records.get().last_error_code,
+            "PROVIDER_NOT_FOUND",
+        )
 
 
 class DigitalOceanSnapshotCreateTests(BaseTestCase):
@@ -311,6 +382,24 @@ class LftpScriptBuilderTests(TestCase):
         line = next(l for l in s.splitlines() if "connect-program" in l)
         # the dangerous chars are shell-quoted, so they are data, not commands/args
         self.assertNotIn("-l u'; rm -rf /", line)
+
+    def test_sftp_password_uses_shared_strict_known_hosts(self):
+        s = W._build_lftp_script(
+            auth=self._auth(CoreAuthWebsite.Protocol.SFTP),
+            host_url="sftp://h",
+            port=22,
+            username="user",
+            password="secret",
+            ssh_key_path=None,
+            parallel=2,
+            transfer='mirror "." "t"',
+            mirror=True,
+        )
+        line = next(l for l in s.splitlines() if "connect-program" in l)
+        self.assertIn("StrictHostKeyChecking=yes", line)
+        self.assertIn("UserKnownHostsFile=", line)
+        self.assertIn(settings.SSH_KNOWN_HOSTS_PATH, line)
+        self.assertIn('user "user" "secret"', s)
 
     def test_plain_ftp_disables_tls(self):
         s = W._build_lftp_script(auth=self._auth(CoreAuthWebsite.Protocol.FTP),
@@ -503,16 +592,11 @@ class WebsiteSnapshotDispatchTests(WebsiteEngineBase):
         self.assertIn(backup.uuid, base_dir)
         self.assertNotIn("website_cache", base_dir)
 
-    def test_public_key_on_lftp_path_fails(self):
-        # Managed public-key auth is SaaS-only; only the tar path may see key auth.
+    def test_public_key_routes_to_lftp_when_managed_key_is_configured(self):
         node, backup = self._make_backup(use_public_key=True)
-        with mock.patch.object(CoreAuthWebsite, "check_connection", lambda *a, **k: None), \
-             mock.patch.object(W.subprocess, "run") as run, \
-             mock.patch.object(W, "_finalize_zip"), \
-             mock.patch.object(W, "delete_from_disk"):
-            with self.assertRaises(NodeBackupFailedError):
-                W.snapshot_website(backup)
-        run.assert_not_called()
+        lftp, tar = self._run(backup)
+        tar.assert_not_called()
+        lftp.assert_called_once()
 
 
 class WebsiteMirrorOptsTests(WebsiteEngineBase):
@@ -645,9 +729,7 @@ class ResetIncrementalCacheTests(BaseTestCase):
 
 
 class NormalizeSshKeyTests(TestCase):
-    """_normalize_ssh_key: paramiko rewrites the key unencrypted when it can; for keys
-    paramiko parses but cannot serialize (Ed25519 in paramiko 5.0.0) it must fall back
-    to the system ssh-keygen -- and only when a passphrase was supplied."""
+    """Private-key normalization never puts passphrases in process arguments."""
 
     def _key_file(self, contents="-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n"):
         fd, path = tempfile.mkstemp()
@@ -672,16 +754,23 @@ class NormalizeSshKeyTests(TestCase):
                 mock.patch("paramiko.RSAKey", rsa),
                 mock.patch("paramiko.ECDSAKey", ec))
 
-    def test_paramiko_write_failure_falls_back_to_ssh_keygen(self):
-        path = self._key_file()
+    def test_paramiko_write_failure_uses_in_process_crypto(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        private_key = Ed25519PrivateKey.generate()
+        encrypted = private_key.private_bytes(
+            encoding=W.serialization.Encoding.PEM,
+            format=W.serialization.PrivateFormat.OpenSSH,
+            encryption_algorithm=W.serialization.BestAvailableEncryption(
+                b"s3cret-passphrase"
+            ),
+        )
+        path = self._key_file(encrypted.decode("utf-8"))
         ed, rsa, ec = self._paramiko_write_broken()
         with ed, rsa, ec, mock.patch.object(W.subprocess, "run") as run:
-            run.return_value = SimpleNamespace(returncode=0, stdout="")
             W._normalize_ssh_key(path, "s3cret-passphrase")
-        run.assert_called_once()
-        argv = run.call_args.args[0]
-        self.assertEqual(argv, ["ssh-keygen", "-p", "-P", "s3cret-passphrase",
-                                "-N", "", "-f", path])
+        run.assert_not_called()
+        W.paramiko.Ed25519Key.from_private_key_file(path)
 
     def test_paramiko_rewrite_success_runs_no_subprocess(self):
         # Real RSA key encrypted with a passphrase: paramiko rewrites it, no fallback.
@@ -780,7 +869,8 @@ class GetSftpClientKeyTests(BaseTestCase):
              mock.patch("paramiko.SSHClient", return_value=ssh_client):
             with self.assertRaises(Exception) as ctx:
                 auth.get_sftp_client()
-        self.assertIn("boom", str(ctx.exception))
+        self.assertNotIn("boom", str(ctx.exception))
+        self.assertIn("validate", str(ctx.exception).lower())
         self.assertEqual(self._storage_listing(), before)
 
     def test_unparseable_key_raises_and_removes_temp_key(self):
@@ -789,8 +879,10 @@ class GetSftpClientKeyTests(BaseTestCase):
         before = self._storage_listing()
         with mock.patch("paramiko.SSHClient", return_value=ssh_client):
             # Real key classes, garbage key contents -> nothing parses.
-            with self.assertRaises(NodeConnectionErrorSFTP):
+            with self.assertRaises(Exception) as ctx:
                 auth.get_sftp_client()
+        self.assertNotIn("unexpected OpenSSH", str(ctx.exception))
+        self.assertIn("validate", str(ctx.exception).lower())
         ssh_client.connect.assert_not_called()
         self.assertEqual(self._storage_listing(), before)
 
@@ -920,7 +1012,7 @@ class _FakeSSH:
         self.sftp = _FakeSFTP()
         self.closed = False
 
-    def exec_command(self, command):
+    def exec_command(self, command, **_kwargs):
         self.commands.append(command)
         out, err, exit_status = self.handler(command)
         return (
@@ -988,6 +1080,10 @@ class DatabaseSnapshotDispatchTests(BaseTestCase):
         with mock.patch("apps._tasks.integration.backup.mysql.snapshot_mysql") as m_mysql, \
              mock.patch("apps._tasks.integration.backup.mariadb.snapshot_mariadb") as m_maria, \
              mock.patch("apps._tasks.integration.backup.postgresql.snapshot_postgresql") as m_pg, \
+             mock.patch(
+                 "apps._tasks.execution.verify_and_commit_source_artifact",
+                 return_value=SimpleNamespace(byte_count=0),
+             ), \
              mock.patch("apps._tasks.integration.storage.tasks.finalize_backup"):
             node.database.create_snapshot(backup)
         return m_mysql, m_maria, m_pg, backup
@@ -1087,6 +1183,30 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         self.assertEqual(len(calls), 1)
         self.assertFalse(os.path.exists(f"_storage/{backup.uuid}.zip"))
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
+
+    def test_stale_worker_does_not_delete_successor_artifacts(self):
+        _node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0"
+        )
+        calls = []
+        with self._patch_check_connection(), \
+             mock.patch.object(
+                 MYSQL_ENGINE.subprocess,
+                 "run",
+                 side_effect=_recorded_run(calls, dump=self.DUMP),
+             ), \
+             mock.patch.object(
+                 MYSQL_ENGINE,
+                 "create_python_zip",
+                 side_effect=BackupExecutionLeaseLostError("stale worker"),
+             ), \
+             mock.patch.object(
+                 MYSQL_ENGINE.delete_from_disk, "apply_async"
+             ) as cleanup:
+            with self.assertRaises(BackupExecutionLeaseLostError):
+                MYSQL_ENGINE.snapshot_mysql(backup)
+
+        cleanup.assert_not_called()
 
     def test_stderr_on_success_is_warning_not_fatal(self):
         node, backup = self._make_backup(
@@ -1382,7 +1502,8 @@ class AuthDatabaseGetSshClientTests(BaseTestCase):
              mock.patch("paramiko.SSHClient", return_value=ssh_client):
             with self.assertRaises(Exception) as ctx:
                 auth.get_ssh_client()
-        self.assertIn("boom", str(ctx.exception))
+        self.assertNotIn("boom", str(ctx.exception))
+        self.assertIn("validate", str(ctx.exception).lower())
         self.assertEqual(self._storage_listing(), before)
 
 
@@ -1424,13 +1545,25 @@ class BackupTaskValidationOrderTests(BaseTestCase):
             self.account, self.member,
             db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0")
 
+    def _storage(self, suffix):
+        return factories.make_storage(
+            self.account,
+            self.member,
+            bucket=f"validation-order-{suffix}",
+        )
+
     def test_website_validation_failure_creates_row_and_marks_retrying(self):
         node = self._website_node()
-        with mock.patch.object(CoreConnection, "validate", return_value=False), \
+        storage = self._storage("website-retry")
+        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+             mock.patch.object(CoreConnection, "validate", return_value=False), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
              mock.patch.object(backup_website, "retry",
                                side_effect=Retry("retrying")) as retry:
-            backup_website.apply(kwargs={"node_id": node.id, "storage_ids": []}, throw=False)
+            backup_website.apply(
+                kwargs={"node_id": node.id, "storage_ids": [storage.id]},
+                throw=False,
+            )
         backup = CoreWebsiteBackup.objects.get(website=node.website)
         self.assertEqual(backup.status, UtilBackup.Status.RETRYING)
         self.assertEqual(backup.type, UtilBackup.Type.ON_DEMAND)
@@ -1440,23 +1573,33 @@ class BackupTaskValidationOrderTests(BaseTestCase):
 
     def test_website_validation_failure_max_retries_marks_row(self):
         node = self._website_node()
-        with mock.patch.object(CoreConnection, "validate", return_value=False), \
+        storage = self._storage("website-max")
+        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+             mock.patch.object(CoreConnection, "validate", return_value=False), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
              mock.patch.object(backup_website, "retry",
                                side_effect=MaxRetriesExceededError("maxed")):
-            backup_website.apply(kwargs={"node_id": node.id, "storage_ids": []}, throw=False)
+            backup_website.apply(
+                kwargs={"node_id": node.id, "storage_ids": [storage.id]},
+                throw=False,
+            )
         backup = CoreWebsiteBackup.objects.get(website=node.website)
         self.assertEqual(backup.status, UtilBackup.Status.MAX_RETRY_FAILED)
         notify.assert_called_once()
 
     def test_database_validation_failure_creates_row_and_marks_retrying(self):
         node = self._database_node()
-        with mock.patch.object(CoreConnection, "validate",
+        storage = self._storage("database-retry")
+        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+             mock.patch.object(CoreConnection, "validate",
                                side_effect=IntegrationValidationError("nope")), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
              mock.patch.object(backup_database, "retry",
                                side_effect=Retry("retrying")) as retry:
-            backup_database.apply(kwargs={"node_id": node.id, "storage_ids": []}, throw=False)
+            backup_database.apply(
+                kwargs={"node_id": node.id, "storage_ids": [storage.id]},
+                throw=False,
+            )
         backup = CoreDatabaseBackup.objects.get(database=node.database)
         self.assertEqual(backup.status, UtilBackup.Status.RETRYING)
         self.assertEqual(backup.type, UtilBackup.Type.ON_DEMAND)
@@ -1466,12 +1609,17 @@ class BackupTaskValidationOrderTests(BaseTestCase):
 
     def test_database_validation_failure_max_retries_marks_row(self):
         node = self._database_node()
-        with mock.patch.object(CoreConnection, "validate",
+        storage = self._storage("database-max")
+        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+             mock.patch.object(CoreConnection, "validate",
                                side_effect=IntegrationValidationError("nope")), \
              mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
              mock.patch.object(backup_database, "retry",
                                side_effect=MaxRetriesExceededError("maxed")):
-            backup_database.apply(kwargs={"node_id": node.id, "storage_ids": []}, throw=False)
+            backup_database.apply(
+                kwargs={"node_id": node.id, "storage_ids": [storage.id]},
+                throw=False,
+            )
         backup = CoreDatabaseBackup.objects.get(database=node.database)
         self.assertEqual(backup.status, UtilBackup.Status.MAX_RETRY_FAILED)
         notify.assert_called_once()

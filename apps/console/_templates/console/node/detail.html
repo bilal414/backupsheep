@@ -465,24 +465,84 @@
                                             <span class="text-sm text-slate-700">{{ backup.created }}</span>
                                         </div>
                                     </td>
-                                    <td class="whitespace-nowrap px-4 py-3">
-                                        {% if backup.status == 3 %}
-                                            <span class="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
-                                                <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>{{ backup.get_status_display }}
-                                            </span>
-                                        {% elif backup.status == 4 or backup.status == 11 or backup.status == 12 or backup.status == 13 or backup.status == 15  or backup.status == 20  or backup.status == 16 %}
-                                            <span class="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">
-                                                <span class="h-1.5 w-1.5 rounded-full bg-red-500"></span>{{ backup.get_status_display }}
-                                            </span>
-                                        {% elif backup.status == 5 or backup.status == 7 or backup.status == 14 or backup.status == 19 %}
-                                            <span class="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">
-                                                <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>{{ backup.get_status_display }}
-                                            </span>
-                                        {% else %}
-                                            <span class="inline-flex items-center gap-1.5 rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-700 ring-1 ring-inset ring-sky-600/20">
-                                                <span class="h-1.5 w-1.5 rounded-full bg-sky-500"></span>{{ backup.get_status_display }}
-                                            </span>
-                                        {% endif %}
+                                    <td class="px-4 py-3">
+                                        <div x-data="executionStatusCard" class="min-w-[13rem]" data-execution-status-card
+                                             data-backup-id="{{ backup.id }}"
+                                             data-integration-code="{{ object.connection.integration.code|lower }}"
+                                             data-fallback-status="{{ backup.get_status_display }}">
+                                            <div x-show="!loaded">
+                                                {% if backup.status == 3 %}
+                                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20" role="status" aria-live="polite">
+                                                        <span class="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true"></span>{{ backup.get_status_display }}
+                                                    </span>
+                                                {% elif backup.status == 4 or backup.status == 11 or backup.status == 12 or backup.status == 13 or backup.status == 15  or backup.status == 20  or backup.status == 16 %}
+                                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20" role="status" aria-live="polite">
+                                                        <span class="h-1.5 w-1.5 rounded-full bg-red-500" aria-hidden="true"></span>{{ backup.get_status_display }}
+                                                    </span>
+                                                {% elif backup.status == 5 or backup.status == 7 or backup.status == 14 or backup.status == 19 %}
+                                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20" role="status" aria-live="polite">
+                                                        <span class="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true"></span>{{ backup.get_status_display }}
+                                                    </span>
+                                                {% else %}
+                                                    <span class="inline-flex items-center gap-1.5 rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-700 ring-1 ring-inset ring-sky-600/20" role="status" aria-live="polite">
+                                                        <span class="h-1.5 w-1.5 rounded-full bg-sky-500" aria-hidden="true"></span>{{ backup.get_status_display }}
+                                                    </span>
+                                                {% endif %}
+                                            </div>
+                                            <div x-show="loaded" x-cloak class="space-y-1.5">
+                                                <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset"
+                                                      :class="view ? view.badgeClass : ''" role="status" aria-live="polite">
+                                                    <span class="h-1.5 w-1.5 rounded-full" :class="view ? view.dotClass : ''" aria-hidden="true"></span>
+                                                    <span x-text="view ? view.label : ''"></span>
+                                                </span>
+                                                <p x-show="view && view.phaseLabel" class="text-xs text-slate-500">
+                                                    Phase: <span class="font-medium text-slate-700" x-text="view ? view.phaseLabel : ''"></span>
+                                                </p>
+                                                <div x-show="view && view.progress" class="space-y-1">
+                                                    <div class="flex items-center justify-between gap-2 text-xs text-slate-500">
+                                                        <span>Progress</span>
+                                                        <span class="font-medium text-slate-700" x-text="view ? view.progressLabel : ''"></span>
+                                                    </div>
+                                                    <div x-show="view && view.progress" class="h-1.5 overflow-hidden rounded-full bg-slate-100" role="progressbar"
+                                                         aria-label="Backup progress"
+                                                         aria-valuemin="0"
+                                                         :aria-valuenow="view && view.progressDeterminate ? view.progressCompleted : null"
+                                                         :aria-valuemax="view && view.progressDeterminate ? view.progressTotal : null">
+                                                        <div class="h-full rounded-full bg-indigo-500 transition-all" :class="view && view.progressDeterminate ? '' : 'animate-pulse'"
+                                                             :style="view && view.progressDeterminate ? `width: ${Math.min(100, Math.round((view.progressCompleted / Math.max(view.progressTotal, 1)) * 100))}%` : 'width: 45%'">
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <p x-show="view && view.providerLabel" class="text-xs text-slate-500">
+                                                    Provider: <span class="font-medium text-slate-700" x-text="view ? view.providerLabel : ''"></span>
+                                                </p>
+                                                <p x-show="view && view.retryAtLabel" class="text-xs font-medium text-amber-700">
+                                                    Next retry: <span x-text="view ? view.retryAtLabel : ''"></span>
+                                                </p>
+                                                <p x-show="view && view.reconciliationLabel" class="text-xs font-medium text-violet-700">
+                                                    Recovery: <span x-text="view ? view.reconciliationLabel : ''"></span>
+                                                </p>
+                                                <p x-show="view && view.errorMessage" class="text-xs font-medium text-red-700" role="alert"
+                                                   x-text="view ? view.errorMessage : ''"></p>
+                                                <details x-show="view && view.correlationId" class="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
+                                                    <summary class="cursor-pointer text-xs font-semibold text-slate-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                                        Technical details
+                                                    </summary>
+                                                    <div class="mt-2 space-y-1.5 text-xs text-slate-500">
+                                                        <div class="flex items-start justify-between gap-2">
+                                                            <span>Correlation ID</span>
+                                                            <button type="button" @click="$clipboard(view ? view.correlationId : '')"
+                                                                    class="inline-flex flex-none items-center rounded px-1.5 py-0.5 font-semibold text-indigo-600 hover:bg-indigo-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                                                                    aria-label="Copy backup correlation ID">
+                                                                Copy
+                                                            </button>
+                                                        </div>
+                                                        <code class="block break-all font-mono text-[11px] text-slate-700" x-text="view ? view.correlationId : ''"></code>
+                                                        <p x-show="view && view.errorCode" class="break-words">Error code: <span class="font-mono text-slate-700" x-text="view ? view.errorCode : ''"></span></p>
+                                                    </div>
+                                                </details>
+                                            </div>
+                                        </div>
                                     </td>
                                     <td class="whitespace-nowrap px-4 py-3 text-slate-700">
                                         {{ backup.get_type_display }}
@@ -1120,26 +1180,69 @@
                         </div>
                         <div x-show="!loading && restoreStarted" class="mt-5 text-left">
                             <div class="text-center">
-                                <span x-show="restoreStatus && restoreStatus.status === 3"
-                                      class="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
-                                    <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span><span x-text="restoreStatus ? restoreStatus.status_display : ''"></span>
+                                <span x-show="!restoreExecutionStatus"
+                                      class="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-700 ring-1 ring-inset ring-slate-500/10"
+                                      role="status" aria-live="polite">
+                                    <span class="h-1.5 w-1.5 rounded-full bg-slate-400" aria-hidden="true"></span>
+                                    <span x-text="legacyRestoreStatusLabel(restoreStatus)"></span>
                                 </span>
-                                <span x-show="restoreStatus && restoreStatus.status === 4"
-                                      class="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">
-                                    <span class="h-1.5 w-1.5 rounded-full bg-red-500"></span><span x-text="restoreStatus ? restoreStatus.status_display : ''"></span>
-                                </span>
-                                <span x-show="restoreStatus && restoreStatus.status !== 3 && restoreStatus.status !== 4"
-                                      class="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20">
-                                    <svg class="animate-spin h-3 w-3 text-amber-600"
-                                         xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                    </svg>
-                                    <span x-text="restoreStatus ? restoreStatus.status_display : ''"></span>
-                                </span>
-                                <p x-show="restoreStatus && restoreStatus.status === 4 && restoreStatus.error"
-                                   class="mt-2 text-sm font-medium text-red-600"
-                                   x-text="restoreStatus && restoreStatus.error ? restoreStatus.error : ''"></p>
+                                <div x-show="restoreExecutionStatus" x-cloak class="space-y-2 text-left">
+                                    <div class="text-center">
+                                        <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset"
+                                              :class="restoreExecutionStatus ? restoreExecutionStatus.badgeClass : ''"
+                                              role="status" aria-live="polite">
+                                            <span class="h-1.5 w-1.5 rounded-full" :class="restoreExecutionStatus ? restoreExecutionStatus.dotClass : ''" aria-hidden="true"></span>
+                                            <span x-text="restoreExecutionStatus ? restoreExecutionStatus.label : ''"></span>
+                                        </span>
+                                    </div>
+                                    <p x-show="restoreExecutionStatus && restoreExecutionStatus.phaseLabel" class="text-xs text-slate-500">
+                                        Phase: <span class="font-medium text-slate-700" x-text="restoreExecutionStatus ? restoreExecutionStatus.phaseLabel : ''"></span>
+                                    </p>
+                                    <div x-show="restoreExecutionStatus && restoreExecutionStatus.progress" class="space-y-1">
+                                        <div class="flex items-center justify-between gap-2 text-xs text-slate-500">
+                                            <span>Progress</span>
+                                            <span class="font-medium text-slate-700" x-text="restoreExecutionStatus ? restoreExecutionStatus.progressLabel : ''"></span>
+                                        </div>
+                                        <div class="h-1.5 overflow-hidden rounded-full bg-slate-100" role="progressbar"
+                                             aria-label="Restore progress"
+                                             aria-valuemin="0"
+                                             :aria-valuenow="restoreExecutionStatus && restoreExecutionStatus.progressDeterminate ? restoreExecutionStatus.progressCompleted : null"
+                                             :aria-valuemax="restoreExecutionStatus && restoreExecutionStatus.progressDeterminate ? restoreExecutionStatus.progressTotal : null">
+                                            <div class="h-full rounded-full bg-indigo-500 transition-all"
+                                                 :class="restoreExecutionStatus && restoreExecutionStatus.progressDeterminate ? '' : 'animate-pulse'"
+                                                 :style="restoreExecutionStatus && restoreExecutionStatus.progressDeterminate ? `width: ${Math.min(100, Math.round((restoreExecutionStatus.progressCompleted / Math.max(restoreExecutionStatus.progressTotal, 1)) * 100))}%` : 'width: 45%'">
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <p x-show="restoreExecutionStatus && restoreExecutionStatus.providerLabel" class="text-xs text-slate-500">
+                                        Provider: <span class="font-medium text-slate-700" x-text="restoreExecutionStatus ? restoreExecutionStatus.providerLabel : ''"></span>
+                                    </p>
+                                    <p x-show="restoreExecutionStatus && restoreExecutionStatus.retryAtLabel" class="text-xs font-medium text-amber-700">
+                                        Next retry: <span x-text="restoreExecutionStatus ? restoreExecutionStatus.retryAtLabel : ''"></span>
+                                    </p>
+                                    <p x-show="restoreExecutionStatus && restoreExecutionStatus.reconciliationLabel" class="text-xs font-medium text-violet-700">
+                                        Recovery: <span x-text="restoreExecutionStatus ? restoreExecutionStatus.reconciliationLabel : ''"></span>
+                                    </p>
+                                    <p x-show="restoreExecutionStatus && restoreExecutionStatus.errorMessage" class="text-xs font-medium text-red-700" role="alert"
+                                       x-text="restoreExecutionStatus ? restoreExecutionStatus.errorMessage : ''"></p>
+                                    <details x-show="restoreExecutionStatus && restoreExecutionStatus.correlationId" class="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
+                                        <summary class="cursor-pointer text-xs font-semibold text-slate-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                            Technical details
+                                        </summary>
+                                        <div class="mt-2 space-y-1.5 text-xs text-slate-500">
+                                            <div class="flex items-start justify-between gap-2">
+                                                <span>Correlation ID</span>
+                                                <button type="button" @click="$clipboard(restoreExecutionStatus ? restoreExecutionStatus.correlationId : '')"
+                                                        class="inline-flex flex-none items-center rounded px-1.5 py-0.5 font-semibold text-indigo-600 hover:bg-indigo-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                                                        aria-label="Copy restore correlation ID">
+                                                    Copy
+                                                </button>
+                                            </div>
+                                            <code class="block break-all font-mono text-[11px] text-slate-700" x-text="restoreExecutionStatus ? restoreExecutionStatus.correlationId : ''"></code>
+                                            <p x-show="restoreExecutionStatus && restoreExecutionStatus.errorCode" class="break-words">Error code: <span class="font-mono text-slate-700" x-text="restoreExecutionStatus ? restoreExecutionStatus.errorCode : ''"></span></p>
+                                        </div>
+                                    </details>
+                                </div>
                             </div>
                             <div class="mt-4">
                                 <h4 class="text-sm font-medium text-slate-700">Recent restores</h4>
@@ -1147,20 +1250,16 @@
                                     <template x-for="restoreItem in restoreList.slice(0, 5)" :key="restoreItem.id">
                                         <li class="flex items-center justify-between gap-3 py-2.5">
                                             <div class="min-w-0 text-sm text-slate-700">
-                                                <span x-text="restoreItem.created_display"></span>
-                                                <p x-show="restoreItem.status === 4 && restoreItem.error"
-                                                   class="mt-1 text-xs font-medium text-red-600" :title="restoreItem.error"
-                                                   x-text="restoreItem.error"></p>
+                                                <span x-text="restoreCreatedLabel(restoreItem)"></span>
+                                                <p x-show="restoreExecutionView(restoreItem)" class="mt-1 text-xs font-medium text-slate-600"
+                                                   x-text="restoreExecutionSummary(restoreItem)"></p>
+                                                <p x-show="!restoreExecutionView(restoreItem) && restoreItem.status === 4"
+                                                   class="mt-1 text-xs font-medium text-red-600"
+                                                   x-text="safeLegacyRestoreError(restoreItem)"></p>
                                             </div>
-                                            <span x-show="restoreItem.status === 3"
-                                                  class="inline-flex flex-none items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20"
-                                                  x-text="restoreItem.status_display"></span>
-                                            <span x-show="restoreItem.status === 4"
-                                                  class="inline-flex flex-none items-center gap-1.5 rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20"
-                                                  x-text="restoreItem.status_display"></span>
-                                            <span x-show="restoreItem.status !== 3 && restoreItem.status !== 4"
-                                                  class="inline-flex flex-none items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20"
-                                                  x-text="restoreItem.status_display"></span>
+                                            <span class="inline-flex flex-none items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset"
+                                                  :class="restoreStatusToneClass(restoreItem)"
+                                                  x-text="restoreStatusLabel(restoreItem)"></span>
                                         </li>
                                     </template>
                                 </ul>
@@ -1981,6 +2080,221 @@
         </div>
     </div>
     <script>
+        /*
+         * The API is the source of truth for durable execution state.  Keep all
+         * presentation decisions here deliberately allow-listed: the dashboard
+         * must remain useful for old rows without ever rendering provider
+         * payloads, coordination metadata, or legacy exception text.
+         */
+        window.BackupSheepExecutionStatus = (() => {
+            const tokenPattern = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
+            const correlationPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+            const retryErrorPattern = /(RATE_LIMIT|RATE_LIMITED|TIMEOUT|TRANSIENT|OUTAGE|UNAVAILABLE)/;
+            const manualReviewErrorPattern = /(UNKNOWN|AMBIGUOUS|DUPLICATE|OWNERSHIP|RECONCILIATION_REQUIRED|RECONCILIATION_EXHAUSTED)/;
+            const providerWaitStates = new Set([
+                'pending', 'queued', 'creating', 'provisioning', 'polling',
+                'running', 'started', 'restoring', 'updating', 'installing'
+            ]);
+            const terminalStatuses = new Set([
+                'failed', 'upload_failed', 'max_retries_failed',
+                'delete_failed', 'delete_failed_not_found',
+                'delete_max_retries_failed', 'timeout', 'storage_validation_failed',
+                'cancelled'
+            ]);
+            const completeStatuses = new Set([
+                'complete', 'delete_completed', 'success', 'succeeded'
+            ]);
+            const errorMessages = {
+                PROVIDER_AUTH_FAILED: 'The provider rejected the configured credentials or permissions.',
+                PROVIDER_RATE_LIMIT: 'The provider rate limit was reached; processing will resume later.',
+                PROVIDER_TRANSIENT_OUTAGE: 'The provider is temporarily unavailable; processing will resume later.',
+                PROVIDER_TIMEOUT: 'The provider request timed out; processing will resume later.',
+                PROVIDER_NOT_FOUND: 'The provider resource was not found.',
+                PROVIDER_OWNERSHIP_MISMATCH: 'Provider ownership verification failed.',
+                STORAGE_RATE_LIMITED: 'The storage provider rate limit was reached; processing will resume later.',
+                STORAGE_TIMEOUT: 'The storage operation timed out; processing will resume later.',
+                STORAGE_TRANSIENT_FAILURE: 'The storage provider is temporarily unavailable; processing will resume later.',
+                STORAGE_DESTINATION_NOT_FOUND: 'The configured storage destination was not found.',
+                STORAGE_AUTH_FAILED: 'The storage destination rejected the configured credentials or permissions.',
+                INTEGRITY_MISMATCH: 'The operation failed an integrity check.',
+                RESTORE_INTEGRITY_FAILED: 'The restore failed an integrity check.',
+            };
+
+            function safeToken(value) {
+                if (value === null || value === undefined || value === '') return null;
+                const token = String(value).trim().toLowerCase();
+                return tokenPattern.test(token) ? token : null;
+            }
+
+            function safeCorrelation(value) {
+                if (value === null || value === undefined) return null;
+                const correlation = String(value).trim();
+                return correlationPattern.test(correlation) ? correlation : null;
+            }
+
+            function safeDate(value) {
+                if (value === null || value === undefined || value === '') return null;
+                const date = new Date(value);
+                return Number.isNaN(date.getTime()) ? null : date;
+            }
+
+            function safeProgress(raw) {
+                if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+                const completedNumber = Number(raw.completed);
+                if (!Number.isFinite(completedNumber) || completedNumber < 0) return null;
+                const completed = Math.floor(completedNumber);
+                const totalSupplied = raw.total !== null && raw.total !== undefined && raw.total !== '';
+                const totalNumber = totalSupplied ? Number(raw.total) : NaN;
+                const total = totalSupplied && Number.isFinite(totalNumber) && totalNumber >= completed
+                    ? Math.floor(totalNumber)
+                    : null;
+                const unit = safeToken(raw.unit);
+                return {
+                    completed,
+                    total,
+                    unit,
+                    determinate: total !== null,
+                    label: `${completed}${total === null ? '' : ` / ${total}`}${unit ? ` ${unit}` : ''}`,
+                };
+            }
+
+            function humanize(value) {
+                if (!value) return '';
+                return value.replace(/[_:.\-]+/g, ' ').replace(/\b\w/g, character => character.toUpperCase());
+            }
+
+            function safeErrorCode(value) {
+                if (value === null || value === undefined || value === '') return null;
+                const code = String(value).trim().toUpperCase();
+                return /^[A-Z][A-Z0-9_]{1,63}$/.test(code) ? code : 'EXECUTION_ERROR';
+            }
+
+            function safeErrorMessage(status) {
+                if (!status || typeof status !== 'object' || Array.isArray(status)) return null;
+                const code = safeErrorCode(status.last_error_code);
+                if (!code) return null;
+                return errorMessages[code] || 'The operation could not be completed. Review secured diagnostics using the correlation ID.';
+            }
+
+            function categoryFor({status, phase, providerStatus, reconciliationState, errorCode, retryAt}) {
+                if (reconciliationState === 'manual_review' || phase === 'manual_review' ||
+                    (errorCode && manualReviewErrorPattern.test(errorCode))) {
+                    return {key: 'manual_review', label: 'Manual review required', tone: 'orange'};
+                }
+                if (reconciliationState === 'required' || reconciliationState === 'in_progress' ||
+                    phase === 'reconciling' || providerStatus === 'reconciling') {
+                    return {key: 'reconciling', label: 'Recovering / reconciling', tone: 'violet'};
+                }
+                if (retryAt || phase === 'retrying' || providerStatus === 'rate_limited' ||
+                    (errorCode && retryErrorPattern.test(errorCode) && !terminalStatuses.has(status))) {
+                    return {key: 'scheduled_retry', label: 'Scheduled retry', tone: 'amber'};
+                }
+                if (phase === 'failed' || terminalStatuses.has(status)) {
+                    return {key: 'terminal_failure', label: 'Terminal failure', tone: 'red'};
+                }
+                if (status === 'partial') {
+                    return {key: 'complete', label: 'Partially complete', tone: 'amber'};
+                }
+                if (completeStatuses.has(status) || phase === 'complete') {
+                    return {key: 'complete', label: 'Complete', tone: 'emerald'};
+                }
+                if (phase === 'polling' || (providerStatus && providerWaitStates.has(providerStatus))) {
+                    return {key: 'provider_wait', label: 'Waiting for provider', tone: 'sky'};
+                }
+                return {key: 'running', label: 'Actively running', tone: 'indigo'};
+            }
+
+            function toneClasses(tone) {
+                const classes = {
+                    indigo: ['bg-indigo-50', 'text-indigo-700', 'ring-indigo-600/20', 'bg-indigo-500'],
+                    sky: ['bg-sky-50', 'text-sky-700', 'ring-sky-600/20', 'bg-sky-500'],
+                    amber: ['bg-amber-50', 'text-amber-700', 'ring-amber-600/20', 'bg-amber-500'],
+                    violet: ['bg-violet-50', 'text-violet-700', 'ring-violet-600/20', 'bg-violet-500'],
+                    orange: ['bg-orange-50', 'text-orange-700', 'ring-orange-600/20', 'bg-orange-500'],
+                    red: ['bg-red-50', 'text-red-700', 'ring-red-600/20', 'bg-red-500'],
+                    emerald: ['bg-emerald-50', 'text-emerald-700', 'ring-emerald-600/20', 'bg-emerald-500'],
+                };
+                const selected = classes[tone] || classes.indigo;
+                return {
+                    badge: `${selected[0]} ${selected[1]} ${selected[2]}`,
+                    dot: selected[3],
+                };
+            }
+
+            function normalize(raw) {
+                if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+                const status = safeToken(raw.status);
+                const phase = safeToken(raw.phase);
+                const providerStatus = safeToken(raw.provider_status);
+                const reconciliation = raw.reconciliation && typeof raw.reconciliation === 'object' && !Array.isArray(raw.reconciliation)
+                    ? raw.reconciliation
+                    : {};
+                const reconciliationState = safeToken(reconciliation.state) || 'none';
+                const errorCode = safeErrorCode(raw.last_error_code);
+                const retryAt = safeDate(raw.next_retry_at);
+                const parsedProgress = safeProgress(raw.progress);
+                const progress = parsedProgress && (
+                    parsedProgress.completed > 0 ||
+                    parsedProgress.total !== null ||
+                    Boolean(parsedProgress.unit)
+                )
+                    ? parsedProgress
+                    : null;
+                const correlationId = safeCorrelation(raw.correlation_id);
+
+                // An empty/malformed execution_status must not replace the
+                // server-rendered legacy status badge.
+                if (!status && !phase && !providerStatus && !errorCode && !retryAt && !progress && !correlationId) return null;
+
+                const category = categoryFor({
+                    status,
+                    phase,
+                    providerStatus,
+                    reconciliationState,
+                    errorCode,
+                    retryAt,
+                });
+                const tones = toneClasses(category.tone);
+                const retryAtLabel = retryAt
+                    ? (() => {
+                        try {
+                            return new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(retryAt);
+                        } catch (_) {
+                            return null;
+                        }
+                    })()
+                    : null;
+                const reconciliationLabel = reconciliationState !== 'none'
+                    ? humanize(reconciliationState)
+                    : null;
+                const shouldPoll = !['complete', 'terminal_failure', 'manual_review'].includes(category.key);
+
+                return {
+                    label: category.label,
+                    category: category.key,
+                    badgeClass: tones.badge,
+                    dotClass: tones.dot,
+                    phaseLabel: phase ? humanize(phase) : null,
+                    providerLabel: providerStatus ? humanize(providerStatus) : null,
+                    progress,
+                    progressLabel: progress ? progress.label : null,
+                    progressCompleted: progress ? progress.completed : 0,
+                    progressTotal: progress ? progress.total : null,
+                    progressDeterminate: Boolean(progress && progress.determinate),
+                    retryAtLabel,
+                    reconciliationLabel,
+                    errorCode,
+                    errorMessage: safeErrorMessage(raw),
+                    correlationId,
+                    durable: raw.durable === true,
+                    shouldPoll,
+                };
+            }
+
+            return {normalize, safeErrorMessage, humanize};
+        })();
+
         document.addEventListener('alpine:init', () => {
             Alpine.magic('clipboard', () => subject => {
                 Alpine.store('notifications').items.push({
@@ -1991,6 +2305,75 @@
                 });
                 navigator.clipboard.writeText(subject)
             });
+
+            Alpine.data('executionStatusCard', () => ({
+                loaded: false,
+                loading: false,
+                timer: null,
+                view: null,
+                backupId: null,
+                integrationCode: null,
+                fallbackStatus: null,
+                init() {
+                    const dataset = this.$el && this.$el.dataset ? this.$el.dataset : {};
+                    this.backupId = dataset.backupId || null;
+                    this.integrationCode = dataset.integrationCode || null;
+                    this.fallbackStatus = dataset.fallbackStatus || null;
+                    this.load();
+                },
+                clearTimer() {
+                    if (this.timer) {
+                        window.clearTimeout(this.timer);
+                        this.timer = null;
+                    }
+                },
+                schedule(delay = 10000) {
+                    this.clearTimer();
+                    this.timer = window.setTimeout(() => {
+                        this.timer = null;
+                        this.load();
+                    }, delay);
+                },
+                destroy() {
+                    this.clearTimer();
+                },
+                async load() {
+                    if (this.loading || !this.backupId || !/^\d+$/.test(String(this.backupId)) ||
+                        !this.integrationCode || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(String(this.integrationCode))) {
+                        return;
+                    }
+                    this.loading = true;
+                    try {
+                        const url = `/api/v1/backups/${encodeURIComponent(this.integrationCode)}/${encodeURIComponent(this.backupId)}/`;
+                        const response = await fetch(url, {headers: {'Accept': 'application/json'}});
+                        if (!response.ok) throw new Error('execution status unavailable');
+                        const payload = await response.json();
+                        const raw = payload && typeof payload === 'object' && !Array.isArray(payload)
+                            ? payload.execution_status
+                            : null;
+                        const nextView = window.BackupSheepExecutionStatus.normalize(raw);
+                        if (!nextView) {
+                            // Legacy or partial API responses leave the safe
+                            // server-rendered badge in place.
+                            this.schedule(30000);
+                            return;
+                        }
+                        this.view = nextView;
+                        this.loaded = true;
+                        if (nextView.shouldPoll) {
+                            this.schedule(10000);
+                        } else {
+                            this.clearTimer();
+                        }
+                    } catch (_) {
+                        // A dashboard status request must never turn a usable
+                        // legacy row into an error state or expose response text.
+                        this.schedule(30000);
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+            }));
 
             Alpine.data('nodeDetails', (notifyOnSuccess, notifyOnFail) => ({
                 list_all_backups: false,
@@ -2012,6 +2395,7 @@
                     confirm: false,
                 },
                 restoreStatus: null,
+                restoreExecutionStatus: null,
                 restoreStarted: false,
                 restoreList: [],
                 restorePollHandle: null,
@@ -2023,6 +2407,7 @@
                 node_name: null,
                 notes: null,
                 loading: null,
+                backupRequestKey: null,
                 timezoneActiveIndex: null,
                 backup: {},
                 onDemandBackup: {
@@ -2071,6 +2456,46 @@
                         this.validateNode();
                     {% endif %}
                 },
+                executionStatusView(item) {
+                    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+                    return window.BackupSheepExecutionStatus.normalize(item.execution_status);
+                },
+                legacyRestoreStatusLabel(item) {
+                    return item && typeof item.status_display === 'string'
+                        ? item.status_display
+                        : 'Restore status unavailable';
+                },
+                restoreExecutionSummary(item) {
+                    const view = this.executionStatusView(item);
+                    if (!view) return '';
+                    const details = [view.label];
+                    if (view.phaseLabel) details.push(`Phase: ${view.phaseLabel}`);
+                    if (view.progressLabel) details.push(`Progress: ${view.progressLabel}`);
+                    if (view.retryAtLabel) details.push(`Next retry: ${view.retryAtLabel}`);
+                    return details.join(' · ');
+                },
+                restoreCreatedLabel(item) {
+                    return item && typeof item.created_display === 'string'
+                        ? item.created_display
+                        : 'Restore date unavailable';
+                },
+                safeLegacyRestoreError(item) {
+                    if (!item || typeof item !== 'object') return '';
+                    return window.BackupSheepExecutionStatus.safeErrorMessage({
+                        last_error_code: item.last_error_code || (item.status === 4 ? 'RESTORE_FAILED' : null),
+                    }) || '';
+                },
+                restoreStatusLabel(item) {
+                    const view = this.executionStatusView(item);
+                    return view ? view.label : this.legacyRestoreStatusLabel(item);
+                },
+                restoreStatusToneClass(item) {
+                    const view = this.executionStatusView(item);
+                    if (view) return view.badgeClass;
+                    if (item && item.status === 3) return 'bg-emerald-50 text-emerald-700 ring-emerald-600/20';
+                    if (item && item.status === 4) return 'bg-red-50 text-red-700 ring-red-600/20';
+                    return 'bg-amber-50 text-amber-700 ring-amber-600/20';
+                },
                 toggleBackups() {
                     this.list_all_backups = !this.list_all_backups;
                     let url = new URL(window.location.href);
@@ -2099,6 +2524,7 @@
                     this.loading = false;
                     this.openBackup = true;
                     this.notes = null;
+                    this.backupRequestKey = null;
                 },
                 closeBackupModal() {
                     this.openBackup = false;
@@ -2163,6 +2589,7 @@
                         confirm: false,
                     };
                     this.restoreStatus = null;
+                    this.restoreExecutionStatus = null;
                     this.restoreStarted = false;
                     this.restoreList = [];
                     this.getBackupStoragePoints(backupID).then(() => {
@@ -2186,6 +2613,7 @@
                         confirm: false,
                     };
                     this.restoreStatus = null;
+                    this.restoreExecutionStatus = null;
                     this.restoreStarted = false;
                     this.restoreList = [];
                 },
@@ -2225,16 +2653,23 @@
                                 json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
                             }
 
-                            throw new Error(json.detail);
+                            throw new Error(json && typeof json.detail === 'string'
+                                ? json.detail
+                                : 'Restore status is temporarily unavailable.');
                         }
                     }).then((json) => {
-                        this.restoreList = json;
-                        if (json.length > 0) {
-                            this.restoreStatus = json[0];
+                        const restoreItems = Array.isArray(json)
+                            ? json.filter(item => item && typeof item === 'object' && !Array.isArray(item))
+                            : [];
+                        this.restoreList = restoreItems;
+                        this.restoreStatus = restoreItems.length > 0 ? restoreItems[0] : null;
+                        this.restoreExecutionStatus = this.executionStatusView(this.restoreStatus);
+                        if (this.restoreStatus) {
                             /**
                              * Stop polling once the latest restore reaches a final state.
                              */
-                            if (this.restoreStatus.status === 3 || this.restoreStatus.status === 4) {
+                            if ((this.restoreExecutionStatus && !this.restoreExecutionStatus.shouldPoll) ||
+                                (!this.restoreExecutionStatus && (this.restoreStatus.status === 3 || this.restoreStatus.status === 4))) {
                                 this.clearRestorePoll();
                             }
                         }
@@ -2281,10 +2716,13 @@
                                 json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
                             }
 
-                            throw new Error(json.detail);
+                            throw new Error(json && typeof json.detail === 'string'
+                                ? json.detail
+                                : 'Restore could not be started.');
                         }
                     }).then((json) => {
-                        this.restoreStatus = json;
+                        this.restoreStatus = json && typeof json === 'object' && !Array.isArray(json) ? json : null;
+                        this.restoreExecutionStatus = this.executionStatusView(this.restoreStatus);
                         this.restoreStarted = true;
                         this.getBackupRestores(false);
                         this.startRestorePolling();
@@ -2533,6 +2971,11 @@
                 },
                 async createBackup() {
                     this.loading = true;
+                    if (!this.backupRequestKey) {
+                        this.backupRequestKey = (window.crypto && crypto.randomUUID)
+                            ? crypto.randomUUID()
+                            : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                    }
 
                     let url = "/api/v1/nodes/" + this.node_id + "/take_snapshot/?" + new URLSearchParams({
                         location: this.location_id,
@@ -2543,12 +2986,14 @@
                         location: this.location_id,
                         notes: this.onDemandBackup.notes,
                         storage_point_ids: this.onDemandBackup.storage_point_ids,
+                        request_id: this.backupRequestKey,
                     }
 
                     let response = await fetch(url, {
                         headers: {
                             'Accept': 'application/json',
-                            'Content-Type': 'application/json'
+                            'Content-Type': 'application/json',
+                            'Idempotency-Key': this.backupRequestKey,
                         },
                         method: 'POST',
                         body: JSON.stringify(data)
@@ -2574,6 +3019,10 @@
                             heading: 'Success!',
                             details: json.detail
                         });
+                        if (json.backup_request && json.backup_request.request_id) {
+                            this.pollBackupRequest(json.backup_request.request_id, 0, this.node_id);
+                        }
+                        this.backupRequestKey = null;
                         this.closeBackupModal();
                     }).catch((error) => {
                         Alpine.store('notifications').items.push({
@@ -2583,6 +3032,42 @@
                             details: error.message
                         });
                     });
+                },
+                async pollBackupRequest(requestId, attempt = 0, nodeId = null) {
+                    if (!requestId || attempt >= 120) return;
+                    nodeId = nodeId || this.node_id;
+                    window.setTimeout(async () => {
+                        try {
+                            const url = `/api/v1/nodes/${nodeId}/backup_request_status/?request_id=${encodeURIComponent(requestId)}`;
+                            const response = await fetch(url, {
+                                headers: {'Accept': 'application/json'}
+                            });
+                            if (!response.ok) return;
+                            const state = await response.json();
+                            if ((state.status === 'claimed' || state.status === 'duplicate') && state.backup_id) {
+                                Alpine.store('notifications').items.push({
+                                    show: true,
+                                    success: true,
+                                    heading: 'Backup started',
+                                    details: state.backup_status_display || 'The durable backup job is now in progress.'
+                                });
+                                window.location.reload();
+                                return;
+                            }
+                            if (state.status === 'cancelled' || state.status === 'manual_review') {
+                                Alpine.store('notifications').items.push({
+                                    show: true,
+                                    error: true,
+                                    heading: 'Backup needs attention',
+                                    details: state.message || 'The durable backup request requires operator review.'
+                                });
+                                return;
+                            }
+                            this.pollBackupRequest(requestId, attempt + 1, nodeId);
+                        } catch (error) {
+                            this.pollBackupRequest(requestId, attempt + 1, nodeId);
+                        }
+                    }, 5000);
                 },
                 /**
                  * Pause Backups

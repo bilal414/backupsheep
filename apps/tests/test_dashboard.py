@@ -17,7 +17,8 @@ class DashboardTests(BaseTestCase):
         response = self.client.get("/console/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Operational pulse")
+        self.assertContains(response, "Protected sources")
+        self.assertContains(response, "Next scheduled")
         self.assertEqual(response.context["visible_node_count"], 1)
         self.assertEqual(response.context["active_schedule_count"], 1)
         self.assertEqual(list(response.context["upcoming_schedules"]), [schedule])

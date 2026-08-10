@@ -9,7 +9,6 @@ from apps.api.v1.utils.api_helpers import (
     CurrentAccountDefault,
     IntegrationDefault,
     bs_encrypt,
-    bs_decrypt,
 )
 from apps.console.connection.models import (
     CoreConnection,
@@ -25,15 +24,26 @@ from apps.api.v1.connection.serializers import (
 
 
 class CoreAuthWordPressReadSerializer(serializers.ModelSerializer):
+    key_configured = serializers.SerializerMethodField()
+    http_password_configured = serializers.SerializerMethodField()
+
     class Meta:
         model = CoreAuthWordPress
         fields = (
             "id",
             "url",
-            "key",
             "http_user",
-            "http_pass",
+            "key_configured",
+            "http_password_configured",
         )
+
+    @staticmethod
+    def get_key_configured(obj):
+        return bool(obj.key)
+
+    @staticmethod
+    def get_http_password_configured(obj):
+        return bool(obj.http_pass)
 
 
 class CoreWordPressConnectionReadSerializer(serializers.ModelSerializer):
@@ -82,10 +92,10 @@ class CoreWordPressConnectionReadSerializer(serializers.ModelSerializer):
 
 
 class CoreAuthWordPressWriteSerializer(serializers.ModelSerializer):
-    key = serializers.CharField(write_only=True)
+    key = serializers.CharField(write_only=True, required=False)
     http_user = serializers.CharField(write_only=True, allow_null=True, allow_blank=True, required=False)
     http_pass = serializers.CharField(write_only=True, allow_null=True, allow_blank=True, required=False)
-    url = serializers.URLField(write_only=True)
+    url = serializers.URLField(write_only=True, required=False)
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -93,12 +103,36 @@ class CoreAuthWordPressWriteSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
+        if not {"url", "key", "http_user", "http_pass"}.intersection(data):
+            if getattr(getattr(self, "parent", None), "instance", None) is None:
+                raise serializers.ValidationError(
+                    {"credentials": "WordPress URL and key are required."}
+                )
+            return data
+
+        parent_instance = getattr(getattr(self, "parent", None), "instance", None)
+        existing = getattr(parent_instance, "auth_wordpress", None) if parent_instance else None
+        combined = {
+            field: data[field] if field in data else getattr(existing, field, None)
+            for field in ("url", "key", "http_user", "http_pass")
+        }
+        if not combined["url"] or not combined["key"]:
+            raise serializers.ValidationError(
+                {"credentials": "WordPress URL and key must both be configured."}
+            )
+        if bool(combined["http_user"]) != bool(combined["http_pass"]):
+            raise serializers.ValidationError(
+                {"http_auth": "HTTP username and password must be configured together."}
+            )
+
         try:
             auth_wordpress = CoreAuthWordPress()
 
-            data["url"] = data["url"].rstrip('/')
+            combined["url"] = combined["url"].rstrip('/')
+            if "url" in data:
+                data["url"] = combined["url"]
 
-            if not auth_wordpress.validate(data, check_errors=True):
+            if not auth_wordpress.validate(combined, check_errors=True):
                 raise serializers.ValidationError(
                     "Unable to authenticate. "
                     "Did you add our endpoint IPs to firewall/cloudflare and WordPress Key to plugin page?. Also "

@@ -562,6 +562,17 @@ CELERY_BROKER_CONNECTION_RETRY = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_BROKER_CONNECTION_MAX_RETRIES = None
 CELERY_BROKER_HEARTBEAT = 60
+# Require RabbitMQ to confirm each persistent publication.  A confirmation can
+# still be lost after broker acceptance, so the database outbox republishes the
+# same task id and relies on worker-side idempotency/fencing.
+CELERY_BROKER_TRANSPORT_OPTIONS = {"confirm_publish": True}
+CELERY_TASK_PUBLISH_RETRY = True
+CELERY_TASK_PUBLISH_RETRY_POLICY = {
+    "max_retries": 3,
+    "interval_start": 0,
+    "interval_step": 1,
+    "interval_max": 3,
+}
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -593,9 +604,10 @@ CELERY_IMPORTS = (
     "apps._tasks.integration.wordpress",
     "apps._tasks.integration.storage.tasks",
 )
-# Local scheduled backups are driven by django-celery-beat's database scheduler
-# (replaces the SaaS AWS EventBridge Scheduler).
-CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+# Local scheduled backups are driven by BackupSheep's django-celery-beat database
+# scheduler (replaces the SaaS AWS EventBridge Scheduler). The custom scheduler
+# commits each occurrence and its outbox before broker publication.
+CELERY_BEAT_SCHEDULER = "backupsheep.scheduler:BackupDatabaseScheduler"
 
 # Backup run logs are kept on the container's local _storage volume (never uploaded to
 # any external bucket) and pruned by the delete_old_logs task after this many days.
@@ -609,7 +621,56 @@ BACKUP_RECOVERY_STALE_SECONDS = int(
     config.get("BACKUP_RECOVERY_STALE_SECONDS", 15 * 60)
 )
 BACKUP_RECOVERY_BATCH_SIZE = int(config.get("BACKUP_RECOVERY_BATCH_SIZE", 100))
+BACKUP_REQUEST_RETRY_SECONDS = int(
+    config.get("BACKUP_REQUEST_RETRY_SECONDS", 60)
+)
+BACKUP_REQUEST_RETRY_MAX_SECONDS = int(
+    config.get("BACKUP_REQUEST_RETRY_MAX_SECONDS", 15 * 60)
+)
+BACKUP_REQUEST_CLAIM_TIMEOUT_SECONDS = int(
+    config.get("BACKUP_REQUEST_CLAIM_TIMEOUT_SECONDS", 5 * 60)
+)
+BACKUP_REQUEST_CLAIM_TIMEOUT_MAX_SECONDS = int(
+    config.get("BACKUP_REQUEST_CLAIM_TIMEOUT_MAX_SECONDS", 60 * 60)
+)
+BACKUP_REQUEST_DISPATCH_LEASE_SECONDS = int(
+    config.get("BACKUP_REQUEST_DISPATCH_LEASE_SECONDS", 60)
+)
+BACKUP_REQUEST_RECOVERY_BATCH_SIZE = int(
+    config.get("BACKUP_REQUEST_RECOVERY_BATCH_SIZE", 100)
+)
 BACKUP_POLL_INTERVAL = int(config.get("BACKUP_POLL_INTERVAL", 120))
+# Short, renewable leases protect long-running local dumps and chord publication.
+# A worker heartbeat extends the lease; after a hard crash, recovery can safely take
+# over within minutes rather than waiting for the command's multi-hour timeout.
+BACKUP_WORKER_LEASE_SECONDS = int(
+    config.get("BACKUP_WORKER_LEASE_SECONDS", 180)
+)
+BACKUP_WORKER_HEARTBEAT_SECONDS = int(
+    config.get("BACKUP_WORKER_HEARTBEAT_SECONDS", 30)
+)
+BACKUP_DELETE_LEASE_SECONDS = int(
+    config.get("BACKUP_DELETE_LEASE_SECONDS", 300)
+)
+BACKUP_STORAGE_LEASE_SECONDS = int(
+    config.get("BACKUP_STORAGE_LEASE_SECONDS", 180)
+)
+BACKUP_STORAGE_HEARTBEAT_SECONDS = int(
+    config.get("BACKUP_STORAGE_HEARTBEAT_SECONDS", 30)
+)
+RESTORE_WORKER_LEASE_SECONDS = int(
+    config.get("RESTORE_WORKER_LEASE_SECONDS", 180)
+)
+RESTORE_WORKER_HEARTBEAT_SECONDS = int(
+    config.get("RESTORE_WORKER_HEARTBEAT_SECONDS", 30)
+)
+RESTORE_RECOVERY_STALE_SECONDS = int(
+    config.get("RESTORE_RECOVERY_STALE_SECONDS", 5 * 60)
+)
+RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS = int(
+    config.get("RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS", 120)
+)
+RESTORE_RECOVERY_BATCH_SIZE = int(config.get("RESTORE_RECOVERY_BATCH_SIZE", 100))
 # Lease the provider-create phase separately from polling. This closes the race in
 # which a duplicate delivery or recovery sweep enters the same create call while the
 # first worker is still waiting on the provider API.
@@ -637,6 +698,68 @@ SSH_KNOWN_HOSTS_PATH = os.path.expanduser(
 if not os.path.isabs(SSH_KNOWN_HOSTS_PATH):
     SSH_KNOWN_HOSTS_PATH = os.path.join(BASE_DIR, SSH_KNOWN_HOSTS_PATH)
 
+SSH_CONNECT_TIMEOUT = int(config.get("SSH_CONNECT_TIMEOUT", 15))
+SSH_BANNER_TIMEOUT = int(config.get("SSH_BANNER_TIMEOUT", 15))
+SSH_AUTH_TIMEOUT = int(config.get("SSH_AUTH_TIMEOUT", 15))
+SSH_KEEPALIVE_SECONDS = int(config.get("SSH_KEEPALIVE_SECONDS", 30))
+DATABASE_CONNECT_TIMEOUT = int(config.get("DATABASE_CONNECT_TIMEOUT", 15))
+DATABASE_STATEMENT_TIMEOUT_MS = int(
+    config.get("DATABASE_STATEMENT_TIMEOUT_MS", 15000)
+)
+DATABASE_LOCK_TIMEOUT_MS = int(config.get("DATABASE_LOCK_TIMEOUT_MS", 5000))
+DATABASE_COMMAND_TIMEOUT = int(config.get("DATABASE_COMMAND_TIMEOUT", 23 * 3600))
+DATABASE_VALIDATION_COMMAND_TIMEOUT = int(
+    config.get("DATABASE_VALIDATION_COMMAND_TIMEOUT", 30)
+)
+PROVIDER_HTTP_CONNECT_TIMEOUT = float(
+    config.get("PROVIDER_HTTP_CONNECT_TIMEOUT", 10)
+)
+PROVIDER_HTTP_READ_TIMEOUT = float(config.get("PROVIDER_HTTP_READ_TIMEOUT", 60))
+PROVIDER_HTTP_MAX_TIMEOUT = float(config.get("PROVIDER_HTTP_MAX_TIMEOUT", 300))
+PROVIDER_HTTP_MAX_RETRIES = int(config.get("PROVIDER_HTTP_MAX_RETRIES", 4))
+PROVIDER_HTTP_MAX_POOL_CONNECTIONS = int(
+    config.get("PROVIDER_HTTP_MAX_POOL_CONNECTIONS", 50)
+)
+PROVIDER_HTTP_BACKOFF_FACTOR = float(
+    config.get("PROVIDER_HTTP_BACKOFF_FACTOR", 0.5)
+)
+S3_MULTIPART_THRESHOLD_BYTES = int(
+    config.get("S3_MULTIPART_THRESHOLD_BYTES", 8 * 1024 * 1024)
+)
+S3_MULTIPART_PART_SIZE_BYTES = int(
+    config.get("S3_MULTIPART_PART_SIZE_BYTES", 8 * 1024 * 1024)
+)
+DROPBOX_UPLOAD_CHUNK_SIZE_BYTES = int(
+    config.get("DROPBOX_UPLOAD_CHUNK_SIZE_BYTES", 8 * 1024 * 1024)
+)
+RESTORE_MAX_ARCHIVE_MEMBERS = int(
+    config.get("RESTORE_MAX_ARCHIVE_MEMBERS", 1_000_000)
+)
+RESTORE_MAX_UNCOMPRESSED_BYTES = int(
+    config.get("RESTORE_MAX_UNCOMPRESSED_BYTES", 2 * 1024 ** 4)
+)
+RESTORE_MAX_COMPRESSION_RATIO = int(
+    config.get("RESTORE_MAX_COMPRESSION_RATIO", 1000)
+)
+RESTORE_DISK_RESERVE_BYTES = int(
+    config.get("RESTORE_DISK_RESERVE_BYTES", 512 * 1024 ** 2)
+)
+
+# Managed-key authentication is optional and must be configured as an explicit key
+# pair by a self-hosted operator. Never advertise a built-in key whose private half
+# is missing from workers. Relative paths are resolved beneath BASE_DIR so the
+# persistent _storage volume can be shared by web and backup workers.
+SSH_MANAGED_PRIVATE_KEY_PATH = os.path.expanduser(
+    str(config.get("SSH_MANAGED_PRIVATE_KEY_PATH", ""))
+)
+if SSH_MANAGED_PRIVATE_KEY_PATH and not os.path.isabs(SSH_MANAGED_PRIVATE_KEY_PATH):
+    SSH_MANAGED_PRIVATE_KEY_PATH = os.path.join(
+        BASE_DIR, SSH_MANAGED_PRIVATE_KEY_PATH
+    )
+SSH_MANAGED_PUBLIC_KEY = str(config.get("SSH_MANAGED_PUBLIC_KEY", "")).strip()
+# Compatibility for older deployments and code paths.
+SSH_KEY_PATH = SSH_MANAGED_PRIVATE_KEY_PATH
+
 # Periodic maintenance fired by Celery beat. The DatabaseScheduler syncs these entries
 # into django-celery-beat's PeriodicTask table on startup.
 from celery.schedules import crontab
@@ -663,6 +786,14 @@ CELERY_BEAT_SCHEDULE = {
     # and the poll ETA lets the scheduled successor claim the next check.
     "resume-in-progress-backups": {
         "task": "resume_in_progress_backups",
+        "schedule": 60.0,
+    },
+    "resume-in-progress-restores": {
+        "task": "resume_in_progress_restores",
+        "schedule": 60.0,
+    },
+    "resume-pending-backup-requests": {
+        "task": "resume_pending_backup_requests",
         "schedule": 60.0,
     },
     # Bucket replication uses durable run/object leases and can resume after a
@@ -726,6 +857,8 @@ CELERY_TASK_ROUTES = {
     "poll_vultr_database_backup": {"queue": "cloud"},
     "restore_vultr_database": {"queue": "cloud"},
     "poll_vultr_database_restore": {"queue": "cloud"},
+    "restore_cloud_backup": {"queue": "cloud"},
+    "poll_cloud_restore": {"queue": "cloud"},
     "backup_aws": {"queue": "cloud"},
     "backup_aws_rds": {"queue": "cloud"},
     "backup_lightsail": {"queue": "cloud"},
@@ -738,6 +871,8 @@ CELERY_TASK_ROUTES = {
     # Async snapshot status polling (re-queues itself); API-only, no local disk.
     "poll_cloud_backup": {"queue": "cloud"},
     "resume_in_progress_backups": {"queue": "default"},
+    "resume_in_progress_restores": {"queue": "default"},
+    "resume_pending_backup_requests": {"queue": "default"},
     # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram/Firebase
     # fan-out, and on-disk run-log retention.
     "send_log_to_db": {"queue": "logs"},

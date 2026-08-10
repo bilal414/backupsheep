@@ -20,7 +20,14 @@ from apps.console.connection.models import (
 )
 from apps.console.node.models import CoreWebsite, CoreNode, CoreSchedule
 from apps.console.storage.models import CoreStorage, CoreStorageType
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer, CoreBackupStorageSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+    CoreBackupStorageSerializer,
+    SafeProviderMetadataMixin,
+    RestoreExecutionStatusMixin,
+)
 
 
 class CoreWebsiteSerializer(serializers.ModelSerializer):
@@ -49,7 +56,7 @@ class CoreWebsiteBackupTransferSerializer(serializers.Serializer):
                 )
         return data
 
-class CoreWebsiteBackupStoragePointsSerializer(serializers.ModelSerializer):
+class CoreWebsiteBackupStoragePointsSerializer(SafeProviderMetadataMixin, serializers.ModelSerializer):
     storage = CoreBackupStorageSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
 
@@ -62,7 +69,7 @@ class CoreWebsiteBackupStoragePointsSerializer(serializers.ModelSerializer):
         return obj.get_status_display()
 
 
-class CoreWebsiteBackupSerializer(serializers.ModelSerializer):
+class CoreWebsiteBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     website = CoreWebsiteSerializer(read_only=True)
     database = CoreWebsiteSerializer(source="website", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -78,11 +85,13 @@ class CoreWebsiteBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreWebsiteBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "stored_backups",
+            "execution_status",
         )
 
     @staticmethod
@@ -112,7 +121,7 @@ class CoreWebsiteBackupSerializer(serializers.ModelSerializer):
         return obj.get_type_display()
 
 
-class CoreWebsiteRestoreSerializer(serializers.ModelSerializer):
+class CoreWebsiteRestoreSerializer(RestoreExecutionStatusMixin, serializers.ModelSerializer):
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

@@ -17,6 +17,7 @@ from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from .filters import CoreConnectionFilter
 from .serializers import CoreConnectionSerializer
+from .view_helpers import connection_error_response
 from ..utils.api_filters import DateRangeFilter
 from ..utils.api_serializers import ReadWriteSerializerMixin
 
@@ -92,16 +93,25 @@ class CoreConnectionView(viewsets.ModelViewSet):
         connection = self.get_object()
         try:
             valid = bool(connection.validate())
-        except Exception:
-            valid = False
+        except Exception as error:
+            return connection_error_response(error, stage="validation")
+        if not valid:
+            response = connection_error_response(
+                RuntimeError("connection validation returned false"),
+                stage="validation",
+            )
+            response.status_code = status.HTTP_200_OK
+            response.data.update(
+                {
+                    "success": False,
+                    "message": "Integration validation failed.",
+                }
+            )
+            return response
         return Response(
             {
-                "success": valid,
-                "message": (
-                    "Validation passed. Integration is good for backups."
-                    if valid
-                    else "Integration validation failed."
-                ),
+                "success": True,
+                "message": "Validation passed. Integration is good for backups.",
             },
             status=status.HTTP_200_OK,
         )

@@ -56,10 +56,12 @@ class VultrAutomaticBackupMonitoringTests(BaseTestCase):
 
     def test_rate_limit_is_not_reported_as_empty_inventory(self):
         auth = SimpleNamespace(get_client=lambda: {})
+        canary = "provider-secret-canary-monitoring"
         with mock.patch(
             "apps.console.vultr_monitoring.requests.get",
-            return_value=_response(429, {"error": "rate limited"}),
+            return_value=_response(429, {"error": canary}),
         ):
             with self.assertRaises(VultrMonitoringError) as raised:
                 list_instance_backups(auth)
         self.assertEqual(raised.exception.classification, "rate_limited")
+        self.assertNotIn(canary, str(raised.exception))

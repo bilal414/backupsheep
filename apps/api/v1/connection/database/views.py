@@ -15,6 +15,7 @@ from .serializers import CoreDatabaseConnectionReadSerializer, CoreDatabaseConne
 from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
+from ..view_helpers import safe_connection_action
 from rest_framework import status
 
 
@@ -71,6 +72,7 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         return Response(endpoints)
 
     @action(detail=True, methods=["get"])
+    @safe_connection_action(stage="object_discovery")
     def objects(self, request, pk=None):
         try:
             connection = self.get_object()
@@ -80,6 +82,7 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             raise NodeConnectionErrorEligibleObjects(e.__str__())
 
     @action(detail=True, methods=["get"])
+    @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         try:
             connection = self.get_object()
@@ -89,6 +92,7 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             return Response({"detail": e.__str__()}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=["get"])
+    @safe_connection_action(stage="metadata_discovery")
     def update_db_type_and_version(self, request, pk=None):
         try:
             connection = self.get_object()

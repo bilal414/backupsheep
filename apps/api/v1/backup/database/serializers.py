@@ -20,8 +20,14 @@ from apps.console.connection.models import (
 )
 from apps.console.node.models import CoreDatabase, CoreNode, CoreSchedule
 from apps.console.storage.models import CoreStorage, CoreStorageType
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer, CoreBackupStorageSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+    CoreBackupStorageSerializer,
+    SafeProviderMetadataMixin,
+    RestoreExecutionStatusMixin,
+)
 
 
 class CoreDatabaseSerializer(serializers.ModelSerializer):
@@ -38,7 +44,7 @@ class CoreDatabaseSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreDatabaseBackupStoragePointsSerializer(serializers.ModelSerializer):
+class CoreDatabaseBackupStoragePointsSerializer(SafeProviderMetadataMixin, serializers.ModelSerializer):
     storage = CoreBackupStorageSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
 
@@ -51,7 +57,7 @@ class CoreDatabaseBackupStoragePointsSerializer(serializers.ModelSerializer):
         return obj.get_status_display()
 
 
-class CoreDatabaseBackupSerializer(serializers.ModelSerializer):
+class CoreDatabaseBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     database = CoreDatabaseSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
@@ -66,11 +72,13 @@ class CoreDatabaseBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreDatabaseBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "stored_backups",
+            "execution_status",
         )
 
     @staticmethod
@@ -100,7 +108,7 @@ class CoreDatabaseBackupSerializer(serializers.ModelSerializer):
         return obj.get_type_display()
 
 
-class CoreDatabaseRestoreSerializer(serializers.ModelSerializer):
+class CoreDatabaseRestoreSerializer(RestoreExecutionStatusMixin, serializers.ModelSerializer):
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

@@ -165,14 +165,44 @@ def provider_classification(status_code):
     return "provider_error"
 
 
+_VULTR_RESULT_MESSAGES = {
+    "provider_terminal_failure": "Vultr reported a terminal snapshot failure.",
+    "malformed_provider_state": "Vultr returned an unrecognized snapshot state.",
+    "missing_without_ownership_proof": (
+        "Unable to prove ownership of the missing Vultr snapshot."
+    ),
+    "missing_after_ownership_proof": "Vultr snapshot was already absent.",
+    "ownership_mismatch": (
+        "Vultr snapshot ownership verification failed; refusing the operation."
+    ),
+    "authentication": "Vultr authentication or authorization failed.",
+    "missing": "The Vultr resource was not found.",
+    "rate_limited": "Vultr rate-limited the request; BackupSheep will retry.",
+    "transient_provider_error": (
+        "Vultr is temporarily unavailable; BackupSheep will retry."
+    ),
+    "transient_client_error": (
+        "The Vultr request was interrupted; BackupSheep will reconcile it."
+    ),
+    "permanent_provider_error": "Vultr rejected the provider operation.",
+    "provider_error": "The Vultr provider operation failed.",
+}
+
+
 def record_provider_result(metadata, *, classification, status_code=None, error=None):
-    """Return metadata with a sanitized provider result for operator visibility."""
+    """Return metadata containing only allowlisted provider diagnostics.
+
+    ``error`` remains in the signature for compatibility with older callers but
+    is deliberately never stringified. Provider exceptions and HTTP bodies can
+    contain bearer tokens, signed URLs, account identifiers, and credentials.
+    """
     updated = dict(metadata or {})
     result = {"classification": classification}
     if status_code is not None:
         result["status_code"] = int(status_code)
-    if error:
-        result["error"] = str(error)[:256]
+    safe_message = _VULTR_RESULT_MESSAGES.get(classification)
+    if safe_message:
+        result["message"] = safe_message
     updated["vultr_last_result"] = result
     return updated
 

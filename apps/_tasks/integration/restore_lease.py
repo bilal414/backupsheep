@@ -1,0 +1,201 @@
+"""Renewable, fenced execution leases for all restore workflows."""
+
+from __future__ import annotations
+
+import os
+import threading
+import uuid
+from datetime import timedelta
+
+from django.conf import settings
+from django.db import close_old_connections, transaction
+from django.utils import timezone
+from sentry_sdk import capture_exception
+
+
+class RestoreAlreadyTerminal(RuntimeError):
+    pass
+
+
+class RestoreLeaseBusy(RuntimeError):
+    def __init__(self, retry_after=30):
+        self.retry_after = max(5, int(retry_after))
+        super().__init__("Another worker owns this restore execution.")
+
+
+class RestoreLeaseLost(RuntimeError):
+    pass
+
+
+class DurableRestoreLease:
+    def __init__(self, restore, *, phase, task_id="", worker_name=""):
+        self.model = restore.__class__
+        self.restore_id = restore.pk
+        self.phase = str(phase or "restore")[:64]
+        self.task_id = str(task_id or "")[:255]
+        self.owner = (
+            f"restore:{self.task_id or 'delivery'}:{os.getpid()}:{uuid.uuid4().hex}"
+        )[:255]
+        self.worker_name = str(worker_name or "")[:255]
+        self.lease_seconds = max(
+            30, int(getattr(settings, "RESTORE_WORKER_LEASE_SECONDS", 180))
+        )
+        requested_heartbeat = max(
+            5, int(getattr(settings, "RESTORE_WORKER_HEARTBEAT_SECONDS", 30))
+        )
+        self.heartbeat_seconds = min(
+            requested_heartbeat, max(5, self.lease_seconds // 3)
+        )
+        self.token = None
+        self.restore = None
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._thread = None
+
+    @staticmethod
+    def _terminal_statuses(restore):
+        statuses = {restore.Status.COMPLETE, restore.Status.FAILED}
+        cancelled = getattr(restore.Status, "CANCELLED", None)
+        if cancelled is not None:
+            statuses.add(cancelled)
+        return statuses
+
+    def claim(self):
+        now = timezone.now()
+        with transaction.atomic():
+            restore = self.model.objects.select_for_update().get(pk=self.restore_id)
+            if restore.status in self._terminal_statuses(restore):
+                raise RestoreAlreadyTerminal()
+            if restore.next_retry_at and restore.next_retry_at > now:
+                raise RestoreLeaseBusy(
+                    min((restore.next_retry_at - now).total_seconds(), 300)
+                )
+            if (
+                restore.lease_token
+                and restore.lease_expires_at
+                and restore.lease_expires_at > now
+            ):
+                raise RestoreLeaseBusy(
+                    min((restore.lease_expires_at - now).total_seconds(), 60)
+                )
+
+            metadata = dict(restore.execution_metadata or {})
+            if restore.lease_owner or restore.lease_token:
+                takeovers = list(metadata.get("stale_lease_takeovers") or [])
+                takeovers.append(
+                    {
+                        "detected_at": now.isoformat(),
+                        "previous_owner": restore.lease_owner,
+                        "previous_phase": restore.execution_phase,
+                        "previous_expires_at": (
+                            restore.lease_expires_at.isoformat()
+                            if restore.lease_expires_at
+                            else None
+                        ),
+                    }
+                )
+                metadata["stale_lease_takeovers"] = takeovers[-20:]
+
+            self.token = uuid.uuid4()
+            restore.execution_metadata = metadata
+            restore.execution_phase = self.phase
+            restore.lease_owner = self.owner
+            restore.lease_token = self.token
+            restore.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
+            restore.heartbeat_at = now
+            restore.attempt_count += 1
+            restore.celery_task_id = self.task_id or restore.celery_task_id
+            restore.status = restore.Status.IN_PROGRESS
+            restore.last_error_code = ""
+            restore.error = None
+            restore.next_retry_at = None
+            restore.save()
+
+        self.restore = restore.bind_execution_fence(self.owner, self.token)
+        self._thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"restore-lease-{self.restore_id}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self.restore
+
+    def _heartbeat_once(self):
+        now = timezone.now()
+        updated = self.model.objects.filter(
+            pk=self.restore_id,
+            lease_owner=self.owner,
+            lease_token=self.token,
+            lease_expires_at__gt=now,
+        ).update(
+            heartbeat_at=now,
+            lease_expires_at=now + timedelta(seconds=self.lease_seconds),
+        )
+        if updated != 1:
+            self._lost.set()
+            return False
+        return True
+
+    def _heartbeat_loop(self):
+        close_old_connections()
+        try:
+            while not self._stop.wait(self.heartbeat_seconds):
+                try:
+                    if not self._heartbeat_once():
+                        return
+                except Exception as error:
+                    capture_exception(error)
+        finally:
+            close_old_connections()
+
+    def ensure_owned(self):
+        if self._lost.is_set() or not self.token:
+            raise RestoreLeaseLost("Restore execution lease ownership was lost.")
+        if not self.model.objects.filter(
+            pk=self.restore_id,
+            lease_owner=self.owner,
+            lease_token=self.token,
+            lease_expires_at__gt=timezone.now(),
+        ).exists():
+            self._lost.set()
+            raise RestoreLeaseLost("Restore execution lease ownership was lost.")
+
+    def checkpoint(
+        self,
+        phase,
+        *,
+        metadata=None,
+        progress_completed=None,
+        progress_total=None,
+        progress_unit=None,
+    ):
+        self.ensure_owned()
+        self.restore.execution_phase = str(phase or "")[:64]
+        values = dict(self.restore.execution_metadata or {})
+        if metadata:
+            values.update(dict(metadata))
+        self.restore.execution_metadata = values
+        if progress_completed is not None:
+            self.restore.progress_completed = max(
+                self.restore.progress_completed, int(progress_completed)
+            )
+        if progress_total is not None:
+            self.restore.progress_total = int(progress_total)
+        if progress_unit is not None:
+            self.restore.progress_unit = str(progress_unit)[:32]
+        self.restore.save()
+
+    def release(self):
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=max(1, self.heartbeat_seconds + 1))
+        if self.token:
+            self.model.objects.filter(
+                pk=self.restore_id,
+                lease_owner=self.owner,
+                lease_token=self.token,
+            ).update(
+                lease_owner="",
+                lease_token=None,
+                lease_expires_at=None,
+            )

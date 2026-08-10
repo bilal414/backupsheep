@@ -1,4 +1,4 @@
-import requests
+from apps.api.v1.utils.http import requests
 from django.conf import settings
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response

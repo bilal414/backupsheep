@@ -5,7 +5,11 @@ from apps.console.backup.models import (
     CoreDigitalOceanBackup,
 )
 from apps.console.node.models import CoreDigitalOcean, CoreNode, CoreSchedule
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 
 
 class CoreDigitalOceanSerializer(serializers.ModelSerializer):
@@ -18,7 +22,7 @@ class CoreDigitalOceanSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreDigitalOceanBackupSerializer(serializers.ModelSerializer):
+class CoreDigitalOceanBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     website = CoreDigitalOceanSerializer(source="digitalocean", read_only=True)
     database = CoreDigitalOceanSerializer(source="digitalocean", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -30,11 +34,13 @@ class CoreDigitalOceanBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreDigitalOceanBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "size_gigabytes",
+            "execution_status",
         )
 
     @staticmethod

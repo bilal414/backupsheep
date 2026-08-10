@@ -1,17 +1,22 @@
 import datetime
 import fcntl
+import hashlib
 import json
 import humanfriendly
 import os
+import re
 import pytz
-import requests
+from apps.api.v1.utils.http import request_timeout, requests
 import shutil
 import uuid
 from contextlib import contextmanager
+from types import SimpleNamespace
+from urllib.parse import quote
 from celery import chord
 from django.conf import settings
 from django.db import models, transaction
 from django.db.models import UniqueConstraint
+from django.utils import timezone
 from django.utils.text import slugify
 from django.utils.timezone import get_current_timezone
 from django_celery_beat.models import PeriodicTask, CrontabSchedule
@@ -42,6 +47,1271 @@ from ..vultr import (
 
 from ..utils.models import UtilBackup, UtilCloud
 from botocore.exceptions import ClientError
+
+
+class _RestoreProviderError(ValueError):
+    """Internal exception whose text is always safe to expose to the user."""
+
+    def __init__(self, code, *, retryable=False, unknown_outcome=False):
+        self.code = str(code)
+        self.retryable = bool(retryable)
+        self.unknown_outcome = bool(unknown_outcome)
+        super().__init__(_RESTORE_ERROR_MESSAGES.get(self.code, _RESTORE_ERROR_MESSAGES["PROVIDER_REQUEST_FAILED"]))
+
+
+_RESTORE_ERROR_MESSAGES = {
+    "PROVIDER_NOT_FOUND": "The provider could not find the restore source or target.",
+    "PROVIDER_AUTH_FAILED": "The provider rejected the restore credentials. Reconnect the cloud account.",
+    "PROVIDER_RATE_LIMIT": "The provider rate-limited the restore request. We will retry shortly.",
+    "PROVIDER_TIMEOUT": "The provider restore request timed out. Its outcome is being reconciled before retrying.",
+    "PROVIDER_TRANSIENT_OUTAGE": "The provider is temporarily unavailable. We will retry the restore.",
+    "PROVIDER_MALFORMED_RESPONSE": "The provider returned an invalid restore response. Manual review is required.",
+    "PROVIDER_FAILED": "The provider reported a terminal restore failure.",
+    "PROVIDER_OWNERSHIP_MISMATCH": "The provider target did not match this BackupSheep restore. Manual review is required.",
+    "PROVIDER_DUPLICATE_MATCH": "Multiple provider resources matched this restore. Manual review is required.",
+    "PROVIDER_UNKNOWN_OUTCOME": "The provider accepted an uncertain restore request. We are reconciling it before retrying.",
+    "PROVIDER_RECONCILIATION_REQUIRED": "The restore outcome is unknown and no unique provider target was found. Manual review is required.",
+    "PROVIDER_REQUEST_FAILED": "The provider restore request failed.",
+}
+
+
+# Notification data is an external/public contract.  Keep this allowlist local to
+# the node boundary so a provider exception can never become an account-log or
+# email payload merely because a new SDK exposes a ``code`` or ``detail`` field.
+_BACKUP_NOTIFICATION_MESSAGES = {
+    "CONNECTION_NOT_READY": "The cloud connection is not ready for backups.",
+    "NODE_NOT_READY": "The node is not ready for a backup.",
+    "CONNECTION_VALIDATION_FAILED": "BackupSheep could not validate the destination connection.",
+    "BACKUP_FAILED": "The backup could not be completed.",
+    "BACKUP_TIMEOUT": "The backup worker reached its time limit.",
+    "BACKUP_STATUS_TIMEOUT": "The provider backup status could not be confirmed before the timeout.",
+    "AUTH_FAILED": "The destination rejected the configured credentials.",
+    "HOST_KEY_CHANGED": "The server identity changed and the connection was refused.",
+    "HOST_KEY_UNKNOWN": "The server identity has not been reviewed.",
+    "KEY_PASSPHRASE_REQUIRED": "The private key requires a passphrase.",
+    "CONNECTION_REFUSED": "The destination refused the network connection.",
+    "DNS_FAILURE": "The destination hostname could not be resolved.",
+    "TCP_TIMEOUT": "The destination did not respond before the connection timeout.",
+    "CLIENT_OR_KEY_MISSING": "A required backup client or managed key is unavailable on the worker.",
+    "PERMISSION_DENIED": "The destination account lacks the required backup permission.",
+    "TLS_REQUIRED": "The destination requires an SSL/TLS connection.",
+    "WORKER_DISK_FULL": "The backup worker does not have enough free disk space.",
+    "ARCHIVE_VALIDATION_FAILED": "The generated backup archive failed integrity validation.",
+    "SOURCE_EXPORT_FAILED": "The source export failed.",
+    "PROVIDER_NOT_FOUND": "The provider could not find the backup source or target.",
+    "PROVIDER_AUTH_FAILED": "The provider rejected the configured credentials or permissions.",
+    "PROVIDER_RATE_LIMIT": "The provider rate limit was reached.",
+    "PROVIDER_TIMEOUT": "The provider request timed out.",
+    "PROVIDER_TRANSIENT_OUTAGE": "The provider is temporarily unavailable.",
+    "PROVIDER_FAILED": "The provider reported a terminal failure.",
+    "PROVIDER_REQUEST_FAILED": "The provider rejected the backup request.",
+    "PROVIDER_CLIENT_ERROR": "The provider client could not complete the backup request.",
+    "PROVIDER_OWNERSHIP_MISMATCH": "Provider ownership verification failed.",
+    "PROVIDER_MALFORMED_RESPONSE": "The provider returned an invalid backup response.",
+    "PROVIDER_DUPLICATE_MATCH": "Multiple provider resources matched this backup; manual review is required.",
+    "PROVIDER_RECONCILIATION_REQUIRED": "The provider operation requires reconciliation before another request.",
+    "PROVIDER_UNSUPPORTED_RESOURCE": "The provider does not support native backups for this resource type.",
+    "STORAGE_UPLOAD_FAILED": "The storage upload could not be completed.",
+    "STORAGE_AUTH_FAILED": "The storage destination rejected the configured credentials or permissions.",
+    "STORAGE_DESTINATION_NOT_FOUND": "The configured storage destination was not found.",
+    "STORAGE_QUOTA_EXCEEDED": "The destination does not have enough available storage capacity.",
+    "STORAGE_RATE_LIMITED": "The storage provider rate limit was reached.",
+    "STORAGE_TIMEOUT": "The storage operation timed out.",
+    "STORAGE_TRANSIENT_FAILURE": "The storage provider is temporarily unavailable.",
+    "STORAGE_INTEGRITY_FAILED": "The uploaded object failed integrity verification.",
+    "SOURCE_ARTIFACT_INVALID": "The local backup artifact failed integrity validation.",
+    "SOURCE_ARTIFACT_MISSING": "The committed local backup artifact is no longer available.",
+    "STORAGE_RECONCILIATION_REQUIRED": "The storage operation requires reconciliation before it can continue.",
+    "WORKER_LEASE_LOST": "This worker lost ownership of the backup execution lease.",
+}
+
+_BACKUP_NOTIFICATION_REMEDIATIONS = {
+    "CONNECTION_NOT_READY": "Reconnect or validate the cloud connection, then retry the backup.",
+    "NODE_NOT_READY": "Ensure the node is active and retry the backup.",
+    "CONNECTION_VALIDATION_FAILED": "Review the destination configuration and worker connectivity, then validate again.",
+    "BACKUP_FAILED": "Review the backup execution using the correlation ID and retry after correcting the reported condition.",
+    "BACKUP_TIMEOUT": "Review worker capacity and backup scope, then retry; durable execution state remains available for recovery.",
+    "BACKUP_STATUS_TIMEOUT": "Wait for provider recovery and inspect the durable backup status before retrying.",
+    "AUTH_FAILED": "Check the configured credentials and authentication mode, then validate again.",
+    "HOST_KEY_CHANGED": "Verify the server identity out of band before replacing the reviewed host key.",
+    "HOST_KEY_UNKNOWN": "Verify the server fingerprint out of band and approve it before retrying.",
+    "KEY_PASSPHRASE_REQUIRED": "Configure the private-key passphrase and validate again.",
+    "CONNECTION_REFUSED": "Confirm the service is running and its firewall allows the BackupSheep worker.",
+    "DNS_FAILURE": "Check the hostname and DNS records, then retry.",
+    "TCP_TIMEOUT": "Allow the BackupSheep worker through the firewall and confirm the configured port is reachable.",
+    "CLIENT_OR_KEY_MISSING": "Install the required client or managed key on every relevant worker.",
+    "PERMISSION_DENIED": "Grant the minimum read/export permissions required for this backup and validate again.",
+    "TLS_REQUIRED": "Enable SSL/TLS for this connection and validate again.",
+    "WORKER_DISK_FULL": "Free worker disk space or move the workload to a worker with sufficient capacity.",
+    "ARCHIVE_VALIDATION_FAILED": "Retry the export and inspect the durable execution using the correlation ID.",
+    "SOURCE_EXPORT_FAILED": "Review secured diagnostics using the correlation ID and retry the source export.",
+    "PROVIDER_NOT_FOUND": "Confirm the source or target still exists and retry after provider recovery.",
+    "PROVIDER_AUTH_FAILED": "Reconnect the cloud account with the minimum required permissions.",
+    "PROVIDER_RATE_LIMIT": "Wait for the provider retry window and allow the durable task to resume.",
+    "PROVIDER_TIMEOUT": "Wait for provider recovery and reconcile the durable operation before retrying.",
+    "PROVIDER_TRANSIENT_OUTAGE": "Wait for provider recovery; the durable operation can be reconciled before retrying.",
+    "PROVIDER_FAILED": "Review the provider operation using the correlation ID and correct the provider-side condition.",
+    "PROVIDER_REQUEST_FAILED": "Review the provider operation using the correlation ID and retry when safe.",
+    "PROVIDER_CLIENT_ERROR": "Update or reconnect the provider client configuration and retry.",
+    "PROVIDER_OWNERSHIP_MISMATCH": "Stop and review provider ownership before retrying this backup.",
+    "PROVIDER_MALFORMED_RESPONSE": "Review the provider API response in secured diagnostics and retry after validation.",
+    "PROVIDER_DUPLICATE_MATCH": "Do not create another provider resource until the duplicate resources are reviewed.",
+    "PROVIDER_RECONCILIATION_REQUIRED": "Review the durable reconciliation record before retrying this provider operation.",
+    "STORAGE_UPLOAD_FAILED": "Review the storage integration and retry the upload.",
+    "STORAGE_AUTH_FAILED": "Reconnect the storage integration with the minimum required permissions.",
+    "STORAGE_DESTINATION_NOT_FOUND": "Verify the configured storage destination and retry.",
+    "STORAGE_QUOTA_EXCEEDED": "Free storage capacity or select a destination with sufficient capacity.",
+    "STORAGE_RATE_LIMITED": "Wait for the storage provider retry window and allow the task to resume.",
+    "STORAGE_TIMEOUT": "Wait for storage provider recovery and reconcile the upload before retrying.",
+    "STORAGE_TRANSIENT_FAILURE": "Wait for storage provider recovery and retry the upload.",
+    "STORAGE_INTEGRITY_FAILED": "Do not restore this copy; retry the upload and verify its checksum.",
+    "SOURCE_ARTIFACT_INVALID": "Retry the source export and verify its integrity before upload.",
+    "SOURCE_ARTIFACT_MISSING": "Recreate the source artifact and retry the backup.",
+    "STORAGE_RECONCILIATION_REQUIRED": "Reconcile the storage operation before starting another upload.",
+    "WORKER_LEASE_LOST": "Allow the durable recovery task to reconcile the backup before retrying.",
+}
+
+_BACKUP_NOTIFICATION_SAFE_CODES = frozenset(_BACKUP_NOTIFICATION_MESSAGES)
+
+
+def _restore_status(name):
+    from apps.console.backup.models import CoreCloudRestore
+
+    return getattr(CoreCloudRestore.Status, name)
+
+
+def _restore_phase(name):
+    from apps.console.backup.models import CoreCloudRestore
+
+    return getattr(CoreCloudRestore.OperationPhase, name)
+
+
+def _restore_message(code):
+    return _RESTORE_ERROR_MESSAGES.get(code, _RESTORE_ERROR_MESSAGES["PROVIDER_REQUEST_FAILED"])
+
+
+def _restore_params(restore):
+    return dict(restore.params) if isinstance(restore.params, dict) else {}
+
+
+def _restore_marker_value(restore):
+    """Return a stable provider marker without putting secrets in provider data."""
+    existing = str(getattr(restore, "restore_marker", "") or "").strip()
+    if existing:
+        return existing[:128]
+    identity = getattr(restore, "pk", None) or getattr(restore, "correlation_id", None)
+    identity = str(identity or getattr(restore, "name", "restore"))
+    return f"backupsheep-restore-{identity}"[:128]
+
+
+def _restore_fingerprint(provider, source_id, target_kind, restore, params):
+    payload = {
+        "provider": str(provider),
+        "source_id": str(source_id),
+        "target_kind": str(target_kind),
+        "restore_id": str(getattr(restore, "pk", "")),
+        # The caller controls restore params; the fingerprint is only an
+        # idempotency witness and is never sent to a provider as a secret.
+        "params": params,
+    }
+    encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _prepare_cloud_restore(restore, *, provider, source_id, target_kind, target_name=None):
+    """Persist the restore identity before any non-idempotent provider call."""
+    params = _restore_params(restore)
+    stored_marker = str(params.get("_bs_provider_name") or "").strip()
+    row_marker = str(getattr(restore, "restore_marker", "") or "").strip()
+    if stored_marker and row_marker and stored_marker != row_marker:
+        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+    marker = (stored_marker or row_marker or _restore_marker_value(restore))[:128]
+    # Providers without a native idempotency header use this deterministic provider
+    # name as the immutable adoption marker. Keep the user-facing restore name in the
+    # row, but never rely on a caller-chosen display name for crash recovery.
+    params.setdefault("_bs_provider_name", marker)
+    identity = dict(params.get("_backupsheep_restore") or {})
+    identity.update(
+        {
+            "provider": str(provider),
+            "source_id": str(source_id),
+            "target_kind": str(target_kind),
+            "target_name": str(params.get("_bs_provider_name") or target_name or restore.name),
+            "marker": marker,
+        }
+    )
+    params["_backupsheep_restore"] = identity
+    params.setdefault("_bs_create_outcome_unknown", False)
+    # New restore requests must prove the marker/source relationship when the
+    # provider exposes those fields. Legacy rows without this flag retain their
+    # exact resource-id polling compatibility.
+    params["_bs_marker_required"] = True
+    fingerprint = _restore_fingerprint(provider, source_id, target_kind, restore, params)
+    fields = []
+    if getattr(restore, "restore_marker", "") != marker:
+        restore.restore_marker = marker
+        fields.append("restore_marker")
+    if getattr(restore, "request_fingerprint", "") != fingerprint:
+        restore.request_fingerprint = fingerprint
+        fields.append("request_fingerprint")
+    if restore.params != params:
+        restore.params = params
+        fields.append("params")
+    restore.operation_phase = _restore_phase("RECONCILING")
+    fields.append("operation_phase")
+    if fields:
+        fields = list(dict.fromkeys(fields + ["modified"]))
+        restore.save(update_fields=fields)
+    return marker, params
+
+
+def _restore_unknown_outcome(restore, *, code="PROVIDER_UNKNOWN_OUTCOME"):
+    """Fence a possibly accepted mutation so a retry must reconcile first."""
+    params = _restore_params(restore)
+    params["_bs_create_outcome_unknown"] = True
+    params["_bs_last_error_code"] = code
+    params["_bs_last_error_category"] = "transient" if code in {
+        "PROVIDER_TIMEOUT", "PROVIDER_TRANSIENT_OUTAGE"
+    } else "unknown_outcome"
+    restore.params = params
+    restore.operation_phase = _restore_phase("CREATE_UNKNOWN")
+    restore.error = _restore_message(code)
+    if hasattr(restore, "last_error_code"):
+        restore.last_error_code = code
+    restore.status = _restore_status("IN_PROGRESS")
+    restore.save(update_fields=["params", "operation_phase", "error", "status", "modified"] + (["last_error_code"] if hasattr(restore, "last_error_code") else []))
+
+
+def _restore_safe_failure(restore, code, *, manual_review=False):
+    params = _restore_params(restore)
+    if code in {
+        "PROVIDER_AUTH_FAILED",
+        "PROVIDER_NOT_FOUND",
+        "PROVIDER_RATE_LIMIT",
+        "PROVIDER_REQUEST_FAILED",
+        "PROVIDER_FAILED",
+    }:
+        params["_bs_create_outcome_unknown"] = False
+    else:
+        params["_bs_create_outcome_unknown"] = bool(params.get("_bs_create_outcome_unknown"))
+    params["_bs_last_error_code"] = code
+    params["_bs_last_error_category"] = "manual_review" if manual_review else "terminal"
+    restore.params = params
+    restore.error = _restore_message(code)
+    restore.status = _restore_status("FAILED")
+    restore.operation_phase = _restore_phase("MANUAL_REVIEW" if manual_review else "FAILED")
+    if hasattr(restore, "last_error_code"):
+        restore.last_error_code = code
+    fields = ["params", "error", "status", "operation_phase", "modified"]
+    if hasattr(restore, "last_error_code"):
+        fields.append("last_error_code")
+    restore.save(update_fields=fields)
+    return _restore_status("FAILED")
+
+
+def _restore_adopt(restore, resource_id, *, provider_status=None, params_update=None, marker_verified=True):
+    resource_id = str(resource_id or "").strip()
+    if not resource_id:
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE", unknown_outcome=True)
+    params = _restore_params(restore)
+    params.update(params_update or {})
+    params["_bs_create_outcome_unknown"] = False
+    params["_bs_marker_verified"] = bool(marker_verified)
+    if provider_status is not None:
+        params["_bs_provider_status"] = str(provider_status)[:64]
+    restore.resource_id = resource_id
+    restore.params = params
+    restore.status = _restore_status("IN_PROGRESS")
+    restore.operation_phase = _restore_phase("POLLING")
+    restore.error = ""
+    fields = ["resource_id", "params", "status", "operation_phase", "error", "modified"]
+    if getattr(restore, "provider_job_id", None) is not None:
+        fields.append("provider_job_id")
+    restore.save(update_fields=list(dict.fromkeys(fields)))
+    return resource_id
+
+
+def _restore_begin_mutation(restore):
+    params = _restore_params(restore)
+    params["_bs_create_outcome_unknown"] = True
+    params["_bs_mutation_started_at"] = timezone.now().isoformat()
+    restore.params = params
+    restore.operation_phase = _restore_phase("CREATE_UNKNOWN")
+    restore.save(update_fields=["params", "operation_phase", "modified"])
+
+
+def _restore_clear_unknown(restore):
+    params = _restore_params(restore)
+    params["_bs_create_outcome_unknown"] = False
+    restore.params = params
+    restore.save(update_fields=["params", "modified"])
+
+
+def _restore_unknown(restore):
+    return bool(_restore_params(restore).get("_bs_create_outcome_unknown"))
+
+
+def _restore_record_scan(restore, *, item_count, match_count):
+    """Persist bounded inventory proof used to explain a fenced restore retry."""
+    params = _restore_params(restore)
+    params["_bs_reconciliation"] = {
+        "scan_complete": True,
+        "scan_item_count": int(item_count),
+        "scan_match_count": int(match_count),
+    }
+    restore.params = params
+    restore.save(update_fields=["params", "modified"])
+
+
+def _restore_candidates(restore, candidates, *, source_id=None, marker=None, id_key="id", marker_match=None, source_match=None):
+    """Adopt exactly one owned candidate, or fail closed on ambiguity."""
+    candidates = list(candidates or [])
+    matched = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if marker_match and marker_match(candidate, marker):
+            matched.append(candidate)
+        elif not marker_match and candidate.get("name") == getattr(restore, "name", None):
+            matched.append(candidate)
+    if len(matched) > 1:
+        _restore_safe_failure(restore, "PROVIDER_DUPLICATE_MATCH", manual_review=True)
+        raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+    if not matched:
+        if _restore_unknown(restore):
+            _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+            raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+        return None
+    candidate = matched[0]
+    if source_match and not source_match(candidate, source_id):
+        _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+    resource_id = (
+        candidate.get(id_key)
+        or candidate.get("uuid")
+        or candidate.get("name")
+        or candidate.get("InstanceId")
+        or candidate.get("VolumeId")
+        or candidate.get("DBInstanceIdentifier")
+    )
+    if str(resource_id) == str(source_id):
+        _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+    _restore_adopt(restore, resource_id, provider_status=candidate.get("status"), marker_verified=True)
+    return candidate
+
+
+def _restore_tags(tags):
+    if isinstance(tags, dict):
+        return {str(k): str(v) for k, v in tags.items()}
+    result = {}
+    for item in tags or []:
+        if isinstance(item, dict) and item.get("Key") is not None:
+            result[str(item["Key"])] = str(item.get("Value", ""))
+        elif isinstance(item, str):
+            result[item] = item
+    return result
+
+
+def _restore_marker_matches(resource, marker):
+    tags = _restore_tags(
+        resource.get("tags")
+        or resource.get("Tags")
+        or resource.get("labels")
+        or resource.get("freeformTags")
+        or resource.get("freeform_tags")
+    )
+    values = set(tags) | set(tags.values())
+    return str(marker) in values or str(marker) in {f"backupsheep.restore:{marker}", f"BackupSheepRestore:{marker}"}
+
+
+def _restore_source_matches(resource, source_id, *keys):
+    expected = str(source_id)
+    values = []
+    for key in keys:
+        value = resource.get(key)
+        if isinstance(value, dict):
+            values.extend(value.values())
+        elif isinstance(value, list):
+            values.extend(value)
+        else:
+            values.append(value)
+    values = {str(value) for value in values if value is not None}
+    # Some providers omit the source field after creation. In that case the
+    # provider-side marker remains the ownership proof for new restores.
+    return not values or expected in values or any(expected in value for value in values)
+
+
+def _restore_http_class(response, *, mutation=False):
+    if response is None or not hasattr(response, "status_code"):
+        return _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+    status = int(getattr(response, "status_code", 0) or 0)
+    if 200 <= status < 300:
+        return None
+    if status in {401, 403}:
+        return _RestoreProviderError("PROVIDER_AUTH_FAILED")
+    if status == 404:
+        return _RestoreProviderError("PROVIDER_NOT_FOUND")
+    if status == 429:
+        return _RestoreProviderError("PROVIDER_RATE_LIMIT", retryable=True)
+    if status in {408, 425, 500, 502, 503, 504}:
+        return _RestoreProviderError(
+            "PROVIDER_TIMEOUT" if status in {408, 504} else "PROVIDER_TRANSIENT_OUTAGE",
+            retryable=True,
+            unknown_outcome=mutation,
+        )
+    return _RestoreProviderError("PROVIDER_FAILED")
+
+
+def _restore_sdk_status(response, *, mutation=False):
+    status = int(getattr(response, "status", 0) or 0)
+    if 200 <= status < 300:
+        return None
+    if status in {401, 403}:
+        return _RestoreProviderError("PROVIDER_AUTH_FAILED")
+    if status == 404:
+        return _RestoreProviderError("PROVIDER_NOT_FOUND")
+    if status == 429:
+        return _RestoreProviderError("PROVIDER_RATE_LIMIT", retryable=True)
+    if status in {408, 425, 500, 502, 503, 504}:
+        return _RestoreProviderError(
+            "PROVIDER_TIMEOUT" if status in {408, 504} else "PROVIDER_TRANSIENT_OUTAGE",
+            retryable=True,
+            unknown_outcome=mutation,
+        )
+    return _RestoreProviderError("PROVIDER_FAILED")
+
+
+def _restore_exception(error, *, mutation=False):
+    """Classify provider SDK/HTTP exceptions without retaining their text."""
+    if isinstance(error, _RestoreProviderError):
+        return error
+    if isinstance(error, (ValueError, KeyError, TypeError)):
+        return _RestoreProviderError(
+            "PROVIDER_MALFORMED_RESPONSE",
+            unknown_outcome=mutation,
+        )
+    name = error.__class__.__name__.lower()
+    if "credential" in name or "auth" in name or "unauthorized" in name:
+        return _RestoreProviderError("PROVIDER_AUTH_FAILED")
+    if "notfound" in name or "not_found" in name:
+        return _RestoreProviderError("PROVIDER_NOT_FOUND")
+    if "timeout" in name or "timedout" in name:
+        return _RestoreProviderError("PROVIDER_TIMEOUT", retryable=True, unknown_outcome=mutation)
+    if "throttl" in name or "ratelimit" in name or "too_many" in name:
+        return _RestoreProviderError("PROVIDER_RATE_LIMIT", retryable=True)
+    if isinstance(error, ClientError):
+        response = error.response or {}
+        error_data = response.get("Error") or {}
+        code = str(error_data.get("Code") or "").lower()
+        status = int(response.get("ResponseMetadata", {}).get("HTTPStatusCode") or 0)
+        if code in {"accessdenied", "accessdeniedexception", "expiredtoken", "invalidclienttokenid", "signaturedoesnotmatch", "unauthorizedoperation", "unrecognizedclientexception"} or status in {401, 403}:
+            return _RestoreProviderError("PROVIDER_AUTH_FAILED")
+        if code in {"resourcenotfoundexception", "notfound", "notfoundexception", "dbinstancenotfound", "dbsnapshotnotfound", "dbsnapshotnotfoundfault", "invalidsnapshot.notfound"} or status == 404:
+            return _RestoreProviderError("PROVIDER_NOT_FOUND")
+        if code in {"throttling", "throttlingexception", "requestlimitexceeded", "limitexceededexception", "toomanyrequestsexception"} or status == 429:
+            return _RestoreProviderError("PROVIDER_RATE_LIMIT", retryable=True)
+        if status in {408, 425, 500, 502, 503, 504} or code in {"internalerror", "serviceunavailable", "requesttimeout", "requesttimeoutexception"}:
+            return _RestoreProviderError("PROVIDER_TRANSIENT_OUTAGE", retryable=True, unknown_outcome=mutation)
+    if "connection" in name or "tempor" in name or "unavailable" in name:
+        return _RestoreProviderError("PROVIDER_TRANSIENT_OUTAGE", retryable=True, unknown_outcome=mutation)
+    status = int(getattr(error, "status", 0) or 0)
+    if status:
+        return _restore_sdk_status(SimpleNamespace(status=status), mutation=mutation)
+    return _RestoreProviderError("PROVIDER_FAILED")
+
+
+def _restore_handle_error(restore, error, *, mutation=False, raise_terminal=True):
+    classified = _restore_exception(error, mutation=mutation)
+    if classified.retryable:
+        if classified.unknown_outcome or mutation:
+            _restore_unknown_outcome(restore, code=classified.code)
+        else:
+            params = _restore_params(restore)
+            params["_bs_last_error_code"] = classified.code
+            params["_bs_last_error_category"] = "retryable"
+            restore.params = params
+            restore.error = _restore_message(classified.code)
+            restore.status = _restore_status("IN_PROGRESS")
+            restore.save(update_fields=["params", "error", "status", "modified"])
+        if raise_terminal:
+            return _restore_status("IN_PROGRESS")
+        return _restore_status("IN_PROGRESS")
+    _restore_safe_failure(restore, classified.code, manual_review=classified.code in {
+        "PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH", "PROVIDER_DUPLICATE_MATCH", "PROVIDER_RECONCILIATION_REQUIRED"
+    })
+    if raise_terminal:
+        raise classified
+    return _restore_status("FAILED")
+
+
+def _restore_verify_target(restore, resource, *, source_id=None, marker=None, source_keys=(), marker_required=None):
+    if not isinstance(resource, dict):
+        _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+        return False
+    resource_id = resource.get("id") or resource.get("uuid") or resource.get("name") or resource.get("InstanceId") or resource.get("VolumeId") or resource.get("DBInstanceIdentifier")
+    if source_id is not None and str(resource_id) == str(source_id):
+        _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+        return False
+    marker_required = bool(marker_required if marker_required is not None else _restore_params(restore).get("_bs_marker_required"))
+    has_marker_fields = any(key in resource for key in ("tags", "Tags", "labels", "freeformTags", "freeform_tags"))
+    if marker and marker_required and has_marker_fields and not _restore_marker_matches(resource, marker):
+        _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+        return False
+    if marker and marker_required and not has_marker_fields and resource.get("name"):
+        if str(resource.get("name")) != str(getattr(restore, "name", "")):
+            _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+            return False
+    if source_id is not None and source_keys and not _restore_source_matches(resource, source_id, *source_keys):
+        _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+        return False
+    return True
+
+
+_VULTR_SAFE_MESSAGES = {
+    "PROVIDER_NOT_FOUND": "Vultr could not find the requested source or target.",
+    "PROVIDER_AUTH_FAILED": "Vultr rejected the configured credentials or permissions.",
+    "PROVIDER_RATE_LIMIT": "Vultr rate-limited the request; BackupSheep will resume automatically.",
+    "PROVIDER_TIMEOUT": "The Vultr request timed out; BackupSheep is reconciling its outcome.",
+    "PROVIDER_TRANSIENT_OUTAGE": "Vultr is temporarily unavailable; BackupSheep will resume automatically.",
+    "PROVIDER_MALFORMED_RESPONSE": "Vultr returned an invalid response; manual review may be required.",
+    "PROVIDER_FAILED": "Vultr reported a terminal failure.",
+    "PROVIDER_REQUEST_FAILED": "The Vultr request could not be completed.",
+    "PROVIDER_OWNERSHIP_MISMATCH": "The Vultr resource failed ownership verification; manual review is required.",
+    "PROVIDER_DUPLICATE_MATCH": "Multiple Vultr resources matched; manual review is required.",
+    "PROVIDER_RECONCILIATION_REQUIRED": "The Vultr operation has no unique adopted resource; manual review is required.",
+}
+
+
+def _vultr_safe_message(code):
+    return _VULTR_SAFE_MESSAGES.get(
+        str(code or "PROVIDER_REQUEST_FAILED"),
+        _VULTR_SAFE_MESSAGES["PROVIDER_REQUEST_FAILED"],
+    )
+
+
+def _vultr_backup_failure(node, backup, code):
+    """Build a public-safe backup exception while retaining its stable code."""
+    failure = NodeBackupFailedError(
+        node,
+        backup.uuid_str,
+        backup.attempt_no,
+        backup.type,
+        message=_vultr_safe_message(code),
+    )
+    # NodeBackupFailedError predates the safe notification contract. Attach the
+    # allowlisted code without changing that shared exception module.
+    failure.error_code = str(code)
+    return failure
+
+
+def _raise_vultr_backup_failure(node, backup, code, *, cause=None):
+    failure = _vultr_backup_failure(node, backup, code)
+    if cause is not None:
+        raise failure from cause
+    raise failure
+
+
+def _record_restore_retryable_error(restore, code):
+    """Persist a code/message pair without provider response text."""
+    params = _restore_params(restore)
+    params["_bs_last_error_code"] = str(code)
+    params["_bs_last_error_category"] = "retryable"
+    restore.params = params
+    restore.error = _restore_message(code)
+    restore.status = _restore_status("IN_PROGRESS")
+    restore.operation_phase = _restore_phase("POLLING")
+    fields = ["params", "error", "status", "operation_phase", "modified"]
+    if hasattr(restore, "last_error_code"):
+        restore.last_error_code = str(code)
+        fields.append("last_error_code")
+    restore.save(update_fields=list(dict.fromkeys(fields)))
+
+
+def _safe_vultr_record(record):
+    """Persist only bounded, non-secret Vultr resource identity fields."""
+    if not isinstance(record, dict):
+        return {}
+    allowed = {
+        "id", "instance_id", "block_id", "snapshot_id", "description", "label",
+        "status", "state", "size", "size_gb", "region", "plan", "type", "date",
+        "time", "date_created", "created_at", "updated_at", "tags", "source_id",
+        "source_database_id", "database_id", "parent_id", "job_id", "operation_id",
+    }
+    result = {}
+    for key in allowed:
+        if key not in record:
+            continue
+        value = record[key]
+        if key == "tags" and isinstance(value, list):
+            result[key] = [str(item)[:128] for item in value[:128]]
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            result[key] = str(value)[:512] if isinstance(value, str) else value
+    return result
+
+
+def _vultr_same_region(actual, expected):
+    if actual in (None, "") or expected in (None, ""):
+        return True
+    return str(actual).casefold() == str(expected).casefold()
+
+
+class _BackupProviderError(RuntimeError):
+    """Internal provider error with a stable, secret-free failure contract."""
+
+    def __init__(self, code, *, retryable=False, unknown_outcome=False, manual_review=False):
+        self.code = str(code or "PROVIDER_FAILED")
+        self.retryable = bool(retryable)
+        self.unknown_outcome = bool(unknown_outcome)
+        self.manual_review = bool(manual_review)
+        super().__init__(
+            _BACKUP_NOTIFICATION_MESSAGES.get(
+                self.code,
+                _BACKUP_NOTIFICATION_MESSAGES["PROVIDER_FAILED"],
+            )
+        )
+
+
+def _backup_provider_response_error(response, *, mutation=False):
+    """Classify a provider response without retaining its body or headers."""
+    # OVH's SDK returns decoded dictionaries while UpCloud's requests wrapper
+    # returns Response objects.  A decoded payload has no HTTP status to
+    # classify, so it is a successful transport response and must be validated
+    # by the caller as a provider payload instead.
+    if isinstance(response, (dict, list)):
+        return None
+    if response is None or not hasattr(response, "status_code"):
+        return _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+    status = int(getattr(response, "status_code", 0) or 0)
+    if 200 <= status < 300:
+        return None
+    if status in {401, 403}:
+        return _BackupProviderError("PROVIDER_AUTH_FAILED")
+    if status == 404:
+        return _BackupProviderError("PROVIDER_NOT_FOUND")
+    if status == 429:
+        return _BackupProviderError("PROVIDER_RATE_LIMIT", retryable=True)
+    if status in {408, 425, 500, 502, 503, 504} or status >= 500:
+        return _BackupProviderError(
+            "PROVIDER_TIMEOUT" if status in {408, 504} else "PROVIDER_TRANSIENT_OUTAGE",
+            retryable=True,
+            unknown_outcome=mutation,
+        )
+    return _BackupProviderError("PROVIDER_REQUEST_FAILED")
+
+
+def _backup_provider_exception(error, *, mutation=False):
+    """Map provider SDK/HTTP exceptions to the existing safe backup codes."""
+    if isinstance(error, _BackupProviderError):
+        return error
+    if isinstance(error, (requests.exceptions.Timeout, TimeoutError)):
+        return _BackupProviderError(
+            "PROVIDER_TIMEOUT", retryable=True, unknown_outcome=mutation
+        )
+    if isinstance(error, requests.exceptions.ConnectionError):
+        return _BackupProviderError(
+            "PROVIDER_TRANSIENT_OUTAGE", retryable=True, unknown_outcome=mutation
+        )
+    if isinstance(error, InvalidCredential):
+        return _BackupProviderError("PROVIDER_AUTH_FAILED")
+
+    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    if status:
+        classified = _backup_provider_response_error(
+            SimpleNamespace(status_code=status), mutation=mutation
+        )
+        if classified:
+            return classified
+
+    name = error.__class__.__name__.lower()
+    if any(token in name for token in ("credential", "unauthorized", "forbidden", "auth")):
+        return _BackupProviderError("PROVIDER_AUTH_FAILED")
+    if any(token in name for token in ("notfound", "not_found", "doesnotexist")):
+        return _BackupProviderError("PROVIDER_NOT_FOUND")
+    if any(token in name for token in ("ratelimit", "throttl", "too_many")):
+        return _BackupProviderError("PROVIDER_RATE_LIMIT", retryable=True)
+    if any(token in name for token in ("timeout", "timedout")):
+        return _BackupProviderError(
+            "PROVIDER_TIMEOUT", retryable=True, unknown_outcome=mutation
+        )
+    if any(token in name for token in ("connection", "unavailable", "tempor")):
+        return _BackupProviderError(
+            "PROVIDER_TRANSIENT_OUTAGE", retryable=True, unknown_outcome=mutation
+        )
+    if isinstance(error, (ValueError, KeyError, TypeError, json.JSONDecodeError)):
+        return _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", unknown_outcome=mutation, manual_review=True
+        )
+    return _BackupProviderError(
+        "PROVIDER_FAILED", unknown_outcome=mutation and isinstance(error, ResourceConflictError)
+    )
+
+
+def _backup_execution_fence(backup):
+    """Return the current durable execution row and its optional fencing token."""
+    state = backup.get_execution_state(create=True)
+    if state is None or not state.lease_token:
+        return state, {}
+    return state, {
+        "lease_owner": state.lease_owner,
+        "lease_token": state.lease_token,
+    }
+
+
+def _backup_scope_fingerprint(provider, source_id, resource_type, scope):
+    payload = {
+        "provider": str(provider),
+        "source_id": str(source_id),
+        "resource_type": str(resource_type),
+        "scope": dict(scope or {}),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _backup_request_marker(backup):
+    """Return the execution-owned marker, never a mutable display value."""
+    state = backup.get_execution_state(create=True)
+    marker = getattr(state, "provider_idempotency_key", None) if state else None
+    marker = marker or backup.uuid_str or f"backupsheep-backup-{backup.pk}"
+    return str(marker)[:128]
+
+
+def _backup_provider_witness(backup, *, provider, source_id, resource_type, scope, source=None):
+    """Build the immutable, bounded source/scope witness stored before mutation."""
+    scope = {
+        str(key): str(value)[:255]
+        for key, value in (scope or {}).items()
+        if value not in (None, "")
+    }
+    witness = {
+        "provider": str(provider)[:64],
+        "marker": _backup_request_marker(backup),
+        "source_id": str(source_id)[:255],
+        "resource_type": str(resource_type)[:64],
+        "scope": scope,
+        "scope_fingerprint": _backup_scope_fingerprint(
+            provider, source_id, resource_type, scope
+        ),
+    }
+    if isinstance(source, dict):
+        for key in (
+            "projectId", "project_id", "tenantId", "tenant_id", "accountId", "account_id",
+            "region", "zone", "availability_zone",
+        ):
+            value = source.get(key)
+            if value not in (None, ""):
+                witness[f"source_{key}"] = str(value)[:255]
+    return witness
+
+
+def _backup_safe_identity(resource, *, id_keys=(), value_keys=()):
+    """Keep only bounded provider identity fields in durable backup metadata."""
+    if not isinstance(resource, dict):
+        return {}
+    keys = tuple(id_keys) + tuple(value_keys) + (
+        "name", "title", "description", "status", "state", "size", "size_gigabytes",
+        "region", "zone", "origin", "source_id", "sourceId", "instanceId", "volumeId",
+        "uuid", "id", "projectId", "project_id", "type", "created_at",
+    )
+    result = {}
+    for key in dict.fromkeys(keys):
+        if key not in resource:
+            continue
+        value = resource.get(key)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            result[str(key)[:64]] = str(value)[:512] if isinstance(value, str) else value
+    return result
+
+
+def _backup_execution_metadata(backup):
+    state = backup.get_execution_state(create=True)
+    metadata = dict(state.provider_metadata or {}) if state else {}
+    return state, metadata
+
+
+def _backup_record_provider_witness(
+    backup,
+    witness,
+    *,
+    provider_status="reconciling",
+    metadata=None,
+    reconciliation_state=None,
+    reconciliation_reason=None,
+):
+    """Persist marker and source/scope evidence through the fenced execution row."""
+    state, fence = _backup_execution_fence(backup)
+    provider_metadata = {
+        "witness": dict(witness),
+        "marker": witness.get("marker"),
+        "source_id": witness.get("source_id"),
+        "resource_type": witness.get("resource_type"),
+        "scope": dict(witness.get("scope") or {}),
+        "scope_fingerprint": witness.get("scope_fingerprint"),
+    }
+    provider_metadata.update(dict(metadata or {}))
+    saved = backup.record_provider_reference(
+        idempotency_key=witness.get("marker"),
+        provider_status=provider_status,
+        metadata=provider_metadata,
+        **fence,
+    )
+    if fence and saved is None:
+        raise _BackupProviderError("WORKER_LEASE_LOST", manual_review=True)
+    if reconciliation_state:
+        from apps.console.backup.models import CoreBackupExecution
+
+        saved = backup.set_reconciliation_state(
+            reconciliation_state=reconciliation_state,
+            reason=reconciliation_reason,
+            metadata=dict(metadata or {}),
+            **fence,
+        )
+        if fence and saved is None:
+            raise _BackupProviderError("WORKER_LEASE_LOST", manual_review=True)
+    return saved or state
+
+
+def _backup_mark_create_started(backup, witness):
+    from apps.console.backup.models import CoreBackupExecution
+
+    return _backup_record_provider_witness(
+        backup,
+        witness,
+        provider_status="create_requested",
+        metadata={
+            "create_attempted": True,
+            "outcome_unknown": True,
+            "create_started_at": timezone.now().isoformat(),
+        },
+        reconciliation_state=CoreBackupExecution.ReconciliationState.REQUIRED,
+        reconciliation_reason="provider_create_outcome_unknown",
+    )
+
+
+def _backup_record_create_failure(
+    backup,
+    witness,
+    error,
+    *,
+    scan_metadata=None,
+):
+    """Persist a classified provider result and never the provider exception text."""
+    from apps.console.backup.models import CoreBackupExecution
+
+    classified = _backup_provider_exception(error, mutation=bool(getattr(error, "unknown_outcome", False)))
+    state, current = _backup_execution_metadata(backup)
+    attempted = bool(current.get("create_attempted"))
+    unknown = bool(getattr(classified, "unknown_outcome", False) or attempted)
+    retryable = bool(getattr(classified, "retryable", False))
+    manual_review = bool(
+        getattr(classified, "manual_review", False)
+        or classified.code in {
+            "PROVIDER_DUPLICATE_MATCH",
+            "PROVIDER_RECONCILIATION_REQUIRED",
+            "PROVIDER_OWNERSHIP_MISMATCH",
+            "PROVIDER_MALFORMED_RESPONSE",
+            "WORKER_LEASE_LOST",
+        }
+    )
+    if classified.code in {
+        "PROVIDER_AUTH_FAILED",
+        "PROVIDER_NOT_FOUND",
+        "PROVIDER_RATE_LIMIT",
+        "PROVIDER_REQUEST_FAILED",
+    } and not getattr(classified, "unknown_outcome", False):
+        # A definitive provider rejection is not evidence that a mutation
+        # happened. Leave the witness reusable after the retry window while
+        # retaining the safe error code. Timeouts and 5xx responses stay fenced.
+        unknown = False
+        attempted = False
+    metadata = {
+        "create_attempted": attempted,
+        "outcome_unknown": unknown,
+        "last_error_code": classified.code,
+    }
+    # Preserve the completed inventory proof when the final outcome is a
+    # duplicate, ownership failure, or zero-match unknown.  The failure record
+    # must explain what was reconciled without retaining provider response text.
+    for key in ("scan_page_count", "scan_item_count", "scan_match_count", "scan_complete"):
+        if key in current:
+            metadata[key] = current[key]
+    metadata.update(dict(scan_metadata or {}))
+    fence = {}
+    if state is not None and state.lease_token:
+        fence = {"lease_owner": state.lease_owner, "lease_token": state.lease_token}
+    saved = backup.record_provider_reference(
+        idempotency_key=witness.get("marker"),
+        provider_status=classified.code,
+        metadata={**{
+            "witness": dict(witness),
+            "marker": witness.get("marker"),
+            "source_id": witness.get("source_id"),
+            "scope": dict(witness.get("scope") or {}),
+        }, **metadata},
+        **fence,
+    )
+    if fence and saved is None:
+        return classified
+    saved = backup.record_execution_error(
+        code=classified.code,
+        message=_BACKUP_NOTIFICATION_MESSAGES.get(
+            classified.code,
+            _BACKUP_NOTIFICATION_MESSAGES["PROVIDER_FAILED"],
+        ),
+        retryable=retryable,
+        reconciliation_reason=(
+            "provider_create_outcome_unknown" if unknown else
+            "provider_manual_review" if manual_review else ""
+        ),
+        reconciliation_metadata=metadata,
+        **fence,
+    )
+    if fence and saved is None:
+        return classified
+    if manual_review:
+        saved = backup.set_reconciliation_state(
+            reconciliation_state=CoreBackupExecution.ReconciliationState.MANUAL_REVIEW,
+            reason=classified.code,
+            metadata=metadata,
+            **fence,
+        )
+        if fence and saved is None:
+            return classified
+    elif not unknown:
+        saved = backup.set_reconciliation_state(
+            reconciliation_state=CoreBackupExecution.ReconciliationState.RESOLVED,
+            reason=classified.code,
+            metadata=metadata,
+            **fence,
+        )
+        if fence and saved is None:
+            return classified
+    backup.status = (
+        UtilBackup.Status.IN_PROGRESS
+        if retryable and not manual_review
+        else UtilBackup.Status.FAILED
+    )
+    safe_metadata = dict(backup.metadata) if isinstance(backup.metadata, dict) else {}
+    safe_metadata.update({"_bs_provider": witness.get("provider"), "_bs_marker": witness.get("marker")})
+    safe_metadata["_bs_last_error_code"] = classified.code
+    safe_metadata["_bs_reconciliation"] = metadata
+    backup.metadata = safe_metadata
+    backup.save(update_fields=["status", "metadata", "modified"])
+    return classified
+
+
+def _backup_raise_node_error(node, backup, classified):
+    """Raise the existing public exception with a fixed, allowlisted message."""
+    failure = NodeBackupFailedError(
+        node,
+        backup.uuid_str,
+        backup.attempt_no,
+        backup.type,
+        message=_BACKUP_NOTIFICATION_MESSAGES.get(
+            classified.code,
+            _BACKUP_NOTIFICATION_MESSAGES["PROVIDER_FAILED"],
+        ),
+    )
+    failure.error_code = classified.code
+    failure.retryable = bool(getattr(classified, "retryable", False))
+    failure.unknown_outcome = bool(getattr(classified, "unknown_outcome", False))
+    raise failure
+
+
+def _backup_adopt_provider_resource(
+    backup,
+    resource,
+    *,
+    witness,
+    provider,
+    id_keys=("id", "uuid"),
+):
+    """Persist a single provider resource and its execution pointer atomically enough for recovery."""
+    if not isinstance(resource, dict):
+        raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", unknown_outcome=True)
+    resource_id = next(
+        (resource.get(key) for key in id_keys if resource.get(key) not in (None, "")),
+        None,
+    )
+    if resource_id in (None, ""):
+        raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", unknown_outcome=True)
+    if str(resource_id) == str(witness.get("source_id")):
+        raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+
+    safe_record = _backup_safe_identity(resource, id_keys=id_keys)
+    safe_record.update(
+        {
+            "_bs_provider": str(provider)[:64],
+            "_bs_marker": witness.get("marker"),
+            "_bs_source_id": witness.get("source_id"),
+            "_bs_scope": dict(witness.get("scope") or {}),
+            "_bs_scope_fingerprint": witness.get("scope_fingerprint"),
+            "_bs_ownership_verified": True,
+        }
+    )
+    # Claim the current execution fence before touching the backup row.  The
+    # execution ledger receives the provider ID first, so a worker crash between
+    # the ledger write and the model save still leaves a recovery pointer and
+    # cannot justify a second provider mutation.
+    _state, fence = _backup_execution_fence(backup)
+    operation_id = next(
+        (
+            resource.get(key)
+            for key in ("actionId", "action_id", "operationId", "operation_id", "jobId", "job_id")
+            if resource.get(key) not in (None, "")
+        ),
+        None,
+    )
+    saved = backup.record_provider_reference(
+        operation_id=operation_id,
+        resource_id=str(resource_id)[:255],
+        idempotency_key=witness.get("marker"),
+        provider_status=str(resource.get("status") or resource.get("state") or "accepted")[:64],
+        metadata={
+            "witness": dict(witness),
+            "resource": safe_record,
+            "create_attempted": True,
+            "outcome_unknown": False,
+            "adopted": True,
+        },
+        **fence,
+    )
+    if fence and saved is None:
+        raise _BackupProviderError("WORKER_LEASE_LOST", manual_review=True)
+
+    update_fields = ["unique_id", "metadata", "modified"]
+    backup.unique_id = str(resource_id)[:255]
+    if operation_id is not None and hasattr(backup, "action_id"):
+        backup.action_id = str(operation_id)[:255]
+        update_fields.insert(1, "action_id")
+    if hasattr(backup, "size_gigabytes"):
+        size = resource.get("size_gigabytes")
+        if size is None:
+            size = resource.get("size")
+        if size is not None:
+            backup.size_gigabytes = size
+            update_fields.insert(1, "size_gigabytes")
+    backup.metadata = safe_record
+    backup.save(update_fields=list(dict.fromkeys(update_fields)))
+    from apps.console.backup.models import CoreBackupExecution
+
+    saved = backup.set_reconciliation_state(
+        reconciliation_state=CoreBackupExecution.ReconciliationState.RESOLVED,
+        reason="provider_resource_adopted",
+        metadata={
+            "match_count": 1,
+            "resource_id_persisted": True,
+            "ownership_verified": True,
+        },
+        **fence,
+    )
+    if fence and saved is None:
+        raise _BackupProviderError("WORKER_LEASE_LOST", manual_review=True)
+    return backup.unique_id
+
+
+def _collection_items_and_next(payload, item_keys):
+    """Extract a provider collection and a bounded page/cursor continuation."""
+    if isinstance(payload, list):
+        return payload, None
+    if not isinstance(payload, dict):
+        raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+
+    containers = [payload]
+    for key in ("data", "meta", "pagination", "links", "storages", "snapshots"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    items = None
+    for container in containers:
+        for key in item_keys:
+            value = container.get(key)
+            if isinstance(value, list):
+                items = value
+                break
+            if isinstance(value, dict) and key in {"storage", "snapshot", "item", "resource"}:
+                items = [value]
+                break
+        if items is not None:
+            break
+    if items is None:
+        raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+
+    next_info = None
+    next_keys = (
+        ("next", "next"), ("next_url", "href"), ("nextLink", "href"),
+        ("next_page", "page"), ("nextPage", "page"),
+        ("next_cursor", "cursor"), ("nextCursor", "cursor"),
+        ("next_page_token", "cursor"), ("nextPageToken", "cursor"),
+    )
+    for container in containers:
+        for key, kind in next_keys:
+            value = container.get(key)
+            if value not in (None, "", False):
+                if isinstance(value, dict):
+                    if value.get("href") or value.get("url"):
+                        kind = "href"
+                        value = value.get("href") or value.get("url")
+                    elif value.get("cursor") not in (None, ""):
+                        kind = "cursor"
+                        value = value.get("cursor")
+                    else:
+                        kind = "page"
+                        value = value.get("page")
+                elif kind == "next":
+                    # A bare ``next`` token is a cursor unless the provider
+                    # explicitly gives us a numeric page value.
+                    kind = "page" if isinstance(value, int) else "cursor"
+                if value not in (None, "", False):
+                    next_info = (kind, value)
+                    break
+        if next_info:
+            break
+
+    # Some APIs expose only page/limit/total. Derive the next page when the response
+    # proves that more objects exist; never guess from an object count alone.
+    if next_info is None:
+        page = None
+        limit = None
+        total = None
+        for container in containers:
+            page = page if page is not None else container.get("page")
+            limit = limit if limit is not None else container.get("limit") or container.get("per_page") or container.get("perPage")
+            total = total if total is not None else container.get("total") or container.get("count")
+        try:
+            page = int(page) if page is not None else None
+            limit = int(limit) if limit is not None else None
+            total = int(total) if total is not None else None
+        except (TypeError, ValueError):
+            page = limit = total = None
+        if page is not None and limit and total is not None and page * limit < total:
+            next_info = ("page", page + 1)
+    return items, next_info
+
+
+def _collection_next_path(path, next_info):
+    kind, value = next_info
+    if kind == "href" and isinstance(value, str):
+        return value
+    parameter = "cursor" if kind == "cursor" else "page"
+    return f"{path}{'&' if '?' in path else '?'}{parameter}={quote(str(value), safe='')}"
+
+
+def _iter_provider_collection(client, path, item_keys, *, stats=None):
+    """Yield every provider page and fail closed on repeated/malformed cursors."""
+    current_path = path
+    seen_paths = set()
+    while True:
+        if current_path in seen_paths:
+            raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+        seen_paths.add(current_path)
+        if isinstance(stats, dict):
+            stats["page_count"] = int(stats.get("page_count", 0)) + 1
+        payload = client.get(current_path)
+        response_error = _backup_provider_response_error(payload)
+        if response_error is not None:
+            raise response_error
+        if not isinstance(payload, (dict, list)) and callable(getattr(payload, "json", None)):
+            try:
+                payload = payload.json()
+            except Exception:
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+                ) from None
+        items, next_info = _collection_items_and_next(payload, item_keys)
+        for item in items:
+            yield item
+        if next_info is None:
+            return
+        next_path = _collection_next_path(path, next_info)
+        if next_path in seen_paths:
+            raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+        current_path = next_path
+
+
+class _UpCloudCollectionClient:
+    """Adapt the shared page walker to UpCloud's requests-based API."""
+
+    def __init__(self, auth):
+        self.auth = auth
+
+    def get(self, path):
+        return requests.get(
+            path,
+            auth=self.auth,
+            verify=True,
+            timeout=request_timeout(),
+            headers={"content-type": "application/json"},
+        )
+
+
+def _identity_values(resource, keys):
+    values = []
+    for key in keys:
+        if key not in resource:
+            continue
+        value = resource.get(key)
+        if isinstance(value, dict):
+            value = value.get("id") or value.get("uuid") or value.get("name")
+        if isinstance(value, list):
+            values.extend(str(item) for item in value if item not in (None, ""))
+        elif value not in (None, ""):
+            values.append(str(value))
+    return values
+
+
+def _strict_provider_candidate(
+    resource,
+    *,
+    marker,
+    source_id,
+    source_keys,
+    scope=None,
+    scope_keys=(),
+    require_source=True,
+    scope_proven=False,
+):
+    """Return ``True`` only for a fully owned marker/source/scope candidate."""
+    if not isinstance(resource, dict):
+        raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+    if source_id in (None, ""):
+        raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+    marker_values = _identity_values(
+        resource, ("name", "title", "description", "snapshotName", "displayName")
+    )
+    if not marker_values or str(marker) not in marker_values:
+        return False
+    source_values = _identity_values(resource, source_keys)
+    if require_source and not source_values:
+        raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+    if source_values and str(source_id) not in source_values:
+        raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+    for expected_key, actual_keys in scope_keys:
+        expected = (scope or {}).get(expected_key)
+        if expected in (None, ""):
+            continue
+        actual_values = _identity_values(resource, actual_keys)
+        if not actual_values and scope_proven:
+            # A provider collection path can be an immutable scope witness (the
+            # OVH endpoint is project+region scoped).  Still reject a field that
+            # is present but contradicts that endpoint boundary.
+            continue
+        if not actual_values or str(expected) not in actual_values:
+            raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+    return True
+
+
+def _strict_restore_candidate(resource, **identity):
+    """Translate strict ownership failures into the restore error contract."""
+    try:
+        return _strict_provider_candidate(resource, **identity)
+    except _BackupProviderError as error:
+        raise _RestoreProviderError(
+            error.code,
+            retryable=error.retryable,
+            unknown_outcome=error.unknown_outcome,
+        ) from None
 
 
 class CoreServerStatus(TimeStampedModel):
@@ -251,108 +1521,621 @@ class CoreDigitalOcean(UtilCloud):
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
             )
 
+    def _find_restore_resource(self, client, restore, marker):
+        """Find a single tagged target without guessing across pages."""
+        resource_type = "droplets" if self.node.type == CoreNode.Type.CLOUD else "volumes"
+        response = requests.get(
+            f"{settings.DIGITALOCEAN_API}/v2/{resource_type}",
+            headers=client,
+            params={"tag_name": marker, "per_page": 200},
+            verify=True,
+        )
+        problem = _restore_http_class(response)
+        if problem:
+            if problem.code == "PROVIDER_NOT_FOUND":
+                return []
+            raise problem
+        try:
+            payload = response.json()
+        except Exception:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if not isinstance(payload, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        resources = payload.get(resource_type)
+        if not isinstance(resources, list):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        meta = payload.get("meta") or {}
+        total = meta.get("total")
+        # DigitalOcean exposes page-based lists, not a cursor. A unique tag is
+        # the exact lookup; if it somehow spans pages, fail closed rather than
+        # silently reintroducing page-number reconciliation.
+        if total is not None and int(total) > len(resources):
+            raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+        return resources
+
+    def _find_aws_backup_restore_job(self, client, *, recovery_point_arn, target_id):
+        jobs = []
+        token = None
+        seen = set()
+        while True:
+            request = {"RecoveryPointArn": recovery_point_arn, "MaxResults": 100}
+            if token:
+                request["NextToken"] = token
+            response = client.list_restore_jobs(**request)
+            if not isinstance(response, dict):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            page = response.get("RestoreJobs") or []
+            if not isinstance(page, list):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            jobs.extend(
+                item for item in page
+                if isinstance(item, dict)
+                and str(item.get("RecoveryPointArn") or recovery_point_arn) == str(recovery_point_arn)
+                and str(target_id) in str(item.get("CreatedResourceArn") or item.get("ResourceArn") or "")
+            )
+            next_token = response.get("NextToken")
+            if not next_token:
+                break
+            if next_token in seen:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            seen.add(next_token)
+            token = next_token
+        if len(jobs) > 1:
+            raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+        return jobs
+
+    @staticmethod
+    def _aws_restore_instances(response):
+        if not isinstance(response, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        result = []
+        for reservation in response.get("Reservations") or []:
+            if not isinstance(reservation, dict):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            instances = reservation.get("Instances") or []
+            if not isinstance(instances, list):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            result.extend(instances)
+        return result
+
+    def _aws_find_restore_resource(self, client, *, marker, source_id, resource_type):
+        tag_filter = [{"Name": "tag:BackupSheepRestore", "Values": [marker]}]
+        if resource_type == "instance":
+            return self._aws_restore_instances(client.describe_instances(Filters=tag_filter))
+        response = client.describe_volumes(Filters=tag_filter)
+        if not isinstance(response, dict) or not isinstance(response.get("Volumes"), list):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        return response["Volumes"]
+
+    def _restore_snapshot_aws(self, backup, restore):
+        params = _restore_params(restore)
+        auth = self.node.connection.auth_aws
+        if self.resource_type in {self.ResourceType.S3, self.ResourceType.DYNAMODB}:
+            from apps._tasks.integration.aws_backup import idempotency_token, start_restore_job
+
+            backup_metadata = backup.metadata if isinstance(backup.metadata, dict) else {}
+            aws_backup = backup_metadata.get("_aws_backup") or {}
+            recovery_point_arn = aws_backup.get("recovery_point_arn")
+            if not recovery_point_arn:
+                _restore_safe_failure(restore, "PROVIDER_NOT_FOUND")
+                raise _RestoreProviderError("PROVIDER_NOT_FOUND")
+            if self.resource_type == self.ResourceType.S3:
+                target_id = str(params.get("destination_bucket_name") or "").strip()
+                if not target_id:
+                    _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE")
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                target_kind = "s3"
+            else:
+                target_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(params.get("target_table_name") or restore.name or ""))
+                if not 3 <= len(target_id) <= 255:
+                    _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE")
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                target_kind = "dynamodb"
+            marker, params = _prepare_cloud_restore(
+                restore,
+                provider="aws_backup",
+                source_id=recovery_point_arn,
+                target_kind=target_kind,
+                target_name=target_id,
+            )
+            if restore.provider_job_id:
+                return
+            client = auth.get_client("s3" if target_kind == "s3" else "dynamodb")
+            try:
+                if _restore_unknown(restore):
+                    jobs = self._find_aws_backup_restore_job(
+                        auth.get_client("backup"),
+                        recovery_point_arn=recovery_point_arn,
+                        target_id=target_id,
+                    )
+                    if not jobs:
+                        return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                    job = jobs[0]
+                    job_id = job.get("RestoreJobId")
+                    if not job_id:
+                        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                    params["_aws_backup_restore_metadata"] = dict(params.get("_aws_backup_restore_metadata") or {})
+                    params["_aws_backup_restore_metadata"]["BackupSheepRestoreMarker"] = marker
+                    _restore_adopt(
+                        restore,
+                        target_id,
+                        provider_status=job.get("Status"),
+                        params_update=params,
+                    )
+                    restore.provider_job_id = str(job_id)
+                    restore.save(update_fields=["provider_job_id", "modified"])
+                    return
+
+                if target_kind == "s3":
+                    client.head_bucket(Bucket=target_id)
+                    if client.get_bucket_versioning(Bucket=target_id).get("Status") != "Enabled":
+                        raise _RestoreProviderError("PROVIDER_FAILED")
+                    restore_metadata = {"DestinationBucketName": target_id}
+                    for key in ("EncryptionType", "KMSKey", "ItemsToRestore", "RestoreLatestVersionsUpTo", "RestoreTime"):
+                        if key in params and params[key] is not None:
+                            value = params[key]
+                            restore_metadata[key] = json.dumps(value) if isinstance(value, (list, dict)) else str(value)
+                    restore_metadata["RestoreACLs"] = "true" if str(params.get("RestoreACLs")).lower() in {"true", "1"} else "false"
+                else:
+                    try:
+                        client.describe_table(TableName=target_id)
+                    except ClientError as error:
+                        classified = _restore_exception(error)
+                        if classified.code != "PROVIDER_NOT_FOUND":
+                            raise classified
+                    else:
+                        _restore_safe_failure(restore, "PROVIDER_FAILED", manual_review=True)
+                        raise _RestoreProviderError("PROVIDER_FAILED")
+                    restore_metadata = {"TargetTableName": target_id}
+                    for key in ("EncryptionType", "KmsMasterKeyArn"):
+                        if key in params and params[key] is not None:
+                            restore_metadata[key] = str(params[key])
+
+                token = idempotency_token("restore", restore.id)
+                params["_aws_backup_restore_metadata"] = restore_metadata
+                params["_aws_backup_restore_token"] = token
+                _restore_begin_mutation(restore)
+                response = start_restore_job(
+                    auth,
+                    self.resource_type,
+                    recovery_point_arn,
+                    restore_metadata,
+                    token,
+                )
+                job_id = response.get("RestoreJobId") if isinstance(response, dict) else None
+                if not job_id:
+                    _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                    return _restore_status("IN_PROGRESS")
+                _restore_adopt(
+                    restore,
+                    target_id,
+                    provider_status="created",
+                    params_update=params,
+                )
+                restore.provider_job_id = str(job_id)
+                restore.save(update_fields=["provider_job_id", "modified"])
+                return
+            except Exception as error:
+                if isinstance(error, _RestoreProviderError):
+                    if error.retryable:
+                        return _restore_handle_error(restore, error, mutation=error.unknown_outcome)
+                    _restore_safe_failure(restore, error.code, manual_review=error.code in {
+                        "PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH", "PROVIDER_DUPLICATE_MATCH", "PROVIDER_RECONCILIATION_REQUIRED"
+                    })
+                    raise
+                return _restore_handle_error(restore, error, mutation=True)
+
+        target_kind = "instance" if self.node.type == CoreNode.Type.CLOUD else "volume"
+        marker, params = _prepare_cloud_restore(
+            restore,
+            provider="aws_ec2",
+            source_id=backup.unique_id,
+            target_kind=target_kind,
+            target_name=restore.name,
+        )
+        if restore.resource_id:
+            return
+        client = auth.get_client()
+        try:
+            if _restore_unknown(restore):
+                candidates = self._aws_find_restore_resource(
+                    client, marker=marker, source_id=backup.unique_id, resource_type=target_kind
+                )
+                if len(candidates) != 1:
+                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                candidate = _restore_candidates(
+                    restore,
+                    candidates,
+                    source_id=backup.unique_id,
+                    marker=marker,
+                    marker_match=lambda item, value: _restore_marker_matches(item, value),
+                    source_match=lambda item, source: _restore_source_matches(
+                        item, source, "ImageId", "SnapshotId", "snapshot_id"
+                    ),
+                )
+                if candidate:
+                    return
+
+            if target_kind == "instance":
+                instance_type = params.get("instance_type")
+                if not instance_type:
+                    response = client.describe_instances(InstanceIds=[self.unique_id])
+                    instances = self._aws_restore_instances(response)
+                    instance_type = instances[0].get("InstanceType") if instances else None
+                if not instance_type:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                instance_data = {
+                    "ImageId": backup.unique_id,
+                    "MinCount": 1,
+                    "MaxCount": 1,
+                    "InstanceType": instance_type,
+                    "TagSpecifications": [{
+                        "ResourceType": "instance",
+                        "Tags": [
+                            {"Key": "Name", "Value": restore.name},
+                            {"Key": "BackupSheepRestore", "Value": marker},
+                            {"Key": "BackupSheepSource", "Value": str(backup.unique_id)},
+                        ],
+                    }],
+                }
+                if params.get("key_name"):
+                    instance_data["KeyName"] = params["key_name"]
+                if params.get("subnet_id"):
+                    instance_data["SubnetId"] = params["subnet_id"]
+                if params.get("security_group_ids"):
+                    instance_data["SecurityGroupIds"] = params["security_group_ids"]
+                _restore_begin_mutation(restore)
+                response = client.run_instances(**instance_data)
+                instances = response.get("Instances") if isinstance(response, dict) else None
+                resource_id = instances[0].get("InstanceId") if isinstance(instances, list) and len(instances) == 1 and isinstance(instances[0], dict) else None
+                if not resource_id:
+                    _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                    return _restore_status("IN_PROGRESS")
+                _restore_adopt(restore, resource_id, provider_status="pending")
+                return
+
+            availability_zone = params.get("availability_zone")
+            if not availability_zone:
+                response = client.describe_volumes(VolumeIds=[self.unique_id])
+                volumes = response.get("Volumes") if isinstance(response, dict) else None
+                availability_zone = volumes[0].get("AvailabilityZone") if isinstance(volumes, list) and volumes else None
+            if not availability_zone:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            _restore_begin_mutation(restore)
+            response = client.create_volume(
+                AvailabilityZone=availability_zone,
+                SnapshotId=backup.unique_id,
+                TagSpecifications=[{
+                    "ResourceType": "volume",
+                    "Tags": [
+                        {"Key": "BackupSheepRestore", "Value": marker},
+                        {"Key": "BackupSheepSource", "Value": str(backup.unique_id)},
+                    ],
+                }],
+            )
+            resource_id = response.get("VolumeId") if isinstance(response, dict) else None
+            if not resource_id:
+                _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                return _restore_status("IN_PROGRESS")
+            _restore_adopt(restore, resource_id, provider_status="creating")
+        except Exception as error:
+            if isinstance(error, _RestoreProviderError):
+                if error.retryable:
+                    return _restore_handle_error(restore, error, mutation=error.unknown_outcome)
+                _restore_safe_failure(restore, error.code, manual_review=error.code in {
+                    "PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH", "PROVIDER_DUPLICATE_MATCH", "PROVIDER_RECONCILIATION_REQUIRED"
+                })
+                raise
+            return _restore_handle_error(restore, error, mutation=True)
+
+    def _check_restore_aws(self, restore):
+        auth = self.node.connection.auth_aws
+        params = _restore_params(restore)
+        if self.resource_type in {self.ResourceType.S3, self.ResourceType.DYNAMODB}:
+            from apps._tasks.integration.aws_backup import describe_restore_job
+
+            if not restore.provider_job_id:
+                if not _restore_unknown(restore):
+                    return _restore_status("IN_PROGRESS")
+                metadata = params.get("_backupsheep_restore") or {}
+                try:
+                    jobs = self._find_aws_backup_restore_job(
+                        auth.get_client("backup"),
+                        recovery_point_arn=metadata.get("source_id"),
+                        target_id=restore.resource_id or metadata.get("target_name"),
+                    )
+                    if len(jobs) != 1:
+                        return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                    restore.provider_job_id = str(jobs[0].get("RestoreJobId") or "")
+                    if not restore.provider_job_id:
+                        return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+                    restore.save(update_fields=["provider_job_id", "modified"])
+                except Exception as error:
+                    return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+            try:
+                result = describe_restore_job(auth, restore.provider_job_id)
+                if not isinstance(result, dict):
+                    return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+                state = str(result.get("Status") or "").upper()
+                if state == "COMPLETED":
+                    target = restore.resource_id
+                    if self.resource_type == self.ResourceType.S3:
+                        auth.get_client("s3").head_bucket(Bucket=target)
+                    else:
+                        table = auth.get_client("dynamodb").describe_table(TableName=target).get("Table") or {}
+                        if table.get("TableStatus") != "ACTIVE":
+                            return _restore_status("IN_PROGRESS")
+                    restore.operation_phase = _restore_phase("COMPLETE")
+                    restore.save(update_fields=["operation_phase", "modified"])
+                    return _restore_status("COMPLETE")
+                if state in {"FAILED", "ABORTED", "EXPIRED"}:
+                    return _restore_safe_failure(restore, "PROVIDER_FAILED")
+                if state not in {"PENDING", "RUNNING", "PARTIAL"}:
+                    return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+                return _restore_status("IN_PROGRESS")
+            except Exception as error:
+                return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+
+        client = auth.get_client()
+        source_id = (params.get("_backupsheep_restore") or {}).get("source_id")
+        marker = _restore_marker_value(restore)
+        if not restore.resource_id:
+            return _restore_status("IN_PROGRESS")
+        try:
+            if self.node.type == CoreNode.Type.CLOUD:
+                response = client.describe_instances(InstanceIds=[restore.resource_id])
+                instances = self._aws_restore_instances(response)
+                if len(instances) != 1:
+                    return _restore_safe_failure(restore, "PROVIDER_NOT_FOUND")
+                instance = instances[0]
+                if not _restore_verify_target(restore, instance, source_id=source_id, marker=marker, source_keys=("ImageId",)):
+                    return _restore_status("FAILED")
+                state = (instance.get("State") or {}).get("Name")
+                if state == "running":
+                    restore.operation_phase = _restore_phase("COMPLETE")
+                    restore.save(update_fields=["operation_phase", "modified"])
+                    return _restore_status("COMPLETE")
+                if state in {"terminated", "shutting-down"}:
+                    return _restore_safe_failure(restore, "PROVIDER_FAILED")
+                if state not in {"pending", "stopped", "stopping", "starting", "running"}:
+                    return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+                return _restore_status("IN_PROGRESS")
+            response = client.describe_volumes(VolumeIds=[restore.resource_id])
+            volumes = response.get("Volumes") if isinstance(response, dict) else None
+            if not isinstance(volumes, list) or len(volumes) != 1:
+                return _restore_safe_failure(restore, "PROVIDER_NOT_FOUND")
+            volume = volumes[0]
+            if not _restore_verify_target(restore, volume, source_id=source_id, marker=marker, source_keys=("SnapshotId",)):
+                return _restore_status("FAILED")
+            state = volume.get("State")
+            if state == "available":
+                restore.operation_phase = _restore_phase("COMPLETE")
+                restore.save(update_fields=["operation_phase", "modified"])
+                return _restore_status("COMPLETE")
+            if state in {"error", "deleted"}:
+                return _restore_safe_failure(restore, "PROVIDER_FAILED")
+            if state not in {"creating", "available", "in-use"}:
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            return _restore_status("IN_PROGRESS")
+        except Exception as error:
+            return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+
     def restore_snapshot(self, backup, restore):
         client = self.node.connection.auth_digitalocean.get_client()
-        params = restore.params or {}
+        target_kind = "droplet" if self.node.type == CoreNode.Type.CLOUD else "volume"
+        marker, params = _prepare_cloud_restore(
+            restore,
+            provider="digitalocean",
+            source_id=backup.unique_id,
+            target_kind=target_kind,
+            target_name=restore.name,
+        )
+        if restore.resource_id:
+            return
 
-        if self.node.type == CoreNode.Type.CLOUD:
-            size = params.get("size")
-            if not size:
-                result = requests.get(
-                    f"{settings.DIGITALOCEAN_API}/v2/droplets/{self.unique_id}",
+        if _restore_unknown(restore):
+            try:
+                candidate = self._find_restore_resource(client, restore, marker)
+                if candidate:
+                    resource = _restore_candidates(
+                        restore,
+                        candidate,
+                        source_id=backup.unique_id,
+                        marker=marker,
+                        marker_match=lambda item, value: _restore_marker_matches(item, value),
+                        source_match=lambda item, source: _restore_source_matches(
+                            item, source, "image", "image_id", "snapshot_id"
+                        ),
+                    )
+                    if resource:
+                        return
+                _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+            except Exception as error:
+                if isinstance(error, _RestoreProviderError):
+                    if error.code in {"PROVIDER_RATE_LIMIT", "PROVIDER_TIMEOUT", "PROVIDER_TRANSIENT_OUTAGE"}:
+                        _restore_handle_error(restore, error, mutation=False)
+                        return _restore_status("IN_PROGRESS")
+                    raise
+                _restore_handle_error(restore, error, mutation=False)
+                return _restore_status("IN_PROGRESS")
+
+        try:
+            if self.node.type == CoreNode.Type.CLOUD:
+                size = params.get("size")
+                if not size:
+                    result = requests.get(
+                        f"{settings.DIGITALOCEAN_API}/v2/droplets/{self.unique_id}",
+                        headers=client,
+                        verify=True,
+                    )
+                    problem = _restore_http_class(result)
+                    if problem:
+                        return _restore_handle_error(restore, problem, mutation=False)
+                    payload = result.json()
+                    size = (payload.get("droplet") or {}).get("size_slug")
+                    if not size:
+                        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                droplet_data = {
+                    "name": restore.name,
+                    "size": size,
+                    "image": int(backup.unique_id),
+                    "tags": list(dict.fromkeys([*(params.get("tags") or []), marker])),
+                }
+                if params.get("region"):
+                    droplet_data["region"] = params.get("region")
+                if params.get("ssh_keys"):
+                    droplet_data["ssh_keys"] = params.get("ssh_keys")
+                _restore_begin_mutation(restore)
+                result = requests.post(
+                    f"{settings.DIGITALOCEAN_API}/v2/droplets",
                     headers=client,
+                    json=droplet_data,
                     verify=True,
                 )
-                if result.status_code == 200:
-                    size = result.json()["droplet"]["size_slug"]
-                else:
-                    raise Exception(
-                        f"Unable to determine source droplet size. API call returned with status {result.status_code}"
-                    )
-            droplet_data = {
-                "name": restore.name,
-                "size": size,
-                "image": int(backup.unique_id),
-            }
-            if params.get("region"):
-                droplet_data["region"] = params.get("region")
-            if params.get("ssh_keys"):
-                droplet_data["ssh_keys"] = params.get("ssh_keys")
-            result = requests.post(
-                f"{settings.DIGITALOCEAN_API}/v2/droplets",
-                headers=client,
-                json=droplet_data,
-                verify=True,
-            )
-            if result.status_code == 202:
-                droplet = result.json()["droplet"]
-                restore.resource_id = droplet["id"]
-                restore.save()
-            else:
-                raise Exception(
-                    f"API call returned with status {result.status_code}: {get_error(result.text)}"
-                )
+                problem = _restore_http_class(result, mutation=True)
+                if problem:
+                    if problem.code == "PROVIDER_RATE_LIMIT":
+                        _restore_clear_unknown(restore)
+                        return _restore_handle_error(restore, problem, mutation=False)
+                    return _restore_handle_error(restore, problem, mutation=True)
+                payload = result.json()
+                droplet = payload.get("droplet") if isinstance(payload, dict) else None
+                resource_id = droplet.get("id") if isinstance(droplet, dict) else None
+                if not resource_id:
+                    _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                    return _restore_status("IN_PROGRESS")
+                _restore_adopt(restore, resource_id, provider_status=droplet.get("status"), params_update={"size": size})
+                return
 
-        elif self.node.type == CoreNode.Type.VOLUME:
-            region = params.get("region")
-            if not region:
-                result = requests.get(
-                    f"{settings.DIGITALOCEAN_API}/v2/volumes/{self.unique_id}",
+            if self.node.type == CoreNode.Type.VOLUME:
+                region = params.get("region")
+                if not region:
+                    result = requests.get(
+                        f"{settings.DIGITALOCEAN_API}/v2/volumes/{self.unique_id}",
+                        headers=client,
+                        verify=True,
+                    )
+                    problem = _restore_http_class(result)
+                    if problem:
+                        return _restore_handle_error(restore, problem, mutation=False)
+                    payload = result.json()
+                    region = ((payload.get("volume") or {}).get("region") or {}).get("slug")
+                    if not region:
+                        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                volume_data = {
+                    "name": restore.name,
+                    "region": region,
+                    "snapshot_id": backup.unique_id,
+                    "tags": list(dict.fromkeys([*(params.get("tags") or []), marker])),
+                }
+                _restore_begin_mutation(restore)
+                result = requests.post(
+                    f"{settings.DIGITALOCEAN_API}/v2/volumes",
                     headers=client,
+                    json=volume_data,
                     verify=True,
                 )
-                if result.status_code == 200:
-                    region = result.json()["volume"]["region"]["slug"]
-                else:
-                    raise Exception(
-                        f"Unable to determine source volume region. API call returned with status {result.status_code}"
-                    )
-            volume_data = {
-                "name": restore.name,
-                "region": region,
-                "snapshot_id": backup.unique_id,
-            }
-            result = requests.post(
-                f"{settings.DIGITALOCEAN_API}/v2/volumes",
-                headers=client,
-                json=volume_data,
-                verify=True,
-            )
-            if result.status_code == 201:
-                volume = result.json()["volume"]
-                restore.resource_id = volume["id"]
-                restore.save()
-            else:
-                raise Exception(
-                    f"API call returned with status {result.status_code}: {get_error(result.text)}"
-                )
+                problem = _restore_http_class(result, mutation=True)
+                if problem:
+                    if problem.code == "PROVIDER_RATE_LIMIT":
+                        _restore_clear_unknown(restore)
+                        return _restore_handle_error(restore, problem, mutation=False)
+                    return _restore_handle_error(restore, problem, mutation=True)
+                payload = result.json()
+                volume = payload.get("volume") if isinstance(payload, dict) else None
+                resource_id = volume.get("id") if isinstance(volume, dict) else None
+                if not resource_id:
+                    _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                    return _restore_status("IN_PROGRESS")
+                _restore_adopt(restore, resource_id, provider_status=volume.get("status"), params_update={"region": region})
+                return
+
+            return _restore_safe_failure(restore, "PROVIDER_FAILED")
+        except Exception as error:
+            if isinstance(error, _RestoreProviderError):
+                if error.code == "PROVIDER_MALFORMED_RESPONSE" and _restore_unknown(restore):
+                    _restore_unknown_outcome(restore, code=error.code)
+                    return _restore_status("IN_PROGRESS")
+                if error.retryable:
+                    return _restore_handle_error(restore, error, mutation=error.unknown_outcome)
+                _restore_safe_failure(restore, error.code, manual_review=error.code in {"PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH"})
+                raise
+            return _restore_handle_error(restore, error, mutation=True)
 
     def check_restore(self, restore):
-        from apps.console.backup.models import CoreCloudRestore
-
         client = self.node.connection.auth_digitalocean.get_client()
+        marker = _restore_marker_value(restore)
+        if not restore.resource_id:
+            if not _restore_unknown(restore):
+                return _restore_status("IN_PROGRESS")
+            try:
+                candidate = self._find_restore_resource(client, restore, marker)
+                if len(candidate) != 1:
+                    _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                    return _restore_status("FAILED")
+                resource = _restore_candidates(
+                    restore,
+                    candidate,
+                    source_id=restore.params.get("_backupsheep_restore", {}).get("source_id") if isinstance(restore.params, dict) else None,
+                    marker=marker,
+                    marker_match=lambda item, value: _restore_marker_matches(item, value),
+                    source_match=lambda item, source: _restore_source_matches(item, source, "image", "image_id", "snapshot_id"),
+                )
+                return self.check_restore(restore) if resource else _restore_status("FAILED")
+            except Exception as error:
+                return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
 
-        if self.node.type == CoreNode.Type.CLOUD:
-            result = requests.get(
-                f"{settings.DIGITALOCEAN_API}/v2/droplets/{restore.resource_id}",
-                headers=client,
-                verify=True,
-            )
-            if result.status_code == 200:
-                droplet = result.json()["droplet"]
-                if droplet.get("status") == "active":
-                    return CoreCloudRestore.Status.COMPLETE
-            return CoreCloudRestore.Status.IN_PROGRESS
+        try:
+            if self.node.type == CoreNode.Type.CLOUD:
+                result = requests.get(
+                    f"{settings.DIGITALOCEAN_API}/v2/droplets/{restore.resource_id}",
+                    headers=client,
+                    verify=True,
+                )
+                problem = _restore_http_class(result)
+                if problem:
+                    return _restore_handle_error(restore, problem, mutation=False, raise_terminal=False)
+                payload = result.json()
+                droplet = payload.get("droplet") if isinstance(payload, dict) else None
+                if not droplet or not _restore_verify_target(
+                    restore, droplet, source_id=(restore.params or {}).get("_backupsheep_restore", {}).get("source_id"),
+                    marker=marker, source_keys=("image", "image_id", "snapshot_id")
+                ):
+                    return _restore_status("FAILED")
+                status = droplet.get("status")
+                if status == "active":
+                    restore.operation_phase = _restore_phase("COMPLETE")
+                    restore.save(update_fields=["operation_phase", "modified"])
+                    return _restore_status("COMPLETE")
+                if status in {"error", "deleting", "destroyed"}:
+                    return _restore_safe_failure(restore, "PROVIDER_FAILED")
+                if status not in {"new", "off", "active"}:
+                    return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+                return _restore_status("IN_PROGRESS")
 
-        elif self.node.type == CoreNode.Type.VOLUME:
             result = requests.get(
                 f"{settings.DIGITALOCEAN_API}/v2/volumes/{restore.resource_id}",
                 headers=client,
                 verify=True,
             )
-            if result.status_code == 200 and result.json().get("volume", {}).get("id"):
-                return CoreCloudRestore.Status.COMPLETE
-            return CoreCloudRestore.Status.IN_PROGRESS
+            problem = _restore_http_class(result)
+            if problem:
+                return _restore_handle_error(restore, problem, mutation=False, raise_terminal=False)
+            payload = result.json()
+            volume = payload.get("volume") if isinstance(payload, dict) else None
+            if not volume or not _restore_verify_target(
+                restore, volume, source_id=(restore.params or {}).get("_backupsheep_restore", {}).get("source_id"),
+                marker=marker, source_keys=("snapshot_id", "snapshot")
+            ):
+                return _restore_status("FAILED")
+            if volume.get("id"):
+                restore.operation_phase = _restore_phase("COMPLETE")
+                restore.save(update_fields=["operation_phase", "modified"])
+                return _restore_status("COMPLETE")
+            return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+        except Exception as error:
+            return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
 
 
 class CoreHetzner(UtilCloud):
@@ -360,7 +2143,12 @@ class CoreHetzner(UtilCloud):
     # server that Hetzner created when the HTTP response was lost before Django
     # persisted ``restore.resource_id``.  The prefix is not reserved by Hetzner.
     RESTORE_LABEL_KEY = "backupsheep.restore"
+    BACKUP_LABEL_KEY = "backupsheep.backup"
+    BACKUP_SOURCE_LABEL_KEY = "backupsheep.source"
+    BACKUP_ACCOUNT_LABEL_KEY = "backupsheep.account"
+    BACKUP_CONNECTION_LABEL_KEY = "backupsheep.connection"
     API_PAGE_SIZE = 50
+    API_MAX_PAGES = 1000
 
     node = models.OneToOneField(
         "CoreNode", related_name="hetzner", on_delete=models.CASCADE
@@ -379,7 +2167,7 @@ class CoreHetzner(UtilCloud):
         return pagination.get("next_page")
 
     @classmethod
-    def _list_resources(cls, client, path, resource_key, params=None):
+    def _list_resources(cls, client, path, resource_key, params=None, stats=None):
         """Return all pages for a Hetzner collection endpoint.
 
         Hetzner's Cloud API caps ``per_page`` at 50.  The old integration only
@@ -388,27 +2176,58 @@ class CoreHetzner(UtilCloud):
         """
         items = []
         page = 1
+        seen_pages = set()
         request_params = dict(params or {})
         while True:
+            if page in seen_pages or len(seen_pages) >= cls.API_MAX_PAGES:
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+                )
+            seen_pages.add(page)
             request_params.update({"page": page, "per_page": cls.API_PAGE_SIZE})
             response = requests.get(
                 f"{settings.HETZNER_API}/v1/{path}",
                 params=request_params,
                 headers=client,
                 verify=True,
+                timeout=request_timeout(),
             )
-            if response.status_code != 200:
-                try:
-                    error = response.json().get("error") or {}
-                    detail = error.get("message") or f"API status code was: {response.status_code}"
-                except Exception:
-                    detail = f"API status code was: {response.status_code}"
-                raise ValueError(detail)
-            payload = response.json()
-            items.extend(payload.get(resource_key) or [])
+            problem = _backup_provider_response_error(response)
+            if problem is not None:
+                raise problem
+            try:
+                payload = response.json()
+            except Exception:
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+                ) from None
+            page_items = payload.get(resource_key) if isinstance(payload, dict) else None
+            pagination = (payload.get("meta") or {}).get("pagination") if isinstance(payload, dict) else None
+            if not isinstance(page_items, list) or not isinstance(pagination, dict):
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+                )
+            items.extend(page_items)
+            if isinstance(stats, dict):
+                stats["page_count"] = len(seen_pages)
+                stats["item_count"] = len(items)
             next_page = cls._next_page(payload)
             if not next_page:
                 return items
+            if isinstance(next_page, bool):
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+                )
+            try:
+                next_page = int(next_page)
+            except (TypeError, ValueError):
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+                ) from None
+            if next_page <= page or next_page in seen_pages:
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+                )
             page = next_page
 
     @classmethod
@@ -430,19 +2249,142 @@ class CoreHetzner(UtilCloud):
             )
         return matches[0] if matches else None
 
+    def _backup_scope(self):
+        return {
+            # The Hetzner token is project scoped. Persist the local account and
+            # connection boundary into both the witness and provider labels so a
+            # different connected project can never adopt this request silently.
+            "account_id": str(self.node.connection.account_id),
+            "connection_id": str(self.node.connection_id),
+        }
+
+    @classmethod
+    def _backup_labels(cls, witness):
+        scope = dict(witness.get("scope") or {})
+        return {
+            cls.BACKUP_LABEL_KEY: str(witness.get("marker") or "")[:63],
+            cls.BACKUP_SOURCE_LABEL_KEY: str(witness.get("source_id") or "")[:63],
+            cls.BACKUP_ACCOUNT_LABEL_KEY: str(scope.get("account_id") or "")[:63],
+            cls.BACKUP_CONNECTION_LABEL_KEY: str(scope.get("connection_id") or "")[:63],
+        }
+
+    @classmethod
+    def _snapshot_owned(cls, image, witness, *, resource_id=None):
+        if not isinstance(image, dict):
+            return False
+        if resource_id is not None and str(image.get("id") or "") != str(resource_id):
+            return False
+        created_from = image.get("created_from")
+        if isinstance(created_from, dict):
+            created_from = created_from.get("id")
+        if (
+            image.get("type") != "snapshot"
+            or str(image.get("description") or "") != str(witness.get("marker") or "")
+            or str(created_from or "") != str(witness.get("source_id") or "")
+        ):
+            return False
+        labels = image.get("labels")
+        expected = cls._backup_labels(witness)
+        return isinstance(labels, dict) and all(
+            str(labels.get(key) or "") == value and bool(value)
+            for key, value in expected.items()
+        )
+
+    def _backup_source_witness(self, client, backup):
+        response = requests.get(
+            f"{settings.HETZNER_API}/v1/servers/{self.unique_id}",
+            headers=client,
+            verify=True,
+            timeout=request_timeout(),
+        )
+        problem = _backup_provider_response_error(response)
+        if problem is not None:
+            raise problem
+        try:
+            payload = response.json()
+        except Exception:
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            ) from None
+        source = payload.get("server") if isinstance(payload, dict) else None
+        if (
+            not isinstance(source, dict)
+            or str(source.get("id") or "") != str(self.unique_id)
+            or str(source.get("status") or "").lower() not in {"running", "off"}
+            or bool(source.get("locked"))
+        ):
+            raise _BackupProviderError(
+                "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True
+            )
+        return _backup_provider_witness(
+            backup,
+            provider="hetzner",
+            source_id=self.unique_id,
+            resource_type="instance",
+            scope=self._backup_scope(),
+            source=source,
+        ), source
+
+    def _backup_candidates(self, client, witness):
+        stats = {}
+        items = self._list_resources(
+            client,
+            "images",
+            "images",
+            {
+                "type": "snapshot",
+                "label_selector": (
+                    f"{self.BACKUP_LABEL_KEY}={witness['marker']}"
+                ),
+            },
+            stats=stats,
+        )
+        marked = [
+            image
+            for image in items
+            if isinstance(image, dict)
+            and str(image.get("description") or "") == str(witness["marker"])
+        ]
+        if any(not isinstance(image, dict) for image in items):
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        matches = [image for image in marked if self._snapshot_owned(image, witness)]
+        if marked and len(matches) != len(marked):
+            raise _BackupProviderError(
+                "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True
+            )
+        return matches, stats.get("page_count", 0), stats.get("item_count", 0)
+
     @classmethod
     def _find_restore_server(cls, client, restore_id):
-        servers = cls._list_resources(
-            client,
-            "servers",
-            "servers",
-            {"label_selector": f"{cls.RESTORE_LABEL_KEY}={restore_id}"},
+        # The label selector is an exact provider-side reconciliation key. Do
+        # not walk mutable page numbers: if a supposedly unique selector spans
+        # pages, fail closed and require manual review.
+        response = requests.get(
+            f"{settings.HETZNER_API}/v1/servers",
+            headers=client,
+            params={
+                "label_selector": f"{cls.RESTORE_LABEL_KEY}={restore_id}",
+                "per_page": cls.API_PAGE_SIZE,
+            },
+            verify=True,
+            timeout=request_timeout(),
         )
+        problem = _restore_http_class(response)
+        if problem:
+            if problem.code == "PROVIDER_NOT_FOUND":
+                return None
+            raise problem
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("servers"), list):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        pagination = (payload.get("meta") or {}).get("pagination") or {}
+        if pagination.get("next_page"):
+            raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+        servers = payload["servers"]
         if len(servers) > 1:
-            raise ValueError(
-                f"Hetzner returned multiple servers for BackupSheep restore {restore_id}; "
-                "refusing to guess which resource to adopt."
-            )
+            raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
         return servers[0] if servers else None
 
     def validate(self):
@@ -452,6 +2394,7 @@ class CoreHetzner(UtilCloud):
             f"{settings.HETZNER_API}/v1/servers/{self.unique_id}",
             headers=client,
             verify=True,
+            timeout=request_timeout(),
         )
         if result.status_code == 200:
             r_json = result.json()
@@ -465,83 +2408,135 @@ class CoreHetzner(UtilCloud):
         return node_ok
 
     def create_snapshot(self, backup):
+        witness = None
+        mutation_started = False
         try:
+            if self.node.type != CoreNode.Type.CLOUD:
+                raise _BackupProviderError("PROVIDER_UNSUPPORTED_RESOURCE")
             client = self.node.connection.auth_hetzner.get_client()
-
-            if self.node.type == CoreNode.Type.CLOUD:
-                # create_image is not idempotent at the HTTP layer. Recover an image
-                # returned before the worker persisted its ids by its exact immutable
-                # BackupSheep UUID description before sending another request.
-                existing = self._find_snapshot_by_description(client, backup.uuid_str)
-                if existing:
-                    backup.unique_id = existing.get("id")
-                    backup.size_gigabytes = existing.get("disk_size")
-                    backup.metadata = existing
-                    backup.save()
-                    return
-
-                server_data = {"description": backup.uuid_str, "type": "snapshot"}
-                result = requests.post(
-                    f"{settings.HETZNER_API}/v1/servers/{self.unique_id}/actions/create_image",
-                    json=server_data,
-                    headers=client,
-                    verify=True,
-                )
-                if result.status_code == 201:
-                    payload = result.json()
-                    image = payload.get("image") or {}
-                    action = payload.get("action") or {}
-                    if action.get("status") == "error":
-                        raise NodeBackupFailedError(
-                            self.node,
-                            backup.uuid_str,
-                            backup.attempt_no,
-                            backup.type,
-                            "Hetzner reported an error while creating the snapshot.",
-                        )
-                    if not image.get("id"):
-                        raise NodeBackupFailedError(
-                            self.node,
-                            backup.uuid_str,
-                            backup.attempt_no,
-                            backup.type,
-                            "Hetzner did not return a snapshot image id.",
-                        )
-                    backup.action_id = action.get("id")
-                    backup.unique_id = image["id"]
-                    backup.size_gigabytes = image.get("disk_size")
-                    backup.metadata = payload
-                    backup.save()
-                elif result.status_code == 429:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "API rate limit exceeded. We will try again shortly.",
-                    )
-                else:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        f"API status code was: {result.status_code}",
-                    )
-
-            elif self.node.type == CoreNode.Type.VOLUME:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    "Hetzner Cloud does not provide native volume snapshots.",
-                )
-        except Exception as e:
-            raise NodeBackupFailedError(
-                self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
+            witness, _source = self._backup_source_witness(client, backup)
+            _backup_record_provider_witness(
+                backup, witness, provider_status="reconciling"
             )
+            matches, page_count, item_count = self._backup_candidates(client, witness)
+            _backup_record_provider_witness(
+                backup,
+                witness,
+                provider_status="reconciled",
+                metadata={
+                    "scan_page_count": page_count,
+                    "scan_item_count": item_count,
+                    "scan_match_count": len(matches),
+                    "scan_complete": True,
+                },
+            )
+            if len(matches) > 1:
+                raise _BackupProviderError(
+                    "PROVIDER_DUPLICATE_MATCH", manual_review=True
+                )
+            if matches:
+                _backup_adopt_provider_resource(
+                    backup,
+                    matches[0],
+                    witness=witness,
+                    provider="hetzner",
+                    id_keys=("id",),
+                )
+                return
+
+            _state, provider_metadata = _backup_execution_metadata(backup)
+            if provider_metadata.get("create_attempted") or provider_metadata.get(
+                "outcome_unknown"
+            ):
+                raise _BackupProviderError(
+                    "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+                )
+
+            _backup_mark_create_started(backup, witness)
+            mutation_started = True
+            response = requests.post(
+                f"{settings.HETZNER_API}/v1/servers/{self.unique_id}/actions/create_image",
+                json={
+                    "description": witness["marker"],
+                    "type": "snapshot",
+                    "labels": self._backup_labels(witness),
+                },
+                headers=client,
+                verify=True,
+                timeout=request_timeout(),
+            )
+            problem = _backup_provider_response_error(response, mutation=True)
+            if problem is not None:
+                raise problem
+            try:
+                payload = response.json()
+            except Exception:
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE",
+                    unknown_outcome=True,
+                    manual_review=True,
+                ) from None
+            image = payload.get("image") if isinstance(payload, dict) else None
+            action = payload.get("action") if isinstance(payload, dict) else None
+            if not isinstance(image, dict) or not isinstance(action, dict):
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE",
+                    unknown_outcome=True,
+                    manual_review=True,
+                )
+            if not action.get("id") or str(action.get("status") or "").lower() not in {
+                "running", "success"
+            }:
+                raise _BackupProviderError(
+                    "PROVIDER_FAILED"
+                    if str(action.get("status") or "").lower() == "error"
+                    else "PROVIDER_MALFORMED_RESPONSE",
+                    unknown_outcome=True,
+                    manual_review=True,
+                )
+            if not image.get("id") or not self._snapshot_owned(image, witness):
+                raise _BackupProviderError(
+                    "PROVIDER_OWNERSHIP_MISMATCH",
+                    unknown_outcome=True,
+                    manual_review=True,
+                )
+            resource = dict(image)
+            resource["action_id"] = str(action["id"])
+            resource["size_gigabytes"] = image.get("disk_size")
+            _backup_adopt_provider_resource(
+                backup,
+                resource,
+                witness=witness,
+                provider="hetzner",
+                id_keys=("id",),
+            )
+        except Exception as error:
+            if witness is None:
+                witness = _backup_provider_witness(
+                    backup,
+                    provider="hetzner",
+                    source_id=self.unique_id,
+                    resource_type="instance",
+                    scope=self._backup_scope(),
+                )
+            classified = _backup_provider_exception(
+                error, mutation=mutation_started
+            )
+            _backup_record_create_failure(backup, witness, classified)
+            _backup_raise_node_error(self.node, backup, classified)
 
     def restore_snapshot(self, backup, restore):
         try:
             client = self.node.connection.auth_hetzner.get_client()
             params = restore.params or {}
+
+            marker, params = _prepare_cloud_restore(
+                restore,
+                provider="hetzner",
+                source_id=backup.unique_id,
+                target_kind="server",
+                target_name=restore.name,
+            )
 
             # A redelivered task must never create a second server after the first
             # create request has already been committed locally.
@@ -551,14 +2546,31 @@ class CoreHetzner(UtilCloud):
             # If the worker died after Hetzner accepted POST /servers but before the
             # response was persisted, adopt the server by its BackupSheep-owned
             # label instead of issuing a second non-idempotent request.
-            existing = self._find_restore_server(client, restore.id)
-            if existing:
-                restore.resource_id = str(existing["id"])
-                existing_params = dict(params)
-                if existing.get("status"):
-                    existing_params["provider_status"] = existing["status"]
-                restore.params = existing_params
-                restore.save()
+            try:
+                existing = self._find_restore_server(client, restore.id)
+                if existing:
+                    if not _restore_verify_target(
+                        restore,
+                        existing,
+                        source_id=backup.unique_id,
+                        marker=str(restore.id),
+                        source_keys=("image", "image_id"),
+                    ):
+                        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                    _restore_adopt(
+                        restore,
+                        existing.get("id"),
+                        provider_status=existing.get("status"),
+                        params_update={"provider_status": existing.get("status")} if existing.get("status") else {},
+                    )
+                    return
+                if _restore_unknown(restore):
+                    _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                    raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+            except Exception as error:
+                if isinstance(error, _RestoreProviderError):
+                    raise
+                _restore_handle_error(restore, error, mutation=False)
                 return
 
             server_data = {
@@ -567,6 +2579,7 @@ class CoreHetzner(UtilCloud):
                 "labels": {
                     **(params.get("labels") or {}),
                     self.RESTORE_LABEL_KEY: str(restore.id),
+                    "backupsheep.source": str(backup.unique_id),
                 },
             }
 
@@ -578,14 +2591,22 @@ class CoreHetzner(UtilCloud):
                     f"{settings.HETZNER_API}/v1/servers/{self.unique_id}",
                     headers=client,
                     verify=True,
+                    timeout=request_timeout(),
                 )
                 if result.status_code == 200:
-                    source_server = result.json()["server"]
-                    server_type = source_server["server_type"]["name"]
+                    try:
+                        source_server = result.json()["server"]
+                        if str(source_server.get("id") or "") != str(self.unique_id):
+                            raise KeyError("source")
+                        server_type = source_server["server_type"]["name"]
+                    except (KeyError, TypeError):
+                        raise _RestoreProviderError(
+                            "PROVIDER_MALFORMED_RESPONSE"
+                        ) from None
                 else:
-                    raise Exception(
-                        f"Unable to determine server type from source server. "
-                        f"API status code was: {result.status_code}"
+                    problem = _restore_http_class(result)
+                    raise problem or _RestoreProviderError(
+                        "PROVIDER_REQUEST_FAILED"
                     )
             server_data["server_type"] = server_type
 
@@ -598,63 +2619,122 @@ class CoreHetzner(UtilCloud):
             if params.get("ssh_keys"):
                 server_data["ssh_keys"] = params.get("ssh_keys")
 
+            _restore_begin_mutation(restore)
             result = requests.post(
                 f"{settings.HETZNER_API}/v1/servers",
                 json=server_data,
                 headers=client,
                 verify=True,
+                timeout=request_timeout(),
             )
-            if result.status_code == 201:
-                server = result.json()["server"]
-                action = result.json()["action"]
-                restore.resource_id = server["id"]
-                if action.get("id"):
-                    params["action_id"] = action["id"]
-                restore.params = params
-                restore.save()
-            elif result.status_code == 429:
-                raise Exception("API rate limit exceeded. We will try again shortly.")
-            else:
-                raise Exception(f"API status code was: {result.status_code}")
+            problem = _restore_http_class(result, mutation=True)
+            if problem:
+                if problem.code == "PROVIDER_RATE_LIMIT":
+                    _restore_clear_unknown(restore)
+                    return _restore_handle_error(restore, problem, mutation=False)
+                return _restore_handle_error(restore, problem, mutation=True)
+            payload = result.json()
+            server = payload.get("server") if isinstance(payload, dict) else None
+            action = payload.get("action") if isinstance(payload, dict) else None
+            if not isinstance(server, dict) or not server.get("id"):
+                _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                return _restore_status("IN_PROGRESS")
+            if isinstance(action, dict) and action.get("status") == "error":
+                _restore_clear_unknown(restore)
+                return _restore_safe_failure(restore, "PROVIDER_FAILED")
+            action_id = action.get("id") if isinstance(action, dict) else None
+            _restore_adopt(
+                restore,
+                server["id"],
+                provider_status=server.get("status"),
+                params_update={"action_id": action_id} if action_id else {},
+            )
         except Exception as e:
-            raise Exception(f"Hetzner restore failed: {get_error(e)}")
+            if isinstance(e, _RestoreProviderError):
+                if e.retryable:
+                    return _restore_handle_error(restore, e, mutation=e.unknown_outcome)
+                _restore_safe_failure(restore, e.code, manual_review=e.code in {
+                    "PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH", "PROVIDER_RECONCILIATION_REQUIRED"
+                })
+                raise
+            return _restore_handle_error(restore, e, mutation=True)
 
     def check_restore(self, restore):
-        from apps.console.backup.models import CoreCloudRestore
-
-        if not restore.resource_id:
-            return CoreCloudRestore.Status.IN_PROGRESS
-
         client = self.node.connection.auth_hetzner.get_client()
+        if not restore.resource_id:
+            if not _restore_unknown(restore):
+                return _restore_status("IN_PROGRESS")
+            try:
+                existing = self._find_restore_server(client, restore.id)
+                if not existing:
+                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                if not _restore_verify_target(
+                    restore,
+                    existing,
+                    source_id=(_restore_params(restore).get("_backupsheep_restore") or {}).get("source_id"),
+                    marker=str(restore.id),
+                    source_keys=("image", "image_id"),
+                ):
+                    return _restore_status("FAILED")
+                _restore_adopt(restore, existing.get("id"), provider_status=existing.get("status"))
+            except Exception as error:
+                return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
 
-        action_id = (restore.params or {}).get("action_id")
+        action_id = (_restore_params(restore)).get("action_id")
         if action_id:
-            action_result = requests.get(
-                f"{settings.HETZNER_API}/v1/actions/{action_id}",
+            try:
+                action_result = requests.get(
+                    f"{settings.HETZNER_API}/v1/actions/{action_id}",
+                    headers=client,
+                    verify=True,
+                    timeout=request_timeout(),
+                )
+                problem = _restore_http_class(action_result)
+                if problem:
+                    return _restore_handle_error(restore, problem, mutation=False, raise_terminal=False)
+                payload = action_result.json()
+                action = payload.get("action") if isinstance(payload, dict) else None
+                if not isinstance(action, dict) or not action.get("status"):
+                    return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+                if action.get("status") == "error":
+                    return _restore_safe_failure(restore, "PROVIDER_FAILED")
+                if action.get("status") != "success":
+                    return _restore_status("IN_PROGRESS")
+            except Exception as error:
+                return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+
+        try:
+            result = requests.get(
+                f"{settings.HETZNER_API}/v1/servers/{restore.resource_id}",
                 headers=client,
                 verify=True,
+                timeout=request_timeout(),
             )
-            if action_result.status_code == 200:
-                action = action_result.json().get("action") or {}
-                if action.get("status") == "error":
-                    return CoreCloudRestore.Status.FAILED
-                if action.get("status") != "success":
-                    return CoreCloudRestore.Status.IN_PROGRESS
-
-        result = requests.get(
-            f"{settings.HETZNER_API}/v1/servers/{restore.resource_id}",
-            headers=client,
-            verify=True,
-        )
-        if result.status_code == 200:
-            server = result.json()["server"]
-            if server.get("status") == "running":
-                return CoreCloudRestore.Status.COMPLETE
-            if server.get("status") in {"deleting", "unknown"}:
-                return CoreCloudRestore.Status.FAILED
-        # Hetzner servers have no definitive error state; anything else
-        # (initializing, non-200 response) is treated as still in progress
-        return CoreCloudRestore.Status.IN_PROGRESS
+            problem = _restore_http_class(result)
+            if problem:
+                return _restore_handle_error(restore, problem, mutation=False, raise_terminal=False)
+            payload = result.json()
+            server = payload.get("server") if isinstance(payload, dict) else None
+            if not _restore_verify_target(
+                restore,
+                server,
+                source_id=(_restore_params(restore).get("_backupsheep_restore") or {}).get("source_id"),
+                marker=str(restore.id),
+                source_keys=("image", "image_id"),
+            ):
+                return _restore_status("FAILED")
+            status = server.get("status") if isinstance(server, dict) else None
+            if status == "running":
+                restore.operation_phase = _restore_phase("COMPLETE")
+                restore.save(update_fields=["operation_phase", "modified"])
+                return _restore_status("COMPLETE")
+            if status in {"deleting", "unknown", "error"}:
+                return _restore_safe_failure(restore, "PROVIDER_FAILED")
+            if status not in {"initializing", "starting", "off", "running"}:
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            return _restore_status("IN_PROGRESS")
+        except Exception as error:
+            return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
 
 
 class CoreUpCloud(UtilCloud):
@@ -676,6 +2756,7 @@ class CoreUpCloud(UtilCloud):
             f"{settings.UPCLOUD_API}/storage/{self.unique_id}",
             auth=client,
             verify=True,
+            timeout=request_timeout(),
             headers={"content-type": "application/json"}
         )
         if result.status_code == 200:
@@ -686,154 +2767,407 @@ class CoreUpCloud(UtilCloud):
                     node_ok = True
         return node_ok
 
+    def _upcloud_source_witness(self, client, backup):
+        result = requests.get(
+            f"{settings.UPCLOUD_API}/storage/{self.unique_id}",
+            auth=client,
+            verify=True,
+            timeout=request_timeout(),
+            headers={"content-type": "application/json"},
+        )
+        problem = _backup_provider_response_error(result)
+        if problem:
+            raise problem
+        try:
+            payload = result.json()
+        except Exception:
+            raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True) from None
+        storage = payload.get("storage") if isinstance(payload, dict) else None
+        if not isinstance(storage, dict):
+            raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+        source_uuid = storage.get("uuid")
+        zone = storage.get("zone")
+        if not source_uuid or str(source_uuid) != str(self.unique_id) or not zone:
+            raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+        witness = _backup_provider_witness(
+            backup,
+            provider="upcloud",
+            source_id=self.unique_id,
+            resource_type="storage",
+            scope={"zone": zone},
+            source=storage,
+        )
+        return witness, storage
+
+    def _upcloud_backup_candidates(self, client, backup, witness):
+        scan = {}
+        items = list(
+            _iter_provider_collection(
+                _UpCloudCollectionClient(client),
+                f"{settings.UPCLOUD_API}/storage/backup",
+                ("storage", "storages", "items", "resources", "data"),
+                stats=scan,
+            )
+        )
+        matches = []
+        for item in items:
+            if _strict_provider_candidate(
+                item,
+                marker=witness.get("marker"),
+                source_id=self.unique_id,
+                source_keys=("origin", "source_uuid", "parent_uuid"),
+                scope=witness.get("scope"),
+                scope_keys=(("zone", ("zone", "region")),),
+            ):
+                matches.append(item)
+        return matches, scan.get("page_count", 0), len(items)
+
+    def _create_upcloud_snapshot(self, backup, *, client):
+        resource_type = "storage" if self.node.type == CoreNode.Type.VOLUME else "server"
+        if self.node.type != CoreNode.Type.VOLUME:
+            classified = _BackupProviderError("PROVIDER_FAILED")
+            witness = _backup_provider_witness(
+                backup,
+                provider="upcloud",
+                source_id=self.unique_id,
+                resource_type=resource_type,
+                scope={},
+            )
+            _backup_record_create_failure(backup, witness, classified)
+            _backup_raise_node_error(self.node, backup, classified)
+        witness = None
+        try:
+            witness, _source = self._upcloud_source_witness(client, backup)
+            _backup_record_provider_witness(backup, witness, provider_status="reconciling")
+            matches, page_count, item_count = self._upcloud_backup_candidates(client, backup, witness)
+            _backup_record_provider_witness(
+                backup,
+                witness,
+                provider_status="reconciled",
+                metadata={
+                    "scan_page_count": page_count,
+                    "scan_item_count": item_count,
+                    "scan_match_count": len(matches),
+                    "scan_complete": True,
+                },
+            )
+            if len(matches) > 1:
+                raise _BackupProviderError("PROVIDER_DUPLICATE_MATCH", manual_review=True)
+            if matches:
+                _backup_adopt_provider_resource(
+                    backup,
+                    matches[0],
+                    witness=witness,
+                    provider="upcloud",
+                    id_keys=("uuid", "id"),
+                )
+                return
+            _state, provider_metadata = _backup_execution_metadata(backup)
+            if provider_metadata.get("create_attempted") or provider_metadata.get("outcome_unknown"):
+                raise _BackupProviderError(
+                    "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+                )
+            _backup_mark_create_started(backup, witness)
+            result = requests.post(
+                f"{settings.UPCLOUD_API}/storage/{self.unique_id}/backup",
+                json={"storage": {"title": witness.get("marker")}},
+                auth=client,
+                verify=True,
+                timeout=request_timeout(),
+                headers={"content-type": "application/json"},
+            )
+            problem = _backup_provider_response_error(result, mutation=True)
+            if problem:
+                raise problem
+            try:
+                payload = result.json()
+            except Exception:
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", unknown_outcome=True, manual_review=True
+                ) from None
+            storage = payload.get("storage") if isinstance(payload, dict) else None
+            if not isinstance(storage, dict) or not storage.get("uuid"):
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", unknown_outcome=True, manual_review=True
+                )
+            if not _strict_provider_candidate(
+                storage,
+                marker=witness.get("marker"),
+                source_id=self.unique_id,
+                source_keys=("origin", "source_uuid", "parent_uuid"),
+                scope=witness.get("scope"),
+                scope_keys=(("zone", ("zone", "region")),),
+            ):
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", unknown_outcome=True, manual_review=True
+                )
+            _backup_adopt_provider_resource(
+                backup,
+                storage,
+                witness=witness,
+                provider="upcloud",
+                id_keys=("uuid", "id"),
+            )
+        except Exception as error:
+            classified = _backup_provider_exception(
+                error,
+                mutation=bool(getattr(error, "unknown_outcome", False)),
+            )
+            _backup_record_create_failure(
+                backup,
+                witness or _backup_provider_witness(
+                    backup,
+                    provider="upcloud",
+                    source_id=self.unique_id,
+                    resource_type=resource_type,
+                    scope={},
+                ),
+                classified,
+                scan_metadata={"phase": "create"},
+            )
+            _backup_raise_node_error(self.node, backup, classified)
+
     def create_snapshot(self, backup):
         try:
             client = self.node.connection.auth_upcloud.get_client()
-
-            if self.node.type == CoreNode.Type.VOLUME:
-                server_data = {"storage": {"title": backup.uuid_str}}
-                # UpCloud returns the backup storage UUID immediately, but a worker
-                # can die before saving it. Search the backup-storage collection by
-                # the deterministic title and source UUID before creating another.
-                existing_response = requests.get(
-                    f"{settings.UPCLOUD_API}/storage/backup",
-                    auth=client,
-                    verify=True,
-                    headers={"content-type": "application/json"},
-                )
-                if existing_response.status_code != 200:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str,
-                        backup.attempt_no,
-                        backup.type,
-                        "Unable to verify existing UpCloud backups before creating a new one.",
-                    )
-                payload = existing_response.json()
-                payload = payload.get("storages", payload)
-                storages = payload.get("storage", []) if isinstance(payload, dict) else payload
-                if isinstance(storages, dict):
-                    storages = [storages]
-                existing = next(
-                    (
-                        item for item in (storages or [])
-                        if item.get("title") == backup.uuid_str
-                        and (
-                            not item.get("origin")
-                            or item.get("origin") == self.unique_id
-                        )
-                    ),
-                    None,
-                )
-                if existing:
-                    backup.unique_id = existing.get("uuid")
-                    backup.size_gigabytes = existing.get("size")
-                    backup.metadata = existing
-                    backup.save()
-                    return
-                result = requests.post(
-                    f"{settings.UPCLOUD_API}/storage/{self.unique_id}/backup",
-                    json=server_data,
-                    auth=client,
-                    verify=True,
-                    headers={"content-type": "application/json"}
-                )
-                if result.status_code == 201:
-                    storage = result.json()["storage"]
-                    backup.unique_id = storage["uuid"]
-                    backup.size_gigabytes = storage["size"]
-                    backup.metadata = result.json()
-                    backup.save()
-                elif result.status_code == 429:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "API rate limit exceeded. We will try again shortly.",
-                    )
-                else:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        f"API call returned with status {result.status_code}"
-                    )
-            elif self.node.type == CoreNode.Type.CLOUD:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    "UpCloud does not provide native server snapshots; only volumes are supported.",
-                )
-        except Exception as e:
-            raise NodeBackupFailedError(
-                self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
+            return self._create_upcloud_snapshot(backup, client=client)
+        except NodeBackupFailedError:
+            raise
+        except Exception as error:
+            witness = _backup_provider_witness(
+                backup,
+                provider="upcloud",
+                source_id=self.unique_id,
+                resource_type="storage" if self.node.type == CoreNode.Type.VOLUME else "server",
+                scope={},
             )
+            classified = _backup_provider_exception(error)
+            _backup_record_create_failure(backup, witness, classified)
+            _backup_raise_node_error(self.node, backup, classified)
+
+    def _find_restore_storage(self, client, restore, source_id):
+        try:
+            resources = list(
+                _iter_provider_collection(
+                    _UpCloudCollectionClient(client),
+                    f"{settings.UPCLOUD_API}/storage/normal",
+                    ("storage", "storages", "items", "resources", "data"),
+                )
+            )
+        except _BackupProviderError as error:
+            raise _RestoreProviderError(
+                error.code,
+                retryable=error.retryable,
+                unknown_outcome=error.unknown_outcome,
+            ) from None
+        params = _restore_params(restore)
+        marker = str(params.get("_bs_provider_name") or _restore_marker_value(restore))
+        expected_zone = params.get("zone")
+        matches = []
+        for item in resources:
+            if _strict_restore_candidate(
+                item,
+                marker=marker,
+                source_id=source_id,
+                source_keys=("origin", "source_uuid", "parent_uuid"),
+                scope={"zone": expected_zone},
+                scope_keys=(("zone", ("zone", "region")),),
+            ):
+                matches.append(item)
+        _restore_record_scan(
+            restore,
+            item_count=len(resources),
+            match_count=len(matches),
+        )
+        if len(matches) > 1:
+            raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+        return matches
 
     def restore_snapshot(self, backup, restore):
         client = self.node.connection.auth_upcloud.get_client()
+        if self.node.type != CoreNode.Type.VOLUME:
+            _restore_safe_failure(restore, "PROVIDER_FAILED")
+            raise _RestoreProviderError("PROVIDER_FAILED")
 
-        if self.node.type == CoreNode.Type.VOLUME:
-            params = restore.params or {}
+        marker, params = _prepare_cloud_restore(
+            restore,
+            provider="upcloud",
+            source_id=backup.unique_id,
+            target_kind="storage",
+            target_name=restore.name,
+        )
+        if restore.resource_id:
+            return
+
+        try:
             zone = params.get("zone")
             tier = params.get("tier")
             if not zone:
-                # Fall back to the zone of the backup storage
                 result = requests.get(
                     f"{settings.UPCLOUD_API}/storage/{backup.unique_id}",
                     auth=client,
                     verify=True,
-                    headers={"content-type": "application/json"}
+                    timeout=request_timeout(),
+                    headers={"content-type": "application/json"},
                 )
-                if result.status_code == 200:
-                    zone = result.json()["storage"]["zone"]
-                else:
-                    raise Exception(
-                        f"Unable to fetch backup storage details. "
-                        f"API call returned with status {result.status_code}"
-                    )
-            # Restore clones the backup storage into a NEW normal storage (non-destructive)
-            storage_data = {"storage": {"zone": zone, "title": restore.name}}
+                problem = _restore_http_class(result)
+                if problem:
+                    return _restore_handle_error(restore, problem, mutation=False)
+                try:
+                    payload = result.json()
+                except Exception:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                source_storage = payload.get("storage") if isinstance(payload, dict) else None
+                if not isinstance(source_storage, dict) or str(source_storage.get("uuid") or backup.unique_id) != str(backup.unique_id):
+                    raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                zone = source_storage.get("zone")
+                if not zone:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                params["zone"] = zone
+                restore.params = params
+                restore.save(update_fields=["params", "modified"])
+
+            existing = self._find_restore_storage(client, restore, backup.unique_id)
+            if existing:
+                candidate = existing[0]
+                _restore_adopt(
+                    restore,
+                    candidate.get("uuid") or candidate.get("id"),
+                    provider_status=candidate.get("state"),
+                    params_update={
+                        "zone": zone,
+                        "_bs_source_verified": True,
+                        "_bs_scope_verified": True,
+                    },
+                )
+                return
+            elif _restore_unknown(restore):
+                _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+
+            provider_name = str(params.get("_bs_provider_name") or marker)
+            storage_data = {"storage": {"zone": zone, "title": provider_name}}
             if tier:
                 storage_data["storage"]["tier"] = tier
+            # UpCloud has no universal idempotency header. The durable title and
+            # local marker are the reconciliation contract for the clone.
+            _restore_begin_mutation(restore)
             result = requests.post(
                 f"{settings.UPCLOUD_API}/storage/{backup.unique_id}/clone",
                 data=json.dumps(storage_data),
                 auth=client,
                 verify=True,
-                headers={"content-type": "application/json"}
+                timeout=request_timeout(),
+                headers={"content-type": "application/json"},
             )
-            if result.status_code == 201:
-                storage = result.json()["storage"]
-                restore.resource_id = storage["uuid"]
-                params["zone"] = storage.get("zone", zone)
-                restore.params = params
-                restore.save()
-            else:
-                try:
-                    error_message = result.json()["error"]["error_message"]
-                except Exception:
-                    error_message = f"API call returned with status {result.status_code}"
-                raise Exception(f"Unable to clone backup storage: {error_message}")
-        else:
-            raise Exception("Snapshot restore is only supported for UpCloud volumes")
+            problem = _restore_http_class(result, mutation=True)
+            if problem:
+                if problem.code == "PROVIDER_RATE_LIMIT":
+                    _restore_clear_unknown(restore)
+                    return _restore_handle_error(restore, problem, mutation=False)
+                return _restore_handle_error(restore, problem, mutation=True)
+            payload = result.json()
+            storage = payload.get("storage") if isinstance(payload, dict) else None
+            resource_id = storage.get("uuid") if isinstance(storage, dict) else None
+            if not resource_id:
+                _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                return _restore_status("IN_PROGRESS")
+            if not _strict_restore_candidate(
+                storage,
+                marker=provider_name,
+                source_id=backup.unique_id,
+                source_keys=("origin", "source_uuid", "parent_uuid"),
+                scope={"zone": zone},
+                scope_keys=(("zone", ("zone", "region")),),
+            ):
+                _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                return _restore_status("IN_PROGRESS")
+            _restore_adopt(
+                restore,
+                resource_id,
+                provider_status=storage.get("state"),
+                params_update={
+                    "zone": storage.get("zone", zone),
+                    "_bs_source_verified": True,
+                    "_bs_scope_verified": True,
+                },
+            )
+        except Exception as error:
+            if isinstance(error, _RestoreProviderError):
+                if error.retryable:
+                    return _restore_handle_error(restore, error, mutation=error.unknown_outcome)
+                _restore_safe_failure(restore, error.code, manual_review=error.code in {
+                    "PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH", "PROVIDER_DUPLICATE_MATCH", "PROVIDER_RECONCILIATION_REQUIRED"
+                })
+                raise
+            return _restore_handle_error(restore, error, mutation=True)
 
     def check_restore(self, restore):
-        from apps.console.backup.models import CoreCloudRestore
-
         client = self.node.connection.auth_upcloud.get_client()
-        result = requests.get(
-            f"{settings.UPCLOUD_API}/storage/{restore.resource_id}",
-            auth=client,
-            verify=True,
-            headers={"content-type": "application/json"}
-        )
-        if result.status_code == 200:
-            state = result.json()["storage"]["state"]
+        if not restore.resource_id:
+            if not _restore_unknown(restore):
+                return _restore_status("IN_PROGRESS")
+            try:
+                candidate = self._find_restore_storage(
+                    client,
+                    restore,
+                    (_restore_params(restore).get("_backupsheep_restore") or {}).get("source_id"),
+                )
+                if len(candidate) != 1:
+                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                item = candidate[0]
+                _restore_adopt(
+                    restore,
+                    item.get("uuid") or item.get("id"),
+                    provider_status=item.get("state"),
+                    params_update={
+                        "_bs_source_verified": True,
+                        "_bs_scope_verified": True,
+                    },
+                )
+            except Exception as error:
+                return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+        try:
+            result = requests.get(
+                f"{settings.UPCLOUD_API}/storage/{restore.resource_id}",
+                auth=client,
+                verify=True,
+                timeout=request_timeout(),
+                headers={"content-type": "application/json"},
+            )
+            problem = _restore_http_class(result)
+            if problem:
+                return _restore_handle_error(restore, problem, mutation=False, raise_terminal=False)
+            payload = result.json()
+            storage = payload.get("storage") if isinstance(payload, dict) else None
+            if not isinstance(storage, dict):
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            params = _restore_params(restore)
+            provider_name = str(params.get("_bs_provider_name") or _restore_marker_value(restore))
+            try:
+                if not _strict_provider_candidate(
+                    storage,
+                    marker=provider_name,
+                    source_id=(params.get("_backupsheep_restore") or {}).get("source_id"),
+                    source_keys=("origin", "source_uuid", "parent_uuid"),
+                    scope={"zone": params.get("zone")},
+                    scope_keys=(("zone", ("zone", "region")),),
+                ):
+                    return _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+            except _BackupProviderError as identity_error:
+                return _restore_safe_failure(restore, identity_error.code, manual_review=True)
+            state = storage.get("state")
             if state == "online":
-                return CoreCloudRestore.Status.COMPLETE
-            elif state == "error":
-                return CoreCloudRestore.Status.FAILED
-        return CoreCloudRestore.Status.IN_PROGRESS
+                restore.operation_phase = _restore_phase("COMPLETE")
+                restore.save(update_fields=["operation_phase", "modified"])
+                return _restore_status("COMPLETE")
+            if state == "error":
+                return _restore_safe_failure(restore, "PROVIDER_FAILED")
+            if state not in {"cloning", "maintenance", "offline", "online"}:
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            return _restore_status("IN_PROGRESS")
+        except Exception as error:
+            return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
 
 
 class _OVHRegionMixin:
@@ -924,6 +3258,406 @@ class _OVHRegionMixin:
         path = f"/cloud/project/{self.project_id}/region/{region}/{snapshot_path}"
         return f"{path}/{snapshot_id}" if snapshot_id else path
 
+    def _ovh_source_witness(self, backup, client, resource_type, region):
+        """Verify and persist the exact OVH project/region/source before POST."""
+        if not self.project_id or not self.unique_id or not region:
+            raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+        source_path = (
+            f"/cloud/project/{self.project_id}/region/{region}/"
+            f"{resource_type}/{self.unique_id}"
+        )
+        source = client.get(source_path)
+        response_error = _backup_provider_response_error(source)
+        if response_error is not None:
+            raise response_error
+        if not isinstance(source, dict):
+            raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+        source_id = source.get("id") or source.get("uuid")
+        if not source_id or str(source_id) != str(self.unique_id):
+            raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+        actual_region = source.get("region") or source.get("zone")
+        if actual_region not in (None, "") and str(actual_region) != str(region):
+            raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+        scope = {"project_id": self.project_id, "region": region}
+        return _backup_provider_witness(
+            backup,
+            provider="ovh",
+            source_id=self.unique_id,
+            resource_type=resource_type,
+            scope=scope,
+            source=source,
+        ), source
+
+    def _ovh_backup_candidates(self, client, backup, resource_type, region, *, witness=None):
+        path = (
+            f"/cloud/project/{self.project_id}/region/{region}/"
+            f"{'snapshot' if resource_type == 'instance' else 'volume/snapshot'}"
+        )
+        scan = {}
+        items = list(
+            _iter_provider_collection(
+                client,
+                path,
+                ("snapshots", "snapshot", "items", "resources", "data"),
+                stats=scan,
+            )
+        )
+        scope = {"project_id": self.project_id, "region": region}
+        matches = []
+        marker = (witness or {}).get("marker") or _backup_request_marker(backup)
+        for item in items:
+            if not isinstance(item, dict):
+                raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            if _strict_provider_candidate(
+                item,
+                marker=marker,
+                source_id=self.unique_id,
+                source_keys=(
+                    "instanceId", "volumeId", "sourceId", "source_id", "origin",
+                ),
+                scope=scope,
+                scope_keys=(
+                    ("region", ("region", "zone")),
+                    ("project_id", ("projectId", "project_id", "project")),
+                ),
+                scope_proven=True,
+            ):
+                matches.append(item)
+        return matches, scan.get("page_count", 0), len(items)
+
+    def _create_ovh_snapshot(self, backup, *, client, provider):
+        """Crash-safe OVH snapshot creation shared by CA/EU/US adapters."""
+        resource_type = "instance" if self.node.type == CoreNode.Type.CLOUD else "volume"
+        if self.node.type not in {CoreNode.Type.CLOUD, CoreNode.Type.VOLUME}:
+            classified = _BackupProviderError("PROVIDER_FAILED")
+            _backup_record_create_failure(
+                backup,
+                _backup_provider_witness(
+                    backup,
+                    provider=provider,
+                    source_id=self.unique_id,
+                    resource_type=resource_type,
+                    scope={"project_id": self.project_id},
+                ),
+                classified,
+            )
+            _backup_raise_node_error(self.node, backup, classified)
+        try:
+            region = self._metadata_region() or self._ovh_region(client, resource_type)
+            if not region:
+                raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            # The source GET and witness persistence are deliberately before the
+            # first collection scan and POST.
+            witness, _source = self._ovh_source_witness(
+                backup, client, resource_type, region
+            )
+            _backup_record_provider_witness(backup, witness, provider_status="reconciling")
+
+            matches, page_count, item_count = self._ovh_backup_candidates(
+                client, backup, resource_type, region, witness=witness
+            )
+            _backup_record_provider_witness(
+                backup,
+                witness,
+                provider_status="reconciled",
+                metadata={
+                    "scan_page_count": page_count,
+                    "scan_item_count": item_count,
+                    "scan_match_count": len(matches),
+                    "scan_complete": True,
+                },
+            )
+            if len(matches) > 1:
+                raise _BackupProviderError(
+                    "PROVIDER_DUPLICATE_MATCH", manual_review=True
+                )
+            if matches:
+                _backup_adopt_provider_resource(
+                    backup,
+                    matches[0],
+                    witness=witness,
+                    provider=provider,
+                    id_keys=("id", "uuid"),
+                )
+                return
+
+            _state, provider_metadata = _backup_execution_metadata(backup)
+            if provider_metadata.get("create_attempted") or provider_metadata.get("outcome_unknown"):
+                raise _BackupProviderError(
+                    "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+                )
+
+            _backup_mark_create_started(backup, witness)
+            path = (
+                f"/cloud/project/{self.project_id}/region/{region}/"
+                f"{resource_type}/snapshot" if resource_type == "instance" else
+                f"/cloud/project/{self.project_id}/region/{region}/volume/snapshot"
+            )
+            request = (
+                {"snapshotName": witness.get("marker")}
+                if resource_type == "instance"
+                else {"name": witness.get("marker")}
+            )
+            response = client.post(path, **request)
+            response_error = _backup_provider_response_error(response, mutation=True)
+            if response_error is not None:
+                raise response_error
+            if not isinstance(response, dict):
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", unknown_outcome=True, manual_review=True
+                )
+            resource_id = response.get("id") or response.get("uuid") or response.get("snapshotId")
+            if not resource_id:
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", unknown_outcome=True, manual_review=True
+                )
+            _backup_adopt_provider_resource(
+                backup,
+                response,
+                witness=witness,
+                provider=provider,
+                id_keys=("id", "uuid", "snapshotId"),
+            )
+        except Exception as error:
+            classified = _backup_provider_exception(
+                error,
+                mutation=bool(getattr(error, "unknown_outcome", False)),
+            )
+            _backup_record_create_failure(backup, locals().get("witness") or _backup_provider_witness(
+                backup,
+                provider=provider,
+                source_id=self.unique_id,
+                resource_type=resource_type,
+                scope={"project_id": self.project_id, "region": locals().get("region")},
+            ), classified, scan_metadata={"phase": "create"})
+            _backup_raise_node_error(self.node, backup, classified)
+
+    def _ovh_restore_collection(self, client, resource_type, region):
+        try:
+            return list(
+                _iter_provider_collection(
+                    client,
+                    f"/cloud/project/{self.project_id}/region/{region}/{resource_type}",
+                    (resource_type, "instances", "volumes", "resources", "items", "data"),
+                )
+            )
+        except _BackupProviderError as error:
+            raise _RestoreProviderError(
+                error.code,
+                retryable=error.retryable,
+                unknown_outcome=error.unknown_outcome,
+            ) from None
+
+    def _find_ovh_restore_resource(self, client, restore, resource_type, region):
+        resources = self._ovh_restore_collection(client, resource_type, region)
+        identity = (_restore_params(restore).get("_backupsheep_restore") or {})
+        source_id = identity.get("source_id")
+        marker = str(
+            (_restore_params(restore).get("_bs_provider_name") or _restore_marker_value(restore))
+        )
+        scope = {"project_id": self.project_id, "region": region}
+        source_keys = (
+            "imageId", "image_id", "snapshotId", "snapshot_id", "sourceSnapshotId",
+        )
+        matches = []
+        for item in resources:
+            if _strict_restore_candidate(
+                item,
+                marker=marker,
+                source_id=source_id,
+                source_keys=source_keys,
+                scope=scope,
+                scope_keys=(
+                    ("region", ("region", "zone")),
+                    ("project_id", ("projectId", "project_id", "project")),
+                ),
+                scope_proven=True,
+            ):
+                matches.append(item)
+        _restore_record_scan(
+            restore,
+            item_count=len(resources),
+            match_count=len(matches),
+        )
+        if len(matches) > 1:
+            raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+        return matches
+
+    def _restore_snapshot_ovh(self, backup, restore, *, client, provider):
+        import math
+
+        target_kind = "instance" if self.node.type == CoreNode.Type.CLOUD else "volume"
+        marker, params = _prepare_cloud_restore(
+            restore,
+            provider=provider,
+            source_id=backup.unique_id,
+            target_kind=target_kind,
+            target_name=restore.name,
+        )
+        if restore.resource_id:
+            return
+        if self.node.type not in {CoreNode.Type.CLOUD, CoreNode.Type.VOLUME}:
+            _restore_safe_failure(restore, "PROVIDER_FAILED")
+            raise _RestoreProviderError("PROVIDER_FAILED")
+
+        try:
+            resource_type = "instance" if self.node.type == CoreNode.Type.CLOUD else "volume"
+            region = params.get("region") or self._ovh_region(client, resource_type)
+            if params.get("region") != region:
+                params["region"] = region
+                restore.params = params
+                restore.save(update_fields=["params", "modified"])
+            existing = self._find_ovh_restore_resource(client, restore, resource_type, region)
+            if existing:
+                candidate = existing[0]
+                _restore_adopt(
+                    restore,
+                    candidate.get("id") or candidate.get("uuid"),
+                    provider_status=candidate.get("status"),
+                    params_update={
+                        "region": region,
+                        "_bs_source_verified": True,
+                        "_bs_scope_verified": True,
+                    },
+                )
+                return
+            elif _restore_unknown(restore):
+                _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+
+            provider_name = str(params.get("_bs_provider_name") or marker)
+            request = {"name": provider_name, "region": region}
+            if self.node.type == CoreNode.Type.CLOUD:
+                flavor_id = params.get("flavor_id")
+                if not flavor_id:
+                    source = client.get(self._ovh_resource_path(client, "instance"))
+                    source_error = _backup_provider_response_error(source)
+                    if source_error is not None:
+                        raise _RestoreProviderError(
+                            source_error.code,
+                            retryable=source_error.retryable,
+                            unknown_outcome=source_error.unknown_outcome,
+                        )
+                    if not isinstance(source, dict) or str(source.get("id") or self.unique_id) != str(self.unique_id):
+                        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                    flavor_id = source.get("flavorId") if isinstance(source, dict) else None
+                if not flavor_id:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                request.update({"flavorId": flavor_id, "imageId": backup.unique_id})
+                path = f"/cloud/project/{self.project_id}/region/{region}/instance"
+            else:
+                size = params.get("size")
+                volume_type = params.get("type")
+                if not size or not volume_type:
+                    source = client.get(self._ovh_resource_path(client, "volume"))
+                    if isinstance(source, dict):
+                        size = size or source.get("size")
+                        volume_type = volume_type or source.get("type")
+                if backup.size_gigabytes:
+                    size = max(int(size), math.ceil(backup.size_gigabytes))
+                if not size or not volume_type:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                request.update({"size": size, "type": volume_type, "snapshotId": backup.unique_id})
+                path = f"/cloud/project/{self.project_id}/region/{region}/volume"
+
+            _restore_begin_mutation(restore)
+            response = client.post(path, **request)
+            response_error = _backup_provider_response_error(response, mutation=True)
+            if response_error is not None:
+                raise _RestoreProviderError(
+                    response_error.code,
+                    retryable=response_error.retryable,
+                    unknown_outcome=response_error.unknown_outcome,
+                )
+            if not isinstance(response, dict) or not response.get("id"):
+                _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                return _restore_status("IN_PROGRESS")
+            _restore_adopt(
+                restore,
+                response["id"],
+                provider_status=response.get("status") or "creating",
+                params_update={
+                    "region": region,
+                    "_bs_source_verified": True,
+                    "_bs_scope_verified": True,
+                },
+            )
+        except Exception as error:
+            if isinstance(error, _RestoreProviderError):
+                if error.retryable:
+                    return _restore_handle_error(restore, error, mutation=error.unknown_outcome)
+                _restore_safe_failure(restore, error.code, manual_review=error.code in {
+                    "PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH", "PROVIDER_DUPLICATE_MATCH", "PROVIDER_RECONCILIATION_REQUIRED"
+                })
+                raise
+            return _restore_handle_error(restore, error, mutation=True)
+
+    def _check_restore_ovh(self, restore, *, client):
+        params = _restore_params(restore)
+        region = params.get("region")
+        resource_type = "instance" if self.node.type == CoreNode.Type.CLOUD else "volume"
+        try:
+            if not restore.resource_id:
+                if not _restore_unknown(restore):
+                    return _restore_status("IN_PROGRESS")
+                region = region or self._ovh_region(client, resource_type)
+                candidates = self._find_ovh_restore_resource(client, restore, resource_type, region)
+                if len(candidates) != 1:
+                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                candidate = candidates[0]
+                _restore_adopt(
+                    restore,
+                    candidate.get("id") or candidate.get("uuid"),
+                    provider_status=candidate.get("status"),
+                    params_update={
+                        "region": region,
+                        "_bs_source_verified": True,
+                        "_bs_scope_verified": True,
+                    },
+                )
+                return _restore_status("IN_PROGRESS")
+
+            region = region or self._ovh_region(client, resource_type)
+            response = client.get(
+                f"/cloud/project/{self.project_id}/region/{region}/{resource_type}/{restore.resource_id}"
+            )
+            if not isinstance(response, dict):
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            source_id = (params.get("_backupsheep_restore") or {}).get("source_id")
+            provider_name = str(params.get("_bs_provider_name") or _restore_marker_value(restore))
+            try:
+                if not _strict_provider_candidate(
+                    response,
+                    marker=provider_name,
+                    source_id=source_id,
+                    source_keys=(
+                        "imageId", "image_id", "snapshotId", "snapshot_id", "sourceSnapshotId",
+                    ),
+                    scope={"project_id": self.project_id, "region": region},
+                    scope_keys=(
+                        ("region", ("region", "zone")),
+                        ("project_id", ("projectId", "project_id", "project")),
+                    ),
+                    scope_proven=True,
+                ):
+                    return _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+            except _BackupProviderError as identity_error:
+                _restore_safe_failure(restore, identity_error.code, manual_review=True)
+                return _restore_status("FAILED")
+            status = str(response.get("status") or "")
+            complete = "ACTIVE" if resource_type == "instance" else "available"
+            if status == complete:
+                restore.operation_phase = _restore_phase("COMPLETE")
+                restore.save(update_fields=["operation_phase", "modified"])
+                return _restore_status("COMPLETE")
+            if status.lower() in {"error", "failed", "destroyed", "deleted"}:
+                return _restore_safe_failure(restore, "PROVIDER_FAILED")
+            if not status:
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            return _restore_status("IN_PROGRESS")
+        except Exception as error:
+            return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+
 
 class CoreOVHCA(_OVHRegionMixin, UtilCloud):
     node = models.OneToOneField(
@@ -952,208 +3686,45 @@ class CoreOVHCA(_OVHRegionMixin, UtilCloud):
         return False
 
     def create_snapshot(self, backup):
-        client = self.node.connection.auth_ovh_ca.get_client()
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            try:
-                snapshots = client.get(self._ovh_snapshot_path(client, "instance"))
-                existing = next(
-                    (
-                        item for item in (snapshots if isinstance(snapshots, list) else [])
-                        if item.get("name") == backup.uuid_str
-                    ),
-                    None,
-                )
-                if existing:
-                    backup.unique_id = existing.get("id")
-                    backup.size_gigabytes = existing.get("size")
-                    backup.save()
-                    return
-                ovh_response = client.post(
-                    f"{self._ovh_resource_path(client, 'instance')}/snapshot",
-                    snapshotName=backup.uuid_str,
-                )
-                # This unique_id will be updated in poll_status() with actual ID from OVH
-                backup.unique_id = backup.uuid_str
-                backup.save()
-            except InvalidCredential:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
-            except Exception as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
-        elif self.node.type == CoreNode.Type.VOLUME:
-            try:
-                snapshots = client.get(self._ovh_snapshot_path(client, "volume"))
-                existing = next(
-                    (
-                        item for item in (snapshots if isinstance(snapshots, list) else [])
-                        if item.get("name") == backup.uuid_str
-                    ),
-                    None,
-                )
-                if existing:
-                    backup.unique_id = existing.get("id")
-                    backup.size_gigabytes = existing.get("size")
-                    backup.save()
-                    return
-                ovh_response = client.post(
-                    f"{self._ovh_resource_path(client, 'volume')}/snapshot",
-                    name=backup.uuid_str,
-                )
-                backup.unique_id = backup.uuid_str
-                backup.save()
-            except InvalidCredential:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
-            except Exception as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
+        try:
+            client = self.node.connection.auth_ovh_ca.get_client()
+            return self._create_ovh_snapshot(backup, client=client, provider="ovh_ca")
+        except NodeBackupFailedError:
+            raise
+        except Exception as error:
+            witness = _backup_provider_witness(
+                backup,
+                provider="ovh_ca",
+                source_id=self.unique_id,
+                resource_type="instance" if self.node.type == CoreNode.Type.CLOUD else "volume",
+                scope={"project_id": self.project_id, "region": self._metadata_region()},
+            )
+            classified = _backup_provider_exception(error)
+            _backup_record_create_failure(backup, witness, classified)
+            _backup_raise_node_error(self.node, backup, classified)
 
     def restore_snapshot(self, backup, restore):
-        import math
-
-        from apps._tasks.exceptions import RestoreCreateError
-
-        client = self.node.connection.auth_ovh_ca.get_client()
-        params = restore.params or {}
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            try:
-                flavor_id = params.get("flavor_id")
-                region = params.get("region")
-                # Fall back to the source instance when options are not supplied;
-                # the snapshot can only be restored in the region it was taken in
-                if not flavor_id or not region:
-                    ovh_instance = client.get(
-                        self._ovh_resource_path(client, "instance")
-                    )
-                    flavor_id = flavor_id or ovh_instance.get("flavorId")
-                    region = region or ovh_instance.get("region")
-                params["region"] = region
-                ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/region/{region}/instance",
-                    flavorId=flavor_id,
-                    name=restore.name,
-                    region=region,
-                    imageId=backup.unique_id,
-                )
-                restore.resource_id = ovh_response["id"]
-                restore.params = params
-                restore.save()
-            except InvalidCredential:
-                raise RestoreCreateError(
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise RestoreCreateError(message=get_error(e))
-            except Exception as e:
-                raise RestoreCreateError(message=get_error(e))
-        elif self.node.type == CoreNode.Type.VOLUME:
-            try:
-                region = params.get("region")
-                size = params.get("size")
-                volume_type = params.get("type")
-                # Fall back to the source volume when options are not supplied
-                if not region or not size or not volume_type:
-                    ovh_volume = client.get(
-                        self._ovh_resource_path(client, "volume")
-                    )
-                    region = region or ovh_volume.get("region")
-                    size = size or ovh_volume.get("size")
-                    volume_type = volume_type or ovh_volume.get("type")
-                # The new volume must be at least the size of the snapshot
-                if backup.size_gigabytes:
-                    size = max(int(size), math.ceil(backup.size_gigabytes))
-                params["region"] = region
-                ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/region/{region}/volume",
-                    region=region,
-                    size=size,
-                    type=volume_type,
-                    snapshotId=backup.unique_id,
-                    name=restore.name,
-                )
-                restore.resource_id = ovh_response["id"]
-                restore.params = params
-                restore.save()
-            except InvalidCredential:
-                raise RestoreCreateError(
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise RestoreCreateError(message=get_error(e))
-            except Exception as e:
-                raise RestoreCreateError(message=get_error(e))
+        try:
+            client = self.node.connection.auth_ovh_ca.get_client()
+            return self._restore_snapshot_ovh(
+                backup,
+                restore,
+                client=client,
+                provider="ovh_ca",
+            )
+        except _RestoreProviderError:
+            raise
+        except Exception as error:
+            return _restore_handle_error(restore, error, mutation=False)
 
     def check_restore(self, restore):
-        from apps.console.backup.models import CoreCloudRestore
-
-        client = self.node.connection.auth_ovh_ca.get_client()
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            ovh_instance = client.get(
-                f"/cloud/project/{self.project_id}/region/"
-                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'instance')}"
-                f"/instance/{restore.resource_id}"
+        try:
+            client = self.node.connection.auth_ovh_ca.get_client()
+            return self._check_restore_ovh(restore, client=client)
+        except Exception as error:
+            return _restore_handle_error(
+                restore, error, mutation=False, raise_terminal=False
             )
-            status = ovh_instance.get("status")
-            if status == "ACTIVE":
-                return CoreCloudRestore.Status.COMPLETE
-            elif status == "ERROR":
-                return CoreCloudRestore.Status.FAILED
-        elif self.node.type == CoreNode.Type.VOLUME:
-            ovh_volume = client.get(
-                f"/cloud/project/{self.project_id}/region/"
-                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'volume')}"
-                f"/volume/{restore.resource_id}"
-            )
-            status = ovh_volume.get("status")
-            if status == "available":
-                return CoreCloudRestore.Status.COMPLETE
-            elif status == "error":
-                return CoreCloudRestore.Status.FAILED
-        return CoreCloudRestore.Status.IN_PROGRESS
 
 
 class CoreOVHEU(_OVHRegionMixin, UtilCloud):
@@ -1183,208 +3754,45 @@ class CoreOVHEU(_OVHRegionMixin, UtilCloud):
         return False
 
     def create_snapshot(self, backup):
-        client = self.node.connection.auth_ovh_eu.get_client()
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            try:
-                snapshots = client.get(self._ovh_snapshot_path(client, "instance"))
-                existing = next(
-                    (
-                        item for item in (snapshots if isinstance(snapshots, list) else [])
-                        if item.get("name") == backup.uuid_str
-                    ),
-                    None,
-                )
-                if existing:
-                    backup.unique_id = existing.get("id")
-                    backup.size_gigabytes = existing.get("size")
-                    backup.save()
-                    return
-                ovh_response = client.post(
-                    f"{self._ovh_resource_path(client, 'instance')}/snapshot",
-                    snapshotName=backup.uuid_str,
-                )
-                # This unique_id will be updated in poll_status() with actual ID from OVH
-                backup.unique_id = backup.uuid_str
-                backup.save()
-            except InvalidCredential:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
-            except Exception as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
-        elif self.node.type == CoreNode.Type.VOLUME:
-            try:
-                snapshots = client.get(self._ovh_snapshot_path(client, "volume"))
-                existing = next(
-                    (
-                        item for item in (snapshots if isinstance(snapshots, list) else [])
-                        if item.get("name") == backup.uuid_str
-                    ),
-                    None,
-                )
-                if existing:
-                    backup.unique_id = existing.get("id")
-                    backup.size_gigabytes = existing.get("size")
-                    backup.save()
-                    return
-                ovh_response = client.post(
-                    f"{self._ovh_resource_path(client, 'volume')}/snapshot",
-                    name=backup.uuid_str,
-                )
-                backup.unique_id = backup.uuid_str
-                backup.save()
-            except InvalidCredential:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
-            except Exception as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
+        try:
+            client = self.node.connection.auth_ovh_eu.get_client()
+            return self._create_ovh_snapshot(backup, client=client, provider="ovh_eu")
+        except NodeBackupFailedError:
+            raise
+        except Exception as error:
+            witness = _backup_provider_witness(
+                backup,
+                provider="ovh_eu",
+                source_id=self.unique_id,
+                resource_type="instance" if self.node.type == CoreNode.Type.CLOUD else "volume",
+                scope={"project_id": self.project_id, "region": self._metadata_region()},
+            )
+            classified = _backup_provider_exception(error)
+            _backup_record_create_failure(backup, witness, classified)
+            _backup_raise_node_error(self.node, backup, classified)
 
     def restore_snapshot(self, backup, restore):
-        import math
-
-        from apps._tasks.exceptions import RestoreCreateError
-
-        client = self.node.connection.auth_ovh_eu.get_client()
-        params = restore.params or {}
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            try:
-                flavor_id = params.get("flavor_id")
-                region = params.get("region")
-                # Fall back to the source instance when options are not supplied;
-                # the snapshot can only be restored in the region it was taken in
-                if not flavor_id or not region:
-                    ovh_instance = client.get(
-                        self._ovh_resource_path(client, "instance")
-                    )
-                    flavor_id = flavor_id or ovh_instance.get("flavorId")
-                    region = region or ovh_instance.get("region")
-                params["region"] = region
-                ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/region/{region}/instance",
-                    flavorId=flavor_id,
-                    name=restore.name,
-                    region=region,
-                    imageId=backup.unique_id,
-                )
-                restore.resource_id = ovh_response["id"]
-                restore.params = params
-                restore.save()
-            except InvalidCredential:
-                raise RestoreCreateError(
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise RestoreCreateError(message=get_error(e))
-            except Exception as e:
-                raise RestoreCreateError(message=get_error(e))
-        elif self.node.type == CoreNode.Type.VOLUME:
-            try:
-                region = params.get("region")
-                size = params.get("size")
-                volume_type = params.get("type")
-                # Fall back to the source volume when options are not supplied
-                if not region or not size or not volume_type:
-                    ovh_volume = client.get(
-                        self._ovh_resource_path(client, "volume")
-                    )
-                    region = region or ovh_volume.get("region")
-                    size = size or ovh_volume.get("size")
-                    volume_type = volume_type or ovh_volume.get("type")
-                # The new volume must be at least the size of the snapshot
-                if backup.size_gigabytes:
-                    size = max(int(size), math.ceil(backup.size_gigabytes))
-                params["region"] = region
-                ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/region/{region}/volume",
-                    region=region,
-                    size=size,
-                    type=volume_type,
-                    snapshotId=backup.unique_id,
-                    name=restore.name,
-                )
-                restore.resource_id = ovh_response["id"]
-                restore.params = params
-                restore.save()
-            except InvalidCredential:
-                raise RestoreCreateError(
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise RestoreCreateError(message=get_error(e))
-            except Exception as e:
-                raise RestoreCreateError(message=get_error(e))
+        try:
+            client = self.node.connection.auth_ovh_eu.get_client()
+            return self._restore_snapshot_ovh(
+                backup,
+                restore,
+                client=client,
+                provider="ovh_eu",
+            )
+        except _RestoreProviderError:
+            raise
+        except Exception as error:
+            return _restore_handle_error(restore, error, mutation=False)
 
     def check_restore(self, restore):
-        from apps.console.backup.models import CoreCloudRestore
-
-        client = self.node.connection.auth_ovh_eu.get_client()
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            ovh_instance = client.get(
-                f"/cloud/project/{self.project_id}/region/"
-                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'instance')}"
-                f"/instance/{restore.resource_id}"
+        try:
+            client = self.node.connection.auth_ovh_eu.get_client()
+            return self._check_restore_ovh(restore, client=client)
+        except Exception as error:
+            return _restore_handle_error(
+                restore, error, mutation=False, raise_terminal=False
             )
-            status = ovh_instance.get("status")
-            if status == "ACTIVE":
-                return CoreCloudRestore.Status.COMPLETE
-            elif status == "ERROR":
-                return CoreCloudRestore.Status.FAILED
-        elif self.node.type == CoreNode.Type.VOLUME:
-            ovh_volume = client.get(
-                f"/cloud/project/{self.project_id}/region/"
-                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'volume')}"
-                f"/volume/{restore.resource_id}"
-            )
-            status = ovh_volume.get("status")
-            if status == "available":
-                return CoreCloudRestore.Status.COMPLETE
-            elif status == "error":
-                return CoreCloudRestore.Status.FAILED
-        return CoreCloudRestore.Status.IN_PROGRESS
 
 
 class CoreOVHUS(_OVHRegionMixin, UtilCloud):
@@ -1414,208 +3822,45 @@ class CoreOVHUS(_OVHRegionMixin, UtilCloud):
         return False
 
     def create_snapshot(self, backup):
-        client = self.node.connection.auth_ovh_us.get_client()
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            try:
-                snapshots = client.get(self._ovh_snapshot_path(client, "instance"))
-                existing = next(
-                    (
-                        item for item in (snapshots if isinstance(snapshots, list) else [])
-                        if item.get("name") == backup.uuid_str
-                    ),
-                    None,
-                )
-                if existing:
-                    backup.unique_id = existing.get("id")
-                    backup.size_gigabytes = existing.get("size")
-                    backup.save()
-                    return
-                ovh_response = client.post(
-                    f"{self._ovh_resource_path(client, 'instance')}/snapshot",
-                    snapshotName=backup.uuid_str,
-                )
-                # This unique_id will be updated in poll_status() with actual ID from OVH
-                backup.unique_id = backup.uuid_str
-                backup.save()
-            except InvalidCredential:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
-            except Exception as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
-        elif self.node.type == CoreNode.Type.VOLUME:
-            try:
-                snapshots = client.get(self._ovh_snapshot_path(client, "volume"))
-                existing = next(
-                    (
-                        item for item in (snapshots if isinstance(snapshots, list) else [])
-                        if item.get("name") == backup.uuid_str
-                    ),
-                    None,
-                )
-                if existing:
-                    backup.unique_id = existing.get("id")
-                    backup.size_gigabytes = existing.get("size")
-                    backup.save()
-                    return
-                ovh_response = client.post(
-                    f"{self._ovh_resource_path(client, 'volume')}/snapshot",
-                    name=backup.uuid_str,
-                )
-                backup.unique_id = backup.uuid_str
-                backup.save()
-            except InvalidCredential:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
-            except Exception as e:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    message=get_error(e)
-                )
+        try:
+            client = self.node.connection.auth_ovh_us.get_client()
+            return self._create_ovh_snapshot(backup, client=client, provider="ovh_us")
+        except NodeBackupFailedError:
+            raise
+        except Exception as error:
+            witness = _backup_provider_witness(
+                backup,
+                provider="ovh_us",
+                source_id=self.unique_id,
+                resource_type="instance" if self.node.type == CoreNode.Type.CLOUD else "volume",
+                scope={"project_id": self.project_id, "region": self._metadata_region()},
+            )
+            classified = _backup_provider_exception(error)
+            _backup_record_create_failure(backup, witness, classified)
+            _backup_raise_node_error(self.node, backup, classified)
 
     def restore_snapshot(self, backup, restore):
-        import math
-
-        from apps._tasks.exceptions import RestoreCreateError
-
-        client = self.node.connection.auth_ovh_us.get_client()
-        params = restore.params or {}
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            try:
-                flavor_id = params.get("flavor_id")
-                region = params.get("region")
-                # Fall back to the source instance when options are not supplied;
-                # the snapshot can only be restored in the region it was taken in
-                if not flavor_id or not region:
-                    ovh_instance = client.get(
-                        self._ovh_resource_path(client, "instance")
-                    )
-                    flavor_id = flavor_id or ovh_instance.get("flavorId")
-                    region = region or ovh_instance.get("region")
-                params["region"] = region
-                ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/region/{region}/instance",
-                    flavorId=flavor_id,
-                    name=restore.name,
-                    region=region,
-                    imageId=backup.unique_id,
-                )
-                restore.resource_id = ovh_response["id"]
-                restore.params = params
-                restore.save()
-            except InvalidCredential:
-                raise RestoreCreateError(
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise RestoreCreateError(message=get_error(e))
-            except Exception as e:
-                raise RestoreCreateError(message=get_error(e))
-        elif self.node.type == CoreNode.Type.VOLUME:
-            try:
-                region = params.get("region")
-                size = params.get("size")
-                volume_type = params.get("type")
-                # Fall back to the source volume when options are not supplied
-                if not region or not size or not volume_type:
-                    ovh_volume = client.get(
-                        self._ovh_resource_path(client, "volume")
-                    )
-                    region = region or ovh_volume.get("region")
-                    size = size or ovh_volume.get("size")
-                    volume_type = volume_type or ovh_volume.get("type")
-                # The new volume must be at least the size of the snapshot
-                if backup.size_gigabytes:
-                    size = max(int(size), math.ceil(backup.size_gigabytes))
-                params["region"] = region
-                ovh_response = client.post(
-                    f"/cloud/project/{self.project_id}/region/{region}/volume",
-                    region=region,
-                    size=size,
-                    type=volume_type,
-                    snapshotId=backup.unique_id,
-                    name=restore.name,
-                )
-                restore.resource_id = ovh_response["id"]
-                restore.params = params
-                restore.save()
-            except InvalidCredential:
-                raise RestoreCreateError(
-                    message="We are unable to connect to your OVH account. "
-                            "Please reconnect your account to refresh authentication token.",
-                )
-            except ResourceConflictError as e:
-                raise RestoreCreateError(message=get_error(e))
-            except Exception as e:
-                raise RestoreCreateError(message=get_error(e))
+        try:
+            client = self.node.connection.auth_ovh_us.get_client()
+            return self._restore_snapshot_ovh(
+                backup,
+                restore,
+                client=client,
+                provider="ovh_us",
+            )
+        except _RestoreProviderError:
+            raise
+        except Exception as error:
+            return _restore_handle_error(restore, error, mutation=False)
 
     def check_restore(self, restore):
-        from apps.console.backup.models import CoreCloudRestore
-
-        client = self.node.connection.auth_ovh_us.get_client()
-
-        if self.node.type == CoreNode.Type.CLOUD:
-            ovh_instance = client.get(
-                f"/cloud/project/{self.project_id}/region/"
-                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'instance')}"
-                f"/instance/{restore.resource_id}"
+        try:
+            client = self.node.connection.auth_ovh_us.get_client()
+            return self._check_restore_ovh(restore, client=client)
+        except Exception as error:
+            return _restore_handle_error(
+                restore, error, mutation=False, raise_terminal=False
             )
-            status = ovh_instance.get("status")
-            if status == "ACTIVE":
-                return CoreCloudRestore.Status.COMPLETE
-            elif status == "ERROR":
-                return CoreCloudRestore.Status.FAILED
-        elif self.node.type == CoreNode.Type.VOLUME:
-            ovh_volume = client.get(
-                f"/cloud/project/{self.project_id}/region/"
-                f"{(restore.params or {}).get('region') or self._ovh_region(client, 'volume')}"
-                f"/volume/{restore.resource_id}"
-            )
-            status = ovh_volume.get("status")
-            if status == "available":
-                return CoreCloudRestore.Status.COMPLETE
-            elif status == "error":
-                return CoreCloudRestore.Status.FAILED
-        return CoreCloudRestore.Status.IN_PROGRESS
 
 
 class CoreAWS(UtilCloud):
@@ -1726,94 +3971,26 @@ class CoreAWS(UtilCloud):
                 backup.save(update_fields=["unique_id", "metadata", "modified"])
                 return
 
-            client = auth.get_client()
-
-            if self.node.type == CoreNode.Type.CLOUD:
-                try:
-                    existing_response = client.describe_images(
-                        Owners=["self"],
-                        Filters=[{"Name": "name", "Values": [backup.uuid_str]}]
-                    )
-                    existing_images = (
-                        existing_response.get("Images", [])
-                        if isinstance(existing_response, dict)
-                        else []
-                    )
-                except ClientError:
-                    # A filtered describe returns an empty list when no image
-                    # exists. Any exception here is an auth/transport failure;
-                    # creating anyway could duplicate an image whose response was
-                    # lost after the provider accepted it.
-                    raise
-                existing = next(
-                    (image for image in existing_images if image.get("ImageId")),
-                    None,
-                )
-                if existing:
-                    backup.unique_id = existing["ImageId"]
-                    backup.save()
-                    return
-                response = client.create_image(
-                    Description=backup.uuid_str,
-                    InstanceId=self.unique_id,
-                    Name=backup.uuid_str,
-                    NoReboot=self.no_reboot,
-                )
-
-                if not response.get("ImageId"):
-                    raise NodeBackupFailedError(self.node,
-                                                backup.uuid_str,
-                                                backup.attempt_no,
-                                                backup.type, f"ImageID not present")
-
-                image_id = response.get("ImageId")
-
-                backup.unique_id = image_id
-                backup.save()
-
-            elif self.node.type == CoreNode.Type.VOLUME:
-                try:
-                    existing_response = client.describe_snapshots(
-                        Filters=[{"Name": "description", "Values": [backup.uuid_str]}]
-                    )
-                    existing_snapshots = (
-                        existing_response.get("Snapshots", [])
-                        if isinstance(existing_response, dict)
-                        else []
-                    )
-                except ClientError:
-                    raise
-                existing = next(
-                    (snapshot for snapshot in existing_snapshots if snapshot.get("SnapshotId")),
-                    None,
-                )
-                if existing:
-                    backup.unique_id = existing["SnapshotId"]
-                    backup.size_gigabytes = round(
-                        int(existing.get("VolumeSize", 0)), 2
-                    )
-                    backup.save()
-                    return
-                response = client.create_snapshot(
-                    Description=backup.uuid_str,
-                    VolumeId=self.unique_id,
-                )
-
-                if not response.get("SnapshotId"):
-                    raise NodeBackupFailedError(self.node,
-                                                backup.uuid_str,
-                                                backup.attempt_no,
-                                                backup.type, f"SnapshotId not present.")
-
-                snapshot_id = response.get("SnapshotId")
-                backup.unique_id = snapshot_id
-                backup.save()
+            # EC2 AMIs and EBS snapshots are owned by the durable backup row.
+            # It persists the immutable request witness, provider pointer,
+            # reconciliation state, and fencing token around every mutation.
+            return backup.create_snapshot(task_id=backup.celery_task_id or None)
         except Exception as e:
             raise NodeBackupFailedError(
                 self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
             )
 
+    # The provider-agnostic AWS restore implementation is defined once above
+    # the provider classes; bind its helpers here so EC2, EBS, S3, and DynamoDB
+    # all share the same fenced reconciliation contract.
+    _find_aws_backup_restore_job = CoreDigitalOcean._find_aws_backup_restore_job
+    _aws_restore_instances = staticmethod(CoreDigitalOcean._aws_restore_instances)
+    _aws_find_restore_resource = CoreDigitalOcean._aws_find_restore_resource
+    _restore_snapshot_aws = CoreDigitalOcean._restore_snapshot_aws
+    _check_restore_aws = CoreDigitalOcean._check_restore_aws
+
     def restore_snapshot(self, backup, restore):
+        return self._restore_snapshot_aws(backup, restore)
         auth = self.node.connection.auth_aws
         params = restore.params or {}
 
@@ -2006,6 +4183,7 @@ class CoreAWS(UtilCloud):
             restore.save()
 
     def check_restore(self, restore):
+        return self._check_restore_aws(restore)
         from apps.console.backup.models import CoreCloudRestore
 
         auth = self.node.connection.auth_aws
@@ -2256,7 +4434,213 @@ class CoreLightsail(UtilCloud):
                 return None
             page_token = next_page_token
 
+    def _find_lightsail_restore_target(self, client, restore):
+        try:
+            if self.resource_type == self.ResourceType.DATABASE:
+                response = client.get_relational_database(relationalDatabaseName=restore.name)
+                target = response.get("relationalDatabase") if isinstance(response, dict) else None
+            elif self.node.type == CoreNode.Type.CLOUD:
+                response = client.get_instance(instanceName=restore.name)
+                target = response.get("instance") if isinstance(response, dict) else None
+            else:
+                response = client.get_disk(diskName=restore.name)
+                target = response.get("disk") if isinstance(response, dict) else None
+        except ClientError as error:
+            classified = _restore_exception(error)
+            if classified.code == "PROVIDER_NOT_FOUND":
+                return None
+            raise classified
+        if target is None:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        return target
+
+    def _restore_snapshot_lightsail(self, backup, restore):
+        client = self.node.connection.auth_lightsail.get_client()
+        target_kind = "database" if self.resource_type == self.ResourceType.DATABASE else (
+            "instance" if self.node.type == CoreNode.Type.CLOUD else "disk"
+        )
+        marker, params = _prepare_cloud_restore(
+            restore,
+            provider="lightsail",
+            source_id=backup.unique_id,
+            target_kind=target_kind,
+            target_name=restore.name,
+        )
+        if restore.resource_id:
+            return
+        try:
+            # Names are Lightsail's only stable create-time identity. On a lost
+            # response the exact GET is therefore the provider reconciliation
+            # operation; source snapshot fields are checked whenever returned.
+            if _restore_unknown(restore):
+                existing = self._find_lightsail_restore_target(client, restore)
+                if not existing:
+                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                if not _restore_verify_target(
+                    restore,
+                    existing,
+                    source_id=backup.unique_id,
+                    marker=marker,
+                    source_keys=(
+                        "snapshotName", "instanceSnapshotName", "diskSnapshotName",
+                        "relationalDatabaseSnapshotName", "sourceSnapshotName",
+                    ),
+                ):
+                    return _restore_status("FAILED")
+                return _restore_adopt(restore, existing.get("name") or restore.name, provider_status=existing.get("state"))
+
+            if self.resource_type == self.ResourceType.DATABASE:
+                snapshot = self._find_relational_database_snapshot(client, backup.unique_id)
+                if not snapshot:
+                    return _restore_safe_failure(restore, "PROVIDER_NOT_FOUND")
+                availability_zone = self._concrete_availability_zone(
+                    params.get("availability_zone") or params.get("availabilityZone")
+                ) or self._concrete_availability_zone((snapshot.get("location") or {}).get("availabilityZone"))
+                bundle_id = params.get("bundle_id") or params.get("relationalDatabaseBundleId") or snapshot.get("fromRelationalDatabaseBundleId")
+                if not availability_zone or not bundle_id:
+                    response = client.get_relational_database(relationalDatabaseName=self.unique_id)
+                    source_database = response.get("relationalDatabase") if isinstance(response, dict) else None
+                    if not isinstance(source_database, dict):
+                        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                    availability_zone = availability_zone or self._concrete_availability_zone((source_database.get("location") or {}).get("availabilityZone"))
+                    bundle_id = bundle_id or source_database.get("relationalDatabaseBundleId")
+                if not availability_zone or not bundle_id:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                request = {
+                    "relationalDatabaseName": restore.name,
+                    "relationalDatabaseSnapshotName": backup.unique_id,
+                    "availabilityZone": availability_zone,
+                    "relationalDatabaseBundleId": bundle_id,
+                }
+                publicly_accessible = params.get("publicly_accessible")
+                if publicly_accessible is None:
+                    publicly_accessible = params.get("publiclyAccessible")
+                if publicly_accessible is not None:
+                    request["publiclyAccessible"] = publicly_accessible
+                _restore_begin_mutation(restore)
+                response = client.create_relational_database_from_snapshot(**request)
+                operations = response.get("operations") if isinstance(response, dict) else None
+                if self._lightsail_operation_failed(operations):
+                    _restore_clear_unknown(restore)
+                    return _restore_safe_failure(restore, "PROVIDER_FAILED")
+                return _restore_adopt(restore, restore.name, provider_status=(operations[0].get("status") if operations else "started"), params_update={"availability_zone": availability_zone, "bundle_id": bundle_id})
+
+            if self.node.type == CoreNode.Type.CLOUD:
+                availability_zone = self._concrete_availability_zone(params.get("availability_zone"))
+                if not availability_zone:
+                    response = client.get_instance_snapshot(instanceSnapshotName=backup.unique_id)
+                    availability_zone = self._concrete_availability_zone((response.get("instanceSnapshot") or {}).get("location", {}).get("availabilityZone"))
+                if not availability_zone:
+                    response = client.get_instance(instanceName=self.unique_id)
+                    availability_zone = self._concrete_availability_zone((response.get("instance") or {}).get("location", {}).get("availabilityZone"))
+                if not availability_zone:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                bundle_id = params.get("bundle_id")
+                if not bundle_id:
+                    response = client.get_instance(instanceName=self.unique_id)
+                    bundle_id = (response.get("instance") or {}).get("bundleId")
+                if not bundle_id:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                _restore_begin_mutation(restore)
+                client.create_instances_from_snapshot(
+                    instanceNames=[restore.name],
+                    instanceSnapshotName=backup.unique_id,
+                    availabilityZone=availability_zone,
+                    bundleId=bundle_id,
+                )
+                return _restore_adopt(restore, restore.name, params_update={"availability_zone": availability_zone, "bundle_id": bundle_id})
+
+            availability_zone = self._concrete_availability_zone(params.get("availability_zone"))
+            if not availability_zone:
+                response = client.get_disk_snapshot(diskSnapshotName=backup.unique_id)
+                availability_zone = self._concrete_availability_zone((response.get("diskSnapshot") or {}).get("location", {}).get("availabilityZone"))
+            if not availability_zone:
+                response = client.get_disk(diskName=self.unique_id)
+                availability_zone = self._concrete_availability_zone((response.get("disk") or {}).get("location", {}).get("availabilityZone"))
+            if not availability_zone:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            _restore_begin_mutation(restore)
+            client.create_disk_from_snapshot(
+                diskName=restore.name,
+                diskSnapshotName=backup.unique_id,
+                availabilityZone=availability_zone,
+                sizeInGb=int(backup.size_gigabytes),
+            )
+            return _restore_adopt(restore, restore.name, params_update={"availability_zone": availability_zone})
+        except Exception as error:
+            if isinstance(error, _RestoreProviderError):
+                if error.retryable:
+                    return _restore_handle_error(restore, error, mutation=error.unknown_outcome)
+                _restore_safe_failure(restore, error.code, manual_review=error.code in {
+                    "PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH", "PROVIDER_RECONCILIATION_REQUIRED"
+                })
+                raise
+            return _restore_handle_error(restore, error, mutation=True)
+
+    def _check_restore_lightsail(self, restore):
+        client = self.node.connection.auth_lightsail.get_client()
+        if not restore.resource_id:
+            if not _restore_unknown(restore):
+                return _restore_status("IN_PROGRESS")
+            try:
+                target = self._find_lightsail_restore_target(client, restore)
+                if not target:
+                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                if not _restore_verify_target(
+                    restore,
+                    target,
+                    source_id=(_restore_params(restore).get("_backupsheep_restore") or {}).get("source_id"),
+                    marker=_restore_marker_value(restore),
+                    source_keys=("snapshotName", "instanceSnapshotName", "diskSnapshotName", "relationalDatabaseSnapshotName", "sourceSnapshotName"),
+                ):
+                    return _restore_status("FAILED")
+                _restore_adopt(restore, target.get("name") or restore.name, provider_status=target.get("state"))
+            except Exception as error:
+                return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+        try:
+            if self.resource_type == self.ResourceType.DATABASE:
+                response = client.get_relational_database(relationalDatabaseName=restore.resource_id)
+                target = response.get("relationalDatabase") if isinstance(response, dict) else None
+                state = target.get("state") if isinstance(target, dict) else None
+                terminal = {"failed", "error", "restore-error", "incompatible-network", "incompatible-parameters", "storage-full"}
+            elif self.node.type == CoreNode.Type.CLOUD:
+                response = client.get_instance(instanceName=restore.resource_id)
+                target = response.get("instance") if isinstance(response, dict) else None
+                state = ((target or {}).get("state") or {}).get("name") if isinstance(target, dict) else None
+                terminal = {"error", "failed", "terminated"}
+            else:
+                response = client.get_disk(diskName=restore.resource_id)
+                target = response.get("disk") if isinstance(response, dict) else None
+                state = target.get("state") if isinstance(target, dict) else None
+                terminal = {"error", "failed", "terminated"}
+            if not _restore_verify_target(
+                restore,
+                target,
+                source_id=(_restore_params(restore).get("_backupsheep_restore") or {}).get("source_id"),
+                marker=_restore_marker_value(restore),
+                source_keys=("snapshotName", "instanceSnapshotName", "diskSnapshotName", "relationalDatabaseSnapshotName", "sourceSnapshotName"),
+            ):
+                return _restore_status("FAILED")
+            if state in ({"available"} if self.resource_type == self.ResourceType.DATABASE else {"running"} if self.node.type == CoreNode.Type.CLOUD else {"available"}):
+                restore.operation_phase = _restore_phase("COMPLETE")
+                restore.save(update_fields=["operation_phase", "modified"])
+                return _restore_status("COMPLETE")
+            if state in terminal:
+                return _restore_safe_failure(restore, "PROVIDER_FAILED")
+            if not state:
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            return _restore_status("IN_PROGRESS")
+        except Exception as error:
+            # Old restore rows predate the marker contract. Preserve their
+            # historical short propagation window for a just-created Lightsail
+            # resource, while new rows classify 404 as a terminal provider error.
+            classified = _restore_exception(error, mutation=False)
+            if classified.code == "PROVIDER_NOT_FOUND" and not (_restore_params(restore).get("_bs_marker_required")):
+                return _restore_status("IN_PROGRESS")
+            return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+
     def restore_snapshot(self, backup, restore):
+        return self._restore_snapshot_lightsail(backup, restore)
         try:
             client = self.node.connection.auth_lightsail.get_client()
             params = restore.params or {}
@@ -2407,6 +4791,7 @@ class CoreLightsail(UtilCloud):
             raise Exception(get_error(e))
 
     def check_restore(self, restore):
+        return self._check_restore_lightsail(restore)
         from apps.console.backup.models import CoreCloudRestore
 
         client = self.node.connection.auth_lightsail.get_client()
@@ -2528,7 +4913,126 @@ class CoreAWSRDS(UtilCloud):
         backup.size_gigabytes = snapshot["DBSnapshot"]["AllocatedStorage"]
         backup.save()
 
+    @staticmethod
+    def _restore_identifier(restore):
+        identifier = re.sub(r"[^a-zA-Z0-9-]", "-", str(restore.name))
+        identifier = re.sub(r"-+", "-", identifier)
+        identifier = re.sub(r"^[^a-zA-Z]+", "", identifier)
+        return identifier[:63].rstrip("-")
+
+    def _restore_snapshot_rds(self, backup, restore):
+        client = self.node.connection.auth_aws_rds.get_client()
+        identifier = self._restore_identifier(restore)
+        if not identifier:
+            _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE")
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        params = _restore_params(restore)
+        marker, params = _prepare_cloud_restore(
+            restore,
+            provider="aws_rds",
+            source_id=backup.unique_id,
+            target_kind="db_instance",
+            target_name=identifier,
+        )
+        if restore.resource_id:
+            return
+        try:
+            existing = None
+            try:
+                response = client.describe_db_instances(DBInstanceIdentifier=identifier)
+                instances = response.get("DBInstances") if isinstance(response, dict) else None
+                if not isinstance(instances, list):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                if len(instances) > 1:
+                    raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+                existing = instances[0] if instances else None
+            except ClientError as error:
+                classified = _restore_exception(error)
+                if classified.code != "PROVIDER_NOT_FOUND":
+                    raise classified
+            if existing:
+                if not _restore_verify_target(
+                    restore,
+                    existing,
+                    source_id=backup.unique_id,
+                    marker=marker,
+                    source_keys=("DBSnapshotIdentifier",),
+                ):
+                    return _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+                if _restore_unknown(restore):
+                    _restore_adopt(restore, identifier, provider_status=existing.get("DBInstanceStatus"))
+                    return
+                return _restore_safe_failure(restore, "PROVIDER_FAILED", manual_review=True)
+            if _restore_unknown(restore):
+                return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+
+            request = {
+                "DBInstanceIdentifier": identifier,
+                "DBSnapshotIdentifier": backup.unique_id,
+                "Tags": [
+                    {"Key": "BackupSheepRestore", "Value": marker},
+                    {"Key": "BackupSheepSource", "Value": str(backup.unique_id)},
+                ],
+            }
+            for key, provider_key in (
+                ("db_instance_class", "DBInstanceClass"),
+                ("db_subnet_group_name", "DBSubnetGroupName"),
+                ("multi_az", "MultiAZ"),
+                ("publicly_accessible", "PubliclyAccessible"),
+                ("vpc_security_group_ids", "VpcSecurityGroupIds"),
+                ("storage_type", "StorageType"),
+            ):
+                if params.get(key) is not None:
+                    request[provider_key] = params[key]
+            _restore_begin_mutation(restore)
+            client.restore_db_instance_from_db_snapshot(**request)
+            _restore_adopt(restore, identifier, provider_status="creating")
+        except Exception as error:
+            if isinstance(error, _RestoreProviderError):
+                if error.retryable:
+                    return _restore_handle_error(restore, error, mutation=error.unknown_outcome)
+                _restore_safe_failure(restore, error.code, manual_review=error.code in {
+                    "PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH", "PROVIDER_DUPLICATE_MATCH", "PROVIDER_RECONCILIATION_REQUIRED"
+                })
+                raise
+            return _restore_handle_error(restore, error, mutation=True)
+
+    def _check_restore_rds(self, restore):
+        client = self.node.connection.auth_aws_rds.get_client()
+        if not restore.resource_id:
+            return _restore_status("IN_PROGRESS")
+        try:
+            response = client.describe_db_instances(DBInstanceIdentifier=restore.resource_id)
+            instances = response.get("DBInstances") if isinstance(response, dict) else None
+            if not isinstance(instances, list) or len(instances) != 1:
+                return _restore_safe_failure(restore, "PROVIDER_NOT_FOUND")
+            instance = instances[0]
+            if not _restore_verify_target(
+                restore,
+                instance,
+                source_id=(_restore_params(restore).get("_backupsheep_restore") or {}).get("source_id"),
+                marker=_restore_marker_value(restore),
+                source_keys=("DBSnapshotIdentifier",),
+            ):
+                return _restore_status("FAILED")
+            status = instance.get("DBInstanceStatus")
+            if status == "available":
+                restore.operation_phase = _restore_phase("COMPLETE")
+                restore.save(update_fields=["operation_phase", "modified"])
+                return _restore_status("COMPLETE")
+            if status in {"failed", "incompatible-restore", "incompatible-network", "incompatible-parameters", "deleted"}:
+                return _restore_safe_failure(restore, "PROVIDER_FAILED")
+            if status not in {"creating", "backing-up", "modifying", "rebooting", "starting", "stopped", "available"}:
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            return _restore_status("IN_PROGRESS")
+        except Exception as error:
+            classified = _restore_exception(error, mutation=False)
+            if classified.code == "PROVIDER_NOT_FOUND" and not (_restore_params(restore).get("_bs_marker_required")):
+                return _restore_status("IN_PROGRESS")
+            return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+
     def restore_snapshot(self, backup, restore):
+        return self._restore_snapshot_rds(backup, restore)
         import re
 
         client = self.node.connection.auth_aws_rds.get_client()
@@ -2574,6 +5078,7 @@ class CoreAWSRDS(UtilCloud):
         restore.save()
 
     def check_restore(self, restore):
+        return self._check_restore_rds(restore)
         from apps.console.backup.models import CoreCloudRestore
 
         client = self.node.connection.auth_aws_rds.get_client()
@@ -2632,22 +5137,30 @@ class CoreVultrDatabase(UtilCloud):
         return VultrDatabaseCapabilities(self.engine, self.plan)
 
     def validate(self):
+        from apps.console.vultr_database import safe_vultr_database_record
+
         try:
             database = self.client.get_database(self.unique_id)
             self.provider_status = str(database.get("status") or "")
-            self.metadata = database
+            self.metadata = safe_vultr_database_record(database)
             self.save(update_fields=["provider_status", "metadata", "modified"])
             return bool(database) and self.provider_status.lower() not in {
                 "failed", "error", "deleted"
             }
-        except Exception:
+        except Exception as error:
+            capture_exception(error)
             return False
 
     def refresh_metadata(self):
+        from apps.console.vultr_database import safe_vultr_database_record
+
         database = self.client.get_database(self.unique_id)
         usage = self.client.get_usage(self.unique_id)
         self.provider_status = str(database.get("status") or "")
-        self.metadata = {"database": database, "usage": usage}
+        self.metadata = {
+            "database": safe_vultr_database_record(database),
+            "usage": safe_vultr_database_record(usage),
+        }
         self.save(update_fields=["provider_status", "metadata", "modified"])
         return self.metadata
 
@@ -2656,18 +5169,24 @@ class CoreVultrDatabase(UtilCloud):
         from apps.console.backup.models import CoreVultrDatabaseBackup
         from apps.console.vultr_database import (
             VultrDatabaseDuplicateError,
+            VultrDatabaseError,
             provider_backup_id,
             provider_backup_state,
+            safe_vultr_database_message,
+            safe_vultr_database_record,
         )
 
         self.capabilities().require_backup_support()
         records = self.client.list_backup_records(self.unique_id)
         if not records:
-            raise ValueError(
-                f"Vultr returned no managed-database backup metadata for {self.unique_id}."
+            raise VultrDatabaseError(
+                None,
+                category="not_found",
             )
         record = records[0]
         provider_id = provider_backup_id(record)
+        if not provider_id:
+            raise VultrDatabaseError(None, category="malformed_response")
         marker = f"vultr-db:{self.unique_id}:{provider_id}"
         existing = CoreVultrDatabaseBackup.objects.filter(
             vultr_database=self, provider_marker=marker
@@ -2688,7 +5207,7 @@ class CoreVultrDatabase(UtilCloud):
             "engine": self.engine,
             "region": self.region,
             "plan": self.plan,
-            "provider_backup": record,
+            "provider_backup": safe_vultr_database_record(record),
         }
         backup.save()
 
@@ -2705,6 +5224,8 @@ class CoreVultrDatabase(UtilCloud):
             VultrDatabaseDuplicateError,
             VultrDatabaseError,
             provider_database_id,
+            safe_vultr_database_message,
+            safe_vultr_database_record,
         )
         from apps.console.backup.models import CoreVultrDatabaseRestore
 
@@ -2722,13 +5243,14 @@ class CoreVultrDatabase(UtilCloud):
             # The label is the durable idempotency marker.  Check the requested
             # placement and plan whenever Vultr includes those fields, while
             # remaining compatible with older list responses that omit them.
-            if (
-                database.get("region") not in (None, "")
-                and str(database["region"]).casefold() != str(region).casefold()
-            ):
+            if not _vultr_same_region(database.get("region"), region):
                 return False
             if database.get("plan") not in (None, "") and str(database["plan"]) != str(plan):
                 return False
+            for source_key in ("source_database_id", "database_id", "parent_id", "source_id"):
+                source_value = database.get(source_key)
+                if source_value not in (None, "") and str(source_value) != str(self.unique_id):
+                    return False
             return True
 
         # Commit the marker and the pre-create state before any provider fork
@@ -2760,7 +5282,7 @@ class CoreVultrDatabase(UtilCloud):
                 )
                 locked.provider_status = duplicate_error.category
                 locked.status = locked.Status.FAILED
-                locked.error = str(duplicate_error)
+                locked.error = safe_vultr_database_message(duplicate_error.category)
                 locked.save(
                     update_fields=[
                         "provider_marker", "params", "provider_status", "status", "error", "modified"
@@ -2772,7 +5294,7 @@ class CoreVultrDatabase(UtilCloud):
                 )
                 locked.provider_status = duplicate_error.category
                 locked.status = locked.Status.FAILED
-                locked.error = str(duplicate_error)
+                locked.error = safe_vultr_database_message(duplicate_error.category)
                 locked.save(
                     update_fields=[
                         "provider_marker", "params", "provider_status", "status", "error", "modified"
@@ -2781,7 +5303,9 @@ class CoreVultrDatabase(UtilCloud):
             elif candidates:
                 locked.resource_id = str(candidates[0]["id"])
                 locked.provider_status = "adopted"
-                locked.metadata = {"adopted_database": candidates[0]}
+                locked.metadata = {
+                    "adopted_database": safe_vultr_database_record(candidates[0])
+                }
                 locked.save(
                     update_fields=[
                         "provider_marker", "params", "resource_id", "provider_status", "metadata",
@@ -2830,14 +5354,17 @@ class CoreVultrDatabase(UtilCloud):
         except VultrDatabaseError as error:
             with transaction.atomic():
                 locked = CoreVultrDatabaseRestore.objects.select_for_update().get(pk=restore.pk)
-                locked.provider_status = "create_unknown" if error.category in {
-                    "rate_limited", "transient_outage"
-                } else error.category
+                unknown_outcome = bool(getattr(error, "unknown_outcome", False)) or error.category in {
+                    "timeout", "transient_outage"
+                }
+                locked.provider_status = "create_unknown" if unknown_outcome else error.category
                 locked.provider_http_status = error.status_code
-                locked.error = str(error)
+                locked.error = safe_vultr_database_message(
+                    error.category, error.status_code
+                )
                 locked.status = (
                     locked.Status.IN_PROGRESS
-                    if error.category in {"rate_limited", "transient_outage"}
+                    if error.category in {"rate_limited", "timeout", "transient_outage"}
                     else locked.Status.FAILED
                 )
                 locked.save(
@@ -2853,7 +5380,7 @@ class CoreVultrDatabase(UtilCloud):
                 locked.resource_id = resource_id
                 locked.provider_job_id = provider_job_id
                 locked.provider_status = "in_progress"
-                locked.metadata = payload
+                locked.metadata = safe_vultr_database_record(payload)
                 locked.status = locked.Status.IN_PROGRESS
                 locked.save(
                     update_fields=[
@@ -2862,13 +5389,20 @@ class CoreVultrDatabase(UtilCloud):
                 )
 
     def check_restore(self, restore):
-        from apps.console.vultr_database import VultrDatabaseError
+        from apps.console.vultr_database import (
+            VultrDatabaseError,
+            safe_vultr_database_record,
+        )
 
         try:
             if not restore.resource_id:
                 return restore.Status.IN_PROGRESS
             database = self.client.get_database(restore.resource_id)
+            if not isinstance(database, dict) or not database.get("id"):
+                raise VultrDatabaseError(None, category="malformed_response")
             state = str(database.get("status") or "").lower()
+            if not state:
+                raise VultrDatabaseError(None, category="malformed_response")
             params = restore.params or {}
             if restore.provider_marker and database.get("label") != restore.provider_marker:
                 restore.provider_status = "ownership_mismatch"
@@ -2893,7 +5427,7 @@ class CoreVultrDatabase(UtilCloud):
                     restore.status = restore.Status.FAILED
                     restore.save(update_fields=["provider_status", "error", "status", "modified"])
                     return restore.status
-            restore.metadata = database
+            restore.metadata = safe_vultr_database_record(database)
             restore.provider_status = state
             if state in {"running", "active", "available"}:
                 restore.status = restore.Status.COMPLETE
@@ -2907,11 +5441,21 @@ class CoreVultrDatabase(UtilCloud):
             restore.provider_status = error.category
             restore.provider_http_status = error.status_code
             restore.metadata = {"error": error.category, "status_code": error.status_code}
-            if error.category in {"rate_limited", "transient_outage"}:
+            if error.category in {"rate_limited", "timeout", "transient_outage"}:
                 restore.status = restore.Status.IN_PROGRESS
             else:
                 restore.status = restore.Status.FAILED
-            restore.save()
+            restore.error = _vultr_safe_message(
+                {
+                    "auth_failed": "PROVIDER_AUTH_FAILED",
+                    "not_found": "PROVIDER_NOT_FOUND",
+                    "rate_limited": "PROVIDER_RATE_LIMIT",
+                    "timeout": "PROVIDER_TIMEOUT",
+                    "transient_outage": "PROVIDER_TRANSIENT_OUTAGE",
+                    "malformed_response": "PROVIDER_MALFORMED_RESPONSE",
+                }.get(error.category, "PROVIDER_REQUEST_FAILED")
+            )
+            restore.save(update_fields=["provider_status", "provider_http_status", "metadata", "error", "status", "modified"])
             return restore.status
 
 
@@ -2929,33 +5473,48 @@ class CoreVultr(UtilCloud):
 
     def validate(self):
         node_ok = False
-        client = self.node.connection.auth_vultr.get_client()
-        if self.node.type == CoreNode.Type.CLOUD:
-            result = requests.get(
-                f"{settings.VULTR_API}/v2/instances/{self.unique_id}",
-                headers=client,
-                verify=True,
-                timeout=vultr_request_timeout(),
-            )
-            if result.status_code == 200:
-                instance = result.json()["instance"]
-                if instance["status"] == "active":
-                    node_ok = True
-        elif self.node.type == CoreNode.Type.VOLUME:
-            result = requests.get(
-                f"{settings.VULTR_API}/v2/blocks/{self.unique_id}",
-                headers=client,
-                verify=True,
-                timeout=vultr_request_timeout(),
-            )
-            if result.status_code == 200:
-                block = result.json()["block"]
-                if block["status"] == "active":
-                    node_ok = True
+        try:
+            client = self.node.connection.auth_vultr.get_client()
+            if self.node.type == CoreNode.Type.CLOUD:
+                result = requests.get(
+                    f"{settings.VULTR_API}/v2/instances/{self.unique_id}",
+                    headers=client,
+                    verify=True,
+                    timeout=vultr_request_timeout(),
+                )
+                try:
+                    if result.status_code == 200:
+                        payload = result.json()
+                        instance = payload.get("instance") if isinstance(payload, dict) else None
+                        node_ok = isinstance(instance, dict) and instance.get("status") == "active"
+                finally:
+                    result.close()
+            elif self.node.type == CoreNode.Type.VOLUME:
+                result = requests.get(
+                    f"{settings.VULTR_API}/v2/blocks/{self.unique_id}",
+                    headers=client,
+                    verify=True,
+                    timeout=vultr_request_timeout(),
+                )
+                try:
+                    if result.status_code == 200:
+                        payload = result.json()
+                        block = payload.get("block") if isinstance(payload, dict) else None
+                        node_ok = isinstance(block, dict) and block.get("status") == "active"
+                finally:
+                    result.close()
+        except Exception as error:
+            capture_exception(error)
         return node_ok
 
     def create_snapshot(self, backup):
-        client = self.node.connection.auth_vultr.get_client()
+        try:
+            client = self.node.connection.auth_vultr.get_client()
+        except Exception as error:
+            capture_exception(error)
+            _raise_vultr_backup_failure(
+                self.node, backup, "PROVIDER_AUTH_FAILED", cause=error
+            )
         source_key = "instance_id" if self.node.type == CoreNode.Type.CLOUD else "block_id"
         backup.metadata = record_snapshot_ownership(
             backup.metadata,
@@ -2976,14 +5535,13 @@ class CoreVultr(UtilCloud):
                     item_key="snapshots",
                     verify=True,
                 ))
+            except NodeBackupFailedError:
+                raise
             except Exception as error:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    "Unable to verify existing Vultr snapshots before creating a new one.",
-                ) from error
+                capture_exception(error)
+                _raise_vultr_backup_failure(
+                    self.node, backup, "PROVIDER_TRANSIENT_OUTAGE", cause=error
+                )
 
             described = [
                 snapshot for snapshot in snapshots
@@ -3001,158 +5559,154 @@ class CoreVultr(UtilCloud):
                 )
                 for snapshot in described
             ):
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    "A Vultr snapshot description matched, but its source did not.",
+                _raise_vultr_backup_failure(
+                    self.node, backup, "PROVIDER_OWNERSHIP_MISMATCH"
                 )
             if len(described) > 1:
-                raise NodeBackupFailedError(
-                    self.node,
-                    backup.uuid_str,
-                    backup.attempt_no,
-                    backup.type,
-                    "Multiple Vultr snapshots matched this backup; refusing to choose one.",
+                _raise_vultr_backup_failure(
+                    self.node, backup, "PROVIDER_DUPLICATE_MATCH"
                 )
             return described[0] if described else None
 
-        if self.node.type == CoreNode.Type.CLOUD:
+        def create_snapshot_request(path, request_body, response_key, source_key):
             try:
-                existing = existing_snapshot("/v2/snapshots", "instance_id")
+                existing = existing_snapshot(path, source_key)
                 if existing:
                     if not snapshot_matches_with_recorded_source(
                         existing,
                         provider_id=existing.get("id"),
                         source_id=self.unique_id,
                         description=backup.uuid_str,
-                        source_key="instance_id",
+                        source_key=source_key,
                         ownership=(backup.metadata or {}).get("vultr_ownership"),
                     ):
-                        raise NodeBackupFailedError(
-                            self.node, backup.uuid_str, backup.attempt_no, backup.type,
-                            "Existing Vultr snapshot failed ownership verification.",
+                        _raise_vultr_backup_failure(
+                            self.node, backup, "PROVIDER_OWNERSHIP_MISMATCH"
                         )
                     backup.unique_id = existing.get("id")
                     backup.metadata = record_snapshot_ownership(
-                        existing,
+                        _safe_vultr_record(existing),
                         source_id=self.unique_id,
-                        source_key="instance_id",
+                        source_key=source_key,
                     )
-                    backup.save()
-                    return
-                result = requests.post(
-                    f"{settings.VULTR_API}/v2/snapshots",
-                    headers=client,
-                    json={"instance_id": self.unique_id, "description": backup.uuid_str},
-                    verify=True,
-                    timeout=vultr_request_timeout(),
-                )
-                if result.status_code == 201:
-                    snapshot = result.json()["snapshot"]
-                    backup.unique_id = snapshot["id"]
-                    backup.metadata = record_snapshot_ownership(
-                        snapshot,
-                        source_id=self.unique_id,
-                        source_key="instance_id",
-                    )
-                    backup.save()
-                elif result.status_code == 502:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "Invalid response from Vultr API. We will try again shortly.",
-                    )
-                elif result.status_code == 429:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "API rate limit exceeded. We will try again shortly.",
-                    )
-                elif result.status_code == 401:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "Unable to connect to your Vultr account. Please reconnect your account to refresh authentication token.",
-                    )
-                else:
-                    raise NodeBackupFailedError(self.node, backup.uuid_str, backup.attempt_no, backup.type,
-                                                f"API call returned with status {result.status_code}")
-            except Exception as e:
-                raise NodeBackupFailedError(
-                    self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
-                )
-        elif self.node.type == CoreNode.Type.VOLUME:
-            try:
-                # Block storage snapshots are created under /v2/blocks/snapshots and
-                # the API returns the snapshot object at top level (no wrapper key).
-                existing = existing_snapshot("/v2/blocks/snapshots", "block_id")
-                if existing:
-                    if not snapshot_matches_with_recorded_source(
-                        existing,
-                        provider_id=existing.get("id"),
-                        source_id=self.unique_id,
-                        description=backup.uuid_str,
-                        source_key="block_id",
-                        ownership=(backup.metadata or {}).get("vultr_ownership"),
-                    ):
-                        raise NodeBackupFailedError(
-                            self.node, backup.uuid_str, backup.attempt_no, backup.type,
-                            "Existing Vultr snapshot failed ownership verification.",
+                    if source_key == "block_id":
+                        backup.size_gigabytes = round(
+                            int(existing.get("size", 0)) / (1000 ** 3), 2
                         )
-                    backup.unique_id = existing.get("id")
-                    backup.metadata = record_snapshot_ownership(
-                        existing,
-                        source_id=self.unique_id,
-                        source_key="block_id",
-                    )
-                    backup.size_gigabytes = round(
-                        int(existing.get("size", 0)) / (1000 ** 3), 2
-                    )
                     backup.save()
                     return
-                result = requests.post(
-                    f"{settings.VULTR_API}/v2/blocks/snapshots",
-                    headers=client,
-                    json={"block_id": self.unique_id, "description": backup.uuid_str},
-                    verify=True,
-                    timeout=vultr_request_timeout(),
+
+                # A timeout, transport failure, 5xx, or malformed success
+                # response may mean Vultr accepted the mutation. Reconcile the
+                # deterministic description first; never issue a second POST
+                # while this fence is set.
+                if (backup.metadata or {}).get("vultr_create_outcome_unknown"):
+                    _raise_vultr_backup_failure(
+                        self.node, backup, "PROVIDER_RECONCILIATION_REQUIRED"
+                    )
+
+                try:
+                    result = requests.post(
+                        f"{settings.VULTR_API}{path}",
+                        headers=client,
+                        json=request_body,
+                        verify=True,
+                        timeout=vultr_request_timeout(),
+                    )
+                except requests.Timeout as error:
+                    capture_exception(error)
+                    backup.metadata = {
+                        **(backup.metadata or {}),
+                        "vultr_create_outcome_unknown": True,
+                    }
+                    backup.save(update_fields=["metadata", "modified"])
+                    _raise_vultr_backup_failure(
+                        self.node, backup, "PROVIDER_TIMEOUT", cause=error
+                    )
+                except requests.RequestException as error:
+                    capture_exception(error)
+                    backup.metadata = {
+                        **(backup.metadata or {}),
+                        "vultr_create_outcome_unknown": True,
+                    }
+                    backup.save(update_fields=["metadata", "modified"])
+                    _raise_vultr_backup_failure(
+                        self.node, backup, "PROVIDER_TRANSIENT_OUTAGE", cause=error
+                    )
+
+                try:
+                    status_code = int(result.status_code)
+                    if status_code == 201:
+                        try:
+                            payload = result.json()
+                            snapshot = payload.get(response_key) if response_key else payload
+                            if not isinstance(snapshot, dict) or not snapshot.get("id"):
+                                raise ValueError("missing snapshot id")
+                        except (TypeError, ValueError, KeyError) as error:
+                            capture_exception(error)
+                            backup.metadata = {
+                                **(backup.metadata or {}),
+                                "vultr_create_outcome_unknown": True,
+                            }
+                            backup.save(update_fields=["metadata", "modified"])
+                            _raise_vultr_backup_failure(
+                                self.node, backup, "PROVIDER_MALFORMED_RESPONSE", cause=error
+                            )
+                        backup.unique_id = str(snapshot["id"])
+                        backup.metadata = record_snapshot_ownership(
+                            _safe_vultr_record(snapshot),
+                            source_id=self.unique_id,
+                            source_key=source_key,
+                        )
+                        backup.save()
+                        return
+
+                    if status_code in (401, 403):
+                        code = "PROVIDER_AUTH_FAILED"
+                    elif status_code == 404:
+                        code = "PROVIDER_NOT_FOUND"
+                    elif status_code == 429:
+                        code = "PROVIDER_RATE_LIMIT"
+                    elif status_code in (408, 425) or status_code >= 500:
+                        code = "PROVIDER_TRANSIENT_OUTAGE"
+                    else:
+                        code = "PROVIDER_REQUEST_FAILED"
+                    if code == "PROVIDER_TRANSIENT_OUTAGE":
+                        backup.metadata = {
+                            **(backup.metadata or {}),
+                            "vultr_create_outcome_unknown": True,
+                        }
+                        backup.save(update_fields=["metadata", "modified"])
+                    _raise_vultr_backup_failure(self.node, backup, code)
+                finally:
+                    close = getattr(result, "close", None)
+                    if close:
+                        close()
+            except NodeBackupFailedError:
+                raise
+            except Exception as error:
+                capture_exception(error)
+                _raise_vultr_backup_failure(
+                    self.node, backup, "PROVIDER_REQUEST_FAILED", cause=error
                 )
-                if result.status_code == 201:
-                    snapshot = result.json()
-                    backup.unique_id = snapshot["id"]
-                    backup.metadata = record_snapshot_ownership(
-                        snapshot,
-                        source_id=self.unique_id,
-                        source_key="block_id",
-                    )
-                    backup.save()
-                elif result.status_code == 502:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "Invalid response from Vultr API. We will try again shortly.",
-                    )
-                elif result.status_code == 429:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "API rate limit exceeded. We will try again shortly.",
-                    )
-                elif result.status_code == 401:
-                    raise NodeBackupFailedError(
-                        self.node,
-                        backup.uuid_str, backup.attempt_no, backup.type,
-                        "Unable to connect to your Vultr account. Please reconnect your account to refresh authentication token.",
-                    )
-                else:
-                    raise NodeBackupFailedError(self.node, backup.uuid_str, backup.attempt_no, backup.type,
-                                                f"API call returned with status {result.status_code}")
-            except Exception as e:
-                raise NodeBackupFailedError(
-                    self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
+
+        try:
+            if self.node.type == CoreNode.Type.CLOUD:
+                return create_snapshot_request(
+                    "/v2/snapshots",
+                    {"instance_id": self.unique_id, "description": backup.uuid_str},
+                    "snapshot",
+                    "instance_id",
                 )
+            if self.node.type == CoreNode.Type.VOLUME:
+                return create_snapshot_request(
+                    "/v2/blocks/snapshots",
+                    {"block_id": self.unique_id, "description": backup.uuid_str},
+                    None,
+                    "block_id",
+                )
+        except NodeBackupFailedError:
+            raise
 
     def restore_snapshot(self, backup, restore):
         """Adopt or create a new Vultr restore target exactly once.
@@ -3167,7 +5721,12 @@ class CoreVultr(UtilCloud):
 
         from apps.console.backup.models import CoreCloudRestore
 
-        client = self.node.connection.auth_vultr.get_client()
+        try:
+            client = self.node.connection.auth_vultr.get_client()
+        except Exception as error:
+            capture_exception(error)
+            _restore_safe_failure(restore, "PROVIDER_AUTH_FAILED")
+            raise _RestoreProviderError("PROVIDER_AUTH_FAILED") from error
         timeout = vultr_request_timeout()
         params = restore.params or {}
         source_snapshot_id = str(backup.unique_id)
@@ -3186,26 +5745,27 @@ class CoreVultr(UtilCloud):
             restore.error = message
             restore.save(update_fields=["status", "operation_phase", "error", "modified"])
 
-        def _provider_error(status_code, operation):
-            if status_code in (401, 403):
-                return (
-                    f"Vultr authorization failed while {operation} (HTTP {status_code})."
-                ), "terminal"
-            if status_code == 404:
-                return f"Vultr resource was not found while {operation}.", "terminal"
-            if status_code == 429:
-                return f"Vultr rate limit while {operation}; restore will resume.", "transient"
-            if status_code >= 500:
-                return f"Vultr server error while {operation} (HTTP {status_code}); restore will resume.", "transient"
-            return f"Vultr API returned HTTP {status_code} while {operation}.", "terminal"
+        def _provider_error(status_code, operation, *, mutation=False):
+            classified = _restore_http_class(
+                SimpleNamespace(status_code=status_code), mutation=mutation
+            )
+            if classified is None:
+                return None, None, None, False
+            return (
+                _restore_message(classified.code),
+                "transient" if classified.retryable else "terminal",
+                classified.code,
+                classified.unknown_outcome,
+            )
 
         def _json_payload(response, operation):
             try:
                 payload = response.json()
             except (TypeError, ValueError) as error:
-                return None, f"Malformed Vultr response while {operation}: {error}"
+                capture_exception(error)
+                return None, _restore_message("PROVIDER_MALFORMED_RESPONSE")
             if not isinstance(payload, dict):
-                return None, f"Malformed Vultr response while {operation}: expected an object."
+                return None, _restore_message("PROVIDER_MALFORMED_RESPONSE")
             return payload, None
 
         def _source_details():
@@ -3230,21 +5790,41 @@ class CoreVultr(UtilCloud):
                     verify=True,
                     timeout=timeout,
                 )
-            except (requests.Timeout, requests.ConnectionError) as error:
-                return None, None, (f"Vultr source lookup timed out: {error}", "transient")
+            except requests.Timeout as error:
+                capture_exception(error)
+                return None, None, (
+                    _restore_message("PROVIDER_TIMEOUT"), "transient", "PROVIDER_TIMEOUT"
+                )
+            except requests.RequestException as error:
+                capture_exception(error)
+                return None, None, (
+                    _restore_message("PROVIDER_TRANSIENT_OUTAGE"),
+                    "transient",
+                    "PROVIDER_TRANSIENT_OUTAGE",
+                )
 
             try:
                 if response.status_code != 200:
-                    message, kind = _provider_error(response.status_code, "reading the source resource")
-                    return None, None, (message, kind)
+                    message, kind, code, _unknown = _provider_error(
+                        response.status_code, "reading the source resource"
+                    )
+                    return None, None, (message, kind, code)
                 payload, malformed = _json_payload(response, "reading the source resource")
                 source = payload.get(resource_key) if payload else None
                 if malformed or not isinstance(source, dict):
-                    return None, None, (malformed or "Malformed Vultr source response.", "terminal")
+                    return None, None, (
+                        malformed or _restore_message("PROVIDER_MALFORMED_RESPONSE"),
+                        "terminal",
+                        "PROVIDER_MALFORMED_RESPONSE",
+                    )
                 region = region or source.get("region")
                 plan = plan or source.get("plan") or source.get("size_gb")
                 if not region or not plan:
-                    return None, None, ("Vultr source response omitted required restore parameters.", "terminal")
+                    return None, None, (
+                        _restore_message("PROVIDER_MALFORMED_RESPONSE"),
+                        "terminal",
+                        "PROVIDER_MALFORMED_RESPONSE",
+                    )
                 return region, plan, None
             finally:
                 close = getattr(response, "close", None)
@@ -3253,15 +5833,14 @@ class CoreVultr(UtilCloud):
 
         region, target_size, source_error = _source_details()
         if source_error:
-            message, kind = source_error
+            message, kind, code = source_error
             if kind == "transient":
-                restore.status = CoreCloudRestore.Status.IN_PROGRESS
+                _record_restore_retryable_error(restore, code)
                 restore.operation_phase = CoreCloudRestore.OperationPhase.RECONCILING
-                restore.error = message
-                restore.save(update_fields=["status", "operation_phase", "error", "modified"])
+                restore.save(update_fields=["operation_phase", "modified"])
                 return CoreCloudRestore.Status.IN_PROGRESS
-            _save_failure(message)
-            raise Exception(message)
+            _restore_safe_failure(restore, code or "PROVIDER_REQUEST_FAILED")
+            raise _RestoreProviderError(code or "PROVIDER_REQUEST_FAILED")
 
         fingerprint_data = {
             "provider": "vultr",
@@ -3330,31 +5909,37 @@ class CoreVultr(UtilCloud):
                         verify=True,
                         timeout=timeout,
                     )
-                except (requests.Timeout, requests.ConnectionError) as error:
-                    return None, f"Vultr reconciliation lookup timed out: {error}", "transient"
+                except requests.Timeout as error:
+                    capture_exception(error)
+                    return None, _restore_message("PROVIDER_TIMEOUT"), "transient", "PROVIDER_TIMEOUT"
+                except requests.RequestException as error:
+                    capture_exception(error)
+                    return None, _restore_message("PROVIDER_TRANSIENT_OUTAGE"), "transient", "PROVIDER_TRANSIENT_OUTAGE"
                 try:
                     if response.status_code != 200:
-                        message, kind = _provider_error(response.status_code, "reconciling the restore")
-                        return None, message, kind
+                        message, kind, code, _unknown = _provider_error(
+                            response.status_code, "reconciling the restore"
+                        )
+                        return None, message, kind, code
                     payload, malformed = _json_payload(response, "reconciling the restore")
                     if malformed:
-                        return None, malformed, "terminal"
+                        return None, malformed, "terminal", "PROVIDER_MALFORMED_RESPONSE"
                     page_items = payload.get(key)
                     if not isinstance(page_items, list) or any(
                         not isinstance(item, dict) for item in page_items
                     ):
-                        return None, f"Malformed Vultr reconciliation response: missing {key}.", "terminal"
+                        return None, _restore_message("PROVIDER_MALFORMED_RESPONSE"), "terminal", "PROVIDER_MALFORMED_RESPONSE"
                     items.extend(page_items)
                     links = (payload.get("meta") or {}).get("links") or {}
                     if not isinstance(links, dict):
-                        return None, "Malformed Vultr reconciliation pagination links.", "terminal"
+                        return None, _restore_message("PROVIDER_MALFORMED_RESPONSE"), "terminal", "PROVIDER_MALFORMED_RESPONSE"
                     next_cursor = links.get("next")
                     if next_cursor in (None, ""):
-                        return items, None, None
+                        return items, None, None, None
                     if not isinstance(next_cursor, str) or not next_cursor.strip():
-                        return None, "Malformed Vultr reconciliation pagination cursor.", "terminal"
+                        return None, _restore_message("PROVIDER_MALFORMED_RESPONSE"), "terminal", "PROVIDER_MALFORMED_RESPONSE"
                     if next_cursor in seen_cursors:
-                        return None, "Vultr pagination repeated the same cursor.", "terminal"
+                        return None, _restore_message("PROVIDER_MALFORMED_RESPONSE"), "terminal", "PROVIDER_MALFORMED_RESPONSE"
                     seen_cursors.add(next_cursor)
                     cursor = next_cursor
                     request_params = {"per_page": 500, "cursor": cursor}
@@ -3371,13 +5956,13 @@ class CoreVultr(UtilCloud):
                 return (
                     marker in tags
                     and str(resource.get("snapshot_id")) == source_snapshot_id
-                    and resource.get("region") == region
+                    and _vultr_same_region(resource.get("region"), region)
                     and resource.get("plan") == target_size
                 )
             return (
                 resource.get("label") == marker
                 and str(resource.get("snapshot_id")) == source_snapshot_id
-                and resource.get("region") == region
+                and _vultr_same_region(resource.get("region"), region)
                 and str(resource.get("size_gb")) == str(target_size)
             )
 
@@ -3390,7 +5975,9 @@ class CoreVultr(UtilCloud):
             return resource.get("label") == marker
 
         failure = None
+        failure_code = None
         transient = None
+        transient_code = None
         create_request = None
 
         # Reconcile while holding the restore-row lock.  If no target exists,
@@ -3404,31 +5991,37 @@ class CoreVultr(UtilCloud):
                 return None
             marker = locked.restore_marker
             if self.node.type == CoreNode.Type.CLOUD:
-                candidates, message, kind = _list_candidates("/v2/instances", "instances")
+                candidates, message, kind, code = _list_candidates("/v2/instances", "instances")
             else:
-                candidates, message, kind = _list_candidates("/v2/blocks", "blocks")
+                candidates, message, kind, code = _list_candidates("/v2/blocks", "blocks")
             if message:
                 if kind == "transient":
                     transient = message
+                    transient_code = code or "PROVIDER_TRANSIENT_OUTAGE"
                 else:
                     failure = message
+                    failure_code = code or "PROVIDER_REQUEST_FAILED"
             else:
                 marked_candidates = [resource for resource in candidates if _has_marker(resource)]
                 matches = [resource for resource in candidates if _matches(resource)]
                 if marked_candidates and len(marked_candidates) != 1:
-                    failure = "Multiple Vultr resources matched the restore marker; manual review required."
+                    failure = _restore_message("PROVIDER_DUPLICATE_MATCH")
+                    failure_code = "PROVIDER_DUPLICATE_MATCH"
                     locked.operation_phase = CoreCloudRestore.OperationPhase.MANUAL_REVIEW
                 elif marked_candidates and not matches:
-                    failure = "A Vultr resource matched the restore marker but not the requested snapshot or target parameters; manual review required."
+                    failure = _restore_message("PROVIDER_OWNERSHIP_MISMATCH")
+                    failure_code = "PROVIDER_OWNERSHIP_MISMATCH"
                     locked.operation_phase = CoreCloudRestore.OperationPhase.MANUAL_REVIEW
                 elif len(matches) > 1:
-                    failure = "Multiple Vultr resources matched the restore marker; manual review required."
+                    failure = _restore_message("PROVIDER_DUPLICATE_MATCH")
+                    failure_code = "PROVIDER_DUPLICATE_MATCH"
                     locked.operation_phase = CoreCloudRestore.OperationPhase.MANUAL_REVIEW
                 elif len(matches) == 1:
                     adopted = matches[0]
                     resource_id = adopted.get("id")
                     if not resource_id:
-                        failure = "Matched Vultr restore resource omitted its id."
+                        failure = _restore_message("PROVIDER_MALFORMED_RESPONSE")
+                        failure_code = "PROVIDER_MALFORMED_RESPONSE"
                     else:
                         locked.resource_id = str(resource_id)
                         locked.status = CoreCloudRestore.Status.IN_PROGRESS
@@ -3441,10 +6034,15 @@ class CoreVultr(UtilCloud):
                         )
                         _copy_restore_state(locked)
                 elif locked.operation_phase == CoreCloudRestore.OperationPhase.CREATE_UNKNOWN:
-                    transient = "Vultr restore create outcome is unknown; waiting for provider reconciliation."
+                    code = "PROVIDER_RECONCILIATION_REQUIRED"
+                    transient = _restore_message(code)
                     locked.status = CoreCloudRestore.Status.IN_PROGRESS
                     locked.error = transient
-                    locked.save(update_fields=["status", "error", "modified"])
+                    params_state = _restore_params(locked)
+                    params_state["_bs_last_error_code"] = code
+                    params_state["_bs_last_error_category"] = "unknown_outcome"
+                    locked.params = params_state
+                    locked.save(update_fields=["params", "status", "error", "modified"])
                 else:
                     if self.node.type == CoreNode.Type.CLOUD:
                         create_payload = {
@@ -3466,7 +6064,7 @@ class CoreVultr(UtilCloud):
                         endpoint = f"{settings.VULTR_API}/v2/blocks"
                     locked.status = CoreCloudRestore.Status.IN_PROGRESS
                     locked.operation_phase = CoreCloudRestore.OperationPhase.CREATE_UNKNOWN
-                    locked.error = "Vultr restore create request is in progress; waiting for its outcome."
+                    locked.error = _restore_message("PROVIDER_UNKNOWN_OUTCOME")
                     locked.save(update_fields=["status", "operation_phase", "error", "modified"])
                     create_request = (endpoint, create_payload)
 
@@ -3482,11 +6080,21 @@ class CoreVultr(UtilCloud):
                 if locked.operation_phase == CoreCloudRestore.OperationPhase.PENDING:
                     locked.operation_phase = CoreCloudRestore.OperationPhase.RECONCILING
                 locked.error = transient
-                locked.save(update_fields=["status", "operation_phase", "error", "modified"])
+                params_state = _restore_params(locked)
+                params_state["_bs_last_error_code"] = transient_code or "PROVIDER_TRANSIENT_OUTAGE"
+                params_state["_bs_last_error_category"] = "retryable"
+                locked.params = params_state
+                locked.save(update_fields=["params", "status", "operation_phase", "error", "modified"])
                 _copy_restore_state(locked)
 
         if failure:
-            raise Exception(failure)
+            _restore_safe_failure(
+                restore,
+                failure_code or "PROVIDER_REQUEST_FAILED",
+                manual_review=failure_code
+                in {"PROVIDER_DUPLICATE_MATCH", "PROVIDER_OWNERSHIP_MISMATCH"},
+            )
+            raise _RestoreProviderError(failure_code or "PROVIDER_REQUEST_FAILED")
         if transient:
             return CoreCloudRestore.Status.IN_PROGRESS
         if not create_request:
@@ -3501,14 +6109,17 @@ class CoreVultr(UtilCloud):
                 verify=True,
                 timeout=timeout,
             )
-        except (requests.Timeout, requests.ConnectionError) as error:
-            transient = f"Vultr restore create outcome is unknown after a network failure: {error}"
-            with transaction.atomic():
-                locked = CoreCloudRestore.objects.select_for_update().get(pk=restore.pk)
-                locked.status = CoreCloudRestore.Status.IN_PROGRESS
-                locked.operation_phase = CoreCloudRestore.OperationPhase.CREATE_UNKNOWN
-                locked.error = transient
-                locked.save(update_fields=["status", "operation_phase", "error", "modified"])
+        except requests.Timeout as error:
+            capture_exception(error)
+            _restore_unknown_outcome(restore, code="PROVIDER_TIMEOUT")
+            return CoreCloudRestore.Status.IN_PROGRESS
+        except requests.RequestException as error:
+            capture_exception(error)
+            _restore_unknown_outcome(restore, code="PROVIDER_TRANSIENT_OUTAGE")
+            return CoreCloudRestore.Status.IN_PROGRESS
+        except Exception as error:
+            capture_exception(error)
+            _restore_unknown_outcome(restore, code="PROVIDER_TRANSIENT_OUTAGE")
             return CoreCloudRestore.Status.IN_PROGRESS
 
         try:
@@ -3517,7 +6128,8 @@ class CoreVultr(UtilCloud):
                 response_payload, malformed = _json_payload(response, "creating the restore")
                 created = response_payload.get(key) if response_payload else None
                 if malformed or not isinstance(created, dict) or not created.get("id"):
-                    transient = malformed or "Malformed Vultr restore create response; outcome is unknown."
+                    _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                    return CoreCloudRestore.Status.IN_PROGRESS
                 else:
                     with transaction.atomic():
                         locked = CoreCloudRestore.objects.select_for_update().get(pk=restore.pk)
@@ -3526,48 +6138,47 @@ class CoreVultr(UtilCloud):
                             locked.status = CoreCloudRestore.Status.IN_PROGRESS
                             locked.operation_phase = CoreCloudRestore.OperationPhase.POLLING
                             locked.error = ""
+                            params_state = _restore_params(locked)
+                            params_state["_bs_create_outcome_unknown"] = False
+                            params_state["_bs_last_error_code"] = ""
+                            params_state["_bs_last_error_category"] = ""
+                            locked.params = params_state
                             locked.save(
                                 update_fields=[
-                                    "resource_id", "status", "operation_phase", "error", "modified"
+                                    "resource_id", "params", "status", "operation_phase", "error", "modified"
                                 ]
                             )
                     return None
             else:
-                provider_message, provider_kind = _provider_error(
-                    response.status_code, "creating the restore"
+                provider_message, provider_kind, provider_code, unknown_outcome = _provider_error(
+                    response.status_code, "creating the restore", mutation=True
                 )
                 if provider_kind == "transient":
-                    transient = provider_message
+                    if unknown_outcome:
+                        _restore_unknown_outcome(restore, code=provider_code)
+                    else:
+                        _record_restore_retryable_error(restore, provider_code)
+                    return CoreCloudRestore.Status.IN_PROGRESS
                 else:
-                    failure = provider_message
+                    _restore_safe_failure(restore, provider_code or "PROVIDER_REQUEST_FAILED")
+                    raise _RestoreProviderError(provider_code or "PROVIDER_REQUEST_FAILED")
         finally:
             close = getattr(response, "close", None)
             if close:
                 close()
 
-        with transaction.atomic():
-            locked = CoreCloudRestore.objects.select_for_update().get(pk=restore.pk)
-            if failure:
-                locked.status = CoreCloudRestore.Status.FAILED
-                locked.operation_phase = CoreCloudRestore.OperationPhase.FAILED
-                locked.error = failure
-            else:
-                locked.status = CoreCloudRestore.Status.IN_PROGRESS
-                locked.operation_phase = CoreCloudRestore.OperationPhase.CREATE_UNKNOWN
-                locked.error = transient
-            locked.save(update_fields=["status", "operation_phase", "error", "modified"])
-
-        if failure:
-            raise Exception(failure)
-        return CoreCloudRestore.Status.IN_PROGRESS
-
     def check_restore(self, restore):
         from apps.console.backup.models import CoreCloudRestore
 
-        client = self.node.connection.auth_vultr.get_client()
+        try:
+            client = self.node.connection.auth_vultr.get_client()
+        except Exception as error:
+            capture_exception(error)
+            _restore_safe_failure(restore, "PROVIDER_AUTH_FAILED")
+            return CoreCloudRestore.Status.FAILED
         timeout = vultr_request_timeout()
 
-        def record(message, phase=None):
+        def record(code, phase=None):
             if phase is not None:
                 restore.operation_phase = phase
                 if phase in {
@@ -3577,11 +6188,23 @@ class CoreVultr(UtilCloud):
                     restore.status = CoreCloudRestore.Status.FAILED
                 else:
                     restore.status = CoreCloudRestore.Status.IN_PROGRESS
-            restore.error = message
-            restore.save(update_fields=["status", "operation_phase", "error", "modified"])
+            params = _restore_params(restore)
+            params["_bs_last_error_code"] = str(code)
+            params["_bs_last_error_category"] = (
+                "retryable"
+                if str(code) in {"PROVIDER_RATE_LIMIT", "PROVIDER_TIMEOUT", "PROVIDER_TRANSIENT_OUTAGE"}
+                else "terminal"
+            )
+            restore.params = params
+            restore.error = _restore_message(code)
+            fields = ["params", "status", "operation_phase", "error", "modified"]
+            if hasattr(restore, "last_error_code"):
+                restore.last_error_code = str(code)
+                fields.append("last_error_code")
+            restore.save(update_fields=list(dict.fromkeys(fields)))
 
         if not restore.resource_id:
-            record("Vultr restore has no provider resource id yet.", CoreCloudRestore.OperationPhase.RECONCILING)
+            record("PROVIDER_RECONCILIATION_REQUIRED", CoreCloudRestore.OperationPhase.RECONCILING)
             return CoreCloudRestore.Status.IN_PROGRESS
 
         if self.node.type == CoreNode.Type.CLOUD:
@@ -3598,44 +6221,41 @@ class CoreVultr(UtilCloud):
                 verify=True,
                 timeout=timeout,
             )
-        except (requests.Timeout, requests.ConnectionError) as error:
-            record(f"Vultr restore status check temporarily unavailable: {error}", CoreCloudRestore.OperationPhase.POLLING)
+        except requests.Timeout as error:
+            capture_exception(error)
+            record("PROVIDER_TIMEOUT", CoreCloudRestore.OperationPhase.POLLING)
+            return CoreCloudRestore.Status.IN_PROGRESS
+        except requests.RequestException as error:
+            capture_exception(error)
+            record("PROVIDER_TRANSIENT_OUTAGE", CoreCloudRestore.OperationPhase.POLLING)
             return CoreCloudRestore.Status.IN_PROGRESS
 
         try:
-            if result.status_code in (429,) or result.status_code >= 500:
-                record(
-                    f"Vultr restore status check returned transient HTTP {result.status_code}.",
-                    CoreCloudRestore.OperationPhase.POLLING,
-                )
+            if result.status_code == 429:
+                record("PROVIDER_RATE_LIMIT", CoreCloudRestore.OperationPhase.POLLING)
                 return CoreCloudRestore.Status.IN_PROGRESS
-            if result.status_code in (401, 403, 404):
-                record(
-                    f"Vultr restore target is unavailable (HTTP {result.status_code}).",
-                    CoreCloudRestore.OperationPhase.FAILED,
-                )
+            if result.status_code in (408, 425) or result.status_code >= 500:
+                record("PROVIDER_TRANSIENT_OUTAGE", CoreCloudRestore.OperationPhase.POLLING)
+                return CoreCloudRestore.Status.IN_PROGRESS
+            if result.status_code in (401, 403):
+                record("PROVIDER_AUTH_FAILED", CoreCloudRestore.OperationPhase.FAILED)
+                return CoreCloudRestore.Status.FAILED
+            if result.status_code == 404:
+                record("PROVIDER_NOT_FOUND", CoreCloudRestore.OperationPhase.FAILED)
                 return CoreCloudRestore.Status.FAILED
             if result.status_code != 200:
-                record(
-                    f"Vultr restore status check returned HTTP {result.status_code}.",
-                    CoreCloudRestore.OperationPhase.FAILED,
-                )
+                record("PROVIDER_REQUEST_FAILED", CoreCloudRestore.OperationPhase.FAILED)
                 return CoreCloudRestore.Status.FAILED
 
             try:
                 payload = result.json()
                 resource = payload.get(key)
             except (TypeError, ValueError, AttributeError) as error:
-                record(
-                    f"Malformed Vultr restore status response: {error}",
-                    CoreCloudRestore.OperationPhase.FAILED,
-                )
+                capture_exception(error)
+                record("PROVIDER_MALFORMED_RESPONSE", CoreCloudRestore.OperationPhase.FAILED)
                 return CoreCloudRestore.Status.FAILED
             if not isinstance(resource, dict) or not resource.get("status"):
-                record(
-                    "Malformed Vultr restore status response.",
-                    CoreCloudRestore.OperationPhase.FAILED,
-                )
+                record("PROVIDER_MALFORMED_RESPONSE", CoreCloudRestore.OperationPhase.FAILED)
                 return CoreCloudRestore.Status.FAILED
 
             # New restores must prove ownership on every status read. Legacy
@@ -3649,7 +6269,10 @@ class CoreVultr(UtilCloud):
                     owned = (
                         restore.restore_marker in tags
                         and str(resource.get("snapshot_id")) == str(restore.backup.unique_id)
-                        and resource.get("region") == (restore.params or {}).get("region", resource.get("region"))
+                        and _vultr_same_region(
+                            resource.get("region"),
+                            (restore.params or {}).get("region", resource.get("region")),
+                        )
                         and resource.get("plan") == (restore.params or {}).get("plan", resource.get("plan"))
                     )
                 else:
@@ -3657,14 +6280,13 @@ class CoreVultr(UtilCloud):
                     owned = (
                         resource.get("label") == restore.restore_marker
                         and str(resource.get("snapshot_id")) == str(restore.backup.unique_id)
-                        and resource.get("region") == params.get("region", resource.get("region"))
+                        and _vultr_same_region(
+                            resource.get("region"), params.get("region", resource.get("region"))
+                        )
                         and str(resource.get("size_gb")) == str(params.get("size_gb", resource.get("size_gb")))
                     )
                 if not owned:
-                    record(
-                        "Vultr restore target failed ownership verification; manual review required.",
-                        CoreCloudRestore.OperationPhase.MANUAL_REVIEW,
-                    )
+                    record("PROVIDER_OWNERSHIP_MISMATCH", CoreCloudRestore.OperationPhase.MANUAL_REVIEW)
                     return CoreCloudRestore.Status.FAILED
 
             status = str(resource["status"]).lower()
@@ -3675,10 +6297,7 @@ class CoreVultr(UtilCloud):
                 restore.save(update_fields=["status", "operation_phase", "error", "modified"])
                 return CoreCloudRestore.Status.COMPLETE
             if status in {"suspended", "failed", "error", "destroyed", "terminated"}:
-                record(
-                    f"Vultr restore target entered terminal state: {status}.",
-                    CoreCloudRestore.OperationPhase.FAILED,
-                )
+                record("PROVIDER_FAILED", CoreCloudRestore.OperationPhase.FAILED)
                 return CoreCloudRestore.Status.FAILED
             restore.operation_phase = CoreCloudRestore.OperationPhase.POLLING
             restore.status = CoreCloudRestore.Status.IN_PROGRESS
@@ -3830,7 +6449,193 @@ class CoreOracle(UtilCloud):
                     self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
                 )
 
+    @staticmethod
+    def _oracle_resource_dict(resource):
+        if isinstance(resource, dict):
+            return resource
+        return {
+            "id": getattr(resource, "id", None),
+            "display_name": getattr(resource, "display_name", None),
+            "lifecycle_state": getattr(resource, "lifecycle_state", None),
+            "freeform_tags": getattr(resource, "freeform_tags", None),
+            "source_backup_id": getattr(resource, "source_backup_id", None),
+        }
+
+    def _find_oracle_restore_resource(self, client, restore, *, volume_type, compartment_id, availability_domain=None):
+        method_name = "list_boot_volumes" if volume_type == "boot" else "list_volumes"
+        method = getattr(client, method_name)
+        resources = []
+        page = None
+        seen = set()
+        while True:
+            request = {"compartment_id": compartment_id, "display_name": restore.name}
+            if availability_domain:
+                request["availability_domain"] = availability_domain
+            if page:
+                request["page"] = page
+            response = method(**request)
+            data = getattr(response, "data", None)
+            if data is None and isinstance(response, dict):
+                data = response.get("data")
+            if not isinstance(data, list):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            resources.extend(self._oracle_resource_dict(item) for item in data)
+            next_page = getattr(response, "opc_next_page", None)
+            if next_page is None and isinstance(response, dict):
+                next_page = response.get("opc-next-page")
+            if not next_page:
+                break
+            if next_page in seen:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            seen.add(next_page)
+            page = next_page
+        matches = [item for item in resources if item.get("display_name") == restore.name]
+        if len(matches) > 1:
+            raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+        return matches
+
+    def _restore_snapshot_oracle(self, backup, restore):
+        import oci
+        from oci.core.models import (
+            BootVolumeSourceFromBootVolumeBackupDetails,
+            CreateBootVolumeDetails,
+            CreateVolumeDetails,
+        )
+
+        if self.node.type != CoreNode.Type.VOLUME:
+            _restore_safe_failure(restore, "PROVIDER_FAILED")
+            raise _RestoreProviderError("PROVIDER_FAILED")
+        config = self.node.connection.auth_oracle.get_client()
+        client = oci.core.BlockstorageClient(config)
+        params = _restore_params(restore)
+        volume_type = (self.metadata or {}).get("_bs_vol_type")
+        target_kind = "boot_volume" if volume_type == "boot" else "volume"
+        marker, params = _prepare_cloud_restore(
+            restore,
+            provider="oracle",
+            source_id=backup.unique_id,
+            target_kind=target_kind,
+            target_name=restore.name,
+        )
+        if restore.resource_id:
+            return
+        try:
+            compartment_id = params.get("compartment_id")
+            availability_domain = params.get("availability_domain")
+            if not compartment_id or not availability_domain:
+                source = (
+                    client.get_boot_volume(self.unique_id).data
+                    if volume_type == "boot"
+                    else client.get_volume(self.unique_id).data
+                )
+                compartment_id = compartment_id or getattr(source, "compartment_id", None)
+                availability_domain = availability_domain or getattr(source, "availability_domain", None)
+            if not compartment_id:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            if _restore_unknown(restore):
+                matches = self._find_oracle_restore_resource(
+                    client,
+                    restore,
+                    volume_type=volume_type,
+                    compartment_id=compartment_id,
+                    availability_domain=availability_domain,
+                )
+                if not matches:
+                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                candidate = _restore_candidates(
+                    restore,
+                    matches,
+                    source_id=backup.unique_id,
+                    marker=marker,
+                    marker_match=lambda item, value: _restore_marker_matches(item, value),
+                    source_match=lambda item, source: _restore_source_matches(item, source, "source_backup_id"),
+                )
+                if candidate:
+                    return
+
+            tags = {"BACKUPSHEEP_RESTORE": marker, "BACKUPSHEEP_SOURCE": str(backup.unique_id)}
+            if volume_type == "boot":
+                details = CreateBootVolumeDetails(
+                    compartment_id=compartment_id,
+                    availability_domain=availability_domain,
+                    display_name=restore.name,
+                    freeform_tags=tags,
+                    source_details=BootVolumeSourceFromBootVolumeBackupDetails(id=backup.unique_id),
+                )
+                _restore_begin_mutation(restore)
+                response = client.create_boot_volume(create_boot_volume_details=details)
+            elif volume_type == "block":
+                details = CreateVolumeDetails(
+                    compartment_id=compartment_id,
+                    availability_domain=availability_domain,
+                    display_name=restore.name,
+                    freeform_tags=tags,
+                    volume_backup_id=backup.unique_id,
+                )
+                _restore_begin_mutation(restore)
+                response = client.create_volume(create_volume_details=details)
+            else:
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            problem = _restore_sdk_status(response, mutation=True)
+            if problem:
+                if problem.code == "PROVIDER_RATE_LIMIT":
+                    _restore_clear_unknown(restore)
+                    return _restore_handle_error(restore, problem, mutation=False)
+                return _restore_handle_error(restore, problem, mutation=True)
+            resource_id = getattr(getattr(response, "data", None), "id", None)
+            if resource_id is None and isinstance(response, dict):
+                resource_id = (response.get("data") or {}).get("id")
+            if not resource_id:
+                _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                return _restore_status("IN_PROGRESS")
+            _restore_adopt(restore, resource_id, provider_status=getattr(getattr(response, "data", None), "lifecycle_state", None), params_update={"compartment_id": compartment_id, "availability_domain": availability_domain})
+        except Exception as error:
+            if isinstance(error, _RestoreProviderError):
+                if error.retryable:
+                    return _restore_handle_error(restore, error, mutation=error.unknown_outcome)
+                _restore_safe_failure(restore, error.code, manual_review=error.code in {
+                    "PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH", "PROVIDER_DUPLICATE_MATCH", "PROVIDER_RECONCILIATION_REQUIRED"
+                })
+                raise
+            return _restore_handle_error(restore, error, mutation=True)
+
+    def _check_restore_oracle(self, restore):
+        import oci
+        from oci.core.models import BootVolume, Volume
+
+        client = oci.core.BlockstorageClient(self.node.connection.auth_oracle.get_client())
+        volume_type = (self.metadata or {}).get("_bs_vol_type")
+        try:
+            response = client.get_boot_volume(restore.resource_id) if volume_type == "boot" else client.get_volume(restore.resource_id)
+            problem = _restore_sdk_status(response)
+            if problem:
+                return _restore_handle_error(restore, problem, mutation=False, raise_terminal=False)
+            data = self._oracle_resource_dict(getattr(response, "data", None))
+            if not _restore_verify_target(
+                restore,
+                data,
+                source_id=(_restore_params(restore).get("_backupsheep_restore") or {}).get("source_id"),
+                marker=_restore_marker_value(restore),
+                source_keys=("source_backup_id",),
+            ):
+                return _restore_status("FAILED")
+            state = data.get("lifecycle_state")
+            available = BootVolume.LIFECYCLE_STATE_AVAILABLE if volume_type == "boot" else Volume.LIFECYCLE_STATE_AVAILABLE
+            faulty = BootVolume.LIFECYCLE_STATE_FAULTY if volume_type == "boot" else Volume.LIFECYCLE_STATE_FAULTY
+            if state == available:
+                restore.operation_phase = _restore_phase("COMPLETE")
+                restore.save(update_fields=["operation_phase", "modified"])
+                return _restore_status("COMPLETE")
+            if state == faulty:
+                return _restore_safe_failure(restore, "PROVIDER_FAILED")
+            if not state:
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            return _restore_status("IN_PROGRESS")
+        except Exception as error:
+            return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+
     def restore_snapshot(self, backup, restore):
+        return self._restore_snapshot_oracle(backup, restore)
         import oci
         from oci.core.models import (
             BootVolumeSourceFromBootVolumeBackupDetails,
@@ -3892,6 +6697,7 @@ class CoreOracle(UtilCloud):
                 raise Exception(f"Unable to restore snapshot: {get_error(e)}")
 
     def check_restore(self, restore):
+        return self._check_restore_oracle(restore)
         from apps.console.backup.models import CoreCloudRestore
         import oci
         from oci.core.models import BootVolume, Volume
@@ -4132,7 +6938,184 @@ class CoreGoogleCloud(UtilCloud):
                     self.node, backup.uuid_str, backup.attempt_no, backup.type, message=get_error(e)
                 )
 
+    def _google_restore_path(self, *, resource_type, name, zone):
+        return (
+            f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{self.project_id}"
+            f"/zones/{zone}/{resource_type}/{name}"
+        )
+
+    def _find_google_restore_resource(self, client, restore, *, resource_type, zone):
+        response = client.get(self._google_restore_path(resource_type=resource_type, name=restore.name, zone=zone))
+        problem = _restore_http_class(response)
+        if problem:
+            if problem.code == "PROVIDER_NOT_FOUND":
+                return None
+            raise problem
+        try:
+            resource = response.json()
+        except Exception:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if not isinstance(resource, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        return resource
+
+    def _restore_snapshot_google(self, backup, restore):
+        client = self.node.connection.auth_google_cloud.get_client()
+        target_kind = "instance" if self.node.type == CoreNode.Type.CLOUD else "disk"
+        marker, params = _prepare_cloud_restore(
+            restore,
+            provider="google_cloud",
+            source_id=backup.unique_id,
+            target_kind=target_kind,
+            target_name=restore.name,
+        )
+        if restore.resource_id:
+            return
+        try:
+            zone = params.get("zone") or self.zone
+            if _restore_unknown(restore):
+                existing = self._find_google_restore_resource(
+                    client, restore, resource_type=target_kind + "s", zone=zone
+                )
+                if not existing:
+                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                if not _restore_verify_target(
+                    restore,
+                    existing,
+                    source_id=backup.unique_id,
+                    marker=marker,
+                    source_keys=("sourceSnapshot", "sourceMachineImage", "sourceDisk"),
+                ):
+                    return _restore_status("FAILED")
+                _restore_adopt(restore, existing.get("name") or restore.name, provider_status=existing.get("status"), params_update={"zone": zone})
+                return
+
+            if self.node.type == CoreNode.Type.CLOUD:
+                source = client.get(
+                    f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{self.project_id}/zones/{self.zone}/instances/{self.unique_id}"
+                )
+                problem = _restore_http_class(source)
+                if problem and problem.code != "PROVIDER_NOT_FOUND":
+                    return _restore_handle_error(restore, problem, mutation=False)
+                if not problem:
+                    payload = source.json()
+                    zone = zone or str(payload.get("zone") or "").split("/")[-1]
+                if not zone:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                body = {
+                    "name": restore.name,
+                    "labels": {"backupsheep_restore": marker[:63]},
+                    "sourceMachineImage": f"global/machineImages/{backup.uuid_str}",
+                }
+                path = f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{self.project_id}/zones/{zone}/instances"
+            else:
+                size_gb = params.get("sizeGb")
+                source = client.get(
+                    f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{self.project_id}/zones/{self.zone}/disks/{self.unique_id}"
+                )
+                problem = _restore_http_class(source)
+                if problem and problem.code != "PROVIDER_NOT_FOUND":
+                    return _restore_handle_error(restore, problem, mutation=False)
+                if not problem:
+                    payload = source.json()
+                    zone = zone or str(payload.get("zone") or "").split("/")[-1]
+                    size_gb = size_gb or payload.get("sizeGb")
+                if not zone:
+                    zone = self.zone
+                if not size_gb and backup.size_gigabytes:
+                    size_gb = int(backup.size_gigabytes + 0.999999)
+                if not size_gb:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                body = {
+                    "name": restore.name,
+                    "labels": {"backupsheep_restore": marker[:63]},
+                    "sourceSnapshot": f"global/snapshots/{backup.uuid_str}",
+                    "sizeGb": str(size_gb),
+                    "type": f"zones/{zone}/diskTypes/pd-balanced",
+                }
+                path = f"{settings.GOOGLE_COMPUTE_API}/compute/v1/projects/{self.project_id}/zones/{zone}/disks"
+            params["zone"] = zone
+            params["request_id"] = hashlib.sha256(marker.encode("utf-8")).hexdigest()[:32]
+            _restore_begin_mutation(restore)
+            response = client.post(path, params={"requestId": params["request_id"]}, json=body)
+            problem = _restore_http_class(response, mutation=True)
+            if problem:
+                if problem.code == "PROVIDER_RATE_LIMIT":
+                    _restore_clear_unknown(restore)
+                    return _restore_handle_error(restore, problem, mutation=False)
+                return _restore_handle_error(restore, problem, mutation=True)
+            operation = response.json()
+            if not isinstance(operation, dict) or not operation.get("name"):
+                _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
+                return _restore_status("IN_PROGRESS")
+            _restore_adopt(restore, restore.name, provider_status="PENDING", params_update={"zone": zone, "operation_id": operation["name"], "request_id": params["request_id"]})
+        except Exception as error:
+            if isinstance(error, _RestoreProviderError):
+                if error.retryable:
+                    return _restore_handle_error(restore, error, mutation=error.unknown_outcome)
+                _restore_safe_failure(restore, error.code, manual_review=error.code in {
+                    "PROVIDER_MALFORMED_RESPONSE", "PROVIDER_OWNERSHIP_MISMATCH", "PROVIDER_RECONCILIATION_REQUIRED"
+                })
+                raise
+            return _restore_handle_error(restore, error, mutation=True)
+
+    def _check_restore_google(self, restore):
+        client = self.node.connection.auth_google_cloud.get_client()
+        params = _restore_params(restore)
+        zone = params.get("zone") or self.zone
+        target_kind = "instance" if self.node.type == CoreNode.Type.CLOUD else "disk"
+        if not restore.resource_id:
+            if not _restore_unknown(restore):
+                return _restore_status("IN_PROGRESS")
+            try:
+                existing = self._find_google_restore_resource(client, restore, resource_type=target_kind + "s", zone=zone)
+                if not existing:
+                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                if not _restore_verify_target(
+                    restore,
+                    existing,
+                    source_id=(params.get("_backupsheep_restore") or {}).get("source_id"),
+                    marker=_restore_marker_value(restore),
+                    source_keys=("sourceSnapshot", "sourceMachineImage", "sourceDisk"),
+                ):
+                    return _restore_status("FAILED")
+                _restore_adopt(restore, existing.get("name") or restore.name, provider_status=existing.get("status"), params_update={"zone": zone})
+            except Exception as error:
+                return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+        try:
+            response = client.get(self._google_restore_path(resource_type=target_kind + "s", name=restore.resource_id, zone=zone))
+            problem = _restore_http_class(response)
+            if problem:
+                # Legacy rows without the marker contract retain the short
+                # eventual-consistency window; new rows fail closed on 404.
+                if problem.code == "PROVIDER_NOT_FOUND" and not params.get("_bs_marker_required"):
+                    return _restore_status("IN_PROGRESS")
+                return _restore_handle_error(restore, problem, mutation=False, raise_terminal=False)
+            resource = response.json()
+            if not _restore_verify_target(
+                restore,
+                resource,
+                source_id=(params.get("_backupsheep_restore") or {}).get("source_id"),
+                marker=_restore_marker_value(restore),
+                source_keys=("sourceSnapshot", "sourceMachineImage", "sourceDisk"),
+            ):
+                return _restore_status("FAILED")
+            status = resource.get("status") if isinstance(resource, dict) else None
+            complete = "RUNNING" if self.node.type == CoreNode.Type.CLOUD else "READY"
+            if status == complete:
+                restore.operation_phase = _restore_phase("COMPLETE")
+                restore.save(update_fields=["operation_phase", "modified"])
+                return _restore_status("COMPLETE")
+            if status in {"FAILED", "TERMINATED", "STOPPING"}:
+                return _restore_safe_failure(restore, "PROVIDER_FAILED")
+            if status not in {"PROVISIONING", "STAGING", "STOPPED", "RUNNING", "READY"}:
+                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+            return _restore_status("IN_PROGRESS")
+        except Exception as error:
+            return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
+
     def restore_snapshot(self, backup, restore):
+        return self._restore_snapshot_google(backup, restore)
         """Initiate a restore of a snapshot to a NEW instance/disk (never in-place).
         Sets restore.resource_id on success and saves; raises with a clear message on failure."""
         params = restore.params or {}
@@ -4232,6 +7215,7 @@ class CoreGoogleCloud(UtilCloud):
                 )
 
     def check_restore(self, restore):
+        return self._check_restore_google(restore)
         """Single non-blocking restore status check: COMPLETE / FAILED / IN_PROGRESS."""
         from apps.console.backup.models import CoreCloudRestore
 
@@ -4332,6 +7316,36 @@ def _clear_local_backup_artifacts(backup):
 
 
 def _resume_local_backup(backup, node, snapshot_callback, storage_relation, point_status):
+    """Acquire a cross-worker lease before entering the local backup pipeline."""
+    from apps._tasks.execution import durable_execution_lease
+
+    with durable_execution_lease(
+        backup,
+        phase="source_dispatch",
+        task_id=backup.celery_task_id,
+    ) as execution:
+        if not execution.acquired:
+            # Another healthy delivery owns this phase. Late acknowledgements plus
+            # the periodic recovery sweep will resume it if that worker disappears.
+            return backup
+        return _resume_local_backup_owned(
+            backup,
+            node,
+            snapshot_callback,
+            storage_relation,
+            point_status,
+            execution,
+        )
+
+
+def _resume_local_backup_owned(
+    backup,
+    node,
+    snapshot_callback,
+    storage_relation,
+    point_status,
+    execution,
+):
     """Resume a local dump/upload pipeline from its persisted phase.
 
     A worker can die after the dump has been created but before the chord is
@@ -4354,6 +7368,8 @@ def _resume_local_backup(backup, node, snapshot_callback, storage_relation, poin
         UtilBackup.Status.UPLOAD_VALIDATION,
         UtilBackup.Status.UPLOAD_COMPLETE,
     )
+    from apps._tasks.execution import verify_and_commit_source_artifact
+
     with _local_backup_phase_lock(backup):
         # The caller can have waited behind a live worker or arrived after a worker
         # crash. Always re-read the phase marker after acquiring the lock. Refresh
@@ -4371,6 +7387,13 @@ def _resume_local_backup(backup, node, snapshot_callback, storage_relation, poin
             backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
             backup.save(update_fields=["status", "modified"])
             snapshot_callback(backup)
+            execution.ensure_owned()
+            artifact = verify_and_commit_source_artifact(backup)
+            execution.progress(
+                artifact.byte_count,
+                artifact.byte_count,
+                unit="bytes",
+            )
             backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
             backup.save(update_fields=["status", "modified"])
 
@@ -4383,9 +7406,16 @@ def _resume_local_backup(backup, node, snapshot_callback, storage_relation, poin
         )
         from apps._tasks.integration.storage.tasks import storage_upload, finalize_backup
 
+        pending_stored_backups = stored_backups.filter(status__in=pending_statuses)
+        if pending_stored_backups.exists():
+            # Recovery is allowed to reuse a source archive only after its CRC,
+            # checksum, byte count, and local commit marker all still match.
+            execution.ensure_owned()
+            verify_and_commit_source_artifact(backup)
+
         storage_upload_task_list = [
             storage_upload.s(node.id, backup.id, stored_backup.id).set()
-            for stored_backup in stored_backups.filter(status__in=pending_statuses)
+            for stored_backup in pending_stored_backups
         ]
 
         if storage_upload_task_list:
@@ -4969,6 +7999,249 @@ class CoreNode(TimeStampedModel):
     def total_schedules(self):
         return self.schedules.filter(status=CoreSchedule.Status.ACTIVE).count()
 
+    @staticmethod
+    def _canonical_backup_storage_ids(storage_ids):
+        """Return a stable, duplicate-free storage selection and invalid count.
+
+        The selection becomes part of a backup's durable request identity.  Be
+        deliberately conservative when recovering malformed legacy metadata: only
+        positive integer primary keys are accepted and everything else is counted as
+        an unavailable requested destination instead of crashing the recovery task.
+        """
+        if storage_ids is None:
+            values = []
+        elif isinstance(storage_ids, (list, tuple, set)):
+            values = storage_ids
+        else:
+            values = [storage_ids]
+
+        normalized = []
+        seen = set()
+        invalid_count = 0
+        for value in values:
+            if isinstance(value, bool):
+                invalid_count += 1
+                continue
+            if isinstance(value, int):
+                storage_id = value
+            elif isinstance(value, str) and value.strip().isdigit():
+                storage_id = int(value.strip())
+            else:
+                invalid_count += 1
+                continue
+            if storage_id <= 0:
+                invalid_count += 1
+                continue
+            if storage_id not in seen:
+                seen.add(storage_id)
+                normalized.append(storage_id)
+        return normalized, invalid_count
+
+    @staticmethod
+    def _write_destination_setup_state(
+        backup,
+        *,
+        state,
+        requested_count,
+        accepted_count,
+        validation_failed_ids,
+        unavailable_count,
+        error_code="",
+        status=None,
+    ):
+        """Merge a safe destination checkpoint under the concrete backup row lock."""
+        with transaction.atomic():
+            locked = backup.__class__.objects.select_for_update().get(pk=backup.pk)
+            metadata = dict(locked.metadata or {})
+            metadata["_backup_destination_setup"] = {
+                "state": str(state),
+                "requested_count": max(0, int(requested_count)),
+                "accepted_count": max(0, int(accepted_count)),
+                "validation_failed_count": len(validation_failed_ids),
+                # These IDs belong to the requesting account and are needed to make
+                # a retry deterministic. Never persist provider exception text here.
+                "validation_failed_storage_ids": sorted(validation_failed_ids),
+                "unavailable_count": max(0, int(unavailable_count)),
+                "error_code": str(error_code or "")[:64],
+                "updated_at": timezone.now().isoformat(),
+            }
+            locked.metadata = metadata
+            update_fields = ["metadata", "modified"]
+            if status is not None:
+                locked.status = status
+                update_fields.insert(0, "status")
+            locked.save(update_fields=update_fields)
+        backup.metadata = metadata
+        if status is not None:
+            backup.status = status
+
+    def _reconcile_local_backup_destinations(self, backup, schedule_id):
+        """Crash-safely reconcile every requested local-backup destination.
+
+        A storage validation can take a network round trip.  The renewable execution
+        lease elects one setup worker, while the M2M rows and metadata checkpoints let
+        a replacement worker continue after a process/server crash without forgetting
+        destinations that had not yet been visited.
+        """
+        from apps._tasks.execution import durable_execution_lease
+
+        with durable_execution_lease(
+            backup,
+            phase="destination_setup",
+            task_id=backup.celery_task_id,
+        ) as execution:
+            if not execution.acquired:
+                return False
+
+            backup.refresh_from_db(fields=["metadata", "status"])
+            metadata = dict(backup.metadata or {})
+            requested_ids, malformed_count = self._canonical_backup_storage_ids(
+                metadata.get("_backup_storage_ids")
+            )
+            try:
+                persisted_invalid_count = max(
+                    0, int(metadata.get("_backup_storage_invalid_id_count") or 0)
+                )
+            except (TypeError, ValueError):
+                persisted_invalid_count = 0
+            invalid_count = max(persisted_invalid_count, malformed_count)
+            requested_count = len(requested_ids) + invalid_count
+
+            prior_setup = metadata.get("_backup_destination_setup")
+            prior_setup = prior_setup if isinstance(prior_setup, dict) else {}
+            failed_ids, _ignored_invalid = self._canonical_backup_storage_ids(
+                prior_setup.get("validation_failed_storage_ids")
+            )
+            failed_ids = set(failed_ids).intersection(requested_ids)
+
+            # An attached row is the durable acceptance marker. This intentionally
+            # includes a destination that was paused after setup: silently replacing
+            # the immutable request would be worse than allowing its upload task to
+            # report the precise terminal condition.
+            accepted_ids = set(
+                backup.storage_points.filter(id__in=requested_ids).values_list(
+                    "id", flat=True
+                )
+            )
+            unresolved_ids = [
+                storage_id
+                for storage_id in requested_ids
+                if storage_id not in accepted_ids and storage_id not in failed_ids
+            ]
+            available = {
+                storage.id: storage
+                for storage in CoreStorage.objects.filter(
+                    id__in=unresolved_ids,
+                    account=self.connection.account,
+                    status=CoreStorage.Status.ACTIVE,
+                ).select_related("type")
+            }
+
+            def checkpoint(state="in_progress", error_code="", status=None):
+                unavailable_count = invalid_count + sum(
+                    storage_id not in available
+                    for storage_id in requested_ids
+                    if storage_id not in accepted_ids and storage_id not in failed_ids
+                )
+                self._write_destination_setup_state(
+                    backup,
+                    state=state,
+                    requested_count=requested_count,
+                    accepted_count=len(accepted_ids),
+                    validation_failed_ids=failed_ids,
+                    unavailable_count=unavailable_count,
+                    error_code=error_code,
+                    status=status,
+                )
+                return unavailable_count
+
+            checkpoint()
+            for storage_id in unresolved_ids:
+                storage_point = available.get(storage_id)
+                if storage_point is None:
+                    continue
+                execution.ensure_owned()
+                accepted = bool(storage_point.validate())
+                execution.ensure_owned()
+                if accepted:
+                    # Django's M2M manager checks the target identity, so replaying
+                    # this step after a crash cannot create a second logical upload.
+                    backup.storage_points.add(storage_point)
+                    accepted_ids.add(storage_id)
+                else:
+                    failed_ids.add(storage_id)
+                checkpoint()
+
+                if not accepted:
+                    message = (
+                        f"Storage validation failed for {storage_point.name} "
+                        f"({storage_point.type.name}) during backup "
+                        f"({backup.uuid_str}) of your node ({self.name})."
+                    )
+                    try:
+                        self.connection.account.create_backup_log(
+                            message=message,
+                            node=self,
+                            backup=backup,
+                        )
+                    except Exception as error:
+                        capture_exception(error)
+                    try:
+                        self.notify_storage_validation_fail(storage_point, backup)
+                    except Exception as error:
+                        capture_exception(error)
+
+            execution.ensure_owned()
+            accepted_air_gap = backup.storage_points.filter(
+                id__in=accepted_ids,
+                is_air_gapped=True,
+            ).exists()
+            schedule = (
+                CoreSchedule.objects.filter(id=schedule_id).first()
+                if schedule_id
+                else None
+            )
+            air_gap_required = bool(schedule and schedule.require_air_gapped_copy)
+
+            if not accepted_ids:
+                error_code = "NO_VALID_STORAGE_DESTINATION"
+            elif air_gap_required and not accepted_air_gap:
+                error_code = "AIR_GAPPED_DESTINATION_REQUIRED"
+            else:
+                checkpoint(state="complete")
+                return True
+
+            checkpoint(
+                state="failed",
+                error_code=error_code,
+                status=UtilBackup.Status.STORAGE_VALIDATION_FAILED,
+            )
+            backup.record_execution_error(
+                code=error_code,
+                retryable=False,
+                lease_owner=execution.owner,
+                lease_token=execution.token,
+            )
+            if error_code == "AIR_GAPPED_DESTINATION_REQUIRED":
+                message = (
+                    f"Required air-gapped copy was not accepted for backup "
+                    f"({backup.uuid_str}) of your node ({self.name})."
+                )
+            else:
+                message = (
+                    f"No requested storage destination was accepted for backup "
+                    f"({backup.uuid_str}) of your node ({self.name})."
+                )
+            try:
+                self.connection.account.create_backup_log(
+                    message=message,
+                    node=self,
+                    backup=backup,
+                )
+            except Exception as error:
+                capture_exception(error)
+            return False
+
     # def validate(self):
     #     validate_ok = (
     #             self.connection.status == CoreConnection.Status.ACTIVE
@@ -4990,6 +8263,11 @@ class CoreNode(TimeStampedModel):
         own backup (same celery_task_id) and is never blocked by it.
         """
         with transaction.atomic():
+            # Keep the durable delivery ledger in sync with the concrete backup
+            # while the node lock is held.  This import stays local to avoid
+            # widening the node/backup model import cycle.
+            from apps.console.backup.models import CoreBackupRequest
+
             CoreNode.objects.select_for_update().get(id=self.id)
             node_type_object = self._integration_object()
             active_backup = node_type_object.backups.filter(
@@ -5001,6 +8279,12 @@ class CoreNode(TimeStampedModel):
                     f"{active_backup.id} is already in flight (status "
                     f"{active_backup.get_status_display()}, task "
                     f"{active_backup.celery_task_id}); task {celery_task_id} exiting."
+                )
+                CoreBackupRequest.link_backup(
+                    task_id=celery_task_id,
+                    node=self,
+                    backup=active_backup,
+                    duplicate=True,
                 )
                 return None
             backup, created = node_type_object.backups.get_or_create(celery_task_id=celery_task_id)
@@ -5019,17 +8303,53 @@ class CoreNode(TimeStampedModel):
             backup.schedule_id = schedule_id
             backup.notes = notes
 
-            # Celery is not the source of truth after a worker crash. Persist the
-            # caller's immutable destination selection before storage-point setup so
-            # DB-only recovery can rebuild an on-demand local backup even if the
-            # original message is gone. Keep the value on retries; a retry may carry
-            # no storage_ids after the recovery sweep has reconstructed the task.
-            if (
-                self.type in (self.Type.DATABASE, self.Type.WEBSITE, self.Type.SAAS)
-                and storage_ids is not None
-            ):
-                metadata = dict(backup.metadata) if isinstance(backup.metadata, dict) else {}
-                metadata["_backup_storage_ids"] = list(storage_ids)
+            # Celery is not the source of truth after a worker crash. Freeze the
+            # caller's destination selection once so DB-only recovery can reconstruct
+            # the request and a redelivery cannot silently substitute another bucket.
+            is_local_backup = self.type in (
+                self.Type.DATABASE,
+                self.Type.WEBSITE,
+                self.Type.SAAS,
+            )
+            if is_local_backup:
+                metadata = (
+                    dict(backup.metadata)
+                    if isinstance(backup.metadata, dict)
+                    else {}
+                )
+                if "_backup_storage_ids" not in metadata:
+                    selection = storage_ids
+                    if selection is None and not created:
+                        # Backward-compatible recovery for a pre-ledger backup.
+                        selection = list(
+                            backup.storage_points.values_list("id", flat=True)
+                        )
+                    normalized_ids, invalid_count = (
+                        self._canonical_backup_storage_ids(selection)
+                    )
+                    metadata["_backup_storage_ids"] = normalized_ids
+                    metadata["_backup_storage_invalid_id_count"] = invalid_count
+                else:
+                    normalized_ids, malformed_count = (
+                        self._canonical_backup_storage_ids(
+                            metadata.get("_backup_storage_ids")
+                        )
+                    )
+                    metadata["_backup_storage_ids"] = normalized_ids
+                    try:
+                        persisted_invalid_count = max(
+                            0,
+                            int(
+                                metadata.get("_backup_storage_invalid_id_count")
+                                or 0
+                            ),
+                        )
+                    except (TypeError, ValueError):
+                        persisted_invalid_count = 0
+                    metadata["_backup_storage_invalid_id_count"] = max(
+                        persisted_invalid_count,
+                        malformed_count,
+                    )
                 backup.metadata = metadata
 
             # Only setup UUID if it's new backup. No need to generate same UUID on retry
@@ -5044,6 +8364,7 @@ class CoreNode(TimeStampedModel):
                 backup.uuid = slugify(f"bs-{n_and_s_trimmed}-n{self.id}-b{backup.id}").replace("_", "-")
             # A recovery message has reached the provider/local task. Clear only
             # the enqueue lease; the poller will establish its own lease later.
+            recovery_lease = None
             if isinstance(backup.metadata, dict):
                 metadata = dict(backup.metadata)
                 control = metadata.get("_backup_control")
@@ -5051,61 +8372,45 @@ class CoreNode(TimeStampedModel):
                     "recovery_task_id" in control or "recovery_lease_until" in control
                 ):
                     control = dict(control)
+                    recovery_lease = (
+                        control.get("recovery_task_id"),
+                        control.get("recovery_lease_token"),
+                    )
                     control.pop("recovery_task_id", None)
                     control.pop("recovery_lease_until", None)
+                    control.pop("recovery_lease_token", None)
                     metadata["_backup_control"] = control
                     backup.metadata = metadata
             backup.save()
-
-        # Cloud servers and volumes don't have storage points for now
-        if (
-            self.type == self.Type.DATABASE
-            or self.type == self.Type.WEBSITE
-            or self.type == self.Type.SAAS
-        ) and (created or not backup.storage_points.exists()):
-            schedule = CoreSchedule.objects.filter(id=schedule_id).first() if schedule_id else None
-            air_gapped_copy_required = bool(
-                schedule and schedule.require_air_gapped_copy
+            CoreBackupRequest.link_backup(
+                task_id=celery_task_id,
+                node=self,
+                backup=backup,
+                duplicate=False,
             )
-            air_gapped_copy_accepted = False
-            storage_points = CoreStorage.objects.filter(
-                id__in=storage_ids,
-                account=self.connection.account,
-                status=CoreStorage.Status.ACTIVE,
-            )
-            for storage_point in storage_points:
-                """
-                Validate all storage points
-                """
-                if storage_point.validate():
-                    backup.storage_points.add(storage_point)
-                    air_gapped_copy_accepted = (
-                        air_gapped_copy_accepted or storage_point.is_air_gapped
-                    )
-                else:
-                    self.connection.account.create_backup_log(
-                        message=f"Storage validation failed for {storage_point.name} ({storage_point.type.name}) "
-                                f"during backup ({backup.uuid_str}) of your node ({self.name}). ",
-                        node=self,
-                        backup=backup
-                    )
-                    self.notify_storage_validation_fail(storage_point, backup)
-
-            if air_gapped_copy_required and not air_gapped_copy_accepted:
-                backup.status = UtilBackup.Status.STORAGE_VALIDATION_FAILED
-                backup.save()
-                self.connection.account.create_backup_log(
-                    message=(
-                        f"Required air-gapped copy was not accepted for backup "
-                        f"({backup.uuid_str}) of your node ({self.name})."
-                    ),
-                    node=self,
-                    backup=backup,
+            if recovery_lease and all(recovery_lease):
+                backup.release_execution(
+                    lease_owner=recovery_lease[0],
+                    lease_token=recovery_lease[1],
+                    phase="recovery",
                 )
-                # Task callers already treat None as an intentional no-op. Do not
-                # snapshot a source when its required ransomware-protected copy is
-                # unavailable.
-                return None
+            # Persist broker delivery and retry metadata independently from Celery's
+            # result backend. This lazily creates the durable execution ledger for old
+            # backup rows while leaving the established backup status contract intact.
+            backup.initialize_execution(
+                celery_task_id=celery_task_id,
+                attempt_no=attempt_no,
+                task_name=self.backup_task_name(),
+            )
+
+        # Cloud servers and volumes don't have storage points for now. Local source
+        # generation may start only after the complete immutable destination request
+        # has been reconciled under a renewable lease.
+        if is_local_backup and not self._reconcile_local_backup_destinations(
+            backup,
+            schedule_id,
+        ):
+            return None
 
         self.save()
         return backup
@@ -5221,236 +8526,286 @@ class CoreNode(TimeStampedModel):
         except Exception as e:
             capture_exception(e)
 
-    def notify_backup_fail(self, error, backup_type):
+    def _backup_notification_contract(self, error):
+        """Return a public-safe notification contract for a backup failure.
+
+        Provider/client exceptions are inspected only by the existing safe
+        classifier.  Their text, response bodies, and exception class names are
+        never returned from this method or placed in an account log/email.
+        """
+        class_name = error.__class__.__name__
+        template = "error_during_backup"
+        code = None
+
+        if class_name == "ConnectionNotReadyForBackupError":
+            code = "CONNECTION_NOT_READY"
+            template = "unable_to_start_backup"
+        elif class_name == "NodeNotReadyForBackupError":
+            code = "NODE_NOT_READY"
+            template = "unable_to_start_backup"
+        elif class_name in {
+            "ConnectionValidationFailedError",
+            "IntegrationValidationError",
+        }:
+            template = "unable_to_start_backup"
+            try:
+                from apps._tasks.integration.backup.errors import safe_backup_failure
+
+                failure = safe_backup_failure(error, stage="connection")
+                classified_code = getattr(failure, "code", "")
+            except Exception as classification_error:
+                capture_exception(classification_error)
+                classified_code = ""
+            if classified_code in _BACKUP_NOTIFICATION_SAFE_CODES:
+                code = classified_code
+            if code in {"SOURCE_EXPORT_FAILED", "BACKUP_FAILED"} or not code:
+                code = "CONNECTION_VALIDATION_FAILED"
+        elif class_name in {
+            "SoftTimeLimitExceeded",
+            "NodeBackupTimeoutError",
+        }:
+            code = "BACKUP_TIMEOUT"
+        elif class_name == "NodeBackupStatusCheckTimeOutError":
+            code = "BACKUP_STATUS_TIMEOUT"
+        elif class_name == "NodeBackupFailedError":
+            # Provider adapters may attach a stable code.  Accept it only from
+            # the explicit allowlist; never accept arbitrary exception text.
+            for attribute in ("error_code", "code"):
+                try:
+                    candidate = getattr(error, attribute, None)
+                except Exception:
+                    candidate = None
+                if isinstance(candidate, str):
+                    candidate = candidate.strip().upper()
+                    if candidate in _BACKUP_NOTIFICATION_SAFE_CODES:
+                        code = candidate
+                        break
+            if not code:
+                try:
+                    from apps._tasks.integration.backup.errors import safe_backup_failure
+
+                    failure = safe_backup_failure(error, stage="backup")
+                    classified_code = getattr(failure, "code", "")
+                except Exception as classification_error:
+                    capture_exception(classification_error)
+                    classified_code = ""
+                if classified_code in _BACKUP_NOTIFICATION_SAFE_CODES:
+                    code = classified_code
+                if code in {"SOURCE_EXPORT_FAILED", "CONNECTION_VALIDATION_FAILED"}:
+                    code = "BACKUP_FAILED"
+
+        if code not in _BACKUP_NOTIFICATION_SAFE_CODES:
+            return None
+
+        retryable = code in {
+            "CONNECTION_REFUSED",
+            "DNS_FAILURE",
+            "TCP_TIMEOUT",
+            "WORKER_DISK_FULL",
+            "ARCHIVE_VALIDATION_FAILED",
+            "SOURCE_EXPORT_FAILED",
+            "PROVIDER_RATE_LIMIT",
+            "PROVIDER_TIMEOUT",
+            "PROVIDER_TRANSIENT_OUTAGE",
+            "STORAGE_RATE_LIMITED",
+            "STORAGE_TIMEOUT",
+            "STORAGE_TRANSIENT_FAILURE",
+            "WORKER_LEASE_LOST",
+            "BACKUP_TIMEOUT",
+            "BACKUP_STATUS_TIMEOUT",
+        }
+        return {
+            "code": code,
+            "message": _BACKUP_NOTIFICATION_MESSAGES[code],
+            "remediation": _BACKUP_NOTIFICATION_REMEDIATIONS[code],
+            "retryable": retryable,
+            "template": template,
+        }
+
+    def _backup_notification_action_url(self, *, validation=False):
+        """Build an allowlisted URL without embedding connection metadata."""
+        if validation:
+            try:
+                integration_code = slugify(
+                    str(self.get_integration_alt_code()).lower()
+                )[:64]
+            except Exception as url_error:
+                capture_exception(url_error)
+                integration_code = ""
+            integration_code = integration_code or "integration"
+            return (
+                "https://backupsheep.com/console/integration/"
+                f"{integration_code}/"
+            )
+
+        try:
+            node_id = int(self.pk)
+        except (TypeError, ValueError):
+            node_id = 0
+        if self.type in {
+            self.Type.CLOUD,
+            self.Type.VOLUME,
+            self.Type.DATABASE,
+            self.Type.WEBSITE,
+        }:
+            try:
+                integration_code = slugify(
+                    str(self.get_integration_alt_code()).lower()
+                )[:64]
+            except Exception as url_error:
+                capture_exception(url_error)
+                integration_code = ""
+            if integration_code:
+                return (
+                    "https://backupsheep.com/console/setup/"
+                    f"{integration_code}/"
+                )
+        return f"https://backupsheep.com/console/nodes/{node_id}/"
+
+    def _backup_notification_correlation(self, error, code, backup_type):
+        """Return a durable execution correlation ID or a deterministic fallback."""
+        backup_key = None
+        for attribute in ("backup_uuid", "backup_name"):
+            try:
+                backup_key = getattr(error, attribute, None)
+            except Exception:
+                backup_key = None
+            if backup_key is not None:
+                break
+
+        if backup_key is not None:
+            try:
+                node_type_object = self._integration_object()
+                backup = (
+                    node_type_object.backups.filter(uuid=str(backup_key))
+                    .order_by("-id")
+                    .first()
+                    if node_type_object
+                    else None
+                )
+                if backup:
+                    state = backup.record_execution_error(
+                        code=code,
+                        message=_BACKUP_NOTIFICATION_MESSAGES[code],
+                    )
+                    if state and getattr(state, "correlation_id", None):
+                        return str(state.correlation_id)
+            except Exception as execution_error:
+                # The notification still has a safe deterministic ID if a legacy
+                # backup row cannot yet materialize its execution ledger.
+                capture_exception(execution_error)
+
+        try:
+            supplied_correlation = getattr(error, "correlation_id", None)
+            return str(uuid.UUID(str(supplied_correlation)))
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        try:
+            node_id = int(self.pk)
+        except (TypeError, ValueError):
+            node_id = 0
+        # uuid5 makes the fallback stable across Celery redelivery without storing
+        # the backup UUID, endpoint, or any exception-derived text.
+        seed = f"backup-notification:{node_id}:{code}:{backup_type}"
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+    def _notify_backup_fail_safe(self, error, backup_type):
         from apps._tasks.helper.tasks import send_postmark_email
         from datetime import datetime
 
-        if str(backup_type) == "1":
-            backup_type = "On-Demand"
-        elif str(backup_type) == "2":
-            backup_type = "Scheduled"
+        class_name = error.__class__.__name__
+        if class_name in {
+            "ConnectionNotReadyForBackupError",
+            "NodeNotReadyForBackupError",
+            "NodeBackupFailedError",
+        } and getattr(error, "attempt_no", None) != 1:
+            return
+
+        contract = self._backup_notification_contract(error)
+        if not contract:
+            return
+
+        backup_type_value = str(backup_type)
+        if backup_type_value == "1":
+            backup_type_label = "On-Demand"
+        elif backup_type_value == "2":
+            backup_type_label = "Scheduled"
+        else:
+            backup_type_label = "Other"
 
         try:
-            if self.notify_on_fail and self.connection.account.notify_on_fail:
-                account = self.connection.account
-                # Email every eligible member (notify_on_fail honored; the primary
-                # membership is always included) instead of only the primary member.
-                recipients = account.get_notification_recipients("fail")
+            correlation_id = self._backup_notification_correlation(
+                error,
+                contract["code"],
+                backup_type_label,
+            )
+            account = self.connection.account
+            if not self.notify_on_fail or not account.notify_on_fail:
+                return
 
-                def notify_recipients(template, data):
-                    for _member, to_email in recipients:
-                        send_postmark_email.delay(to_email, template, data)
+            recipients = account.get_notification_recipients("fail")
+            member = recipients[0][0] if recipients else None
+            try:
+                notification_timezone = pytz.timezone(
+                    (getattr(member, "timezone", None) or "UTC")
+                )
+            except Exception:
+                notification_timezone = pytz.UTC
 
-                member = recipients[0][0] if recipients else None
+            date_time = datetime.now(tz=notification_timezone).strftime(
+                "%b %d %Y - %I:%M%p %Z"
+            )
+            is_validation = contract["template"] == "unable_to_start_backup"
+            # Deliberately omit node/connection names and all location fields:
+            # those fields can contain endpoints, usernames, or paths supplied
+            # during integration setup.
+            data = {
+                "node_id": self.pk,
+                "node_type": self.get_type_display().lower(),
+                "node_status": self.get_status_display(),
+                "backup_time": date_time,
+                "action_url": self._backup_notification_action_url(
+                    validation=is_validation
+                ),
+                "backup_type": backup_type_label,
+                "error": contract["code"],
+                "error_code": contract["code"],
+                "message": contract["message"],
+                "error_details": contract["message"],
+                "remediation": contract["remediation"],
+                "retryable": contract["retryable"],
+                "correlation_id": correlation_id,
+                "help_url": "https://support.backupsheep.com",
+                "sender_name": "BackupSheep - Notification Bot",
+            }
 
-                timezone = pytz.timezone((member.timezone if member else None) or "UTC")
-                now = datetime.now()
+            account.create_log(data=data)
+            for _member, to_email in recipients:
+                send_postmark_email.delay(
+                    to_email,
+                    contract["template"],
+                    data,
+                )
+        except Exception as notification_error:
+            capture_exception(notification_error)
 
-                date_time = now.astimezone(timezone).strftime("%b %d %Y - %I:%M%p %Z")
-
-                if error.__class__.__name__ == "ConnectionNotReadyForBackupError" and error.attempt_no == 1:
-                    if self.type == self.Type.CLOUD:
-                        action_url = f"https://backupsheep.com/console/setup/{self.get_integration_alt_code().lower()}/"
-                    elif self.type == self.Type.VOLUME:
-                        action_url = f"https://backupsheep.com/console/setup/{self.get_integration_alt_code().lower()}/"
-                    elif self.type == self.Type.DATABASE:
-                        action_url = (
-                            f"https://backupsheep.com/console/setup/database/"
-                        )
-                    elif self.type == self.Type.WEBSITE:
-                        action_url = (
-                            f"https://backupsheep.com/console/setup/website/"
-                        )
-                    else:
-                        action_url = f"https://backupsheep.com/console/"
-
-                    data = {
-                            "node_type": self.get_type_display().lower(),
-                            "node_status": self.get_status_display(),
-                            "node_name": self.name,
-                            "backup_time": date_time,
-                            "connection_name": self.connection.name,
-                            "connection_status": self.connection.get_status_display(),
-                            "action_url": action_url,
-                            "backup_type": backup_type,
-                            "endpoint_name": self.connection.location.name,
-                            "endpoint_ip": self.connection.location.ip_address,
-                            "endpoint_ipv6": self.connection.location.ip_address_v6,
-                            "error_details": error.__str__(),
-                            "message": error.__class__.__name__,
-                            "help_url": "https://support.backupsheep.com",
-                            "sender_name": "BackupSheep - Notification Bot",
-                    }
-
-                    self.connection.account.create_log(data=data)
-
-                    notify_recipients(
-                        error.email_template_id,
-                        data,
-                    )
-                elif error.__class__.__name__ == "NodeNotReadyForBackupError" and error.attempt_no == 1:
-                    action_url = f"https://backupsheep.com/console/nodes/{self.id}/"
-
-                    data = {
-                            "node_type": self.get_type_display().lower(),
-                            "node_status": self.get_status_display(),
-                            "node_name": self.name,
-                            "backup_time": date_time,
-                            "connection_name": self.connection.name,
-                            "connection_status": self.connection.get_status_display(),
-                            "action_url": action_url,
-                            "backup_type": backup_type,
-                            "endpoint_name": self.connection.location.name,
-                            "endpoint_ip": self.connection.location.ip_address,
-                            "endpoint_ipv6": self.connection.location.ip_address_v6,
-                            "error_details": error.__str__(),
-                            "message": error.__class__.__name__,
-                            "help_url": "https://support.backupsheep.com",
-                            "sender_name": "BackupSheep - Notification Bot",
-                    }
-
-                    self.connection.account.create_log(data=data)
-
-                    notify_recipients(
-                        error.email_template_id,
-                        data
-                    )
-                elif error.__class__.__name__ == "NodeBackupFailedError" and error.attempt_no == 1:
-                    # node_type_object = getattr(self, self.connection.integration.code)
-                    action_url = f"https://backupsheep.com/console/nodes/{self.id}/"
-
-                    if "SoftTimeLimitExceeded" in error.__str__():
-                        error_details = "Backup execution timeout. Backup must complete within 12 hours or else it will be terminated."
-                    elif "backupsheep" in error.__str__():
-                        error_details = "n/a"
-                    elif "_storage/" in error.__str__():
-                        error_details = error.__str__().replace("_storage/", "")
-                    else:
-                        error_details = error.__str__()
-
-                    data = {
-                            "node_type": self.get_type_display().lower(),
-                            "node_status": self.get_status_display(),
-                            "node_name": self.name,
-                            "backup_time": date_time,
-                            "connection_name": self.connection.name,
-                            "connection_status": self.connection.get_status_display(),
-                            "action_url": action_url,
-                            "backup_type": backup_type,
-                            "endpoint_name": self.connection.location.name,
-                            "endpoint_ip": self.connection.location.ip_address,
-                            "endpoint_ipv6": self.connection.location.ip_address_v6,
-                            "error_details": error_details,
-                            "message": error.__class__.__name__,
-                            "help_url": "https://support.backupsheep.com",
-                            "sender_name": "BackupSheep - Notification Bot",
-                        }
-
-                    self.connection.account.create_log(data=data)
-
-                    notify_recipients(
-                        error.email_template_id,
-                        data
-                    )
-                elif error.__class__.__name__ == "SoftTimeLimitExceeded":
-                    action_url = f"https://backupsheep.com/console/nodes/{self.id}/"
-                    error_details = "Backup execution timeout. Backup must complete within 6" \
-                                    " hours or else it will be terminated."
-                    data = {
-                        "node_type": self.get_type_display().lower(),
-                        "node_status": self.get_status_display(),
-                        "node_name": self.name,
-                        "backup_time": date_time,
-                        "connection_name": self.connection.name,
-                        "connection_status": self.connection.get_status_display(),
-                        "action_url": action_url,
-                        "backup_type": backup_type,
-                        "endpoint_name": self.connection.location.name,
-                        "endpoint_ip": self.connection.location.ip_address,
-                        "endpoint_ipv6": self.connection.location.ip_address_v6,
-                        "error_details": error_details,
-                        "message": error.__class__.__name__,
-                        "help_url": "https://support.backupsheep.com",
-                        "sender_name": "BackupSheep - Notification Bot",
-                    }
-
-                    self.connection.account.create_log(data=data)
-
-                    notify_recipients(
-                        "error_during_backup",
-                        data
-                    )
-                elif error.__class__.__name__ == "NodeBackupTimeoutError":
-                    action_url = f"https://backupsheep.com/console/nodes/{self.id}/"
-                    error_details = error.__str__()
-                    data = {
-                        "node_type": self.get_type_display().lower(),
-                        "node_status": self.get_status_display(),
-                        "node_name": self.name,
-                        "backup_time": date_time,
-                        "connection_name": self.connection.name,
-                        "connection_status": self.connection.get_status_display(),
-                        "action_url": action_url,
-                        "backup_type": backup_type,
-                        "endpoint_name": self.connection.location.name,
-                        "endpoint_ip": self.connection.location.ip_address,
-                        "endpoint_ipv6": self.connection.location.ip_address_v6,
-                        "error_details": error_details,
-                        "message": error.__class__.__name__,
-                        "help_url": "https://support.backupsheep.com",
-                        "sender_name": "BackupSheep - Notification Bot",
-                    }
-
-                    self.connection.account.create_log(data=data)
-
-                    notify_recipients(
-                        "error_during_backup",
-                        data
-                    )
-                elif (error.__class__.__name__ == "ConnectionValidationFailedError" or
-                      error.__class__.__name__ == "IntegrationValidationError"):
-                    if self.type == self.Type.CLOUD:
-                        action_url = f"https://backupsheep.com/console/integration/{self.get_integration_alt_code().lower()}/?i_name={self.connection.name}"
-                    elif self.type == self.Type.VOLUME:
-                        action_url = f"https://backupsheep.com/console/integration/{self.get_integration_alt_code().lower()}/?i_name={self.connection.name}"
-                    elif self.type == self.Type.DATABASE:
-                        action_url = f"https://backupsheep.com/console/integration/database/?i_name={self.connection.name}"
-                    elif self.type == self.Type.WEBSITE:
-                        action_url = f"https://backupsheep.com/console/integration/website/?i_name={self.connection.name}"
-                    else:
-                        action_url = f"https://backupsheep.com/console/"
-
-                    data = {
-                            "node_type": self.get_type_display().lower(),
-                            "node_status": self.get_status_display(),
-                            "node_name": self.name,
-                            "backup_time": date_time,
-                            "connection_name": self.connection.name,
-                            "connection_status": self.connection.get_status_display(),
-                            "action_url": action_url,
-                            "backup_type": backup_type,
-                            "endpoint_name": self.connection.location.name,
-                            "endpoint_location": self.connection.location.location,
-                            "endpoint_ip": self.connection.location.ip_address,
-                            "endpoint_ipv6": self.connection.location.ip_address_v6,
-                            "error_details": error.__str__(),
-                            "message": error.__class__.__name__,
-                            "help_url": "https://support.backupsheep.com",
-                            "sender_name": "BackupSheep - Notification Bot",
-                    }
-
-                    self.connection.account.create_log(data=data)
-
-                    notify_recipients(
-                        "unable_to_start_backup",
-                        data,
-                    )
-        except Exception as e:
-            capture_exception(e)
+    def notify_backup_fail(self, error, backup_type):
+        """Persist and send only the stable public backup-failure contract."""
+        return self._notify_backup_fail_safe(error, backup_type)
 
     def notify_upload_fail(self, error, backup, storage):
         from apps._tasks.helper.tasks import send_postmark_email
         from datetime import datetime
+
+        # Keep full diagnostics in Sentry only. The account log and email are
+        # a stable public contract and must never contain provider bodies,
+        # command lines, credentials, hostnames, or exception text.
+        capture_exception(error)
+        safe_code = getattr(error, "error_code", None)
+        if not isinstance(safe_code, str) or safe_code not in _BACKUP_NOTIFICATION_SAFE_CODES:
+            safe_code = "STORAGE_UPLOAD_FAILED"
+        safe_message = _BACKUP_NOTIFICATION_MESSAGES[safe_code]
 
         if backup.type == 1:
             backup_type = "On-Demand"
@@ -5490,7 +8845,10 @@ class CoreNode(TimeStampedModel):
                     "endpoint_location": self.connection.location.location,
                     "endpoint_ip": self.connection.location.ip_address,
                     "endpoint_ipv6": self.connection.location.ip_address_v6,
-                    "error_details": error.__str__(),
+                    "error": safe_code,
+                    "error_code": safe_code,
+                    "error_details": safe_message,
+                    "message_detail": safe_message,
                     "message": "upload_fail",
                     "help_url": "https://support.backupsheep.com",
                     "sender_name": "BackupSheep - Notification Bot",

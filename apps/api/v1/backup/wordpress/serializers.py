@@ -20,8 +20,11 @@ from apps.console.connection.models import (
 from apps.console.node.models import CoreWordPress, CoreNode, CoreSchedule
 from apps.console.storage.models import CoreStorage, CoreStorageType
 from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
     CoreBackupScheduleSerializer,
     CoreBackupStorageSerializer,
+    SafeProviderMetadataMixin,
 )
 
 
@@ -35,7 +38,7 @@ class CoreWordPressSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreWordPressBackupStoragePointsSerializer(serializers.ModelSerializer):
+class CoreWordPressBackupStoragePointsSerializer(SafeProviderMetadataMixin, serializers.ModelSerializer):
     storage = CoreBackupStorageSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
 
@@ -48,7 +51,7 @@ class CoreWordPressBackupStoragePointsSerializer(serializers.ModelSerializer):
         return obj.get_status_display()
 
 
-class CoreWordPressBackupSerializer(serializers.ModelSerializer):
+class CoreWordPressBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     wordpress = CoreWordPressSerializer(read_only=True)
     database = CoreWordPressSerializer(source="wordpress", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -64,11 +67,13 @@ class CoreWordPressBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreWordPressBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "stored_backups",
+            "execution_status",
         )
 
     @staticmethod

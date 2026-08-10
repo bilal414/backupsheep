@@ -1,3 +1,5 @@
+import os
+
 from django.conf import settings
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.db.models import Q, Sum, Count
@@ -67,6 +69,12 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
             context["show_link_icon"] = True
             context["show_link_url"] = reverse("console:setup:integration_select")
             context["integration"] = integration
+            context["ssh_managed_public_key"] = settings.SSH_MANAGED_PUBLIC_KEY
+            context["ssh_managed_key_enabled"] = bool(
+                settings.SSH_MANAGED_PUBLIC_KEY
+                and settings.SSH_MANAGED_PRIVATE_KEY_PATH
+                and os.path.isfile(settings.SSH_MANAGED_PRIVATE_KEY_PATH)
+            )
         else:
             return redirect("console:setup:integration_select")
 

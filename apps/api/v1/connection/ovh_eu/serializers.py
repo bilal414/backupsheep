@@ -1,11 +1,12 @@
 import pytz
+from django.conf import settings
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
 from apps.console.account.models import CoreAccount
 from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
-    CurrentAccountDefault, IntegrationDefault,
+    CurrentAccountDefault, IntegrationDefault, bs_encrypt,
 )
 from apps.console.connection.models import (
     CoreConnection,
@@ -19,6 +20,8 @@ from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreCo
 
 
 class CoreAuthOVHEUReadSerializer(serializers.ModelSerializer):
+    consumer_key_configured = serializers.SerializerMethodField()
+
     class Meta:
         model = CoreAuthOVHEU
         fields = (
@@ -26,13 +29,19 @@ class CoreAuthOVHEUReadSerializer(serializers.ModelSerializer):
             "info_name",
             "info_email",
             "info_organization",
+            "consumer_key_configured",
         )
         datatables_always_serialize = (
             "id",
             "info_name",
             "info_email",
             "info_organization",
+            "consumer_key_configured",
         )
+
+    @staticmethod
+    def get_consumer_key_configured(obj):
+        return bool(obj.consumer_key)
 
 
 class CoreOVHEUConnectionReadSerializer(serializers.ModelSerializer):
@@ -91,11 +100,34 @@ class CoreOVHEUConnectionReadSerializer(serializers.ModelSerializer):
 
 
 class CoreAuthOVHEUWriteSerializer(serializers.ModelSerializer):
+    consumer_key = serializers.CharField(write_only=True, required=False, allow_null=True)
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = CoreAuthOVHEU
         fields = "__all__"
+
+    def validate(self, data):
+        if data.get("consumer_key"):
+            try:
+                import ovh
+
+                client = ovh.Client(
+                    endpoint="ovh-eu",
+                    application_key=settings.OVH_EU_APP_KEY,
+                    application_secret=settings.OVH_EU_APP_SECRET,
+                    consumer_key=data["consumer_key"],
+                    timeout=int(getattr(settings, "PROVIDER_HTTP_READ_TIMEOUT", 60)),
+                )
+                client.get("/cloud/project")
+            except Exception:
+                raise serializers.ValidationError(
+                    "Unable to authenticate. Please verify the OVH consumer key and permissions."
+                )
+            data["consumer_key"] = bs_encrypt(
+                data["consumer_key"], self.context["encryption_key"]
+            )
+        return data
 
 
 class CoreOVHEUConnectionWriteSerializer(serializers.ModelSerializer):

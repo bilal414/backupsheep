@@ -2,26 +2,30 @@
 
 The application already supports S3-compatible destinations through the
 ``idrive`` storage adapter. This harness proves that adapter against one
-temporary Hetzner Object Storage bucket and then removes only that bucket.
+temporary Hetzner Object Storage bucket. Cleanup requires both the exact
+provider marker and a fsynced durable ledger entry.
 
 Required environment variables:
 
     HETZNER_S3_ACCESS_KEY
     HETZNER_S3_SECRET_KEY
+    BACKUPSHEEP_E2E_RUN_ID
+    BACKUPSHEEP_E2E_LEDGER_PATH
 
 Optional environment variables:
 
     HETZNER_S3_ENDPOINT  # defaults to https://fsn1.your-objectstorage.com
     HETZNER_S3_REGION    # defaults to fsn1
+    BACKUPSHEEP_E2E_APPLY=YES    # opt in to provider writes
+    BACKUPSHEEP_E2E_CLEANUP=YES  # separately opt in to verified cleanup
 
 The access and secret keys are process inputs only. They are never included in
 the report, application rows, or exception output.
 """
 
-import datetime as dt
+import hashlib
 import json
 import os
-import secrets
 import sys
 import time
 
@@ -34,6 +38,11 @@ import django
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "backupsheep.settings")
+
+from scripts.live_e2e_ledger import (  # noqa: E402
+    DurableResourceLedger,
+    require_run_id,
+)
 
 
 class HarnessError(RuntimeError):
@@ -48,11 +57,6 @@ def _redact(value, secrets_to_redact):
     return text
 
 
-def _unique_prefix():
-    stamp = dt.datetime.now(dt.timezone.utc).strftime("%y%m%d%H%M%S")
-    return f"bs-e2e-{stamp}-{secrets.token_hex(3)}"
-
-
 class ObjectStorageHarness:
     MARKER_KEY = "backupsheep-e2e/ownership.json"
     OBJECT_KEY = "backupsheep-e2e/payload.txt"
@@ -64,7 +68,7 @@ class ObjectStorageHarness:
             "HETZNER_S3_ENDPOINT", "https://fsn1.your-objectstorage.com"
         ).rstrip("/")
         self.region = os.environ.get("HETZNER_S3_REGION", "fsn1")
-        self.prefix = _unique_prefix()
+        self.prefix = require_run_id(os.environ.get("BACKUPSHEEP_E2E_RUN_ID"))
         self.bucket = self.prefix
         self.marker_body = json.dumps(
             {"owner": "BackupSheep", "prefix": self.prefix},
@@ -73,7 +77,18 @@ class ObjectStorageHarness:
         self.payload_body = (
             f"BackupSheep Hetzner Object Storage E2E {self.prefix}\n"
         ).encode()
-        self.create_attempted = False
+        self.apply = os.environ.get("BACKUPSHEEP_E2E_APPLY") == "YES"
+        self.cleanup_enabled = os.environ.get("BACKUPSHEEP_E2E_CLEANUP") == "YES"
+        scope = (
+            f"{self.endpoint}:{self.region}:"
+            f"{hashlib.sha256(access_key.encode()).hexdigest()[:16]}"
+        )
+        self.ledger = DurableResourceLedger(
+            os.environ.get("BACKUPSHEEP_E2E_LEDGER_PATH"),
+            provider="hetzner_object_storage",
+            run_id=self.prefix,
+            scope=scope,
+        )
         self.report = {
             "prefix": self.prefix,
             "bucket": self.bucket,
@@ -90,7 +105,9 @@ class ObjectStorageHarness:
             region_name=self.region,
             config=Config(
                 signature_version="s3v4",
-                retries={"max_attempts": 4, "mode": "standard"},
+                connect_timeout=10,
+                read_timeout=60,
+                retries={"total_max_attempts": 1, "mode": "standard"},
                 request_checksum_calculation="when_required",
                 response_checksum_validation="when_required",
             ),
@@ -118,7 +135,6 @@ class ObjectStorageHarness:
         # Hetzner's S3 endpoint accepts the standard regional location
         # constraint. A single create request is deliberate: on an ambiguous
         # response cleanup adopts the exact bucket only after marker validation.
-        self.create_attempted = True
         self.client.create_bucket(
             Bucket=self.bucket,
             CreateBucketConfiguration={"LocationConstraint": self.region},
@@ -179,6 +195,20 @@ class ObjectStorageHarness:
         )
         marker = self.client.get_object(Bucket=self.bucket, Key=self.MARKER_KEY)
         marker_body = marker["Body"].read()
+        if marker_body != self.marker_body:
+            raise HarnessError("Object Storage ownership marker read-back failed")
+        # Only this confirmed read-back makes the exact bucket cleanup-eligible.
+        self.ledger.record(
+            kind="bucket",
+            resource_id=self.bucket,
+            name=self.bucket,
+            ownership={
+                "marker_key": self.MARKER_KEY,
+                "marker_sha256": hashlib.sha256(self.marker_body).hexdigest(),
+                "endpoint": self.endpoint,
+                "region": self.region,
+            },
+        )
         payload = self.client.get_object(Bucket=self.bucket, Key=self.OBJECT_KEY)
         payload_body = payload["Body"].read()
         if marker_body != self.marker_body or payload_body != self.payload_body:
@@ -236,6 +266,23 @@ class ObjectStorageHarness:
 
     def cleanup(self):
         errors = []
+        if not self.cleanup_enabled:
+            self.report["cleanup"] = {
+                "status": "NOT_REQUESTED",
+                "errors": [],
+                "bucket": self.bucket,
+            }
+            return
+        ledger_entry = self.ledger.get("bucket", self.bucket)
+        if not ledger_entry or not self.ledger.cleanup_eligible("bucket", self.bucket):
+            self.report["cleanup"] = {
+                "status": "MANUAL_REVIEW",
+                "errors": [
+                    "refused bucket cleanup: no durable confirmed ownership ledger entry"
+                ],
+                "bucket": self.bucket,
+            }
+            return
         try:
             names = self.list_bucket_names()
             bucket_present = self.bucket in names
@@ -245,11 +292,7 @@ class ObjectStorageHarness:
 
         if bucket_present:
             marker_owned = self._marker_is_owned()
-            # If the run failed before the marker could be written, the exact
-            # random name plus a successful create attempt is the recovery proof.
-            # We still refuse cleanup if any object falls outside this run's
-            # prefix, so a race cannot turn into a broad delete.
-            if not marker_owned and not self.create_attempted:
+            if not marker_owned:
                 errors.append(
                     "refused bucket cleanup: exact BackupSheep ownership marker is missing"
                 )
@@ -313,10 +356,20 @@ class ObjectStorageHarness:
             "errors": errors,
             "bucket": self.bucket,
         }
+        self.ledger.mark_cleanup(
+            "bucket",
+            self.bucket,
+            state="deleted" if not errors else "failed",
+            error="; ".join(errors),
+        )
 
     def run(self):
         try:
             self.baseline()
+            if not self.apply:
+                self.report["status"] = "PREFLIGHT_PASS"
+                self.report["mode"] = "read_only"
+                return 0
             self.create_bucket()
             self.verify_backupsheep_storage_adapter()
             self.put_and_get()
@@ -329,16 +382,17 @@ class ObjectStorageHarness:
         finally:
             self.cleanup()
             print(json.dumps(self.report, indent=2, sort_keys=True, default=str))
-        return (
-            0
-            if self.report.get("status") == "PASS"
-            and self.report["cleanup"]["status"] == "PASS"
-            else 1
-        )
+        cleanup_ok = self.report["cleanup"]["status"] in {"PASS", "NOT_REQUESTED"}
+        return 0 if self.report.get("status") == "PASS" and cleanup_ok else 1
 
 
 def main():
-    required = ("HETZNER_S3_ACCESS_KEY", "HETZNER_S3_SECRET_KEY")
+    required = (
+        "HETZNER_S3_ACCESS_KEY",
+        "HETZNER_S3_SECRET_KEY",
+        "BACKUPSHEEP_E2E_RUN_ID",
+        "BACKUPSHEEP_E2E_LEDGER_PATH",
+    )
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
         print(

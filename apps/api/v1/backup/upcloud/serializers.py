@@ -5,7 +5,11 @@ from apps.console.backup.models import (
     CoreUpCloudBackup,
 )
 from apps.console.node.models import CoreUpCloud, CoreNode, CoreSchedule
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 
 
 class CoreUpCloudSerializer(serializers.ModelSerializer):
@@ -18,7 +22,7 @@ class CoreUpCloudSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreUpCloudBackupSerializer(serializers.ModelSerializer):
+class CoreUpCloudBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     website = CoreUpCloudSerializer(source="upcloud", read_only=True)
     database = CoreUpCloudSerializer(source="upcloud", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -30,11 +34,13 @@ class CoreUpCloudBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreUpCloudBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "size_gigabytes",
+            "execution_status",
         )
 
     @staticmethod

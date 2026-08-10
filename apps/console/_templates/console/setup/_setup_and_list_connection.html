@@ -116,9 +116,12 @@
                                             Modify
                                         </button>
                                         <button @click="validateConnection('{{ connection.id }}', '{{ connection.location.id }}')"
+                                                :disabled="validatingConnectionId === '{{ connection.id }}'"
+                                                :aria-busy="validatingConnectionId === '{{ connection.id }}'"
                                                 type="button"
-                                                class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                            Validate
+                                                class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+                                            <span x-show="validatingConnectionId !== '{{ connection.id }}'">Validate</span>
+                                            <span x-show="validatingConnectionId === '{{ connection.id }}'">Validating…</span>
                                         </button>
                                         <a target="_blank"
                                            href="{% url 'console:log:index' %}?integration={{ connection.id }}"
@@ -380,6 +383,21 @@
                         </p>
                     </div>
                     <div x-show="!loading" class="mt-6 grid grid-cols-1 gap-x-4 gap-y-5 sm:grid-cols-6">
+                        <div x-show="connectionFailure" x-cloak
+                             class="sm:col-span-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950"
+                             role="alert" aria-live="polite">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <p class="font-semibold" x-text="connectionFailureTitle(connectionFailure)"></p>
+                                <span class="rounded-full bg-amber-100 px-2 py-0.5 font-mono text-[11px] font-semibold text-amber-800"
+                                      x-text="connectionFailure?.code"></span>
+                            </div>
+                            <p class="mt-1 leading-6" x-text="connectionFailure?.detail"></p>
+                            <p class="mt-1 leading-6"><span class="font-semibold">What to do:</span>
+                                <span x-text="connectionFailure?.remediation"></span>
+                            </p>
+                            <p class="mt-1 text-xs font-medium"
+                               x-text="connectionFailure?.retryable ? 'You can retry after correcting the temporary condition.' : 'Review the configuration before retrying.'"></p>
+                        </div>
                         <div class="sm:col-span-6">
                             <label for="name" class="block text-sm font-medium text-slate-700">
                                 Name {% if "wordpress" in integration.code %}(<a target="_blank" class="font-medium text-indigo-600 transition hover:text-indigo-700" href="https://support.backupsheep.com/docs/how-to-backup-wordpress">How to Backup WordPress</a>){% endif %}
@@ -725,8 +743,8 @@
                             <label for="password" class="block text-sm font-medium text-slate-700">
                                 API User Password
                             </label>
-                            <input x-model="selectedAuth.password" type="text" name="password" id="password"
-                                   autocomplete="password"
+                            <input x-model="selectedAuth.password" type="password" name="password" id="password"
+                                   autocomplete="new-password"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.password" class="mt-1.5 text-xs font-medium text-red-600"
                                id="password-error" x-text="connectionErrors.auth?.password"></p>
@@ -926,8 +944,8 @@
                             <label for="password" class="block text-sm font-medium text-slate-700">
                                 Database Password
                             </label>
-                            <input x-model="selectedAuth.password" type="text" name="password" id="password"
-                                   autocomplete="password"
+                            <input x-model="selectedAuth.password" type="password" name="password" id="password"
+                                   autocomplete="new-password"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.password" class="mt-1.5 text-xs font-medium text-red-600"
                                id="port-error" x-text="connectionErrors.auth?.password"></p>
@@ -1010,8 +1028,8 @@
                                 <span x-show="selectedAuth.use_private_key===false||!selectedAuth.use_private_key">Password</span>
                                 <span x-show="selectedAuth.use_private_key===true">SSH Key Passphrase (optional)</span>
                             </label>
-                            <input x-model="selectedAuth.password" type="text" name="password" id="password"
-                                   autocomplete="password"
+                            <input x-model="selectedAuth.password" type="password" name="password" id="password"
+                                   autocomplete="new-password"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.password" class="mt-1.5 text-xs font-medium text-red-600"
                                id="password-error" x-text="connectionErrors.auth?.password"></p>
@@ -1133,6 +1151,7 @@
                             <div class="border-t border-slate-200"></div>
                         </div>
 
+                        {% if ssh_managed_key_enabled %}
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="flex items-center justify-between gap-4">
@@ -1141,7 +1160,7 @@
                                     <span class="text-xs text-slate-500" id="availability-description">Use the public-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
                                 </span>
                                 <button type="button"
-                                        @click="selectedAuth.use_public_key = !selectedAuth.use_public_key; selectedAuth.use_private_key=false;"
+                                        @click="selectedAuth.use_public_key = !selectedAuth.use_public_key; selectedAuth.use_private_key=false; selectedAuth.private_key=null; selectedAuth.ssh_password=null; if (integrationCode === 'website') selectedAuth.password=null;"
                                         :class="{ 'bg-indigo-600': selectedAuth.use_public_key, 'bg-slate-200': !(selectedAuth.use_public_key) }"
                                         class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
                                         role="switch" :aria-checked="selectedAuth.use_public_key" aria-labelledby="availability-label"
@@ -1162,10 +1181,11 @@
                                 </p>
                             </div>
                             <code class="mt-3 block overflow-x-auto whitespace-normal break-words rounded-lg bg-slate-900 p-3 font-mono text-xs leading-6 text-slate-100"
-                                  x-show="(selectedAuth.use_public_key===true)">echo -e 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC4PG+UeogbJNjvqNOXHK6TsRcE+Zd7hU67qI5Kelt/jpim/kneW1R6lTD9X39EwYGJxjXG6cZkfio3mEFpVmciKWpT9x9jKMvEQGSupzlhU7qSaFIbf1jtpWlPKs686BsJwfkFrUMk2jtaB/GIcRp39UyZB9heoqsgdPwNu2R6uToCjSmZGgg3dMl5Uwis4obu+NeLDl9r6E9LdwXTV3jJI+ZAn1Ju3S7WOXaG+sNLcs+sPMwBPNyLkHEUbJ0XrEHnWhamcm4tgrNlzv2oV2ysS4qCPGZYLari0nrl43MJK+h5YUeAAqHih9zneIN2Gh45rQwBQcOt37a1T993klDh backupsheep.com' >> ~/.ssh/authorized_keys</code>
+                                  x-show="(selectedAuth.use_public_key===true)">printf '%s\n' '{{ ssh_managed_public_key }}' >> ~/.ssh/authorized_keys</code>
                             <code class="mt-3 block overflow-x-auto whitespace-normal break-words rounded-lg bg-slate-900 p-3 font-mono text-xs leading-6 text-slate-100"
                                   x-show="(selectedAuth.use_public_key===true)">chmod 0600 ~/.ssh/authorized_keys</code>
                         </div>
+                        {% endif %}
                         <div class="sm:col-span-6"
                              x-show="integrationCode === 'database' || integrationCode === 'website'">
                             <div class="flex items-center justify-between gap-4">
@@ -1175,7 +1195,7 @@
                                           id="availability-description">Use the private-key method for the {{ integration.code }} server authentication. If you are not familiar, then leave it off.</span>
                                 </span>
                                 <button type="button"
-                                        @click="selectedAuth.use_private_key = !selectedAuth.use_private_key; selectedAuth.use_public_key=false;"
+                                        @click="selectedAuth.use_private_key = !selectedAuth.use_private_key; selectedAuth.use_public_key=false; if (integrationCode === 'website') selectedAuth.password=null; if (integrationCode === 'database') selectedAuth.ssh_password=null;"
                                         :class="{ 'bg-indigo-600': selectedAuth.use_private_key, 'bg-slate-200': !(selectedAuth.use_private_key) }"
                                         class="relative inline-flex h-6 w-11 flex-none cursor-pointer rounded-full border-2 border-transparent bg-slate-200 transition-colors duration-200 ease-in-out focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
                                         role="switch" :aria-checked="selectedAuth.use_private_key" aria-labelledby="availability-label"
@@ -1185,7 +1205,7 @@
                                               class="pointer-events-none inline-block h-5 w-5 translate-x-0 rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
                                 </button>
                             </div>
-                            <textarea x-model="selectedAuth.private_key" id="private_key" name="private_key"
+                            <textarea x-model="selectedAuth.private_key" id="private_key" name="private_key" autocomplete="off" spellcheck="false"
                                       rows="3"
                                       x-show="(selectedAuth.use_private_key===true)"
                                       class="mt-3 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
@@ -1263,8 +1283,8 @@
                                         x-show="selectedAuth.use_public_key===true">(optional)</span></span>
                                 <span x-show="selectedAuth.use_private_key===true">SSH Key Passphrase (optional)</span>
                             </label>
-                            <input x-model="selectedAuth.ssh_password" type="text" name="ssh_port" id="ssh_port"
-                                   autocomplete="ssh_password"
+                            <input x-model="selectedAuth.ssh_password" type="password" name="ssh_password" id="ssh_password"
+                                   autocomplete="new-password"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                             <p x-show="connectionErrors.auth?.ssh_password" class="mt-1.5 text-xs font-medium text-red-600"
                                id="ssh_port-error" x-text="connectionErrors.auth?.ssh_password"></p>
@@ -1345,15 +1365,18 @@
                     </div>
                 </div>
 
-                <div x-show="!loading" class="flex flex-col-reverse gap-2 border-t border-slate-200 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
-                    <button @click="closeConnectionModal()" type="button"
-                            class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                <div class="flex flex-col-reverse gap-2 border-t border-slate-200 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+                    <button @click="closeConnectionModal()" type="button" :disabled="loading"
+                            class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
                         Cancel
                     </button>
                     <button @click="saveConnection()" type="button"
-                            class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                        <span x-show="!connection.id">Add Integration</span>
-                        <span x-show="connection.id">Modify Integration</span>
+                            :disabled="loading || discoveryLoading"
+                            :aria-busy="loading"
+                            class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+                        <span x-show="!loading && !connection.id">Add Integration</span>
+                        <span x-show="!loading && connection.id">Modify Integration</span>
+                        <span x-show="loading">Saving and validating…</span>
                     </button>
                 </div>
             </div>
@@ -1460,6 +1483,10 @@
             endpoints: [],
             awsRegions: [],
             loading: null,
+            discoveryLoading: false,
+            validatingConnectionId: null,
+            connectionFailure: null,
+            requestTimeoutMs: 60000,
             selectedAuth: {},
             notes: null,
             connectionErrors: {
@@ -1623,46 +1650,166 @@
             openUrl(url) {
                 window.location.href = url;
             },
+            defaultConnectionFailure(code = 'CONNECTION_VALIDATION_FAILED') {
+                const failures = {
+                    REQUEST_TIMEOUT: {
+                        detail: 'The request took too long and was stopped by your browser.',
+                        remediation: 'Confirm the destination is reachable from the BackupSheep worker, then retry.',
+                        retryable: true,
+                    },
+                    NETWORK_FAILURE: {
+                        detail: 'The browser could not reach BackupSheep to complete this request.',
+                        remediation: 'Check your network connection and retry. If the problem continues, check BackupSheep availability.',
+                        retryable: true,
+                    },
+                    AUTH_FAILED: {
+                        detail: 'The destination rejected the supplied authentication credentials.',
+                        remediation: 'Check the username and selected password or key authentication mode.',
+                        retryable: false,
+                    },
+                    PERMISSION_DENIED: {
+                        detail: 'The account does not have the permission required for this operation.',
+                        remediation: 'Grant the minimum required permissions and retry.',
+                        retryable: false,
+                    },
+                    CONNECTION_VALIDATION_FAILED: {
+                        detail: 'BackupSheep could not complete the connection operation.',
+                        remediation: 'Review the destination details and worker connectivity, then retry.',
+                        retryable: false,
+                    },
+                };
+                return {code, stage: 'browser', ...(failures[code] || failures.CONNECTION_VALIDATION_FAILED)};
+            },
+            extractConnectionFailure(payload, responseStatus = null) {
+                const authPayload = payload?.['auth_' + this.integrationCode];
+                const candidate = payload?.connection_error || authPayload?.connection_error;
+                const allowedCodes = new Set([
+                    'TCP_TIMEOUT', 'DNS_FAILURE', 'AUTH_FAILED', 'HOST_KEY_UNKNOWN',
+                    'HOST_KEY_CHANGED', 'KEY_PASSPHRASE_REQUIRED', 'CONNECTION_REFUSED',
+                    'CLIENT_OR_KEY_MISSING', 'PERMISSION_DENIED', 'TLS_REQUIRED',
+                    'CONNECTION_VALIDATION_FAILED',
+                ]);
+                if (candidate && allowedCodes.has(candidate.code)
+                    && typeof candidate.detail === 'string'
+                    && typeof candidate.remediation === 'string'
+                    && typeof candidate.retryable === 'boolean') {
+                    return {
+                        code: candidate.code,
+                        detail: candidate.detail,
+                        remediation: candidate.remediation,
+                        retryable: candidate.retryable,
+                        stage: typeof candidate.stage === 'string' ? candidate.stage : 'connection',
+                    };
+                }
+                if (responseStatus === 401) return this.defaultConnectionFailure('AUTH_FAILED');
+                if (responseStatus === 403) return this.defaultConnectionFailure('PERMISSION_DENIED');
+                return this.defaultConnectionFailure();
+            },
+            connectionFailureTitle(failure) {
+                const titles = {
+                    REQUEST_TIMEOUT: 'Request timed out',
+                    TCP_TIMEOUT: 'Destination timed out',
+                    DNS_FAILURE: 'DNS lookup failed',
+                    AUTH_FAILED: 'Authentication failed',
+                    HOST_KEY_UNKNOWN: 'SSH host key needs approval',
+                    HOST_KEY_CHANGED: 'SSH host key changed',
+                    KEY_PASSPHRASE_REQUIRED: 'Private-key passphrase required',
+                    CONNECTION_REFUSED: 'Connection refused',
+                    PERMISSION_DENIED: 'Permission denied',
+                    TLS_REQUIRED: 'TLS is required',
+                    NETWORK_FAILURE: 'Network request failed',
+                };
+                return titles[failure?.code] || 'Connection operation failed';
+            },
+            connectionFailureDetails(failure) {
+                return failure?.remediation
+                    ? `${failure.detail} ${failure.remediation}`
+                    : failure?.detail || 'BackupSheep could not complete the request.';
+            },
+            notifyConnectionFailure(error, heading = null) {
+                const failure = error?.connectionFailure || this.defaultConnectionFailure();
+                this.connectionFailure = failure;
+                Alpine.store('notifications').items.push({
+                    show: true,
+                    error: true,
+                    heading: heading || this.connectionFailureTitle(failure),
+                    details: this.connectionFailureDetails(failure),
+                });
+            },
+            applyConnectionErrors(payload) {
+                const authKey = 'auth_' + this.integrationCode;
+                this.connectionErrors = {
+                    name: payload?.name || null,
+                    notes: payload?.notes || null,
+                    location: payload?.location || null,
+                    region: payload?.region || null,
+                    auth: payload?.[authKey] || {},
+                };
+            },
+            async requestJSON(url, options = {}, timeoutMs = null) {
+                const controller = new AbortController();
+                const timeout = window.setTimeout(
+                    () => controller.abort(),
+                    timeoutMs || this.requestTimeoutMs,
+                );
+                try {
+                    const response = await fetch(url, {...options, signal: controller.signal});
+                    let payload = {};
+                    try {
+                        payload = await response.json();
+                    } catch (ignored) {
+                        payload = {};
+                    }
+                    if (!response.ok) {
+                        const failure = this.extractConnectionFailure(payload, response.status);
+                        const error = new Error(failure.detail);
+                        error.connectionFailure = failure;
+                        error.payload = payload;
+                        error.status = response.status;
+                        throw error;
+                    }
+                    return payload;
+                } catch (error) {
+                    if (error?.connectionFailure) throw error;
+                    const failure = error?.name === 'AbortError'
+                        ? this.defaultConnectionFailure('REQUEST_TIMEOUT')
+                        : this.defaultConnectionFailure('NETWORK_FAILURE');
+                    const safeError = new Error(failure.detail);
+                    safeError.connectionFailure = failure;
+                    safeError.payload = {};
+                    throw safeError;
+                } finally {
+                    window.clearTimeout(timeout);
+                }
+            },
             async getOauthUrl() {
                 this.loading = true;
-                let url = "/api/v1/connections/" + this.integrationCode + "/oauth_url/";
-
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: 'GET',
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        this.loading = false;
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-
-                        this.scheduleErrors = json;
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
-                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'OAuth URL Ready!', details: json.detail});#}
-                    this.oauth_url = json.oauth_url;
-                    this.loading = false;
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({
-                        show: true,
-                        error: true,
-                        heading: 'Error! Unable to get OAuth url.',
-                        details: error.message
+                const url = "/api/v1/connections/" + this.integrationCode + "/oauth_url/";
+                try {
+                    const json = await this.requestJSON(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'GET',
                     });
-                });
+                    this.oauth_url = json.oauth_url;
+                } catch (error) {
+                    this.notifyConnectionFailure(error, 'Unable to prepare provider authorization');
+                } finally {
+                    this.loading = false;
+                }
             },
 
             async openConnectionModal(connection_id, location_id, action_type, integration_code) {
+                this.connectionFailure = null;
+                this.connectionErrors = {
+                    name: null,
+                    notes: null,
+                    location: null,
+                    region: null,
+                    auth: {},
+                };
 
                 if (!connection_id && (integration_code === "basecamp")) {
                     window.location.href = "{{connect_url|safe}}";
@@ -1671,42 +1818,26 @@
                      * Modify Connection
                      */
                     if (connection_id) {
-                        Alpine.store('showLoading').toggle();
+                        this.loading = true;
+                        this.connectionFailure = null;
+                        try {
+                            await this.getEndpoints();
 
-                        await this.getEndpoints();
-
-                        if (this.integrationCode === "aws" || this.integrationCode === "aws_rds" || this.integrationCode === "lightsail") {
-                            await this.getAWSRegions();
-                            this.selectAWSRegions = true;
-                        }
-
-                        let url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/?" + new URLSearchParams({
-                            location: location_id,
-                        });
-
-                        let response = await fetch(url, {
-                            headers: {
-                                'Accept': 'application/json',
-                                'Content-Type': 'application/json'
-                            },
-                            method: 'GET',
-                        }).then(async (response) => {
-                            if (response.ok) {
-                                return response.json();
-                            } else {
-                                this.loading = false;
-                                let json;
-                                try {
-                                    json = await response.json();
-                                } catch (exception_var) {
-                                    json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                                }
-
-                                this.connectionErrors = json;
-                                throw new Error(json.detail);
+                            if (this.integrationCode === "aws" || this.integrationCode === "aws_rds" || this.integrationCode === "lightsail") {
+                                await this.getAWSRegions();
+                                this.selectAWSRegions = true;
                             }
-                        }).then((json) => {
-                            {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'Success!', details: json.detail});#}
+
+                            const url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/?" + new URLSearchParams({
+                                location: location_id,
+                            });
+                            const json = await this.requestJSON(url, {
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'Content-Type': 'application/json'
+                                },
+                                method: 'GET',
+                            });
                             this.connection = json;
 
                             /**
@@ -1716,7 +1847,7 @@
                                 this.connection.id = null;
                             }
 
-                            this.selectedAuth = this.connection["auth_" + this.integrationCode];
+                            this.selectedAuth = this.connection["auth_" + this.integrationCode] || {};
                             if (this.integrationCode === "database") {
                                 if (this.selectedAuth.type) {
                                     this.selectedAuth.type = this.databaseTypes.filter(obj => {
@@ -1739,24 +1870,19 @@
 
                             if (this.integrationCode === "wordpress") {
                                 if (!this.selectedAuth.key || action_type === 'copy') {
-                                    this.getWordPressKey();
+                                    await this.getWordPressKey();
                                 }
                             }
-
-                            Alpine.store('showLoading').toggle();
 
                             /**
                              * Open Modal
                              */
                             this.openConnection = true;
-                        }).catch((error) => {
-                            Alpine.store('notifications').items.push({
-                                show: true,
-                                error: true,
-                                heading: 'Error!',
-                                details: error.message
-                            });
-                        });
+                        } catch (error) {
+                            this.notifyConnectionFailure(error, 'Unable to load the integration');
+                        } finally {
+                            this.loading = false;
+                        }
 
                     } else {
                         /**
@@ -1786,7 +1912,9 @@
 
             },
             async saveConnection() {
+                if (this.loading || this.discoveryLoading) return;
                 this.loading = true;
+                this.connectionFailure = null;
                 let url = null;
                 let method = null;
 
@@ -1819,8 +1947,6 @@
                     data["auth_" + this.integrationCode].protocol = data["auth_" + this.integrationCode].protocol?.code;
 
                     if (data["auth_" + this.integrationCode].protocol === 1) {
-                        this.selectedAuth.use_private_key = false;
-                        this.selectedAuth.use_public_key = false;
                         data["auth_" + this.integrationCode].use_private_key = false;
                         data["auth_" + this.integrationCode].use_public_key = false;
                     }
@@ -1841,101 +1967,56 @@
                 }
 
                 if (data["auth_" + this.integrationCode].use_public_key === true) {
-                    this.selectedAuth.private_key = null;
-                    this.selectedAuth.use_private_key = null;
-                    this.selectedAuth.ssh_password = null;
                     data["auth_" + this.integrationCode].private_key = null;
                     data["auth_" + this.integrationCode].use_private_key = null;
                     data["auth_" + this.integrationCode].ssh_password = null;
                 }
-                /**
-                 * We need to get details of schedule so we will make GET call.
-                 * @type {Response}
-                 */
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: method,
-                    body: JSON.stringify(data)
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        this.loading = false;
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
 
-                        this.connectionErrors = json;
-                        this.connectionErrors.auth = this.connectionErrors["auth_" + this.integrationCode];
-                        if (this.connectionErrors["auth_" + this.integrationCode]?.non_field_errors) {
-                            json.detail = this.connectionErrors["auth_" + this.integrationCode]?.non_field_errors[0];
-
-                        } else {
-                                json.detail = "Unable to process request. Please contact support.";
-                        }
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
+                try {
+                    const json = await this.requestJSON(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: method,
+                        body: JSON.stringify(data)
+                    });
                     if (this.integrationCode === "database") {
                         if (json["id"]) {
-                            this.updateDBTypeAndVersion(json["id"], json["location"]);
+                            await this.updateDBTypeAndVersion(json["id"], json["location"]);
                         }
                     }
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
                         heading: 'Success!',
-                        details: json.detail
+                        details: json.detail || 'Integration saved and validated.'
                     });
-                    this.loading = false;
                     this.closeConnectionModal();
                     location.reload();
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({
-                        show: true,
-                        error: true,
-                        heading: 'Error!',
-                        details: error.message
-                    });
-                });
+                } catch (error) {
+                    this.applyConnectionErrors(error?.payload || {});
+                    this.notifyConnectionFailure(error);
+                } finally {
+                    this.loading = false;
+                }
 
             },
             async pauseConnection(connection_id) {
                 this.loading = true;
-
-                let url = "/api/v1/connections/" + connection_id + "/pause/";
-
-                let data = {
+                const url = "/api/v1/connections/" + connection_id + "/pause/";
+                const data = {
                     notes: this.notes,
-                }
-
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: 'POST',
-                    body: JSON.stringify(data)
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
+                };
+                try {
+                    const json = await this.requestJSON(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'POST',
+                        body: JSON.stringify(data)
+                    });
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
@@ -1943,136 +2024,79 @@
                         details: json.detail
                     });
                     location.reload();
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({
-                        show: true,
-                        error: true,
-                        heading: 'Error!',
-                        details: error.message
-                    });
-                });
+                } catch (error) {
+                    this.notifyConnectionFailure(error, 'Unable to pause the integration');
+                } finally {
+                    this.loading = false;
+                }
             },
             async validateConnection(connection_id, location_id) {
-                Alpine.store('showLoading').toggle();
-
-                let url = null;
-                let method = null;
-
-                url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/validate?" + new URLSearchParams({
+                if (this.validatingConnectionId) return;
+                this.validatingConnectionId = String(connection_id);
+                this.connectionFailure = null;
+                const url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/validate?" + new URLSearchParams({
                     location: location_id,
                 });
-                method = "GET";
-
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: method,
-                }).then(async (response) => {
-
-                    Alpine.store('showLoading').toggle();
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
+                try {
+                    const json = await this.requestJSON(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'GET',
+                    });
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
                         heading: 'Success!',
-                        details: json.detail
+                        details: json.detail || json.message || 'Validation passed. Integration is good for backups.'
                     });
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({
-                        show: true,
-                        error: true,
-                        heading: 'Error!',
-                        details: error.message
-                    });
-                });
+                } catch (error) {
+                    this.notifyConnectionFailure(error);
+                } finally {
+                    this.validatingConnectionId = null;
+                }
             },
             async updateDBTypeAndVersion(connection_id, location_id) {
-                let url = null;
-                let method = null;
-
-                url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/update_db_type_and_version?" + new URLSearchParams({
+                const url = "/api/v1/connections/" + this.integrationCode + "/" + connection_id + "/update_db_type_and_version?" + new URLSearchParams({
                     location: location_id,
                 });
-                method = "GET";
-
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: method,
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
+                try {
+                    const json = await this.requestJSON(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'GET',
+                    });
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
                         heading: 'Success!',
                         details: json.detail
                     });
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({
-                        show: true,
-                        error: true,
-                        heading: 'Error!',
-                        details: error.message
-                    });
-                });
+                    return true;
+                } catch (error) {
+                    this.notifyConnectionFailure(error, 'Integration saved, but database metadata discovery failed');
+                    return false;
+                }
             },
 
             async resumeConnection(connection_id) {
                 this.loading = true;
-
-                let url = "/api/v1/connections/" + connection_id + "/resume/";
-
-                let data = {
+                const url = "/api/v1/connections/" + connection_id + "/resume/";
+                const data = {
                     notes: this.notes,
-                }
-
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: 'POST',
-                    body: JSON.stringify(data)
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
+                };
+                try {
+                    const json = await this.requestJSON(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'POST',
+                        body: JSON.stringify(data)
+                    });
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
@@ -2080,181 +2104,102 @@
                         details: json.detail
                     });
                     location.reload();
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({
-                        show: true,
-                        error: true,
-                        heading: 'Error!',
-                        details: error.message
-                    });
-                });
+                } catch (error) {
+                    this.notifyConnectionFailure(error, 'Unable to resume the integration');
+                } finally {
+                    this.loading = false;
+                }
             },
 
             async deleteConnection(connection_id) {
-                Alpine.store('showLoading').toggle();
-
-                let url = "/api/v1/connections/" + connection_id + "/";
-
-                let data = {
+                this.loading = true;
+                const url = "/api/v1/connections/" + connection_id + "/";
+                const data = {
                     notes: this.notes,
-                }
-
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: 'DELETE',
-                    body: JSON.stringify(data)
-                }).then(async (response) => {
-                    Alpine.store('showLoading').toggle();
-                    if (response.status === 204) {
-                        return {"detail": "Integration will be deleted soon."};
-                    } else {
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
+                };
+                try {
+                    const json = await this.requestJSON(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'DELETE',
+                        body: JSON.stringify(data)
+                    });
                     Alpine.store('notifications').items.push({
                         show: true,
                         success: true,
                         heading: 'Success!',
-                        details: json.detail
+                        details: json.detail || 'Integration deleted.'
                     });
                     location.reload();
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({
-                        show: true,
-                        error: true,
-                        heading: 'Error!',
-                        details: error.message
-                    });
-                });
+                } catch (error) {
+                    this.notifyConnectionFailure(error, 'Unable to delete the integration');
+                } finally {
+                    this.loading = false;
+                }
             },
 
 
             async getEndpoints() {
-                let url = "/api/v1/connections/" + this.integrationCode + "/endpoints/?";
-
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: 'GET',
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        this.loading = false;
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-
-                        this.connectionErrors = json;
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
-                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'Success!', details: json.detail});#}
-                    this.endpoints = json;
-                    {#this.closeConnectionModal();#}
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({
-                        show: true,
-                        error: true,
-                        heading: 'Error!',
-                        details: error.message
+                const url = "/api/v1/connections/" + this.integrationCode + "/endpoints/?";
+                this.discoveryLoading = true;
+                try {
+                    const json = await this.requestJSON(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'GET',
                     });
-                    {#this.closeConnectionModal();#}
-                });
+                    this.endpoints = json;
+                    return true;
+                } catch (error) {
+                    this.notifyConnectionFailure(error, 'Unable to load backup servers');
+                    return false;
+                } finally {
+                    this.discoveryLoading = false;
+                }
             },
             async getAWSRegions() {
-                let url = "/api/v1/connections/" + this.integrationCode + "/regions/?";
-
-                /**
-                 * We need to get details of schedule so we will make GET call.
-                 * @type {Response}
-                 */
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: 'GET',
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        this.loading = false;
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-
-                        this.connectionErrors = json;
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
-                    {#Alpine.store('notifications').items.push({show: true, success: true, heading: 'Success!', details: json.detail});#}
-                    this.awsRegions = json;
-                    {#this.closeConnectionModal();#}
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({
-                        show: true,
-                        error: true,
-                        heading: 'Error!',
-                        details: error.message
+                const url = "/api/v1/connections/" + this.integrationCode + "/regions/?";
+                this.discoveryLoading = true;
+                try {
+                    const json = await this.requestJSON(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'GET',
                     });
-                    {#this.closeConnectionModal();#}
-                });
+                    this.awsRegions = json;
+                    return true;
+                } catch (error) {
+                    this.notifyConnectionFailure(error, 'Unable to load provider regions');
+                    return false;
+                } finally {
+                    this.discoveryLoading = false;
+                }
             },
             async getWordPressKey() {
-                let url = "/api/v1/saas/" + this.integrationCode + "/generate_key/?";
-
-                /**
-                 * We need to get details of schedule so we will make GET call.
-                 * @type {Response}
-                 */
-                let response = await fetch(url, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    },
-                    method: 'GET',
-                }).then(async (response) => {
-                    if (response.ok) {
-                        return response.json();
-                    } else {
-                        this.loading = false;
-                        let json;
-                        try {
-                            json = await response.json();
-                        } catch (exception_var) {
-                            json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                        }
-                        throw new Error(json.detail);
-                    }
-                }).then((json) => {
-                     this.selectedAuth.key = json.key;
-                }).catch((error) => {
-                    Alpine.store('notifications').items.push({
-                        show: true,
-                        error: true,
-                        heading: 'Error!',
-                        details: error.message
+                const url = "/api/v1/saas/" + this.integrationCode + "/generate_key/?";
+                this.discoveryLoading = true;
+                try {
+                    const json = await this.requestJSON(url, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        method: 'GET',
                     });
-                });
+                    this.selectedAuth.key = json.key;
+                    return true;
+                } catch (error) {
+                    this.notifyConnectionFailure(error, 'Unable to generate the WordPress connection key');
+                    return false;
+                } finally {
+                    this.discoveryLoading = false;
+                }
             },
 
             toggleEndpointDropdown() {
@@ -2288,6 +2233,8 @@
                 this.endpointActiveIndex = null;
                 this.openConnection = false;
                 this.selectAWSRegions = false;
+                this.connectionFailure = null;
+                this.discoveryLoading = false;
                 this.connection = {};
                 this.selectedAuth = {};
                 this.connectionErrors = {

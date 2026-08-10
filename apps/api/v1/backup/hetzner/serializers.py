@@ -5,7 +5,11 @@ from apps.console.backup.models import (
     CoreHetznerBackup,
 )
 from apps.console.node.models import CoreHetzner, CoreNode, CoreSchedule
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 
 
 class CoreHetznerSerializer(serializers.ModelSerializer):
@@ -18,7 +22,7 @@ class CoreHetznerSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreHetznerBackupSerializer(serializers.ModelSerializer):
+class CoreHetznerBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     website = CoreHetznerSerializer(source="hetzner", read_only=True)
     database = CoreHetznerSerializer(source="hetzner", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -30,11 +34,13 @@ class CoreHetznerBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreHetznerBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "size_gigabytes",
+            "execution_status",
         )
 
     @staticmethod

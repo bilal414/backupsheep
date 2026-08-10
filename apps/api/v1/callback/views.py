@@ -16,6 +16,7 @@ from apps.console.connection.models import (
     CoreAuthOVHCA,
     CoreAuthOVHEU,
     CoreAuthOVHUS, CoreAuthGoogleCloud, CoreConnectionLocation, CoreAuthBasecamp,
+    _BoundedGoogleAuthorizedSession,
 )
 from apps.console.node.models import CoreGoogleCloud, CoreBasecamp
 from apps.console.notification.models import CoreNotificationSlack
@@ -32,10 +33,9 @@ from apps.api.v1.utils.api_exceptions import ExceptionDefault
 from ..utils.api_authentication import CsrfExemptSessionAuthentication
 import time
 import ovh
-import requests
+from apps.api.v1.utils.http import requests, request_timeout
 from rest_framework.parsers import FormParser
 import dropbox
-from googleapiclient import discovery
 from cryptography.fernet import Fernet
 from google.oauth2 import id_token
 import google.oauth2.credentials
@@ -838,6 +838,7 @@ class APICallbackGoogleDrive(APIView):
                 code=code,
                 authorization_response=f"{settings.APP_URL}{self.request.get_full_path()}",
                 client_secret=settings.GOOGLE_CLIENT_SECRET,
+                timeout=request_timeout(),
             )
 
             if response:
@@ -851,10 +852,22 @@ class APICallbackGoogleDrive(APIView):
                     client_secret=settings.GOOGLE_CLIENT_SECRET,
                     refresh_token=response["refresh_token"],
                 )
-                # authed_http = AuthorizedHttp(credentials)
-                service = discovery.build("drive", "v3", credentials=credentials)
-
-                about = service.about().get(fields="appInstalled,user").execute()
+                client = _BoundedGoogleAuthorizedSession(credentials)
+                about_response = client.get(
+                    "https://www.googleapis.com/drive/v3/about",
+                    params={"fields": "appInstalled,user"},
+                )
+                if about_response.status_code != 200:
+                    raise ValueError(
+                        "Google Drive account details could not be verified."
+                    )
+                about = about_response.json()
+                if not isinstance(about, dict) or not isinstance(
+                    about.get("user"), dict
+                ):
+                    raise ValueError(
+                        "Google Drive returned malformed account details."
+                    )
 
                 if CoreStorageGoogleDrive.objects.filter(
                     storage__account=account,

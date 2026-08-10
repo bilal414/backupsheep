@@ -158,6 +158,7 @@ class LightsailRelationalDatabaseTests(BaseTestCase):
             "relationalDatabaseSnapshots": [
                 {
                     "name": "db-snapshot",
+                    "fromRelationalDatabaseName": "source-database",
                     "state": "available",
                     "sizeInGb": 32,
                 }
@@ -277,6 +278,15 @@ class LightsailRelationalDatabaseTests(BaseTestCase):
         node = self._make_lightsail_node()
         backup = self._backup(node, status=UtilBackup.Status.COMPLETE)
         client = mock.MagicMock()
+        client.get_relational_database_snapshots.return_value = {
+            "relationalDatabaseSnapshots": [
+                {
+                    "name": "db-snapshot",
+                    "fromRelationalDatabaseName": "source-database",
+                    "state": "available",
+                }
+            ]
+        }
 
         with self._client_patch(client):
             backup.soft_delete()

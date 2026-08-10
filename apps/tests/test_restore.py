@@ -1,5 +1,7 @@
 import io
+import hashlib
 import os
+import stat
 import tempfile
 from types import SimpleNamespace
 from unittest import mock
@@ -102,13 +104,14 @@ class RestoreDispatchTests(BaseTestCase):
         ):
             self.assertEqual(restore.poll_status(), CoreCloudRestore.Status.COMPLETE)
 
-    def test_poll_status_swallows_transient_errors(self):
+    def test_poll_status_propagates_unclassified_errors_to_task_classifier(self):
         node = factories.make_cloud_node(self.account, self.member)
         restore = CoreCloudRestore.objects.create(node=node, backup_id=1, name="r")
         with mock.patch.object(
             type(node.digitalocean), "check_restore", side_effect=Exception("boom")
         ):
-            self.assertEqual(restore.poll_status(), CoreCloudRestore.Status.IN_PROGRESS)
+            with self.assertRaisesRegex(Exception, "boom"):
+                restore.poll_status()
 
     def test_backup_property_resolves_provider_backup(self):
         node = factories.make_cloud_node(self.account, self.member)
@@ -332,8 +335,15 @@ class AuthDatabaseDirectConnectRobustnessTests(BaseTestCase):
 
     def test_ssh_mode_closes_client_and_removes_temp_key(self):
         auth = self._auth(use_private_key=True)
+        sftp = mock.MagicMock()
+        sftp.open.side_effect = lambda _name, _mode: io.StringIO()
         ssh = SimpleNamespace(
-            exec_command=lambda command: (None, io.StringIO("8.0.36\n"), io.StringIO("")),
+            exec_command=lambda command, timeout=None: (
+                None,
+                io.StringIO("8.0.36\n"),
+                io.StringIO(""),
+            ),
+            open_sftp=lambda: sftp,
             close=mock.Mock(),
         )
         fd, key_path = tempfile.mkstemp(dir="_storage", prefix="sshkey_")
@@ -366,12 +376,22 @@ class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
     @staticmethod
     def _capture_command(auth, method, stdout_text):
         captured = []
+        sftp = mock.MagicMock()
 
-        def exec_command(command):
+        def open_remote_file(_name, _mode):
+            return io.StringIO()
+
+        sftp.open.side_effect = open_remote_file
+
+        def exec_command(command, timeout=None):
             captured.append(command)
             return None, io.StringIO(stdout_text), io.StringIO("")
 
-        ssh = SimpleNamespace(exec_command=exec_command, close=mock.Mock())
+        ssh = SimpleNamespace(
+            exec_command=exec_command,
+            open_sftp=lambda: sftp,
+            close=mock.Mock(),
+        )
         with mock.patch.object(CoreAuthDatabase, "get_ssh_client",
                                return_value=(ssh, None)):
             getattr(auth, method)()
@@ -403,6 +423,20 @@ class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
             auth, "check_connection", "Server version: 8.0.36\n")
         self.assertIn("--ssl-mode=PREFERRED", command)
 
+    def test_remote_command_never_contains_database_password(self):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL, "mysql_8_0")
+        encryption_key = auth.connection.account.get_encryption_key()
+        from apps.api.v1.utils.api_helpers import bs_encrypt
+
+        password = "enterprise-secret-value"
+        auth.password = bs_encrypt(password, encryption_key)
+        auth.save(update_fields=["password", "modified"])
+        command = self._capture_command(
+            auth, "check_connection", "Server version: 8.0.36\n"
+        )
+        self.assertNotIn(password, command)
+        self.assertIn("--defaults-extra-file", command)
+
 
 # ---------------------------------------------------------------------------
 # Website + database restore backend (fetch/extract helpers, engines, tasks, API)
@@ -413,6 +447,7 @@ import uuid
 import zipfile
 
 from django.test import override_settings
+from django.utils import timezone
 
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration import restore as restore_tasks
@@ -537,6 +572,28 @@ class RestoreBackendBase(BaseTestCase):
 
 
 class FetchBackupZipTests(RestoreBackendBase):
+    @staticmethod
+    def _identity(path):
+        digest = hashlib.sha256()
+        size = 0
+        with open(path, "rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        return size, digest.hexdigest()
+
+    def _commit_destination(self, stored, path):
+        size, checksum = self._identity(path)
+        return stored.backup.record_artifact_integrity(
+            role="destination",
+            object_key=stored.storage_file_id,
+            byte_count=size,
+            storage=stored.storage,
+            checksum_algorithm="sha256",
+            checksum_value=checksum,
+            verified_at=timezone.now(),
+        )
+
     def test_local_copy(self):
         node, backup = self._website_backup()
         src = self._make_zip({"index.html": "<h1>hi</h1>"})
@@ -545,6 +602,53 @@ class FetchBackupZipTests(RestoreBackendBase):
         restore_common.fetch_backup_zip(stored, dest)
         with zipfile.ZipFile(dest) as zf:
             self.assertEqual(zf.read("index.html"), b"<h1>hi</h1>")
+
+    def test_local_copy_matches_committed_destination_checksum(self):
+        _node, backup = self._website_backup()
+        source = self._make_zip({"index.html": "verified"})
+        stored = self._website_point(backup, source)
+        self._commit_destination(stored, source)
+
+        destination = os.path.join(self.tmp, "verified.zip")
+        restore_common.fetch_backup_zip(stored, destination)
+
+        self.assertEqual(self._identity(destination), self._identity(source))
+
+    def test_local_copy_rejects_tampered_committed_destination(self):
+        _node, backup = self._website_backup()
+        source = self._make_zip({"index.html": "original"})
+        stored = self._website_point(backup, source)
+        self._commit_destination(stored, source)
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("index.html", "tampered")
+
+        destination = os.path.join(self.tmp, "tampered.zip")
+        with self.assertRaises(RestoreError) as context:
+            restore_common.fetch_backup_zip(stored, destination)
+
+        self.assertIn("SHA-256", str(context.exception))
+        self.assertFalse(os.path.exists(destination))
+
+    def test_new_ledger_backup_cannot_restore_without_destination_evidence(self):
+        _node, backup = self._website_backup()
+        source = self._make_zip({"index.html": "committed source"})
+        size, checksum = self._identity(source)
+        backup.record_artifact_integrity(
+            role="source",
+            object_key=os.path.basename(source),
+            byte_count=size,
+            checksum_algorithm="sha256",
+            checksum_value=checksum,
+            verified_at=timezone.now(),
+        )
+        stored = self._website_point(backup, source)
+
+        with self.assertRaises(RestoreError) as context:
+            restore_common.fetch_backup_zip(
+                stored, os.path.join(self.tmp, "unverified.zip")
+            )
+
+        self.assertIn("no committed integrity record", str(context.exception))
 
     def test_local_path_traversal_rejected(self):
         node, backup = self._website_backup()
@@ -613,6 +717,19 @@ class ExtractBackupZipTests(RestoreBackendBase):
         zip_path = self._make_zip({"/abs/evil.txt": "x"}, name="abs.zip")
         with self.assertRaises(RestoreError):
             restore_common.extract_backup_zip(zip_path, os.path.join(self.tmp, "out"))
+
+    def test_rejects_zip_symlink_member(self):
+        zip_path = os.path.join(self.tmp, "symlink.zip")
+        member = zipfile.ZipInfo("site-link")
+        member.create_system = 3
+        member.external_attr = (stat.S_IFLNK | 0o777) << 16
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr(member, "../../outside")
+
+        with self.assertRaises(RestoreError) as context:
+            restore_common.extract_backup_zip(zip_path, os.path.join(self.tmp, "out"))
+
+        self.assertIn("special file", str(context.exception))
 
 
 class MaybeExtractTarTests(RestoreBackendBase):
@@ -830,30 +947,29 @@ class DatabaseRestoreEngineTests(RestoreBackendBase):
         )
         restore = self._db_restore(backup, {"appdb.sql": "CREATE TABLE t(id int);"})
         calls = []
-        self._run_engine(backup, restore, self._recorded_run(calls, [(0, b"", b"")]))
+        with mock.patch.object(
+            RD,
+            "_ensure_mysql_target",
+            side_effect=[{"state": "importing", "_new": True}, {"state": "complete"}],
+        ), mock.patch.object(RD, "_mysql_query", return_value=""):
+            self._run_engine(
+                backup, restore, self._recorded_run(calls, [(0, b"", b"")])
+            )
 
-        self.assertEqual(len(calls), 2)
-        create_argv = calls[0]["argv"]
-        self.assertTrue(create_argv[0].endswith("mysql"))
-        # defaults file is the first option token (creds never on argv)
-        self.assertEqual(
-            create_argv[1],
-            f"--defaults-extra-file=_storage/my_restore_{backup.uuid_str}.cnf",
-        )
-        self.assertIn("-e", create_argv)
-        self.assertIn("CREATE DATABASE IF NOT EXISTS `appdb`;", create_argv)
-        self.assertNotIn(DB_PASS, " ".join(create_argv))
-
-        import_argv, import_kwargs = calls[1]["argv"], calls[1]["kwargs"]
+        self.assertEqual(len(calls), 1)
+        import_argv, import_kwargs = calls[0]["argv"], calls[0]["kwargs"]
         self.assertEqual(
             import_argv[1],
             f"--defaults-extra-file=_storage/my_restore_{backup.uuid_str}.cnf",
         )
-        self.assertEqual(import_argv[-1], "appdb")
+        target = restore.params["target_mapping"]["appdb"]
+        self.assertNotEqual(target, "appdb")
+        self.assertEqual(import_argv[-1], target)
         self.assertIsNotNone(import_kwargs.get("stdin"))  # dump streamed on stdin
         self.assertFalse(import_kwargs.get("shell"))
         self.assertNotIn("env", import_kwargs)
         self.assertEqual(import_kwargs.get("timeout"), 12 * 3600)
+        self.assertNotIn(DB_PASS, " ".join(import_argv))
 
         # The credentials file is deleted afterwards.
         self.assertFalse(
@@ -866,13 +982,19 @@ class DatabaseRestoreEngineTests(RestoreBackendBase):
         )
         restore = self._db_restore(backup, {"appdb.sql": "CREATE TABLE t(id int);"})
         calls = []
-        fake = self._recorded_run(calls, [
-            (0, b"", b""),
-            (1, b"", b"ERROR 1050 (42S01): Table 't' already exists"),
-        ])
-        with self.assertRaises(NodeBackupFailedError) as ctx:
-            self._run_engine(backup, restore, fake)
-        self.assertIn("already exists", str(ctx.exception))
+        fake = self._recorded_run(
+            calls,
+            [(1, b"", b"ERROR 1050 (42S01): Table 't' already exists")],
+        )
+        with mock.patch.object(
+            RD,
+            "_ensure_mysql_target",
+            return_value={"state": "importing", "_new": True},
+        ), mock.patch.object(RD, "_mysql_query", return_value=""):
+            with self.assertRaises(NodeBackupFailedError) as ctx:
+                self._run_engine(backup, restore, fake)
+        self.assertNotIn("already exists", str(ctx.exception))
+        self.assertIn("Secured diagnostics", str(ctx.exception))
         self.assertFalse(
             os.path.exists(f"_storage/my_restore_{backup.uuid_str}.cnf")
         )
@@ -883,36 +1005,38 @@ class DatabaseRestoreEngineTests(RestoreBackendBase):
         )
         restore = self._db_restore(backup, {"appdb.sql": "CREATE TABLE t(id int);"})
         calls = []
-        # First psql check returns empty stdout -> database missing -> createdb.
-        self._run_engine(backup, restore, self._recorded_run(calls, [(0, b"", b"")]))
+        with mock.patch.object(
+            RD,
+            "_ensure_postgres_target",
+            side_effect=[{"state": "importing"}, {"state": "complete"}],
+        ):
+            self._run_engine(
+                backup, restore, self._recorded_run(calls, [(0, b"", b"")])
+            )
 
-        self.assertEqual(len(calls), 3)
-        check_argv = calls[0]["argv"]
-        self.assertTrue(check_argv[0].endswith("psql"))
-        self.assertIn("pg_database", " ".join(check_argv))
-        createdb_argv = calls[1]["argv"]
-        self.assertTrue(createdb_argv[0].endswith("createdb"))
-        self.assertIn("appdb", createdb_argv)
-        import_argv, import_kwargs = calls[2]["argv"], calls[2]["kwargs"]
+        self.assertEqual(len(calls), 1)
+        import_argv, import_kwargs = calls[0]["argv"], calls[0]["kwargs"]
         self.assertTrue(import_argv[0].endswith("psql"))
-        self.assertIn("-d", import_argv)
-        self.assertIn("appdb", import_argv)
-        self.assertIsNotNone(import_kwargs.get("stdin"))
-        # Password travels only via PGPASSWORD env, never on argv.
-        for call in calls:
-            self.assertEqual(call["kwargs"]["env"]["PGPASSWORD"], DB_PASS)
-            self.assertNotIn(DB_PASS, " ".join(call["argv"]))
+        target = restore.params["target_mapping"]["appdb"]
+        self.assertIn(f"--dbname={target}", import_argv)
+        self.assertIn("--single-transaction", import_argv)
+        self.assertIn("--set=ON_ERROR_STOP=1", import_argv)
+        self.assertNotIn(DB_PASS, " ".join(import_argv))
+        self.assertNotIn("PGPASSWORD", import_kwargs["env"])
+        self.assertIn("PGPASSFILE", import_kwargs["env"])
+        self.assertFalse(os.path.exists(import_kwargs["env"]["PGPASSFILE"]))
 
-    def test_postgres_skips_createdb_when_database_exists(self):
+    def test_postgres_fork_collision_without_marker_fails_closed(self):
         node, backup = self._database_backup(
             db_type=CoreAuthDatabase.DatabaseType.POSTGRESQL, version="postgres_16"
         )
         restore = self._db_restore(backup, {"appdb.sql": "CREATE TABLE t(id int);"})
         calls = []
-        fake = self._recorded_run(calls, [(0, b"1\n", b""), (0, b"", b"")])
-        self._run_engine(backup, restore, fake)
-        self.assertEqual(len(calls), 2)  # check + import, no createdb
-        self.assertFalse(any(c["argv"][0].endswith("createdb") for c in calls))
+        fake = self._recorded_run(calls, [(0, b"", b"")])
+        with mock.patch.object(RD, "_postgres_query", side_effect=["1\n", ""]):
+            with self.assertRaisesRegex(RestoreError, "not BackupSheep-owned"):
+                self._run_engine(backup, restore, fake)
+        self.assertEqual(calls, [])
 
     def test_tables_mode_imports_into_connection_database(self):
         node, backup = self._database_backup(
@@ -921,10 +1045,19 @@ class DatabaseRestoreEngineTests(RestoreBackendBase):
         )
         restore = self._db_restore(backup, {"orders.sql": "INSERT INTO orders VALUES (1);"})
         calls = []
-        self._run_engine(backup, restore, self._recorded_run(calls, [(0, b"", b"")]))
-        # {table}.sql imports into auth.database_name ("appdb"), not into "orders".
-        self.assertEqual(calls[1]["argv"][-1], "appdb")
-        self.assertIn("`appdb`", " ".join(calls[0]["argv"]))
+        with mock.patch.object(
+            RD,
+            "_ensure_mysql_target",
+            side_effect=[{"state": "importing", "_new": True}, {"state": "complete"}],
+        ), mock.patch.object(RD, "_mysql_query", return_value=""):
+            self._run_engine(
+                backup, restore, self._recorded_run(calls, [(0, b"", b"")])
+            )
+        # Table-only dumps still map from the configured source database, but
+        # fork-by-default prevents an implicit overwrite of that database.
+        target = restore.params["target_mapping"]["appdb"]
+        self.assertEqual(calls[0]["argv"][-1], target)
+        self.assertNotEqual(target, "appdb")
 
     def test_no_sql_dumps_fails(self):
         node, backup = self._database_backup(
@@ -975,7 +1108,9 @@ class WebsiteRestoreTaskTests(RestoreBackendBase):
             restore_tasks.restore_website_backup.apply(args=[node.id, backup.id, restore.id])
         restore.refresh_from_db()
         self.assertEqual(restore.status, CoreWebsiteRestore.Status.FAILED)
-        self.assertEqual(restore.error, "boom")
+        self.assertEqual(restore.last_error_code, "RESTORE_SOURCE_UNAVAILABLE")
+        self.assertNotIn("boom", restore.error)
+        self.assertIn("not currently available", restore.error)
 
 
 class DatabaseRestoreTaskTests(RestoreBackendBase):
@@ -1015,7 +1150,9 @@ class DatabaseRestoreTaskTests(RestoreBackendBase):
             restore_tasks.restore_database_backup.apply(args=[node.id, backup.id, restore.id])
         restore.refresh_from_db()
         self.assertEqual(restore.status, CoreDatabaseRestore.Status.FAILED)
-        self.assertIn("import boom", restore.error)
+        self.assertEqual(restore.last_error_code, "RESTORE_TARGET_REJECTED")
+        self.assertNotIn("import boom", restore.error)
+        self.assertIn("Secured diagnostics", restore.error)
 
 
 class WebsiteRestoreAPITests(RestoreBackendBase):
@@ -1113,7 +1250,9 @@ class WebsiteRestoreAPITests(RestoreBackendBase):
         self.assertEqual(row["name"], "newer")
         self.assertEqual(row["status"], CoreWebsiteRestore.Status.PENDING)
         self.assertEqual(row["status_display"], "Pending")
-        self.assertEqual(row["error"], "oops")
+        self.assertNotEqual(row["error"], "oops")
+        self.assertNotIn("oops", row["error"])
+        self.assertIn("correlation ID", row["error"])
         self.assertEqual(row["backup"], backup.id)
         self.assertEqual(row["storage_point"], stored.id)
 
@@ -1165,7 +1304,11 @@ class DatabaseRestoreAPITests(RestoreBackendBase):
         self.assertEqual(resp.data["status_display"], "Pending")
         self.assertEqual(resp.data["backup"], backup.id)
         self.assertEqual(resp.data["storage_point"], stored.id)
-        self.assertIsNone(resp.data["params"])  # delete is website-only
+        self.assertEqual(resp.data["params"]["mode"], "fork")
+        self.assertTrue(resp.data["params"]["mapping_locked"])
+        self.assertNotEqual(
+            resp.data["params"]["target_mapping"]["appdb"], "appdb"
+        )
         dispatch.assert_called_once()
 
     def test_restores_list_shape_matches_ui_contract(self):
@@ -1226,8 +1369,10 @@ class WebsiteRestoreFailureDetectionTests(RestoreBackendBase):
 
         with self.assertRaises(NodeBackupFailedError) as ctx:
             self._run(backup, restore, fake_run)
-        self.assertIn("secret.txt", str(ctx.exception))
-        self.assertIn("exit code 1", str(ctx.exception))
+        self.assertNotIn("secret.txt", str(ctx.exception))
+        self.assertIn("Secured diagnostics", str(ctx.exception))
+        with open(f"_storage/restore_{backup.uuid_str}.log") as log:
+            self.assertIn("LFTP_REJECTED", log.read())
 
     def test_mirror_failure_schedules_artifact_cleanup(self):
         node, backup = self._website_backup(all_paths=True)
@@ -1273,7 +1418,8 @@ class WebsiteRestoreFailureDetectionTests(RestoreBackendBase):
 
         with self.assertRaises(NodeBackupFailedError) as ctx:
             self._run(backup, restore, fake_run)
-        self.assertIn("failed transfers", str(ctx.exception))
+        self.assertIn("Secured diagnostics", str(ctx.exception))
+        self.assertNotIn("index.html", str(ctx.exception))
 
     def test_put_uses_boolean_pget_flag(self):
         # lftp 4.9.2: `-P` is boolean for put; `-P 3` would make lftp upload an
@@ -1322,9 +1468,10 @@ class RestoreDiskSpacePreflightTests(RestoreBackendBase):
             with self.assertRaises(NodeBackupFailedError) as ctx:
                 RW.restore_website(backup, restore)
         run.assert_not_called()
-        # 3x the stored zip = 6 GB needed, 5 GB free.
-        self.assertIn("Not enough free disk space for website restore", str(ctx.exception))
-        self.assertIn("need ~6.00 GB", str(ctx.exception))
+        # Capacity details stay in secured diagnostics; public exceptions remain
+        # stable and do not reveal worker filesystem/capacity information.
+        self.assertNotIn("5.00 GB", str(ctx.exception))
+        self.assertIn("Secured diagnostics", str(ctx.exception))
         # The zip was never fetched.
         self.assertFalse(os.path.exists(f"_storage/restore_{backup.uuid_str}.zip"))
 
@@ -1344,7 +1491,8 @@ class RestoreDiskSpacePreflightTests(RestoreBackendBase):
             with self.assertRaises(NodeBackupFailedError) as ctx:
                 RW.restore_website(backup, restore)
         run.assert_not_called()
-        self.assertIn("need ~1.00 GB", str(ctx.exception))
+        self.assertNotIn("1.00 GB", str(ctx.exception))
+        self.assertIn("Secured diagnostics", str(ctx.exception))
 
     def test_database_restore_preflight_blocks_before_fetch(self):
         node, backup = self._database_backup(
@@ -1364,6 +1512,6 @@ class RestoreDiskSpacePreflightTests(RestoreBackendBase):
             with self.assertRaises(NodeBackupFailedError) as ctx:
                 RD.restore_database(backup, restore)
         run.assert_not_called()
-        self.assertIn("Not enough free disk space for database restore",
-                      str(ctx.exception))
+        self.assertNotIn("free disk space", str(ctx.exception).lower())
+        self.assertIn("Secured diagnostics", str(ctx.exception))
         self.assertFalse(os.path.exists(f"_storage/restore_{backup.uuid_str}.zip"))

@@ -1,7 +1,9 @@
 import subprocess
 import time
+from datetime import timedelta
 from billiard.exceptions import SoftTimeLimitExceeded
 from boto3.exceptions import S3UploadFailedError
+from botocore.exceptions import ClientError
 from celery import current_app
 from celery.exceptions import MaxRetriesExceededError
 from django.conf import settings
@@ -64,15 +66,273 @@ from apps._tasks.integration.storage.wasabi import (
     storage_wasabi,
     storage_wasabi_delete,
 )
+from apps._tasks.execution import verify_and_commit_source_artifact
+from apps._tasks.integration.storage.lease import (
+    DurableStorageUploadLease,
+    StorageUploadAlreadyComplete,
+    StorageUploadLeaseBusy,
+    StorageUploadLeaseLost,
+)
+from apps._tasks.integration.storage.s3_verified import (
+    S3ObjectIntegrityError,
+    S3UploadReconciliationRequired,
+)
 from apps.console.backup.models import (
     CoreWebsiteBackup,
     CoreDatabaseBackup,
     CoreWordPressBackup, CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints,
     CoreWordPressBackupStoragePoints, CoreBasecampBackup,
+    StoragePointLeaseLostError,
 )
 from apps.console.node.models import CoreNode
 from apps.console.storage.models import CoreStorage
 from apps.console.utils.models import UtilBackup
+
+
+class UnsupportedStorageBackend(RuntimeError):
+    pass
+
+
+class SourceArtifactInvalid(RuntimeError):
+    pass
+
+
+_STORAGE_AUTH_CODES = {
+    "AccessDenied",
+    "ExpiredToken",
+    "InvalidAccessKeyId",
+    "InvalidClientTokenId",
+    "SignatureDoesNotMatch",
+    "Unauthorized",
+}
+_STORAGE_RATE_LIMIT_CODES = {
+    "RequestLimitExceeded",
+    "SlowDown",
+    "Throttling",
+    "ThrottlingException",
+    "TooManyRequestsException",
+}
+_STORAGE_NOT_FOUND_CODES = {"404", "NoSuchBucket", "NoSuchKey", "NotFound"}
+
+
+def _client_error_code(error):
+    current = error
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ClientError):
+            return str((current.response.get("Error") or {}).get("Code") or "")
+        current = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
+    return ""
+
+
+def _caused_by(error, exception_types):
+    current = error
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, exception_types):
+            return True
+        current = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
+    return False
+
+
+def _chain_has_class_name(error, class_name):
+    current = error
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ == class_name:
+            return True
+        current = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
+    return False
+
+
+def _storage_error_outcome(error, point):
+    """Map an exception to a safe, stable status without persisting its text."""
+    quota_errors = (
+        NodeGoogleDriveNotEnoughStorageError,
+        NodeDropboxNotEnoughStorageError,
+        StorageFilebaseQuotaExceededError,
+    )
+    missing_errors = (
+        NodeDigitalOceanSpacesBucketDeletedError,
+        NodeDigitalOceanSpacesNoSuchBucketError,
+        NodeDropboxFileIDMissingError,
+    )
+    if isinstance(error, quota_errors):
+        return (
+            "STORAGE_QUOTA_EXCEEDED",
+            "The destination does not have enough available storage capacity.",
+            point.Status.UPLOAD_FAILED_STORAGE_LIMIT,
+            False,
+        )
+    if isinstance(error, NodeDropboxTokenExpiredError):
+        return (
+            "STORAGE_AUTH_FAILED",
+            "The storage destination rejected its configured credentials.",
+            point.Status.UPLOAD_FAILED,
+            False,
+        )
+    if _caused_by(error, (FileNotFoundError,)):
+        return (
+            "SOURCE_ARTIFACT_MISSING",
+            "The committed local backup artifact is no longer available.",
+            point.Status.UPLOAD_FAILED_FILE_NOT_FOUND,
+            False,
+        )
+    if isinstance(error, missing_errors):
+        return (
+            "STORAGE_DESTINATION_NOT_FOUND",
+            "The configured storage destination or object was not found.",
+            point.Status.UPLOAD_FAILED,
+            False,
+        )
+    if _caused_by(error, (S3ObjectIntegrityError, SourceArtifactInvalid)) or (
+        _chain_has_class_name(error, "_LocalStorageIntegrityError")
+    ):
+        return (
+            "STORAGE_INTEGRITY_FAILED",
+            "The uploaded object failed integrity verification.",
+            point.Status.STORAGE_VALIDATION_FAILED,
+            False,
+        )
+    if _caused_by(error, (S3UploadReconciliationRequired,)):
+        return (
+            "STORAGE_RECONCILIATION_REQUIRED",
+            "The provider returned ambiguous upload state; automatic writes were stopped safely.",
+            point.Status.STORAGE_VALIDATION_FAILED,
+            False,
+        )
+    if isinstance(error, UnsupportedStorageBackend):
+        return (
+            "STORAGE_BACKEND_UNSUPPORTED",
+            "This storage backend is not supported by the current worker.",
+            point.Status.UPLOAD_FAILED,
+            False,
+        )
+    if isinstance(error, SoftTimeLimitExceeded):
+        return (
+            "STORAGE_TIMEOUT",
+            "The storage operation timed out and will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        )
+
+    declared_code = str(
+        getattr(error, "error_code", None) or getattr(error, "code", None) or ""
+    ).upper()
+    declared_outcomes = {
+        "STORAGE_AUTH_FAILED": (
+            "STORAGE_AUTH_FAILED",
+            "The storage destination rejected its configured credentials.",
+            point.Status.UPLOAD_FAILED,
+            False,
+        ),
+        "STORAGE_DESTINATION_NOT_FOUND": (
+            "STORAGE_DESTINATION_NOT_FOUND",
+            "The configured storage destination or object was not found.",
+            point.Status.UPLOAD_FAILED,
+            False,
+        ),
+        "STORAGE_RATE_LIMITED": (
+            "STORAGE_RATE_LIMITED",
+            "The storage provider rate limit was reached; upload will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        ),
+        "PROVIDER_TIMEOUT": (
+            "STORAGE_TIMEOUT",
+            "The storage operation timed out and will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        ),
+        "STORAGE_TIMEOUT": (
+            "STORAGE_TIMEOUT",
+            "The storage operation timed out and will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        ),
+        "PROVIDER_TRANSIENT_FAILURE": (
+            "STORAGE_TRANSIENT_FAILURE",
+            "The storage provider could not complete the operation; upload will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        ),
+        "STORAGE_TRANSIENT_FAILURE": (
+            "STORAGE_TRANSIENT_FAILURE",
+            "The storage provider could not complete the operation; upload will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        ),
+        "ARTIFACT_PERSISTENCE_FAILED": (
+            "STORAGE_TRANSIENT_FAILURE",
+            "Verified storage evidence could not be persisted; upload will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        ),
+        "STATE_PERSISTENCE_FAILED": (
+            "STORAGE_TRANSIENT_FAILURE",
+            "Storage progress could not be persisted; upload will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        ),
+        "STREAMING_VERIFICATION_UNAVAILABLE": (
+            "STORAGE_BACKEND_UNSUPPORTED",
+            "This storage client cannot safely stream the object for integrity verification.",
+            point.Status.STORAGE_VALIDATION_FAILED,
+            False,
+        ),
+        "PROVIDER_MALFORMED_RESPONSE": (
+            "STORAGE_RECONCILIATION_REQUIRED",
+            "The provider returned malformed upload state; automatic writes were stopped safely.",
+            point.Status.STORAGE_VALIDATION_FAILED,
+            False,
+        ),
+        "SESSION_STATE_UNAVAILABLE": (
+            "STORAGE_RECONCILIATION_REQUIRED",
+            "Resumable upload state could not be protected; automatic writes were stopped safely.",
+            point.Status.STORAGE_VALIDATION_FAILED,
+            False,
+        ),
+    }
+    if declared_code in declared_outcomes:
+        return declared_outcomes[declared_code]
+
+    provider_code = _client_error_code(error)
+    if provider_code in _STORAGE_AUTH_CODES:
+        return (
+            "STORAGE_AUTH_FAILED",
+            "The storage destination rejected its configured credentials.",
+            point.Status.UPLOAD_FAILED,
+            False,
+        )
+    if provider_code in _STORAGE_NOT_FOUND_CODES:
+        return (
+            "STORAGE_DESTINATION_NOT_FOUND",
+            "The configured storage destination or object was not found.",
+            point.Status.UPLOAD_FAILED,
+            False,
+        )
+    if provider_code in _STORAGE_RATE_LIMIT_CODES:
+        return (
+            "STORAGE_RATE_LIMITED",
+            "The storage provider rate limit was reached; upload will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        )
+    return (
+        "STORAGE_TRANSIENT_FAILURE",
+        "The storage provider could not complete the operation; upload will resume automatically.",
+        point.Status.UPLOAD_RETRY,
+        True,
+    )
 
 
 @current_app.task(
@@ -106,37 +366,29 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     else:
         raise TaskParamsNotProvided()
 
-    # Chord publication and worker acknowledgement are separate events. A storage
-    # task can therefore be delivered twice, or be recovered after a worker loss.
-    # Claim the storage-point row before touching the remote backend and skip a
-    # healthy in-flight claimant. A stale claimant is safe to resume because each
-    # backend uses the deterministic backup UUID/file key.
-    with transaction.atomic():
-        locked = stored_backup.__class__.objects.select_for_update().get(pk=stored_backup.pk)
-        if locked.status == locked.Status.UPLOAD_COMPLETE:
-            return
-        if locked.status == locked.Status.UPLOAD_IN_PROGRESS:
-            stale_after = int(
-                getattr(
-                    settings,
-                    "BACKUP_STORAGE_STALE_SECONDS",
-                    getattr(settings, "BACKUP_RECOVERY_STALE_SECONDS", 900),
-                )
-            )
-            if (timezone.now() - locked.modified).total_seconds() < stale_after:
-                # This task may be a duplicate header from a redelivered parent
-                # chord, including a duplicate with the same Celery id. Keep the
-                # header slot pending until the claimant completes; returning here
-                # would let the duplicate chord finalize the backup while the real
-                # upload is still running.
-                raise self.retry(countdown=60)
-        locked.status = locked.Status.UPLOAD_IN_PROGRESS
-        locked.celery_task_id = self.request.id
-        locked.save(update_fields=["status", "celery_task_id", "modified"])
-        stored_backup = locked
+    # Celery delivery is not execution ownership.  Claim a renewable DB lease and
+    # bind its random fence to every adapter save before touching a destination.
+    lease = DurableStorageUploadLease(
+        stored_backup,
+        task_id=self.request.id,
+        worker_name=getattr(self.request, "hostname", ""),
+    )
+    try:
+        stored_backup = lease.claim()
+    except StorageUploadAlreadyComplete:
+        return
+    except StorageUploadLeaseBusy as error:
+        raise self.retry(
+            countdown=error.retry_after,
+            max_retries=2880,
+        )
 
     log_file_path = f"_storage/{backup.uuid_str}.log"
-    log_file = open(log_file_path, "a+")
+    try:
+        log_file = open(log_file_path, "a+")
+    except Exception:
+        lease.release()
+        raise
 
     storage_type_name = f"Storage ({stored_backup.storage.type.name})"
     log_file.write(f"{storage_type_name}: Starting Upload \n")
@@ -144,6 +396,18 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     log_file.write(f"{storage_type_name}: {stored_backup.storage.name} \n")
 
     try:
+        # A destination may only upload the immutable source identity committed by
+        # the dump worker.  This catches disk corruption and stale-file reuse before
+        # a provider receives any bytes.
+        try:
+            verify_and_commit_source_artifact(backup)
+        except FileNotFoundError:
+            raise
+        except Exception as error:
+            raise SourceArtifactInvalid(
+                "The committed source artifact failed verification."
+            ) from error
+
         if stored_backup.storage.type.code == "dropbox":
             storage_dropbox(stored_backup)
         elif stored_backup.storage.type.code == "google_drive":
@@ -197,12 +461,9 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
         elif stored_backup.storage.type.code == "local":
             storage_local(stored_backup)
         else:
-            stored_backup.status = stored_backup.Status.UPLOAD_FAILED
-            stored_backup.save()
-            log_file.write(
-                f"{storage_type_name}: Unsupported storage type "
-                f"'{stored_backup.storage.type.code}'\n"
-            )
+            raise UnsupportedStorageBackend()
+
+        lease.ensure_owned()
 
         # The backend sets the storage point to UPLOAD_COMPLETE on success (or a
         # failure status / raises). Backup-level completion (status, notification,
@@ -210,121 +471,71 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
         # after every upload finishes.
         log_file.write(f"{storage_type_name}: {stored_backup.get_status_display()} \n")
 
-    except NodeGoogleDriveNotEnoughStorageError as e:
-        node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-        stored_backup.status = stored_backup.Status.UPLOAD_FAILED_STORAGE_LIMIT
-        stored_backup.save()
-        node.connection.account.create_storage_log(
-            e.__str__(), node, backup, stored_backup.storage
+    except (StorageUploadLeaseLost, StoragePointLeaseLostError) as error:
+        # A replacement worker may already be active.  Never let this stale
+        # delivery overwrite its state, even with a failure status.
+        capture_exception(error)
+        raise self.retry(countdown=30, max_retries=2880)
+    except Exception as error:
+        capture_exception(error)
+        code, message, status, retryable = _storage_error_outcome(
+            error, stored_backup
         )
-        log_file.write(f"Error: {e.__str__()} \n")
-    except NodeDigitalOceanSpacesBucketDeletedError as e:
-        node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-        stored_backup.status = stored_backup.Status.UPLOAD_FAILED_STORAGE_LIMIT
-        stored_backup.save()
-        node.connection.account.create_storage_log(
-            e.__str__(), node, backup, stored_backup.storage
+        stored_backup.last_error_code = code
+        stored_backup.last_error_message = message
+        stored_backup.status = status
+        stored_backup.save(
+            update_fields=[
+                "last_error_code",
+                "last_error_message",
+                "status",
+                "modified",
+            ]
         )
-        log_file.write(f"Error: {e.__str__()} \n")
-    except NodeDigitalOceanSpacesNoSuchBucketError as e:
-        node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-        stored_backup.status = stored_backup.Status.UPLOAD_FAILED_STORAGE_LIMIT
-        stored_backup.save()
-        node.connection.account.create_storage_log(
-            e.__str__(), node, backup, stored_backup.storage
-        )
-        log_file.write(f"Error: {e.__str__()} \n")
-    except NodeDropboxNotEnoughStorageError as e:
-        node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-        stored_backup.status = stored_backup.Status.UPLOAD_FAILED_STORAGE_LIMIT
-        stored_backup.save()
-        node.connection.account.create_storage_log(
-            e.__str__(), node, backup, stored_backup.storage
-        )
-        log_file.write(f"Error: {e.__str__()} \n")
-    except StorageFilebaseQuotaExceededError as e:
-        node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-        stored_backup.status = stored_backup.Status.UPLOAD_FAILED_STORAGE_LIMIT
-        stored_backup.save()
-        node.connection.account.create_storage_log(
-            e.__str__(), node, backup, stored_backup.storage
-        )
-        log_file.write(f"Error: {e.__str__()} \n")
-    except NodeDropboxTokenExpiredError as e:
-        node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-        stored_backup.status = stored_backup.Status.UPLOAD_FAILED_STORAGE_LIMIT
-        stored_backup.save()
-        node.connection.account.create_storage_log(
-            e.__str__(), node, backup, stored_backup.storage
-        )
-        log_file.write(f"Error: {e.__str__()} \n")
-    except NodeDropboxFileIDMissingError as e:
-        node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-        stored_backup.status = stored_backup.Status.UPLOAD_FAILED
-        stored_backup.save()
-        node.connection.account.create_storage_log(
-            e.__str__(), node, backup, stored_backup.storage
-        )
-        log_file.write(f"Error: {e.__str__()} \n")
-    #    An error occurred (NoSuchBucket) when calling the
-    #    CreateMultipartUpload operation: The specified bucket does not exist
-    except S3UploadFailedError as e:
-        node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-        stored_backup.status = stored_backup.Status.UPLOAD_FAILED
-        stored_backup.save()
-        node.connection.account.create_storage_log(
-            e.__str__(), node, backup, stored_backup.storage
-        )
-        log_file.write(f"Error: {e.__str__()} \n")
-
-    # #     An error occurred (InvalidAccessKeyId) when calling the
-    # PutObject operation: The AWS Access Key Id you provided does not exist in our records.
-    # except NodeAWSS3UploadFailedError as e:
-    #     node.notify_upload_fail(e, backup, stored_backup.storage)
-    #     stored_backup.status = stored_backup.Status.UPLOAD_FAILED
-    #     stored_backup.save()
-    #     node.connection.account.create_storage_log(e, node, backup, stored_backup.storage)
-    except SoftTimeLimitExceeded as e:
-        node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-        stored_backup.status = stored_backup.Status.UPLOAD_TIME_LIMIT_REACHED
-        stored_backup.save()
-        node.connection.account.create_storage_log(
-            e.__str__(), node, backup, stored_backup.storage
-        )
-        log_file.write(f"Error: {e.__str__()} \n")
-    except Exception as e:
-        capture_exception(e)
-
-        # A missing local backup file cannot be fixed by retrying; fail immediately.
-        if (
-            "user-provided path" in e.__str__().lower()
-            and "does not exist" in e.__str__().lower()
-        ):
-            stored_backup.status = stored_backup.Status.UPLOAD_FAILED_FILE_NOT_FOUND
-            stored_backup.save()
-            node.connection.account.create_storage_log(
-                e.__str__(), node, backup, stored_backup.storage
-            )
-            log_file.write(f"Error (not retryable): {e.__str__()} \n")
-        else:
+        retry_after = None
+        retry_at = None
+        if retryable:
+            retry_after = getattr(error, "retry_after", None)
             try:
-                if attempt_no <= 3:
-                    node.notify_upload_fail(e.__str__(), backup, stored_backup.storage)
-
-                stored_backup.status = stored_backup.Status.UPLOAD_RETRY
-                stored_backup.save()
-
-                node.connection.account.create_storage_log(
-                    e.__str__(), node, backup, stored_backup.storage
-                )
-                log_file.write(f"Error: {e.__str__()} \n")
-                raise self.retry()
+                retry_after = max(1, min(int(retry_after), 86400))
+            except (TypeError, ValueError):
+                retry_after = 900
+            retry_at = timezone.now() + timedelta(seconds=retry_after)
+        backup.record_execution_error(
+            code=code,
+            message=message,
+            retryable=retryable,
+            retry_at=retry_at,
+        )
+        if attempt_no <= 3:
+            node.notify_upload_fail(message, backup, stored_backup.storage)
+        node.connection.account.create_storage_log(
+            message, node, backup, stored_backup.storage
+        )
+        log_file.write(f"Error [{code}]: {message}\n")
+        if retryable:
+            try:
+                raise self.retry(countdown=retry_after)
             except MaxRetriesExceededError:
                 stored_backup.status = stored_backup.Status.UPLOAD_FAILED
-                stored_backup.save()
-                log_file.write(f"Error: Giving up after max retries \n")
+                stored_backup.last_error_code = "STORAGE_RETRIES_EXHAUSTED"
+                stored_backup.last_error_message = (
+                    "The storage upload exhausted its automatic retry budget."
+                )
+                stored_backup.save(
+                    update_fields=[
+                        "status",
+                        "last_error_code",
+                        "last_error_message",
+                        "modified",
+                    ]
+                )
+                log_file.write(
+                    "Error [STORAGE_RETRIES_EXHAUSTED]: automatic retries exhausted.\n"
+                )
     finally:
         log_file.close()
+        lease.release()
 
 
 @current_app.task(
@@ -395,7 +606,22 @@ def finalize_backup(self, node_id, backup_id):
             for point in storage_points
         )
         storage_point_count = len(storage_points)
-        all_uploaded = uploaded_count == storage_point_count
+        metadata = dict(backup.metadata or {})
+        destination_setup = metadata.get("_backup_destination_setup")
+        destination_setup = (
+            destination_setup if isinstance(destination_setup, dict) else {}
+        )
+        try:
+            requested_storage_count = max(
+                storage_point_count,
+                int(destination_setup.get("requested_count") or 0),
+            )
+        except (TypeError, ValueError):
+            requested_storage_count = storage_point_count
+        all_uploaded = (
+            requested_storage_count > 0
+            and uploaded_count == requested_storage_count
+        )
         if uploaded_count > 0:
             final_status = (
                 UtilBackup.Status.COMPLETE
@@ -406,7 +632,6 @@ def finalize_backup(self, node_id, backup_id):
             # Nothing was stored anywhere -> failure (do not silently mark complete).
             final_status = UtilBackup.Status.UPLOAD_FAILED
 
-        metadata = dict(backup.metadata or {})
         finalization = metadata.get("_backup_finalization")
         finalization = dict(finalization) if isinstance(finalization, dict) else {}
         status_changed = backup.status != final_status
@@ -420,7 +645,12 @@ def finalize_backup(self, node_id, backup_id):
         if uploaded_count > 0:
             metadata["storage_upload_summary"] = {
                 "uploaded": uploaded_count,
-                "configured": storage_point_count,
+                # ``configured`` is retained for API compatibility, but now means
+                # the complete immutable request rather than only the subset that
+                # happened to attach before a worker crash.
+                "configured": requested_storage_count,
+                "accepted": storage_point_count,
+                "failed": max(requested_storage_count - uploaded_count, 0),
                 "partial": final_status == UtilBackup.Status.PARTIAL,
             }
         backup.status = final_status
@@ -457,7 +687,7 @@ def finalize_backup(self, node_id, backup_id):
         elif should_log_partial:
             message = (
                 f"Backup {backup.uuid_str} completed partially: "
-                f"{uploaded_count}/{storage_point_count} storage destinations succeeded."
+                f"{uploaded_count}/{requested_storage_count} storage destinations succeeded."
             )
             node.connection.account.create_backup_log(message, node, backup)
             capture_message(message)

@@ -204,7 +204,9 @@ class ViewActionLogTests(BaseTestCase):
         node = factories.make_website_node(self.account, self.member)
         schedule = factories.make_schedule(node, self.member)
         self.client.force_login(self.user)
-        with mock.patch("apps.api.v1.schedule.views.current_app") as capp:
+        # Schedule triggers are accepted through the durable transactional
+        # outbox; publication uses the dispatch module's Celery app.
+        with mock.patch("apps._tasks.backup_dispatch.current_app") as capp:
             r = self.client.post(
                 f"/api/v1/schedules/{schedule.id}/trigger/",
                 {"request_id": "req-activity-1"},

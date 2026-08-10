@@ -2,6 +2,7 @@ import json
 from datetime import timedelta
 
 import boto3
+from botocore.config import Config
 from django.utils import timezone
 from apps._tasks.exceptions import (
     NodeBackupFailedError,
@@ -18,6 +19,11 @@ from apps.console.backup.models import (
 from apps.console.node.models import CoreNode, CoreServerStatus
 from apps.console.storage.models import CoreStorage
 from django.core.cache import cache
+from apps._tasks.integration.storage.s3_verified import upload_verified_s3
+from apps.api.v1.utils.boto import bounded_boto3_client
+
+
+AWS_S3_OBJECT_METADATA_KEY = "aws_s3_object"
 
 
 def storage_aws_s3(stored_backup):
@@ -30,14 +36,22 @@ def storage_aws_s3(stored_backup):
         prefix = aws_s3.prefix
 
         file_name = f"{stored_backup.backup.uuid}.zip"
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3",
+            allow_retries=True,
             region_name=aws_s3.region.code if aws_s3.region else None,
             aws_access_key_id=bs_decrypt(
                 aws_s3.access_key, encryption_key
             ),
             aws_secret_access_key=bs_decrypt(
                 aws_s3.secret_key, encryption_key
+            ),
+            config=Config(
+                connect_timeout=10,
+                read_timeout=60,
+                retries={"max_attempts": 5, "mode": "standard"},
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
             ),
         )
         if prefix:
@@ -94,22 +108,24 @@ def storage_aws_s3(stored_backup):
         retain_until = None
         if aws_s3.object_lock_is_configured():
             retain_until = timezone.now() + timedelta(days=aws_s3.object_lock_retain_days)
-            # An additional checksum is required by S3 for Object Lock writes.
             extra_args.update(
                 {
                     "ObjectLockMode": aws_s3.object_lock_mode,
                     "ObjectLockRetainUntilDate": retain_until,
-                    "ChecksumAlgorithm": "SHA256",
                 }
             )
 
-        with open(local_zip, "rb") as data:
-            s3_client.upload_fileobj(
-                data,
-                aws_s3.bucket_name,
-                aws_key,
-                ExtraArgs=extra_args,
-            )
+        object_state = upload_verified_s3(
+            stored_backup,
+            client=s3_client,
+            bucket=aws_s3.bucket_name,
+            key=aws_key,
+            local_path=local_zip,
+            metadata_key=AWS_S3_OBJECT_METADATA_KEY,
+            expected_owner=aws_s3.expected_bucket_owner or None,
+            extra_args=extra_args,
+            supports_checksum=True,
+        )
 
         if aws_s3.object_lock_is_configured():
             lock_metadata = {
@@ -117,39 +133,13 @@ def storage_aws_s3(stored_backup):
                 "retain_until": retain_until.isoformat(),
                 "air_gapped": storage.is_air_gapped,
                 "deletion_protection": bool(aws_s3.no_delete or storage.is_air_gapped),
+                "version_id": object_state.get("version_id"),
             }
-            head_args = {"Bucket": aws_s3.bucket_name, "Key": aws_key}
-            if aws_s3.expected_bucket_owner:
-                head_args["ExpectedBucketOwner"] = aws_s3.expected_bucket_owner
-            try:
-                s3_object = s3_client.head_object(**head_args)
-                object_retain_until = s3_object.get("ObjectLockRetainUntilDate")
-                lock_metadata.update(
-                    {
-                        "mode": s3_object.get("ObjectLockMode") or lock_metadata["mode"],
-                        "retain_until": (
-                            object_retain_until.isoformat()
-                            if object_retain_until
-                            else lock_metadata["retain_until"]
-                        ),
-                        "version_id": s3_object.get("VersionId"),
-                        "legal_hold": s3_object.get("ObjectLockLegalHoldStatus"),
-                    }
-                )
-            except Exception:
-                # The upload is durable at this point. Keep the intended retention
-                # metadata and fail closed during deletion if we cannot read a
-                # version ID back from S3.
-                lock_metadata["version_id"] = None
-
             stored_backup.metadata = {
                 **(stored_backup.metadata or {}),
                 "s3_object_lock": lock_metadata,
             }
-        storage_file_id = aws_key
-        stored_backup.storage_file_id = storage_file_id
-        stored_backup.status = stored_backup.Status.UPLOAD_COMPLETE
-        stored_backup.save()
+            stored_backup.save(update_fields=["metadata", "modified"])
     except FileNotFoundError as e:
         stored_backup.status = stored_backup.Status.UPLOAD_FAILED_FILE_NOT_FOUND
         stored_backup.save()

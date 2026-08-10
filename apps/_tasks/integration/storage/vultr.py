@@ -1,101 +1,320 @@
-import hashlib
-
-import boto3
 from botocore.client import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
+from dataclasses import dataclass
 
 from apps._tasks.exceptions import StorageVultrUploadFailedError
+from apps._tasks.integration.storage.s3_verified import (
+    S3ObjectIntegrityError,
+    S3UploadReconciliationRequired,
+    upload_verified_s3,
+)
 from apps.api.v1.utils.api_helpers import bs_decrypt
+from apps.api.v1.utils.boto import bounded_boto3_client
 
 
 VULTR_OBJECT_METADATA_KEY = "vultr_s3_object"
-VULTR_SHA256_HEADER = "backupsheep-sha256"
-_NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound", "NoSuchBucket"}
 
 
-def _hash_stream(stream):
-    digest = hashlib.sha256()
-    size = 0
-    while True:
-        chunk = stream.read(1024 * 1024)
-        if not chunk:
+@dataclass(frozen=True)
+class _SafeS3Failure:
+    """Private classification data; never serialize provider details."""
+
+    code: str
+    message: str
+    retryable: bool
+    retry_after: int | None = None
+    provider_code: str = ""
+
+
+_AUTH_CODES = {
+    "accessdenied",
+    "expiredtoken",
+    "expiredtokenexception",
+    "invalidaccesskeyid",
+    "invalidclienttokenid",
+    "invalidsecuritytoken",
+    "invalidtoken",
+    "signaturedoesnotmatch",
+    "unauthorized",
+}
+_NOT_FOUND_CODES = {
+    "404",
+    "bucketdeleted",
+    "nosuchbucket",
+    "nosuchkey",
+    "notfound",
+}
+_RATE_LIMIT_CODES = {
+    "ratelimitexceeded",
+    "requestlimitexceeded",
+    "slowdown",
+    "throttling",
+    "throttlingexception",
+    "toomanyrequests",
+    "toomanyrequestsexception",
+}
+_RECONCILIATION_CODES = {
+    "conditionalrequestconflict",
+    "invalidpart",
+    "invalidpartorder",
+    "nosuchupload",
+    "preconditionfailed",
+}
+_QUOTA_CODES = {"quotaexceeded", "storagequotaexceeded"}
+
+
+def _exception_chain(error):
+    current = error
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
+
+
+def _provider_response(error):
+    for current in _exception_chain(error):
+        if not isinstance(current, ClientError):
+            continue
+        response = current.response if isinstance(current.response, dict) else {}
+        error_data = response.get("Error") or {}
+        if not isinstance(error_data, dict):
+            error_data = {}
+        provider_code = error_data.get("Code")
+        provider_code = provider_code.lower() if isinstance(provider_code, str) else ""
+        response_metadata = response.get("ResponseMetadata") or {}
+        if not isinstance(response_metadata, dict):
+            response_metadata = {}
+        status = response_metadata.get("HTTPStatusCode")
+        if isinstance(status, str) and status.isdigit():
+            status = int(status)
+        if not isinstance(status, int):
+            status = None
+        headers = response_metadata.get("HTTPHeaders") or {}
+        if not isinstance(headers, dict):
+            headers = {}
+        return provider_code, status, headers
+    return "", None, {}
+
+
+def _retry_after(headers):
+    if not isinstance(headers, dict):
+        return None
+    value = None
+    for name, candidate in headers.items():
+        if isinstance(name, str) and name.lower() == "retry-after":
+            value = candidate
             break
-        digest.update(chunk)
-        size += len(chunk)
-    return digest.hexdigest(), size
+    if isinstance(value, int):
+        seconds = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        seconds = int(value.strip())
+    else:
+        return None
+    return max(1, min(seconds, 86400))
 
 
-def _head_object(client, bucket, key, version_id=None):
-    args = {"Bucket": bucket, "Key": key}
-    if version_id and version_id != "null":
-        args["VersionId"] = version_id
-    return client.head_object(**args)
+def _declared_retry_after(error):
+    for current in _exception_chain(error):
+        value = getattr(current, "retry_after", None)
+        if isinstance(value, int):
+            return max(1, min(value, 86400))
+        if isinstance(value, str) and value.strip().isdigit():
+            return max(1, min(int(value.strip()), 86400))
+    return None
 
 
-def _metadata_value(response, name):
-    metadata = response.get("Metadata") or {}
-    name = name.lower()
-    return next(
-        (str(value) for key, value in metadata.items() if key.lower() == name),
-        None,
+def _declared_code(error):
+    for current in _exception_chain(error):
+        value = getattr(current, "error_code", None) or getattr(current, "code", None)
+        if isinstance(value, str):
+            return value.upper()
+    return ""
+
+
+def _safe_s3_failure(error):
+    """Return stable storage semantics without reading provider body text."""
+    for current in _exception_chain(error):
+        if isinstance(current, S3ObjectIntegrityError):
+            return _SafeS3Failure(
+                "STORAGE_INTEGRITY_FAILED",
+                "The uploaded object failed integrity verification; the local backup changed after this upload operation started or the provider copy did not match.",
+                False,
+            )
+        if isinstance(current, S3UploadReconciliationRequired):
+            return _SafeS3Failure(
+                "STORAGE_RECONCILIATION_REQUIRED",
+                "The provider returned ambiguous upload state; Multiple unfinished uploads or another reconciliation conflict requires review.",
+                False,
+            )
+
+    declared_code = _declared_code(error)
+    if declared_code in {
+        "STORAGE_INTEGRITY_FAILED",
+        "STORAGE_RECONCILIATION_REQUIRED",
+        "STORAGE_AUTH_FAILED",
+        "STORAGE_DESTINATION_NOT_FOUND",
+        "STORAGE_RATE_LIMITED",
+        "STORAGE_QUOTA_EXCEEDED",
+        "STORAGE_TIMEOUT",
+        "PROVIDER_TIMEOUT",
+        "PROVIDER_TRANSIENT_FAILURE",
+        "PROVIDER_MALFORMED_RESPONSE",
+    }:
+        messages = {
+            "STORAGE_INTEGRITY_FAILED": "The uploaded object failed integrity verification.",
+            "STORAGE_RECONCILIATION_REQUIRED": "The provider returned ambiguous upload state; automatic writes were stopped safely.",
+            "STORAGE_AUTH_FAILED": "The storage destination rejected its configured credentials.",
+            "STORAGE_DESTINATION_NOT_FOUND": "The configured storage destination or object was not found.",
+            "STORAGE_RATE_LIMITED": "The storage provider rate limit was reached; upload will resume automatically.",
+            "STORAGE_QUOTA_EXCEEDED": "The storage destination has reached its configured capacity quota.",
+            "STORAGE_TIMEOUT": "The storage operation timed out and will resume automatically.",
+            "PROVIDER_TIMEOUT": "The storage operation timed out and will resume automatically.",
+            "PROVIDER_TRANSIENT_FAILURE": "The storage provider could not complete the operation; upload will resume automatically.",
+            "PROVIDER_MALFORMED_RESPONSE": "The provider returned a malformed response; automatic writes were stopped safely.",
+        }
+        retryable = declared_code in {
+            "STORAGE_RATE_LIMITED",
+            "STORAGE_TIMEOUT",
+            "PROVIDER_TIMEOUT",
+            "PROVIDER_TRANSIENT_FAILURE",
+        }
+        return _SafeS3Failure(
+            declared_code,
+            messages[declared_code],
+            retryable,
+            _declared_retry_after(error),
+        )
+
+    provider_code, status, headers = _provider_response(error)
+    retry_after = _retry_after(headers)
+    if provider_code in _QUOTA_CODES or status == 507:
+        return _SafeS3Failure(
+            "STORAGE_QUOTA_EXCEEDED",
+            "The storage destination has reached its configured capacity quota.",
+            False,
+            provider_code=provider_code,
+        )
+    if provider_code in _AUTH_CODES or status in {401, 403}:
+        return _SafeS3Failure(
+            "STORAGE_AUTH_FAILED",
+            "The storage destination rejected its configured credentials.",
+            False,
+            provider_code=provider_code,
+        )
+    if provider_code in _NOT_FOUND_CODES or status == 404:
+        return _SafeS3Failure(
+            "STORAGE_DESTINATION_NOT_FOUND",
+            "The configured storage destination or object was not found.",
+            False,
+            provider_code=provider_code,
+        )
+    if provider_code in _RATE_LIMIT_CODES or status == 429:
+        return _SafeS3Failure(
+            "STORAGE_RATE_LIMITED",
+            "The storage provider rate limit was reached; upload will resume automatically.",
+            True,
+            retry_after,
+            provider_code,
+        )
+    if provider_code in _RECONCILIATION_CODES or status in {409, 412}:
+        return _SafeS3Failure(
+            "STORAGE_RECONCILIATION_REQUIRED",
+            "The provider returned ambiguous upload state; automatic writes were stopped safely.",
+            False,
+            provider_code=provider_code,
+        )
+    if any(
+        token in type(current).__name__.lower()
+        for current in _exception_chain(error)
+        for token in ("responseparser", "paramvalidation", "malformedresponse")
+    ):
+        return _SafeS3Failure(
+            "PROVIDER_MALFORMED_RESPONSE",
+            "The provider returned a malformed response; automatic writes were stopped safely.",
+            False,
+            provider_code=provider_code,
+        )
+    if any(
+        "checksum" in type(current).__name__.lower()
+        for current in _exception_chain(error)
+    ):
+        return _SafeS3Failure(
+            "STORAGE_INTEGRITY_FAILED",
+            "The uploaded object failed integrity verification.",
+            False,
+            provider_code=provider_code,
+        )
+    has_provider_response = bool(provider_code or status is not None)
+    if (
+        (
+            isinstance(error, (BotoCoreError, TimeoutError, ConnectionError))
+            and not has_provider_response
+        )
+        or any(
+            token in type(current).__name__.lower()
+            for current in _exception_chain(error)
+            for token in ("timeout", "connectionclosed", "endpointconnection")
+        )
+        or provider_code in {"requesttimeout", "requesttimeoutexception"}
+        or status in {408}
+    ):
+        is_timeout = (
+            isinstance(error, TimeoutError)
+            or provider_code in {"requesttimeout", "requesttimeoutexception"}
+            or status == 408
+            or any(
+                "timeout" in type(current).__name__.lower()
+                for current in _exception_chain(error)
+            )
+        )
+        return _SafeS3Failure(
+            "STORAGE_TIMEOUT" if is_timeout else "PROVIDER_TRANSIENT_FAILURE",
+            "The storage operation timed out and will resume automatically."
+            if is_timeout
+            else "The storage provider could not complete the operation; upload will resume automatically.",
+            True,
+            retry_after,
+            provider_code,
+        )
+    if status is not None and 400 <= status < 500:
+        return _SafeS3Failure(
+            "PROVIDER_MALFORMED_RESPONSE",
+            "The provider returned a malformed response; automatic writes were stopped safely.",
+            False,
+            provider_code=provider_code,
+        )
+    return _SafeS3Failure(
+        "PROVIDER_TRANSIENT_FAILURE",
+        "The storage provider could not complete the operation; upload will resume automatically.",
+        True,
+        retry_after,
+        provider_code,
     )
 
 
-def _object_matches(client, bucket, key, expected, *, persisted=None):
-    """Verify one exact object without treating ETag as a content checksum.
-
-    The custom SHA-256 metadata is preferred. If a compatible S3 provider does not
-    preserve user metadata, the object body is streamed through SHA-256 instead.
-    """
-    persisted = persisted or {}
-    try:
-        head = _head_object(client, bucket, key, persisted.get("version_id"))
-    except ClientError as exc:
-        code = str((exc.response or {}).get("Error", {}).get("Code", ""))
-        if code in _NOT_FOUND_CODES:
-            return None
-        raise
-
-    if int(head.get("ContentLength", -1)) != expected["size_bytes"]:
-        return None
-
-    expected_etag = persisted.get("etag")
-    if expected_etag and head.get("ETag") != expected_etag:
-        return None
-
-    remote_sha256 = _metadata_value(head, VULTR_SHA256_HEADER)
-    if remote_sha256:
-        if remote_sha256 != expected["sha256"]:
-            return None
-    else:
-        response = client.get_object(
-            **{
-                "Bucket": bucket,
-                "Key": key,
-                **(
-                    {"VersionId": persisted["version_id"]}
-                    if persisted.get("version_id") and persisted["version_id"] != "null"
-                    else {}
-                ),
-            }
-        )
-        body = response["Body"]
-        try:
-            remote_sha256, remote_size = _hash_stream(body)
-        finally:
-            close = getattr(body, "close", None)
-            if close:
-                close()
-        if remote_size != expected["size_bytes"] or remote_sha256 != expected["sha256"]:
-            return None
-
-    return head
+def _safe_upload_exception(exception_type, stored_backup, error, *, failure=None):
+    failure = failure or _safe_s3_failure(error)
+    wrapped = exception_type(
+        stored_backup.backup.uuid_str,
+        stored_backup.backup.attempt_no,
+        stored_backup.backup.type,
+        failure.message,
+    )
+    wrapped.error_code = failure.code
+    wrapped.code = failure.code
+    wrapped.retryable = failure.retryable
+    wrapped.retry_after = failure.retry_after
+    return wrapped
 
 
 def _s3_client(storage, encryption_key):
     vultr = storage.storage_vultr
-    return boto3.client(
+    return bounded_boto3_client(
         "s3",
+        allow_retries=True,
         aws_access_key_id=bs_decrypt(vultr.access_key, encryption_key),
         aws_secret_access_key=bs_decrypt(vultr.secret_key, encryption_key),
         endpoint_url=f"https://{vultr.endpoint}",
@@ -109,23 +328,6 @@ def _s3_client(storage, encryption_key):
     )
 
 
-def _persist_upload(stored_backup, file_key, expected, head):
-    metadata = dict(stored_backup.metadata or {})
-    metadata[VULTR_OBJECT_METADATA_KEY] = {
-        "object_key": file_key,
-        "sha256": expected["sha256"],
-        "size_bytes": expected["size_bytes"],
-        # ETag is retained as provider identity metadata only. It is not used as
-        # a content hash because multipart ETags are not MD5 checksums.
-        "etag": head.get("ETag"),
-        "version_id": head.get("VersionId"),
-    }
-    stored_backup.storage_file_id = file_key
-    stored_backup.metadata = metadata
-    stored_backup.status = stored_backup.Status.UPLOAD_COMPLETE
-    stored_backup.save()
-
-
 def storage_vultr(stored_backup):
     try:
         local_zip = f"_storage/{stored_backup.backup.uuid}.zip"
@@ -133,63 +335,27 @@ def storage_vultr(stored_backup):
         encryption_key = storage.account.get_encryption_key()
         vultr = storage.storage_vultr
 
-        file_name = f"{stored_backup.backup.uuid}.zip"
         prefix = vultr.prefix or ""
         if prefix and not prefix.endswith("/"):
             prefix += "/"
-        file_key = prefix + file_name
+        key = f"{prefix}{stored_backup.backup.uuid}.zip"
 
-        # Hash the exact stream that will be uploaded. This keeps memory bounded
-        # and gives retries a deterministic content identity.
-        with open(local_zip, "rb") as file_obj:
-            sha256, size_bytes = _hash_stream(file_obj)
-            expected = {"sha256": sha256, "size_bytes": size_bytes}
-            file_obj.seek(0)
-
-            client = _s3_client(storage, encryption_key)
-            stored_metadata = dict((stored_backup.metadata or {}).get(VULTR_OBJECT_METADATA_KEY) or {})
-            persisted_key = stored_metadata.get("object_key") or stored_backup.storage_file_id
-            candidate_key = persisted_key or file_key
-
-            # The deterministic key preflight also adopts an object from the
-            # crash window where S3 accepted the upload but the DB save did not.
-            head = _object_matches(
-                client,
-                vultr.bucket_name,
-                candidate_key,
-                expected,
-                persisted=stored_metadata,
-            )
-            if head is not None:
-                _persist_upload(stored_backup, candidate_key, expected, head)
-                return
-
-            file_obj.seek(0)
-            client.upload_fileobj(
-                file_obj,
-                vultr.bucket_name,
-                candidate_key,
-                ExtraArgs={"Metadata": {VULTR_SHA256_HEADER: sha256}},
-            )
-
-        # Verify durability and capture provider-assigned identity only after the
-        # upload has completed. A failed verification remains an upload failure.
-        head = _object_matches(
-            client,
-            vultr.bucket_name,
-            candidate_key,
-            expected,
+        upload_verified_s3(
+            stored_backup,
+            client=_s3_client(storage, encryption_key),
+            bucket=vultr.bucket_name,
+            key=key,
+            local_path=local_zip,
+            metadata_key=VULTR_OBJECT_METADATA_KEY,
+            # Vultr is S3 compatible but does not expose every AWS checksum feature;
+            # the portable SHA-256 metadata plus byte-count verification is used.
+            supports_checksum=False,
         )
-        if head is None:
-            raise ValueError("Vultr Object Storage integrity verification failed")
-        _persist_upload(stored_backup, candidate_key, expected, head)
     except FileNotFoundError:
         stored_backup.status = stored_backup.Status.UPLOAD_FAILED_FILE_NOT_FOUND
-        stored_backup.save()
-    except Exception as exc:
-        raise StorageVultrUploadFailedError(
-            stored_backup.backup.uuid_str,
-            stored_backup.backup.attempt_no,
-            stored_backup.backup.type,
-            str(exc),
-        )
+        stored_backup.save(update_fields=["status", "modified"])
+    except Exception as error:
+        raise _safe_upload_exception(
+            StorageVultrUploadFailedError, stored_backup, error
+        ) from error
+import boto3

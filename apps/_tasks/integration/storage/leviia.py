@@ -1,50 +1,56 @@
-import boto3
-from botocore.client import Config
+from botocore.config import Config
 
-from apps._tasks.exceptions import StorageCloudflareUploadFailedError, StorageLeviiaUploadFailedError
+from apps._tasks.exceptions import StorageLeviiaUploadFailedError
+from apps._tasks.integration.storage.s3_verified import upload_verified_s3
+from apps._tasks.integration.storage.vultr import _safe_upload_exception
 from apps.api.v1.utils.api_helpers import bs_decrypt
+from apps.api.v1.utils.boto import bounded_boto3_client
+
+
+LEVIIA_OBJECT_METADATA_KEY = "leviia_s3_object"
+
+
+def _s3_client(leviia, encryption_key):
+    return bounded_boto3_client(
+        "s3",
+        allow_retries=True,
+        aws_access_key_id=bs_decrypt(leviia.access_key, encryption_key),
+        aws_secret_access_key=bs_decrypt(leviia.secret_key, encryption_key),
+        region_name="auto",
+        endpoint_url=f"https://{leviia.endpoint}",
+        config=Config(
+            connect_timeout=10,
+            read_timeout=60,
+            retries={"max_attempts": 5, "mode": "standard"},
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
+    )
 
 
 def storage_leviia(stored_backup):
     try:
-        backup = stored_backup.backup
-
-        local_zip = f"_storage/{stored_backup.backup.uuid}.zip"
         storage = stored_backup.storage
-        encryption_key = storage.account.get_encryption_key()
-        prefix = storage.storage_leviia.prefix
+        leviia = storage.storage_leviia
+        prefix = leviia.prefix or ""
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+        key = f"{prefix}{stored_backup.backup.node.name_slug}/{stored_backup.backup.uuid}.zip"
 
-        file_name = f"{backup.node.name_slug}/{stored_backup.backup.uuid}.zip"
-
-        session = boto3.Session(
-            aws_access_key_id=bs_decrypt(storage.storage_leviia.access_key, encryption_key),
-            aws_secret_access_key=bs_decrypt(storage.storage_leviia.secret_key, encryption_key),
-            region_name="auto"
+        upload_verified_s3(
+            stored_backup,
+            client=_s3_client(leviia, storage.account.get_encryption_key()),
+            bucket=leviia.bucket_name,
+            key=key,
+            local_path=f"_storage/{stored_backup.backup.uuid}.zip",
+            metadata_key=LEVIIA_OBJECT_METADATA_KEY,
+            supports_checksum=False,
         )
-        config = Config(
-            request_checksum_calculation="when_required",
-            response_checksum_validation="when_required",
-        )
-        s3 = session.resource(
-            "s3", endpoint_url=f"https://{storage.storage_leviia.endpoint}",
-            config=config,
-        )
-
-        if prefix:
-            if (prefix != "") and (prefix.endswith("/") is False):
-                prefix += "/"
-            file_key = prefix + file_name
-        else:
-            file_key = file_name
-        s3.meta.client.upload_file(
-            local_zip, storage.storage_leviia.bucket_name, file_key
-        )
-        storage_file_id = file_key
-        stored_backup.storage_file_id = storage_file_id
-        stored_backup.status = stored_backup.Status.UPLOAD_COMPLETE
-        stored_backup.save()
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         stored_backup.status = stored_backup.Status.UPLOAD_FAILED_FILE_NOT_FOUND
-        stored_backup.save()
-    except Exception as e:
-        raise StorageLeviiaUploadFailedError(stored_backup.backup.uuid_str, stored_backup.backup.attempt_no, stored_backup.backup.type, e.__str__())
+        stored_backup.save(update_fields=["status", "modified"])
+    except Exception as error:
+        raise _safe_upload_exception(
+            StorageLeviiaUploadFailedError, stored_backup, error
+        ) from error
+import boto3

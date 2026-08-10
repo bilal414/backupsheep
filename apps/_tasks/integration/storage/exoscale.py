@@ -1,46 +1,55 @@
-import boto3
-from botocore.client import Config
+from botocore.config import Config
 
 from apps._tasks.exceptions import StorageExoScaleUploadFailedError
+from apps._tasks.integration.storage.s3_verified import upload_verified_s3
+from apps._tasks.integration.storage.vultr import _safe_upload_exception
 from apps.api.v1.utils.api_helpers import bs_decrypt
+from apps.api.v1.utils.boto import bounded_boto3_client
+
+
+EXOSCALE_OBJECT_METADATA_KEY = "exoscale_s3_object"
+
+
+def _s3_client(exoscale, encryption_key):
+    return bounded_boto3_client(
+        "s3",
+        allow_retries=True,
+        aws_access_key_id=bs_decrypt(exoscale.access_key, encryption_key),
+        aws_secret_access_key=bs_decrypt(exoscale.secret_key, encryption_key),
+        endpoint_url=f"https://{exoscale.region.endpoint}",
+        config=Config(
+            connect_timeout=10,
+            read_timeout=60,
+            retries={"max_attempts": 5, "mode": "standard"},
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
+    )
 
 
 def storage_exoscale(stored_backup):
     try:
-        local_zip = f"_storage/{stored_backup.backup.uuid}.zip"
         storage = stored_backup.storage
-        encryption_key = storage.account.get_encryption_key()
-        prefix = storage.storage_exoscale.prefix
+        exoscale = storage.storage_exoscale
+        prefix = exoscale.prefix or ""
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+        key = f"{prefix}{stored_backup.backup.uuid}.zip"
 
-        file_name = f"{stored_backup.backup.uuid}.zip"
-        session = boto3.Session(
-            aws_access_key_id=bs_decrypt(storage.storage_exoscale.access_key, encryption_key),
-            aws_secret_access_key=bs_decrypt(storage.storage_exoscale.secret_key, encryption_key),
+        upload_verified_s3(
+            stored_backup,
+            client=_s3_client(exoscale, storage.account.get_encryption_key()),
+            bucket=exoscale.bucket_name,
+            key=key,
+            local_path=f"_storage/{stored_backup.backup.uuid}.zip",
+            metadata_key=EXOSCALE_OBJECT_METADATA_KEY,
+            supports_checksum=False,
         )
-        config = Config(
-            request_checksum_calculation="when_required",
-            response_checksum_validation="when_required",
-        )
-        s3 = session.resource(
-            "s3", endpoint_url=f"https://{storage.storage_exoscale.region.endpoint}",
-            config=config,
-        )
-
-        if prefix:
-            if (prefix != "") and (prefix.endswith("/") is False):
-                prefix += "/"
-            file_key = prefix + file_name
-        else:
-            file_key = file_name
-        s3.meta.client.upload_file(local_zip, storage.storage_exoscale.bucket_name, file_key)
-        storage_file_id = file_key
-        stored_backup.storage_file_id = storage_file_id
-        stored_backup.status = stored_backup.Status.UPLOAD_COMPLETE
-        stored_backup.save()
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         stored_backup.status = stored_backup.Status.UPLOAD_FAILED_FILE_NOT_FOUND
-        stored_backup.save()
-    except Exception as e:
-        raise StorageExoScaleUploadFailedError(
-            stored_backup.backup.uuid_str, stored_backup.backup.attempt_no, stored_backup.backup.type, e.__str__()
-        )
+        stored_backup.save(update_fields=["status", "modified"])
+    except Exception as error:
+        raise _safe_upload_exception(
+            StorageExoScaleUploadFailedError, stored_backup, error
+        ) from error
+import boto3

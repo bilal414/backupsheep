@@ -13,6 +13,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
 from django.db import models
 from model_utils.models import TimeStampedModel
+from apps.api.v1.utils.http import requests
+from apps.api.v1.utils.boto import bounded_boto3_client
 
 
 def _site_fernet():
@@ -105,7 +107,6 @@ class CoreSiteSettings(TimeStampedModel):
         try:
             if provider == "postmark":
                 import json
-                import requests
                 r = requests.post(
                     f"{self.email_cred('api_url', 'POSTMARK_API_URL')}/email",
                     headers={"Content-Type": "application/json", "Accept": "application/json",
@@ -116,7 +117,6 @@ class CoreSiteSettings(TimeStampedModel):
                 )
                 return (r.status_code == 200), (r.json().get("Message", "Sent") if r.status_code != 200 else "Sent")
             elif provider == "mailgun":
-                import requests
                 r = requests.post(
                     f"{self.email_cred('api_url', 'MAILGUN_API_URL')}/{self.email_cred('domain', 'MAILGUN_DOMAIN')}/messages",
                     auth=("api", self.email_cred("api_key", "MAILGUN_API_KEY")),
@@ -126,7 +126,7 @@ class CoreSiteSettings(TimeStampedModel):
                 return (r.status_code == 200), ("Sent" if r.status_code == 200 else r.text[:200])
             elif provider == "ses":
                 import boto3
-                client = boto3.client(
+                client = bounded_boto3_client(
                     "ses",
                     aws_access_key_id=self.email_cred("access_key_id", "AWS_SES_ACCESS_KEY_ID"),
                     aws_secret_access_key=self.email_cred("secret_access_key", "AWS_SES_SECRET_ACCESS_KEY"),
@@ -140,5 +140,11 @@ class CoreSiteSettings(TimeStampedModel):
                 )
                 return True, "Sent"
             return False, "No email provider is selected."
-        except Exception as e:
-            return False, str(e)[:200]
+        except Exception as error:
+            from sentry_sdk import capture_exception
+
+            capture_exception(error)
+            return (
+                False,
+                "The email provider request failed. Check the configured credentials, endpoint, and network access.",
+            )

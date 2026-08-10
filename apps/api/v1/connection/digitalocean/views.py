@@ -22,6 +22,7 @@ from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, Integrati
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
+from ..view_helpers import safe_connection_action
 from requests.utils import requote_uri
 
 
@@ -92,6 +93,7 @@ class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         return Response({"oauth_url": requote_uri(oauth_url)})
 
     @action(detail=True, methods=["get"])
+    @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         try:
             connection = self.get_object()
@@ -104,6 +106,7 @@ class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             raise IntegrationValidationError(e.__str__())
 
     @action(detail=True, methods=["get"])
+    @safe_connection_action(stage="object_discovery")
     def objects(self, request, pk=None):
         try:
             connection = self.get_object()

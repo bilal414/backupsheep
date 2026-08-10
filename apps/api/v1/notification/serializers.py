@@ -1,5 +1,5 @@
 import pytz
-import requests
+from apps.api.v1.utils.http import requests
 from django.conf import settings
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers

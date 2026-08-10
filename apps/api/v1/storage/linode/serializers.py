@@ -4,11 +4,15 @@ import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from apps.api.v1.storage.serializers import CoreStorageTypeSerializer
+from apps.api.v1.storage.serializers import (
+    CoreStorageTypeSerializer,
+    StorageCredentialReadSerializerMixin,
+    StorageCredentialWriteSerializerMixin,
+)
 from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
-    StorageDefault, bs_decrypt, bs_encrypt,
+    StorageDefault, bs_encrypt,
 )
 from apps.console.backup.models import (
     CoreWebsiteBackupStoragePoints,
@@ -17,9 +21,8 @@ from apps.console.backup.models import (
 from apps.console.storage.models import CoreStorageLinode, CoreStorage
 
 
-class CoreStorageLinodeReadSerializer(serializers.ModelSerializer):
-    access_key = serializers.SerializerMethodField()
-    secret_key = serializers.SerializerMethodField()
+class CoreStorageLinodeReadSerializer(StorageCredentialReadSerializerMixin, serializers.ModelSerializer):
+    credential_fields = ("access_key", "secret_key")
 
     class Meta:
         model = CoreStorageLinode
@@ -42,14 +45,8 @@ class CoreStorageLinodeReadSerializer(serializers.ModelSerializer):
             "prefix",
         )
 
-    def get_access_key(self, obj):
-        return bs_decrypt(obj.access_key, self.context["encryption_key"])
-
-    def get_secret_key(self, obj):
-        return bs_decrypt(obj.secret_key, self.context["encryption_key"])
-
-
-class CoreStorageLinodeWriteSerializer(serializers.ModelSerializer):
+class CoreStorageLinodeWriteSerializer(StorageCredentialWriteSerializerMixin, serializers.ModelSerializer):
+    credential_fields = ("access_key", "secret_key")
     access_key = serializers.CharField(write_only=True)
     secret_key = serializers.CharField(write_only=True)
     bucket_name = serializers.CharField(write_only=True)
@@ -71,7 +68,7 @@ class CoreStorageLinodeWriteSerializer(serializers.ModelSerializer):
             data["access_key"] = bs_encrypt(data["access_key"], self.context["encryption_key"])
             data["secret_key"] = bs_encrypt(data["secret_key"], self.context["encryption_key"])
         except Exception as e:
-            raise serializers.ValidationError(f"Unable to authenticate. {e.__str__()}")
+            raise serializers.ValidationError("Unable to authenticate with the storage provider. Verify the credentials and configuration.")
 
         return data
 

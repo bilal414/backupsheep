@@ -13,7 +13,7 @@ from django.conf import settings
 
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps.api.v1.utils.api_helpers import bs_encrypt
-from apps.console.backup.models import CoreCloudRestore, CoreVultrBackup
+from apps.console.backup.models import CoreBackupRequest, CoreCloudRestore, CoreVultrBackup
 from apps.console.connection.models import CoreAuthVultr
 from apps.console.node.models import CoreNode, CoreVultr
 from apps.console.utils.models import UtilBackup
@@ -98,6 +98,25 @@ class VultrVolumeCreateSnapshotTests(BaseTestCase):
                 node.vultr.create_snapshot(backup)
         backup.refresh_from_db()
         self.assertEqual(backup.unique_id, "")
+
+    def test_provider_exception_canary_is_not_persisted_or_exposed(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
+        backup = make_vultr_backup(node)
+        canary = "provider-secret-canary-vultr-snapshot"
+        empty_listing = _response(200, {"snapshots": [], "meta": {"total": 0}})
+        with mock.patch(
+            "apps.console.node.models.requests.get", return_value=empty_listing
+        ), mock.patch(
+            "apps.console.node.models.requests.post",
+            side_effect=requests.Timeout(canary),
+        ):
+            with self.assertRaises(NodeBackupFailedError) as raised:
+                node.vultr.create_snapshot(backup)
+
+        self.assertNotIn(canary, str(raised.exception))
+        backup.refresh_from_db()
+        self.assertNotIn(canary, repr(backup.metadata))
+        self.assertTrue(backup.metadata["vultr_create_outcome_unknown"])
 
 
 class VultrInstanceCreateSnapshotTests(BaseTestCase):
@@ -291,6 +310,51 @@ class VultrSoftDeleteTests(BaseTestCase):
 
 
 class VultrSnapshotSafetyTests(BaseTestCase):
+    def _request(self, node, task_id):
+        return CoreBackupRequest.objects.create(
+            request_key=f"vultr-snapshot-request-{task_id}",
+            task_id=task_id,
+            task_name=node.backup_task_name(),
+            node=node,
+        )
+
+    def test_node_backup_delivery_claim_is_durable(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
+        request = self._request(node, "volume-task-claimed")
+
+        backup = node.backup_initiate(
+            "volume-task-claimed",
+            UtilBackup.Type.ON_DEMAND,
+            1,
+            None,
+            None,
+            "outbox claim",
+        )
+
+        self.assertIsNotNone(backup)
+        request.refresh_from_db()
+        self.assertEqual(request.status, CoreBackupRequest.Status.CLAIMED)
+        self.assertEqual(request.backup_object_id, backup.pk)
+
+    def test_node_duplicate_delivery_links_active_backup(self):
+        node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
+        active = make_vultr_backup(node, celery_task_id="volume-active-task")
+        request = self._request(node, "volume-duplicate-task")
+
+        result = node.backup_initiate(
+            "volume-duplicate-task",
+            UtilBackup.Type.ON_DEMAND,
+            1,
+            None,
+            None,
+            None,
+        )
+
+        self.assertIsNone(result)
+        request.refresh_from_db()
+        self.assertEqual(request.status, CoreBackupRequest.Status.DUPLICATE)
+        self.assertEqual(request.backup_object_id, active.pk)
+
     def test_create_follows_cursor_to_find_existing_snapshot(self):
         node = make_vultr_node(self.account, self.member, node_type=CoreNode.Type.VOLUME)
         backup = make_vultr_backup(node)

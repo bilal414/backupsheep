@@ -12,16 +12,21 @@ import uuid
 from datetime import timedelta
 from unittest import mock
 
-from django.db import close_old_connections
+from django.db import IntegrityError, close_old_connections, transaction
 from django.test import TransactionTestCase
 from django.utils import timezone
 
 from apps._tasks.helper import tasks as helper_tasks
 from apps._tasks.integration.digitalocean import backup_digitalocean
 from apps._tasks.integration.website import backup_website
-from apps.console.backup.models import CoreDigitalOceanBackup, CoreWebsiteBackup
-from apps.console.connection.models import CoreConnection
-from apps.console.node.models import CoreDigitalOcean, CoreWebsite
+from apps.console.backup.models import (
+    CoreDigitalOceanBackup,
+    CoreWebsiteBackup,
+    CoreWebsiteBackupStoragePoints,
+)
+from apps.console.connection.models import CoreConnection, CoreIntegration
+from apps.console.node.models import CoreDigitalOcean, CoreNode, CoreWebsite
+from apps.console.storage.models import CoreStorage
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -104,14 +109,239 @@ class BackupInitiateGuardTests(BaseTestCase):
 
     def test_same_task_reuses_persisted_local_upload_phase(self):
         node = factories.make_website_node(self.account, self.member)
+        storage = factories.make_storage(
+            self.account, self.member, bucket="persisted-upload-phase"
+        )
         first = CoreWebsiteBackup.objects.create(
             website=node.website,
             status=UtilBackup.Status.UPLOAD_IN_PROGRESS,
             celery_task_id="task-1",
+            metadata={"_backup_storage_ids": [storage.id]},
+        )
+        CoreWebsiteBackupStoragePoints.objects.create(
+            backup=first,
+            storage=storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_IN_PROGRESS,
         )
         resumed = self._initiate(node, "task-1", storage_ids=[])
         self.assertEqual(resumed.id, first.id)
         self.assertEqual(resumed.status, UtilBackup.Status.UPLOAD_IN_PROGRESS)
+
+
+class DestinationSetupRecoveryTests(BaseTestCase):
+    def _storage(self, suffix):
+        return factories.make_storage(
+            self.account,
+            self.member,
+            bucket=f"destination-setup-{suffix}",
+        )
+
+    def _initiate(self, node, task_id, storage_ids):
+        return node.backup_initiate(
+            task_id,
+            UtilBackup.Type.ON_DEMAND,
+            1,
+            None,
+            storage_ids,
+            None,
+        )
+
+    def test_crash_after_first_destination_resumes_remaining_selection(self):
+        node = factories.make_website_node(self.account, self.member)
+        first = self._storage("first")
+        second = self._storage("second")
+
+        with mock.patch.object(
+            CoreStorage,
+            "validate",
+            side_effect=[True, RuntimeError("worker disappeared")],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "worker disappeared"):
+                self._initiate(node, "destination-crash-task", [first.id, second.id])
+
+        backup = CoreWebsiteBackup.objects.get(
+            celery_task_id="destination-crash-task"
+        )
+        self.assertEqual(
+            set(backup.storage_points.values_list("id", flat=True)),
+            {first.id},
+        )
+        self.assertEqual(
+            backup.metadata["_backup_destination_setup"]["state"],
+            "in_progress",
+        )
+
+        with mock.patch.object(CoreStorage, "validate", return_value=True) as validate:
+            resumed = self._initiate(
+                node,
+                "destination-crash-task",
+                [first.id, second.id],
+            )
+
+        self.assertEqual(resumed.pk, backup.pk)
+        validate.assert_called_once()
+        backup.refresh_from_db()
+        self.assertEqual(
+            set(backup.storage_points.values_list("id", flat=True)),
+            {first.id, second.id},
+        )
+        setup = backup.metadata["_backup_destination_setup"]
+        self.assertEqual(setup["state"], "complete")
+        self.assertEqual(setup["requested_count"], 2)
+        self.assertEqual(setup["accepted_count"], 2)
+        self.assertEqual(setup["validation_failed_count"], 0)
+        self.assertEqual(setup["unavailable_count"], 0)
+        self.assertEqual(setup["error_code"], "")
+
+    def test_live_destination_setup_lease_blocks_duplicate_delivery(self):
+        from apps._tasks.execution import durable_execution_lease
+
+        node = factories.make_website_node(self.account, self.member)
+        storage = self._storage("leased")
+        backup = CoreWebsiteBackup.objects.create(
+            website=node.website,
+            status=UtilBackup.Status.IN_PROGRESS,
+            celery_task_id="destination-lease-task",
+            metadata={"_backup_storage_ids": [storage.id]},
+        )
+        backup.initialize_execution(
+            celery_task_id=backup.celery_task_id,
+            task_name="backup_website",
+        )
+
+        with durable_execution_lease(
+            backup,
+            phase="destination_setup",
+            task_id="original-delivery",
+        ) as lease:
+            self.assertTrue(lease.acquired)
+            with mock.patch.object(CoreStorage, "validate") as validate:
+                duplicate = self._initiate(
+                    node,
+                    "destination-lease-task",
+                    [storage.id],
+                )
+
+        self.assertIsNone(duplicate)
+        validate.assert_not_called()
+        self.assertFalse(backup.storage_points.exists())
+
+    def test_partial_validation_is_not_reported_as_complete(self):
+        from apps._tasks.integration.storage.tasks import finalize_backup
+
+        node = factories.make_website_node(self.account, self.member)
+        accepted = self._storage("accepted")
+        rejected = self._storage("rejected")
+        with mock.patch.object(
+            CoreStorage, "validate", side_effect=[True, False]
+        ), mock.patch.object(CoreNode, "notify_storage_validation_fail"):
+            backup = self._initiate(
+                node,
+                "destination-partial-task",
+                [accepted.id, rejected.id],
+            )
+
+        point = backup.stored_website_backups.get()
+        point.status = point.Status.UPLOAD_COMPLETE
+        point.save(update_fields=["status", "modified"])
+        with mock.patch(
+            "apps._tasks.helper.tasks.delete_from_disk.apply_async"
+        ):
+            finalize_backup.apply(args=[node.id, backup.id])
+
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.PARTIAL)
+        self.assertEqual(
+            backup.metadata["storage_upload_summary"],
+            {
+                "uploaded": 1,
+                "configured": 2,
+                "accepted": 1,
+                "failed": 1,
+                "partial": True,
+            },
+        )
+
+    def test_no_valid_destination_stops_before_source_snapshot(self):
+        node = factories.make_website_node(self.account, self.member)
+        storage = self._storage("invalid")
+        kwargs = {
+            "node_id": node.id,
+            "schedule_id": None,
+            "storage_ids": [storage.id],
+            "notes": None,
+        }
+        with mock.patch.object(
+            CoreStorage, "validate", return_value=False
+        ), mock.patch.object(
+            CoreNode, "notify_storage_validation_fail"
+        ), mock.patch.object(
+            CoreConnection, "validate", return_value=True
+        ) as connection_validate, mock.patch.object(
+            CoreWebsite, "create_snapshot"
+        ) as snapshot:
+            backup_website.apply(kwargs=kwargs, task_id="no-destination-task")
+
+        snapshot.assert_not_called()
+        connection_validate.assert_not_called()
+        backup = CoreWebsiteBackup.objects.get(
+            celery_task_id="no-destination-task"
+        )
+        self.assertEqual(
+            backup.status,
+            UtilBackup.Status.STORAGE_VALIDATION_FAILED,
+        )
+        self.assertEqual(
+            backup.get_execution_state().last_error_code,
+            "NO_VALID_STORAGE_DESTINATION",
+        )
+
+    def test_redelivery_cannot_replace_immutable_destination_selection(self):
+        node = factories.make_website_node(self.account, self.member)
+        original = self._storage("original")
+        substituted = self._storage("substituted")
+
+        with mock.patch.object(CoreStorage, "validate", return_value=True) as validate:
+            first = self._initiate(
+                node,
+                "immutable-destination-task",
+                [original.id],
+            )
+            second = self._initiate(
+                node,
+                "immutable-destination-task",
+                [substituted.id],
+            )
+
+        self.assertEqual(first.pk, second.pk)
+        validate.assert_called_once()
+        first.refresh_from_db()
+        self.assertEqual(first.metadata["_backup_storage_ids"], [original.id])
+        self.assertEqual(
+            set(first.storage_points.values_list("id", flat=True)),
+            {original.id},
+        )
+
+    def test_database_constraint_prevents_duplicate_logical_destination(self):
+        node = factories.make_website_node(self.account, self.member)
+        storage = self._storage("unique")
+        backup = CoreWebsiteBackup.objects.create(
+            website=node.website,
+            status=UtilBackup.Status.IN_PROGRESS,
+            celery_task_id="unique-destination-task",
+        )
+        CoreWebsiteBackupStoragePoints.objects.create(
+            backup=backup,
+            storage=storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_READY,
+        )
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            CoreWebsiteBackupStoragePoints.objects.create(
+                backup=backup,
+                storage=storage,
+                status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_FAILED,
+            )
 
 
 class CloudTaskDuplicateTests(BaseTestCase):
@@ -121,7 +351,15 @@ class CloudTaskDuplicateTests(BaseTestCase):
         kwargs = {
             "node_id": node.id, "schedule_id": None, "storage_ids": None, "notes": None,
         }
-        with mock.patch.object(CoreDigitalOcean, "create_snapshot") as snapshot, \
+        def accepted(backup):
+            backup.action_id = f"provider-action-{backup.pk}"
+            backup.save(update_fields=["action_id", "modified"])
+
+        with mock.patch.object(
+                CoreDigitalOcean,
+                "create_snapshot",
+                side_effect=accepted,
+        ) as snapshot, \
                 mock.patch.object(helper_tasks.poll_cloud_backup, "apply_async") as poll:
             backup_digitalocean.apply(kwargs=kwargs, task_id=task_id or uuid.uuid4().hex)
         return snapshot, poll
@@ -146,7 +384,9 @@ class CloudTaskDuplicateTests(BaseTestCase):
         backup.status = UtilBackup.Status.RETRYING
         backup.save()
         snapshot2, poll2 = self._run_task(node, task_id="retry-task-id")
-        snapshot2.assert_called_once()
+        # The retry resumes polling the durable provider action and never emits
+        # a second create request.
+        snapshot2.assert_not_called()
         poll2.assert_called_once()
         self.assertEqual(CoreDigitalOceanBackup.objects.count(), 1)
 
@@ -171,9 +411,8 @@ class RecoverySweepTests(BaseTestCase):
             celery_task_id="create-task-1",
         )
 
-        self.assertIsNotNone(
-            helper_tasks._claim_provider_create(backup, "create-task-1")
-        )
+        claimed = helper_tasks._claim_provider_create(backup, "create-task-1")
+        self.assertIsNotNone(claimed)
         self.assertIsNone(
             helper_tasks._claim_provider_create(backup, "create-task-2")
         )
@@ -183,7 +422,13 @@ class RecoverySweepTests(BaseTestCase):
             helper_tasks._claim_provider_create(backup, "create-task-1")
         )
 
-        helper_tasks._release_backup_lease(backup, "create-task-1", "create")
+        state = claimed.get_execution_state()
+        helper_tasks._release_backup_lease(
+            backup,
+            "create-task-1",
+            "create",
+            lease_token=state.lease_token,
+        )
         self.assertIsNotNone(
             helper_tasks._claim_provider_create(backup, "create-task-2")
         )
@@ -267,10 +512,17 @@ class WebsiteTaskDuplicateTests(BaseTestCase):
 
     def test_duplicate_invocation_exits_before_snapshot(self):
         node = factories.make_website_node(self.account, self.member)
+        storage = factories.make_storage(
+            self.account, self.member, bucket="website-duplicate-guard"
+        )
         kwargs = {
-            "node_id": node.id, "schedule_id": None, "storage_ids": [], "notes": None,
+            "node_id": node.id,
+            "schedule_id": None,
+            "storage_ids": [storage.id],
+            "notes": None,
         }
-        with mock.patch.object(CoreConnection, "validate", return_value=True), \
+        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+                mock.patch.object(CoreConnection, "validate", return_value=True), \
                 mock.patch.object(CoreWebsite, "create_snapshot") as snapshot:
             backup_website.apply(kwargs=kwargs, task_id="w-task-1")
             snapshot.assert_called_once()
@@ -289,6 +541,13 @@ class ConcurrentInitiateTests(TransactionTestCase):
     thread wins the lock. Needs TransactionTestCase: threads use their own
     connections and can only see committed rows.
     """
+
+    def setUp(self):
+        super().setUp()
+        CoreIntegration.objects.get_or_create(
+            code="digitalocean",
+            defaults={"name": "DigitalOcean", "type": CoreIntegration.Type.CLOUD},
+        )
 
     def test_concurrent_initiates_create_exactly_one_backup(self):
         account, member, _user = factories.make_account()
@@ -320,3 +579,44 @@ class ConcurrentInitiateTests(TransactionTestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(sum(1 for backup in results if backup is not None), 1)
         self.assertEqual(CoreDigitalOceanBackup.objects.count(), 1)
+
+        # The provider-independent execution ledger uses the same PostgreSQL locking
+        # guarantee: two broker deliveries racing for one backup elect exactly one
+        # fenced lease owner.
+        backup = CoreDigitalOceanBackup.objects.get()
+        claim_barrier = threading.Barrier(2)
+        claims = []
+        errors = []
+
+        def claim(owner):
+            try:
+                close_old_connections()
+                candidate = CoreDigitalOceanBackup.objects.get(pk=backup.pk)
+                claim_barrier.wait(timeout=10)
+                state = candidate.claim_execution(
+                    lease_owner=owner,
+                    phase="create",
+                    lease_seconds=300,
+                )
+                claims.append(state.lease_token if state is not None else None)
+            except Exception as error:  # pragma: no cover - asserted below
+                errors.append(error)
+            finally:
+                close_old_connections()
+
+        claim_threads = [
+            threading.Thread(target=claim, args=("delivery-a",)),
+            threading.Thread(target=claim, args=("delivery-b",)),
+        ]
+        for thread in claim_threads:
+            thread.start()
+        for thread in claim_threads:
+            thread.join(timeout=30)
+            self.assertFalse(thread.is_alive(), "execution claim deadlocked")
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(claims), 2)
+        self.assertEqual(sum(token is not None for token in claims), 1)
+        state = backup.get_execution_state()
+        self.assertEqual(state.claim_count, 1)
+        self.assertIn(state.lease_token, claims)

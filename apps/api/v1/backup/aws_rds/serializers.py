@@ -5,7 +5,11 @@ from apps.console.backup.models import (
     CoreAWSRDSBackup,
 )
 from apps.console.node.models import CoreAWSRDS, CoreNode, CoreSchedule
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 
 
 class CoreAWSRDSSerializer(serializers.ModelSerializer):
@@ -18,7 +22,7 @@ class CoreAWSRDSSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreAWSRDSBackupSerializer(serializers.ModelSerializer):
+class CoreAWSRDSBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     website = CoreAWSRDSSerializer(source="aws_rds", read_only=True)
     database = CoreAWSRDSSerializer(source="aws_rds", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -30,11 +34,13 @@ class CoreAWSRDSBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreAWSRDSBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "size_gigabytes",
+            "execution_status",
         )
 
     @staticmethod

@@ -23,7 +23,7 @@ from apps.api.v1.connection.serializers import (
 
 
 class CoreAuthOracleReadSerializer(serializers.ModelSerializer):
-    private_key = serializers.SerializerMethodField()
+    private_key_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreAuthOracle
@@ -34,7 +34,7 @@ class CoreAuthOracleReadSerializer(serializers.ModelSerializer):
             "tenancy",
             "region",
             "profile",
-            "private_key",
+            "private_key_configured",
         )
         datatables_always_serialize = (
             "id",
@@ -43,11 +43,11 @@ class CoreAuthOracleReadSerializer(serializers.ModelSerializer):
             "tenancy",
             "region",
             "profile",
-            "private_key",
+            "private_key_configured",
         )
 
-    def get_private_key(self, obj):
-        return bs_decrypt(obj.private_key, self.context["encryption_key"])
+    def get_private_key_configured(self, obj):
+        return bool(obj.private_key)
 
 
 class CoreOracleConnectionReadSerializer(serializers.ModelSerializer):
@@ -106,11 +106,11 @@ class CoreOracleConnectionReadSerializer(serializers.ModelSerializer):
 
 
 class CoreAuthOracleWriteSerializer(serializers.ModelSerializer):
-    user = serializers.CharField(write_only=True)
-    fingerprint = serializers.CharField(write_only=True)
-    tenancy = serializers.CharField(write_only=True)
-    region = serializers.CharField(write_only=True)
-    private_key = serializers.CharField(write_only=True)
+    user = serializers.CharField(write_only=True, required=False)
+    fingerprint = serializers.CharField(write_only=True, required=False)
+    tenancy = serializers.CharField(write_only=True, required=False)
+    region = serializers.CharField(write_only=True, required=False)
+    private_key = serializers.CharField(write_only=True, required=False)
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -118,12 +118,47 @@ class CoreAuthOracleWriteSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
+        credential_fields = {"user", "fingerprint", "tenancy", "region", "private_key"}
+        if not credential_fields.intersection(data):
+            if getattr(getattr(self, "parent", None), "instance", None) is None:
+                raise serializers.ValidationError(
+                    {field: "This credential field is required." for field in credential_fields}
+                )
+            return data
+
+        parent_instance = getattr(getattr(self, "parent", None), "instance", None)
+        existing = getattr(parent_instance, "auth_oracle", None) if parent_instance else None
+        combined = {}
+        for field in credential_fields:
+            if field in data:
+                combined[field] = data[field]
+            elif existing is not None:
+                value = getattr(existing, field)
+                if field == "private_key":
+                    value = bs_decrypt(value, self.context["encryption_key"])
+                combined[field] = value
+
+        missing = [field for field in credential_fields if not combined.get(field)]
+        if missing:
+            raise serializers.ValidationError(
+                {field: "This credential field is required." for field in missing}
+            )
+
         auth_oracle = CoreAuthOracle()
 
-        if not auth_oracle.validate(data, check_errors=True):
-            raise serializers.ValidationError("Unable to authenticate. Please verify your authentication data.")
+        try:
+            authenticated = auth_oracle.validate(combined, check_errors=True)
+        except Exception:
+            raise serializers.ValidationError(
+                "Unable to authenticate. Please verify the Oracle identifiers, key, region, and permissions."
+            )
+        if not authenticated:
+            raise serializers.ValidationError(
+                "Unable to authenticate. Please verify the Oracle identifiers, key, region, and permissions."
+            )
 
-        data["private_key"] = bs_encrypt(data["private_key"], self.context["encryption_key"])
+        if "private_key" in data:
+            data["private_key"] = bs_encrypt(data["private_key"], self.context["encryption_key"])
         return data
 
 

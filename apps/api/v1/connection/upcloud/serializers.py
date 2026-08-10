@@ -8,6 +8,7 @@ from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault, IntegrationDefault, bs_decrypt, bs_encrypt,
 )
+from apps.api.v1.utils.http import requests
 from apps.console.connection.models import (
     CoreConnection,
     CoreIntegration,
@@ -22,26 +23,26 @@ from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreCo
 
 class CoreAuthUpCloudReadSerializer(serializers.ModelSerializer):
     username = serializers.SerializerMethodField()
-    password = serializers.SerializerMethodField()
+    password_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreAuthUpCloud
         fields = (
             "id",
             "username",
-            "password",
+            "password_configured",
         )
         datatables_always_serialize = (
             "id",
             "username",
-            "password",
+            "password_configured",
         )
 
     def get_username(self, obj):
         return bs_decrypt(obj.username, self.context["encryption_key"])
 
-    def get_password(self, obj):
-        return bs_decrypt(obj.password, self.context["encryption_key"])
+    def get_password_configured(self, obj):
+        return bool(obj.password)
 
 
 class CoreUpCloudConnectionReadSerializer(serializers.ModelSerializer):
@@ -100,8 +101,8 @@ class CoreUpCloudConnectionReadSerializer(serializers.ModelSerializer):
 
 
 class CoreAuthUpCloudWriteSerializer(serializers.ModelSerializer):
-    username = serializers.CharField(write_only=True)
-    password = serializers.CharField(write_only=True)
+    username = serializers.CharField(write_only=True, required=False)
+    password = serializers.CharField(write_only=True, required=False)
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -109,8 +110,18 @@ class CoreAuthUpCloudWriteSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
+        supplied = {"username", "password"}.intersection(data)
+        if not supplied:
+            if getattr(getattr(self, "parent", None), "instance", None) is None:
+                raise serializers.ValidationError(
+                    {"credentials": "Username and password are required."}
+                )
+            return data
+        if supplied != {"username", "password"}:
+            raise serializers.ValidationError(
+                {"credentials": "Username and password must be replaced together."}
+            )
         try:
-            import requests
             from requests.auth import HTTPBasicAuth
 
             username = data["username"]
@@ -127,7 +138,7 @@ class CoreAuthUpCloudWriteSerializer(serializers.ModelSerializer):
                 )
             data["username"] = bs_encrypt(username, self.context["encryption_key"])
             data["password"] = bs_encrypt(password, self.context["encryption_key"])
-        except Exception as e:
+        except Exception:
             raise serializers.ValidationError(
                 "Unable to authenticate. "
                 "Please check your username and password. "

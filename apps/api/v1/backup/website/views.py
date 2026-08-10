@@ -16,6 +16,8 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
+from sentry_sdk import capture_exception
+from apps.api.v1.utils.boto import bounded_boto3_client
 
 from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
@@ -128,7 +130,10 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                 else:
                     raise DownloadStoragePointNotFound()
             except Exception as e:
-                raise DownloadStoragePointError(e.__str__())
+                capture_exception(e)
+                raise DownloadStoragePointError(
+                    "The backup download could not be prepared safely. Please retry."
+                )
         else:
             raise DownloadMissingParams()
 
@@ -173,7 +178,7 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                 access_key = settings.AWS_S3_ACCESS_KEY
                 secret_key = settings.AWS_S3_SECRET_ACCESS_KEY
 
-            s3_client = boto3.client(
+            s3_client = bounded_boto3_client(
                 "s3",
                 endpoint_url=s3_endpoint,
                 aws_access_key_id=access_key,
@@ -190,7 +195,7 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             )
             return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         elif date < backup.created < date_aws_s3:
-            s3_client = boto3.client(
+            s3_client = bounded_boto3_client(
                 "s3",
                 endpoint_url=settings.LOGS_S3_ENDPOINT,
                 aws_access_key_id=settings.LOGS_S3_ACCESS_KEY_ID,
@@ -208,7 +213,7 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             response = response.replace(f"{settings.LOGS_S3_ENDPOINT}/logs", "https://logs.backupsheep.com")
             return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         else:
-            s3_client = boto3.client(
+            s3_client = bounded_boto3_client(
                 "s3",
                 endpoint_url=settings.CEPH_S3_ENDPOINT,
                 aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
@@ -249,7 +254,7 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                 access_key = settings.AWS_S3_ACCESS_KEY
                 secret_key = settings.AWS_S3_SECRET_ACCESS_KEY
 
-            s3_client = boto3.client(
+            s3_client = bounded_boto3_client(
                 "s3",
                 endpoint_url=s3_endpoint,
                 aws_access_key_id=access_key,
@@ -266,7 +271,7 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             )
             return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         elif date < backup.created < date_aws_s3:
-            s3_client = boto3.client(
+            s3_client = bounded_boto3_client(
                 "s3",
                 endpoint_url=settings.LOGS_S3_ENDPOINT,
                 aws_access_key_id=settings.LOGS_S3_ACCESS_KEY_ID,
@@ -284,7 +289,7 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             response = response.replace(f"{settings.LOGS_S3_ENDPOINT}/logs", "https://logs.backupsheep.com")
             return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         else:
-            s3_client = boto3.client(
+            s3_client = bounded_boto3_client(
                 "s3",
                 endpoint_url=settings.CEPH_S3_ENDPOINT,
                 aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
@@ -307,7 +312,10 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             storage_points = CoreWebsiteBackupStoragePointsSerializer(backup.stored_website_backups.all(), many=True).data
             return Response(storage_points, status=status.HTTP_200_OK)
         except Exception as e:
-            raise StoragePointError(e.__str__())
+            capture_exception(e)
+            raise StoragePointError(
+                "Backup storage points could not be loaded. Please retry."
+            )
 
     @action(detail=True, methods=["post"])
     def restore(self, request, pk=None):

@@ -5,7 +5,11 @@ from apps.console.backup.models import (
     CoreLightsailBackup,
 )
 from apps.console.node.models import CoreLightsail, CoreNode, CoreSchedule
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 
 
 class CoreLightsailSerializer(serializers.ModelSerializer):
@@ -18,7 +22,7 @@ class CoreLightsailSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreLightsailBackupSerializer(serializers.ModelSerializer):
+class CoreLightsailBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     lightsail = CoreLightsailSerializer(read_only=True)
     database = CoreLightsailSerializer(source="lightsail", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -30,11 +34,13 @@ class CoreLightsailBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreLightsailBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "size_gigabytes",
+            "execution_status",
         )
 
     @staticmethod

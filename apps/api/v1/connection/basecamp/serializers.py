@@ -6,7 +6,9 @@ from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
     IntegrationDefault,
+    bs_encrypt,
 )
+from apps.api.v1.utils.http import requests
 from apps.console.connection.models import (
     CoreConnection,
     CoreConnectionLocation,
@@ -20,12 +22,25 @@ from apps.api.v1.connection.serializers import (
 
 
 class CoreAuthBasecampReadSerializer(serializers.ModelSerializer):
+    access_token_configured = serializers.SerializerMethodField()
+    refresh_token_configured = serializers.SerializerMethodField()
+
     class Meta:
         model = CoreAuthBasecamp
         fields = (
             "id",
-            "metadata",
+            "identity_id",
+            "access_token_configured",
+            "refresh_token_configured",
         )
+
+    @staticmethod
+    def get_access_token_configured(obj):
+        return bool(obj.access_token)
+
+    @staticmethod
+    def get_refresh_token_configured(obj):
+        return bool(obj.refresh_token)
 
 
 class CoreBasecampConnectionReadSerializer(serializers.ModelSerializer):
@@ -74,12 +89,39 @@ class CoreBasecampConnectionReadSerializer(serializers.ModelSerializer):
 
 
 class CoreAuthBasecampWriteSerializer(serializers.ModelSerializer):
-    name = serializers.CharField(write_only=True)
+    name = serializers.CharField(write_only=True, required=False)
+    access_token = serializers.CharField(write_only=True, required=False, allow_null=True)
+    refresh_token = serializers.CharField(write_only=True, required=False, allow_null=True)
+    metadata = serializers.JSONField(write_only=True, required=False, allow_null=True)
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = CoreAuthBasecamp
         fields = "__all__"
+
+    def validate(self, data):
+        if "refresh_token" in data and "access_token" not in data:
+            raise serializers.ValidationError(
+                {"credentials": "Provide the access token when replacing the refresh token."}
+            )
+        if data.get("access_token"):
+            try:
+                response = requests.get(
+                    "https://launchpad.37signals.com/authorization.json",
+                    headers={"Authorization": f"Bearer {data['access_token']}"},
+                )
+            except Exception:
+                raise serializers.ValidationError(
+                    "Unable to authenticate. Basecamp is temporarily unreachable."
+                )
+            if response.status_code != 200:
+                raise serializers.ValidationError(
+                    "Unable to authenticate. Please verify the Basecamp token and permissions."
+                )
+        for field in ("access_token", "refresh_token"):
+            if field in data and data[field]:
+                data[field] = bs_encrypt(data[field], self.context["encryption_key"])
+        return data
 
 
 class CoreBasecampConnectionWriteSerializer(serializers.ModelSerializer):

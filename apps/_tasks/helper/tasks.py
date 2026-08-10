@@ -1,12 +1,13 @@
 import datetime
 import json
+import math
 import os
 import shutil
 import uuid
 import boto3
 import humanfriendly
 import pytz
-import requests
+from apps.api.v1.utils.http import requests
 from django.conf import settings
 import time
 from celery import current_app
@@ -28,10 +29,13 @@ from slack_sdk import WebhookClient
 
 
 @current_app.task(name="run_scheduled_backup", bind=True, ignore_result=True)
-def run_scheduled_backup(self, schedule_id=None):
-    """Fired by django-celery-beat for each active schedule; enqueues the node backup.
+def run_scheduled_backup(self, schedule_id=None, occurrence_id=None):
+    """Legacy fallback for already queued beat messages.
 
-    Replaces the SaaS path where AWS EventBridge called /schedules/{id}/trigger/.
+    The BackupSheep DatabaseScheduler now creates the durable outbox directly.
+    This task remains compatible with messages emitted by older Beat processes,
+    and accepts an explicit stable occurrence id for integrations that still
+    choose to use the task hop.
     """
     from apps.console.node.models import CoreSchedule, CoreScheduleRun
 
@@ -42,15 +46,77 @@ def run_scheduled_backup(self, schedule_id=None):
     except CoreSchedule.DoesNotExist:
         return
 
-    CoreScheduleRun.objects.create(schedule=schedule, request_id=uuid.uuid4().hex)
-    current_app.send_task(
-        schedule.node.backup_task_name(),
-        kwargs={
-            "node_id": schedule.node.id,
-            "schedule_id": schedule.id,
-            "storage_ids": schedule.storage_ids,
-        },
+    request_id = str(
+        occurrence_id
+        or getattr(self.request, "id", "")
+        or uuid.uuid4().hex
     )
+    CoreScheduleRun.objects.get_or_create(
+        schedule=schedule, request_id=request_id
+    )
+    from apps._tasks.backup_dispatch import create_backup_request
+
+    create_backup_request(
+        node=schedule.node,
+        schedule=schedule,
+        storage_ids=schedule.storage_ids,
+        trigger="schedule",
+        idempotency_key=(
+            f"periodic-occurrence:{schedule.id}:{request_id}"
+            if occurrence_id
+            else f"celery-schedule:{schedule.id}:{request_id}"
+        ),
+    )
+
+
+@current_app.task(
+    name="resume_pending_backup_requests", bind=True, ignore_result=True
+)
+def resume_pending_backup_requests(self):
+    """Republish durable requests lost before a backup worker claimed them."""
+    from apps._tasks.backup_dispatch import publish_backup_request
+    from apps._tasks.backup_dispatch import _backup_request_ineligible_q
+    from apps.console.backup.models import CoreBackupRequest
+
+    now = timezone.now()
+    try:
+        batch_size = int(
+            getattr(settings, "BACKUP_REQUEST_RECOVERY_BATCH_SIZE", 100)
+        )
+    except (TypeError, ValueError):
+        batch_size = 100
+    # Keep one misconfigured deployment from selecting an unbounded outbox batch
+    # on every beat tick. The per-row lease remains the concurrency boundary.
+    batch_size = max(1, min(batch_size, 1000))
+    lease_available = (
+        Q(dispatch_lease_token__isnull=True)
+        | Q(dispatch_lease_expires_at__isnull=True)
+        | Q(dispatch_lease_expires_at__lte=now)
+    )
+    dispatch_due = Q(next_dispatch_at__isnull=True) | Q(next_dispatch_at__lte=now)
+    candidates = list(
+        CoreBackupRequest.objects.filter(
+            status__in=(
+                CoreBackupRequest.Status.PENDING,
+                CoreBackupRequest.Status.DISPATCHED,
+            )
+        )
+        .filter(lease_available)
+        # Ineligible requests are selected even while their confirmed claim
+        # timeout is in the future, so pausing/deleting a source terminalizes
+        # the outbox on the next beat tick instead of waiting for the timeout.
+        .filter(dispatch_due | _backup_request_ineligible_q())
+        .order_by("next_dispatch_at", "created", "pk")
+        .values_list("pk", flat=True)[:batch_size]
+    )
+    for request_id in candidates:
+        try:
+            publish_backup_request(request_id)
+        except CoreBackupRequest.DoesNotExist:
+            continue
+        except Exception as error:
+            # One malformed/deleted row cannot stop recovery of the rest.
+            capture_exception(error)
 
 
 _CLOUD_BACKUP_MODELS = None
@@ -128,10 +194,15 @@ def _save_backup_control(backup, control, metadata=None, include_status=False):
 
 
 def _claim_backup_lease(backup, task_id, lease_name="recovery", lease_seconds=None):
-    """Claim a short DB lease before enqueueing recovery work."""
+    """Claim a fenced DB lease and mirror it into legacy JSON metadata.
+
+    The dedicated execution row is authoritative. The JSON mirror remains during the
+    rolling-upgrade window so workers from the previous release still see the lease.
+    """
     lease_seconds = int(
-        lease_seconds or getattr(settings, "BACKUP_POLL_INTERVAL", 120)
-    ) + 30
+        lease_seconds
+        or (int(getattr(settings, "BACKUP_POLL_INTERVAL", 120)) + 30)
+    )
     with transaction.atomic():
         fresh = backup.__class__.objects.select_for_update().get(pk=backup.pk)
         if fresh.status not in UtilBackup.ACTIVE_STATUSES:
@@ -140,6 +211,7 @@ def _claim_backup_lease(backup, task_id, lease_name="recovery", lease_seconds=No
         now = time.time()
         lease_until_key = f"{lease_name}_lease_until"
         task_key = f"{lease_name}_task_id"
+        token_key = f"{lease_name}_lease_token"
         try:
             active_until = float(control.get(lease_until_key) or 0)
         except (TypeError, ValueError):
@@ -151,8 +223,47 @@ def _claim_backup_lease(backup, task_id, lease_name="recovery", lease_seconds=No
         # a second snapshot request.
         if active_until > now:
             return None
-        control[task_key] = task_id
-        control[lease_until_key] = now + lease_seconds
+
+        state = fresh.claim_execution(
+            lease_owner=task_id,
+            phase=lease_name,
+            lease_seconds=lease_seconds,
+            increment_attempt=lease_name in {"create", "recovery"},
+        )
+        if state is None:
+            return None
+
+        # A pre-migration JSON lease that expired is still evidence of a worker loss.
+        if (control.get(task_key) or control.get(lease_until_key)) and active_until <= now:
+            reconciliation_metadata = dict(state.reconciliation_metadata or {})
+            legacy_history = list(
+                reconciliation_metadata.get("stale_legacy_lease_takeovers") or []
+            )
+            legacy_history.append(
+                {
+                    "detected_at": timezone.now().isoformat(),
+                    "phase": lease_name,
+                    "previous_owner": control.get(task_key),
+                    "previous_expires_at": active_until or None,
+                }
+            )
+            reconciliation_metadata["stale_legacy_lease_takeovers"] = legacy_history[-20:]
+            state.reconciliation_metadata = reconciliation_metadata
+            if state.reconciliation_state != state.ReconciliationState.MANUAL_REVIEW:
+                state.reconciliation_state = state.ReconciliationState.REQUIRED
+            state.reconciliation_reason = "stale_legacy_execution_lease"
+            state.save(
+                update_fields=[
+                    "reconciliation_metadata",
+                    "reconciliation_state",
+                    "reconciliation_reason",
+                    "modified",
+                ]
+            )
+
+        control[task_key] = str(task_id)
+        control[lease_until_key] = state.lease_expires_at.timestamp()
+        control[token_key] = str(state.lease_token)
         _save_backup_control(fresh, control, metadata, include_status=True)
         return fresh
 
@@ -181,9 +292,18 @@ def _claim_cloud_poll(backup, task_id, interval):
             # safety lease can swallow the next two-minute poll forever.
             if not next_poll_at or next_poll_at > now:
                 return None
+
+        state = fresh.claim_execution(
+            lease_owner=task_id,
+            phase="poll",
+            lease_seconds=max(int(interval) * 2, 300),
+        )
+        if state is None:
+            return None
         control.pop("poll_next_run_at", None)
-        control["poll_task_id"] = task_id
-        control["poll_lease_until"] = now + max(int(interval) * 2, 300)
+        control["poll_task_id"] = str(task_id)
+        control["poll_lease_until"] = state.lease_expires_at.timestamp()
+        control["poll_lease_token"] = str(state.lease_token)
         # A recovery message has reached a worker; its enqueue lease no longer
         # needs to block the real poller or the next recovery cycle.
         control.pop("recovery_task_id", None)
@@ -197,15 +317,32 @@ def _claim_cloud_poll(backup, task_id, interval):
         return fresh
 
 
-def _release_backup_lease(backup, task_id, lease_name):
+def _release_backup_lease(backup, task_id, lease_name, lease_token=None):
     """Release a phase lease only when the releasing worker still owns it."""
     with transaction.atomic():
         fresh = backup.__class__.objects.select_for_update().get(pk=backup.pk)
         metadata, control = _backup_control(fresh)
         task_key = f"{lease_name}_task_id"
-        if control.get(task_key) == task_id:
+        token_key = f"{lease_name}_lease_token"
+        state = fresh.get_execution_state(create=False)
+        token = lease_token or control.get(token_key)
+        released = None
+        if state is not None and token is not None:
+            released = fresh.release_execution(
+                lease_owner=task_id,
+                lease_token=token,
+                phase=lease_name,
+            )
+        legacy_owner_matches = control.get(task_key) == str(task_id)
+        legacy_token_matches = not control.get(token_key) or str(
+            control.get(token_key)
+        ) == str(token or "")
+        if legacy_owner_matches and legacy_token_matches and (
+            state is None or released is not None
+        ):
             control.pop(task_key, None)
             control.pop(f"{lease_name}_lease_until", None)
+            control.pop(token_key, None)
             _save_backup_control(fresh, control, metadata)
         return fresh
 
@@ -221,11 +358,150 @@ def _claim_provider_create(backup, task_id):
 
 def _backup_lease_active(backup, lease_name):
     """Return whether a phase lease is still held by a live/unknown worker."""
+    state = backup.get_execution_state(create=False)
+    if state is not None and state.phase == lease_name and state.lease_is_active():
+        return True
     _, control = _backup_control(backup)
     try:
         return float(control.get(f"{lease_name}_lease_until") or 0) > time.time()
     except (TypeError, ValueError):
         return False
+
+
+_PROVIDER_CREATE_RETRYABLE_CODES = frozenset(
+    {
+        "PROVIDER_RATE_LIMIT",
+        "PROVIDER_TIMEOUT",
+        "PROVIDER_TRANSIENT_OUTAGE",
+    }
+)
+_PROVIDER_CREATE_MANUAL_REVIEW_CODES = frozenset(
+    {
+        "PROVIDER_DUPLICATE_MATCH",
+        "PROVIDER_MALFORMED_RESPONSE",
+        "PROVIDER_OWNERSHIP_MISMATCH",
+        "PROVIDER_RECONCILIATION_REQUIRED",
+        "WORKER_LEASE_LOST",
+    }
+)
+_PROVIDER_CREATE_SAFE_MESSAGES = {
+    "PROVIDER_AUTH_FAILED": "The cloud provider rejected the configured credentials or permissions.",
+    "PROVIDER_DUPLICATE_MATCH": "Multiple provider resources matched this backup. Manual review is required.",
+    "PROVIDER_FAILED": "The cloud provider reported a terminal backup failure.",
+    "PROVIDER_MALFORMED_RESPONSE": "The cloud provider returned an invalid response. Manual review is required.",
+    "PROVIDER_NOT_FOUND": "The cloud provider could not find the backup source.",
+    "PROVIDER_OWNERSHIP_MISMATCH": "Provider ownership verification failed. Manual review is required.",
+    "PROVIDER_RECONCILIATION_REQUIRED": "The provider operation could not be reconciled automatically. Manual review is required.",
+    "PROVIDER_REQUEST_FAILED": "The cloud provider rejected the backup request.",
+    "WORKER_LEASE_LOST": "The backup worker lost ownership of this provider operation.",
+}
+
+
+def _provider_create_state(backup, error=None, *, previous_error_code=""):
+    """Return a secret-free disposition derived from durable provider state."""
+    backup.refresh_from_db()
+    state = backup.get_execution_state(create=False)
+    provider_metadata = (
+        dict(state.provider_metadata or {}) if state is not None else {}
+    )
+    error_code = str(
+        getattr(error, "error_code", "")
+        or getattr(error, "code", "")
+        or ""
+    )[:64]
+    state_code = str(
+        getattr(state, "last_error_code", "") if state is not None else ""
+    )[:64]
+    # Do not mistake a previous retry's durable code for the exception from
+    # this provider call when a legacy adapter supplied no typed contract.
+    if not error_code and state_code == str(previous_error_code or ""):
+        state_code = ""
+    code = error_code or state_code
+    reconciliation_state = str(
+        getattr(state, "reconciliation_state", "") or ""
+    )
+    manual_review = (
+        reconciliation_state == "manual_review"
+        or code in _PROVIDER_CREATE_MANUAL_REVIEW_CODES
+    )
+    retryable = bool(
+        getattr(error, "retryable", False)
+        or code in _PROVIDER_CREATE_RETRYABLE_CODES
+        or (state is not None and state.next_retry_at)
+    )
+    unknown = bool(
+        getattr(error, "unknown_outcome", False)
+        or reconciliation_state in {"required", "in_progress"}
+        or provider_metadata.get("outcome_unknown")
+        or (
+            provider_metadata.get("create_attempted")
+            and not _backup_has_provider_reference(backup)
+        )
+    )
+    terminal = backup.status not in UtilBackup.ACTIVE_STATUSES or manual_review
+    return state, code, retryable, unknown, terminal
+
+
+def _provider_create_delay(state, *, retain_lease):
+    """Return a bounded delay that never overlaps a retained mutation fence."""
+    now = timezone.now()
+    candidates = [60]
+    if state is not None and state.next_retry_at:
+        candidates.append(
+            max(1, math.ceil((state.next_retry_at - now).total_seconds()))
+        )
+    if retain_lease and state is not None and state.lease_expires_at:
+        candidates.append(
+            max(1, math.ceil((state.lease_expires_at - now).total_seconds())) + 1
+        )
+    return min(max(candidates), 86400)
+
+
+def _schedule_provider_create_resume(backup, countdown):
+    """Best-effort ETA publication; the DB recovery sweep is the fallback."""
+    node = backup.node
+    task_id = str(backup.celery_task_id or f"recover-create-{backup.pk}")
+    try:
+        current_app.send_task(
+            node.backup_task_name(),
+            task_id=task_id,
+            kwargs=_backup_recovery_kwargs(backup, node),
+            countdown=max(1, int(countdown)),
+            delivery_mode=2,
+        )
+    except Exception as error:
+        # Do not convert a broker outage into a provider retry or terminal
+        # backup. The active row and lease remain discoverable by recovery.
+        capture_exception(error)
+
+
+def _notify_terminal_provider_create(backup, code):
+    """Finalize and notify one terminal create without provider error text."""
+    from apps._tasks.exceptions import NodeBackupFailedError
+
+    try:
+        backup, should_notify = _finish_cloud_backup(
+            backup,
+            UtilBackup.Status.FAILED,
+            "failure_notified",
+        )
+        _reset_node_if_no_active_backup(backup.node, backup)
+        if should_notify:
+            failure = NodeBackupFailedError(
+                backup.node,
+                backup.uuid_str,
+                backup.attempt_no,
+                backup.type,
+                message=_PROVIDER_CREATE_SAFE_MESSAGES.get(
+                    code,
+                    _PROVIDER_CREATE_SAFE_MESSAGES["PROVIDER_FAILED"],
+                ),
+            )
+            failure.error_code = code or "PROVIDER_FAILED"
+            backup.node.notify_backup_fail(failure, backup.type)
+    except Exception as error:
+        # Notification/log failures never alter the terminal provider outcome.
+        capture_exception(error)
 
 
 def run_provider_create(backup, task_id, create_callback):
@@ -239,13 +515,179 @@ def run_provider_create(backup, task_id, create_callback):
     claimed = _claim_provider_create(backup, task_id)
     if claimed is None:
         return None
+    state = claimed.get_execution_state(create=False)
+    lease_token = state.lease_token if state is not None else None
+    previous_error_code = getattr(state, "last_error_code", "") if state else ""
     try:
         if not _backup_has_provider_reference(claimed):
             create_callback(claimed)
-    except Exception:
-        raise
+    except Exception as error:
+        current_state = claimed.get_execution_state(create=False)
+        if (
+            current_state is None
+            or lease_token is None
+            or not current_state.lease_matches(
+                task_id,
+                lease_token,
+                phase="create",
+                now=timezone.now(),
+                require_live=True,
+            )
+        ):
+            # A replacement worker owns recovery now.  The stale delivery must
+            # not classify, release, notify, or schedule from its old result.
+            return None
+        state, code, retryable, unknown, terminal = _provider_create_state(
+            claimed,
+            error,
+            previous_error_code=previous_error_code,
+        )
+        if terminal:
+            try:
+                _release_backup_lease(
+                    claimed,
+                    task_id,
+                    "create",
+                    lease_token=lease_token,
+                )
+            finally:
+                _notify_terminal_provider_create(claimed, code)
+            return None
+
+        if unknown or not code:
+            retry_at = (
+                state.lease_expires_at
+                if state is not None and state.lease_expires_at
+                else timezone.now()
+                + datetime.timedelta(
+                    seconds=max(
+                        60,
+                        int(
+                            getattr(
+                                settings,
+                                "BACKUP_CREATE_LEASE_SECONDS",
+                                3600,
+                            )
+                        ),
+                    )
+                )
+            )
+            claimed.record_execution_error(
+                code="PROVIDER_CREATE_OUTCOME_UNKNOWN",
+                message=(
+                    "The provider create response was not confirmed; deterministic "
+                    "reconciliation is required before another create request."
+                ),
+                retry_at=retry_at,
+                retryable=True,
+                reconciliation_reason="provider_create_outcome_unknown",
+                reconciliation_metadata={"phase": "create"},
+                lease_owner=task_id,
+                lease_token=lease_token,
+            )
+            state = claimed.get_execution_state(create=False)
+            _schedule_provider_create_resume(
+                claimed,
+                _provider_create_delay(state, retain_lease=True),
+            )
+            return None
+
+        if retryable:
+            delay = _provider_create_delay(state, retain_lease=False)
+            claimed.record_execution_error(
+                code=code,
+                retry_at=timezone.now() + datetime.timedelta(seconds=delay),
+                retryable=True,
+                lease_owner=task_id,
+                lease_token=lease_token,
+            )
+            _release_backup_lease(
+                claimed,
+                task_id,
+                "create",
+                lease_token=lease_token,
+            )
+            claimed.node.backup_retrying_reset(task_id)
+            claimed.refresh_from_db()
+            _schedule_provider_create_resume(claimed, delay)
+            return None
+
+        claimed.status = UtilBackup.Status.FAILED
+        claimed.save(update_fields=["status", "modified"])
+        _release_backup_lease(
+            claimed,
+            task_id,
+            "create",
+            lease_token=lease_token,
+        )
+        _notify_terminal_provider_create(claimed, code or "PROVIDER_FAILED")
+        return None
     else:
-        _release_backup_lease(claimed, task_id, "create")
+        claimed.refresh_from_db()
+        current_state = claimed.get_execution_state(create=False)
+        if (
+            current_state is None
+            or lease_token is None
+            or not current_state.lease_matches(
+                task_id,
+                lease_token,
+                phase="create",
+                now=timezone.now(),
+                require_live=True,
+            )
+        ):
+            return None
+        if claimed.status not in UtilBackup.ACTIVE_STATUSES:
+            code = str(current_state.last_error_code or "PROVIDER_FAILED")[:64]
+            try:
+                _release_backup_lease(
+                    claimed,
+                    task_id,
+                    "create",
+                    lease_token=lease_token,
+                )
+            finally:
+                _notify_terminal_provider_create(claimed, code)
+            return None
+        if not _backup_has_provider_reference(claimed):
+            retry_at = state.lease_expires_at if state is not None else None
+            claimed.record_execution_error(
+                code="PROVIDER_CREATE_OUTCOME_UNKNOWN",
+                message=(
+                    "The provider create call returned without a durable provider "
+                    "resource identifier; reconciliation is required."
+                ),
+                retry_at=retry_at,
+                retryable=True,
+                reconciliation_reason="provider_create_missing_reference",
+                reconciliation_metadata={"phase": "create"},
+                lease_owner=task_id,
+                lease_token=lease_token,
+            )
+            state = claimed.get_execution_state(create=False)
+            _schedule_provider_create_resume(
+                claimed,
+                _provider_create_delay(state, retain_lease=True),
+            )
+            return None
+        claimed.record_provider_reference(
+            operation_id=(
+                getattr(claimed, "action_id", None)
+                or getattr(claimed, "provider_job_id", None)
+            ),
+            resource_id=(
+                getattr(claimed, "unique_id", None)
+                or getattr(claimed, "provider_backup_id", None)
+            ),
+            idempotency_key=(
+                getattr(claimed, "provider_marker", None) or claimed.uuid_str
+            ),
+            lease_owner=task_id,
+            lease_token=lease_token,
+        )
+        _release_backup_lease(
+            claimed, task_id, "create", lease_token=lease_token
+        )
     return claimed
 
 
@@ -255,10 +697,29 @@ def _update_poll_control(backup, task_id=None, **updates):
         metadata, control = _backup_control(fresh)
         if task_id and control.get("poll_task_id") != task_id:
             return None
+        state = fresh.get_execution_state(create=False)
+        lease_token = control.get("poll_lease_token")
+        if state is None or not lease_token:
+            return None
         control.update(updates)
         # Refresh the lease after a slow provider request so a recovery sweep cannot
         # enqueue a second poller while the first one is still healthy.
         interval = max(int(getattr(settings, "BACKUP_POLL_INTERVAL", 120)), 1)
+        lease_seconds = max(interval * 2, 300)
+        if updates.get("poll_next_run_at"):
+            # The successor becomes the rightful claimant at its persisted ETA. The
+            # JSON lease remains conservative for old workers; _claim_cloud_poll uses
+            # poll_next_run_at to recognize the scheduled hand-off.
+            lease_seconds = max(
+                int(float(updates["poll_next_run_at"]) - time.time()), 1
+            )
+        heartbeat = fresh.heartbeat_execution(
+            lease_owner=task_id,
+            lease_token=lease_token,
+            lease_seconds=lease_seconds,
+        )
+        if heartbeat is None:
+            return None
         control["poll_lease_until"] = time.time() + max(interval * 2, 300)
         _save_backup_control(fresh, control, metadata)
         return fresh
@@ -274,9 +735,21 @@ def _finish_cloud_backup(backup, status, flag_name):
         control[flag_name] = True
         control.pop("poll_task_id", None)
         control.pop("poll_lease_until", None)
+        poll_token = control.pop("poll_lease_token", None)
         control.pop("recovery_task_id", None)
         control.pop("recovery_lease_until", None)
+        control.pop("recovery_lease_token", None)
         _save_backup_control(fresh, control, metadata, include_status=True)
+        state = fresh.get_execution_state(create=False)
+        if state is not None and state.lease_token:
+            # The terminal status is already committed under the backup-row lock. Mark
+            # the execution finished with the same fencing token when available.
+            fresh.release_execution(
+                lease_owner=state.lease_owner,
+                lease_token=poll_token or state.lease_token,
+                phase=state.phase,
+                finished=True,
+            )
         return fresh, not already_finished
 
 
@@ -312,6 +785,18 @@ def _reset_node_if_no_active_backup(node, backup=None):
         return fresh_node
 
 
+def _cloud_poll_countdown(backup, default_interval):
+    """Honor a provider Retry-After persisted in the durable execution row."""
+    countdown = max(1, int(default_interval))
+    state = backup.get_execution_state(create=False)
+    if state is None or not state.next_retry_at:
+        return countdown
+    retry_seconds = int((state.next_retry_at - timezone.now()).total_seconds())
+    if retry_seconds > countdown:
+        countdown = min(retry_seconds, 86400)
+    return max(1, countdown)
+
+
 def _backup_recovery_kwargs(backup, node):
     schedule = getattr(backup, "schedule", None)
     metadata = backup.metadata if isinstance(backup.metadata, dict) else {}
@@ -342,14 +827,7 @@ def _local_upload_is_active(backup):
     path must be allowed to republish that point instead of skipping the backup
     forever.
     """
-    stale_after = int(
-        getattr(
-            settings,
-            "BACKUP_STORAGE_STALE_SECONDS",
-            getattr(settings, "BACKUP_RECOVERY_STALE_SECONDS", 900),
-        )
-    )
-    cutoff = timezone.now() - datetime.timedelta(seconds=stale_after)
+    now = timezone.now()
     for relation_name in (
         "stored_website_backups",
         "stored_database_backups",
@@ -360,8 +838,46 @@ def _local_upload_is_active(backup):
         if relation is None:
             continue
         status = relation.model.Status.UPLOAD_IN_PROGRESS
-        return relation.filter(status=status, modified__gte=cutoff).exists()
+        return relation.filter(
+            status=status,
+            upload_lease_token__isnull=False,
+            upload_lease_expires_at__gt=now,
+        ).exists()
     return False
+
+
+def _recoverable_backup_queryset(model, *, cutoff, now, batch_size):
+    """Return active rows whose durable lease is absent or stale.
+
+    ``modified`` remains the compatibility fallback for rows created before the
+    execution-ledger migration. Once a lease exists, its expiry is authoritative: an
+    active heartbeat prevents recovery even when the backup row itself is old, while
+    an expired lease is recovered immediately without waiting for ``modified``.
+    """
+    from django.contrib.contenttypes.models import ContentType
+    from apps.console.backup.models import CoreBackupExecution
+
+    content_type = ContentType.objects.get_for_model(
+        model, for_concrete_model=False
+    )
+    states = CoreBackupExecution.objects.filter(backup_content_type=content_type)
+    live_ids = states.filter(
+        lease_token__isnull=False,
+        lease_expires_at__gt=now,
+    ).values("backup_object_id")
+    stale_ids = states.filter(
+        Q(lease_expires_at__lte=now)
+        | Q(
+            lease_expires_at__isnull=True,
+            lease_owner__gt="",
+        )
+    ).values("backup_object_id")
+    return (
+        model.objects.filter(status__in=UtilBackup.ACTIVE_STATUSES)
+        .exclude(pk__in=live_ids)
+        .filter(Q(pk__in=stale_ids) | Q(modified__lt=cutoff))
+        .order_by("modified")[:batch_size]
+    )
 
 
 @current_app.task(name="resume_in_progress_backups", bind=True, ignore_result=True)
@@ -379,13 +895,16 @@ def resume_in_progress_backups(self):
     stale_seconds = int(getattr(settings, "BACKUP_RECOVERY_STALE_SECONDS", 900))
     batch_size = int(getattr(settings, "BACKUP_RECOVERY_BATCH_SIZE", 100))
     cutoff = timezone.now() - datetime.timedelta(seconds=stale_seconds)
+    recovery_now = timezone.now()
     cloud_models, local_models = _recovery_backup_models()
 
     for model in cloud_models + local_models:
-        backups = model.objects.filter(
-            status__in=UtilBackup.ACTIVE_STATUSES,
-            modified__lt=cutoff,
-        ).order_by("modified")[:batch_size]
+        backups = _recoverable_backup_queryset(
+            model,
+            cutoff=cutoff,
+            now=recovery_now,
+            batch_size=batch_size,
+        )
         for backup in backups:
             try:
                 node = backup.node
@@ -528,8 +1047,8 @@ def delete_from_disk(self, backup_uuid, path_type):
 
     path_type selects what to remove (everything lives under <BASE_DIR>/_storage/):
         "dir"  -> the working directory  <uuid>/      (uncompressed dump tree)
-        "zip"  -> the archive            <uuid>.zip
-        "both" -> the working directory and the archive
+        "zip"  -> the archive and commit marker <uuid>.zip/.manifest.json
+        "both" -> the working directory, archive, and commit marker
 
     The run log (<uuid>.log) is intentionally kept on disk and pruned later by
     delete_old_logs; it is never removed here.
@@ -560,6 +1079,7 @@ def delete_from_disk(self, backup_uuid, path_type):
 
         if path_type in ("zip", "both"):
             _remove(f"{backup_uuid}.zip", is_dir=False)
+            _remove(f"{backup_uuid}.manifest.json", is_dir=False)
     except Exception as e:
         capture_exception(e)
         raise self.retry()
@@ -673,10 +1193,19 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
     try:
         status = backup.poll_status()
     except Exception as e:
-        # poll_status is meant to swallow transient errors itself; if an unexpected one
-        # escapes, treat it as "still in progress" rather than failing the backup.
         capture_exception(e)
-        status = UtilBackup.Status.IN_PROGRESS
+        # Provider adapters normally classify their own responses. If an SDK
+        # exception escapes, classify it here instead of silently converting
+        # authentication failures, 404s, and malformed client errors into a false
+        # IN_PROGRESS state.
+        from apps.console.backup.models import _provider_exception_outcome
+
+        status = _provider_exception_outcome(
+            backup,
+            e,
+            provider=node.connection.integration.code,
+            operation="poll",
+        )
 
     if status == UtilBackup.Status.COMPLETE:
         backup, should_notify = _finish_cloud_backup(
@@ -729,15 +1258,17 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
     # Keep the lease alive until just after the ETA message. If the worker dies
     # before publishing it, the lease expires and the periodic recovery task takes
     # over; if it is healthy, the next invocation uses the same task row.
+    next_countdown = _cloud_poll_countdown(backup, interval)
     if _update_poll_control(
         backup,
         task_id=task_id,
         started_at=started_at,
-        poll_next_run_at=time.time() + max(int(interval), 1),
+        poll_next_run_at=time.time() + next_countdown,
     ) is None:
         return
     poll_cloud_backup.apply_async(
-        args=[node_id, backup_id, started_at, interval, timeout], countdown=interval
+        args=[node_id, backup_id, started_at, interval, timeout],
+        countdown=next_countdown,
     )
 
 

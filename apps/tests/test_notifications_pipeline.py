@@ -271,7 +271,11 @@ class RestoreNotificationTests(RestoreBackendBase):
         templates = [call.args[1] for call in delay.call_args_list]
         self.assertEqual(templates, ["restore_started", "restore_failed"])
         failed_ctx = delay.call_args_list[1].args[2]
-        self.assertIn("boom", failed_ctx["error_details"])
+        self.assertEqual(
+            failed_ctx["error_details"],
+            "The restore failed safely. Review its status and correlation ID in BackupSheep.",
+        )
+        self.assertNotIn("boom", failed_ctx["error_details"])
         self.assertEqual(core_log.record.call_count, 2)
 
 

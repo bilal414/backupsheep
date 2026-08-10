@@ -48,15 +48,18 @@ import shutil
 import subprocess
 
 import paramiko
+from cryptography.hazmat.primitives import serialization
 from django.conf import settings
 from sentry_sdk import capture_exception
+from apps._tasks.integration.backup.errors import safe_backup_failure
 
 from apps._tasks.exceptions import NodeBackupFailedError, NodeBackupTimeoutError
 from apps._tasks.integration.backup._archive import create_zip
 from apps.api.v1.utils.api_helpers import bs_decrypt, mkdir_p, create_directory_v2, ensure_disk_space
 from apps.console.connection.models import CoreAuthWebsite
+from apps.console.connection.ssh import managed_private_key_path
 from apps._tasks.helper.tasks import delete_from_disk
-from apps.console.utils.models import UtilBackup
+from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 
 # Hard cap on a single lftp transfer (12h).
 COMMAND_TIMEOUT = 12 * 3600
@@ -207,19 +210,47 @@ def _normalize_ssh_key(path, passphrase):
             except FileNotFoundError:
                 pass
 
-    if passphrase:
-        # The passphrase travels only on the argv of this local subprocess and is
-        # never logged; stdin is closed so ssh-keygen can never prompt.
+    # Paramiko cannot serialize every key type it can parse (notably Ed25519 in
+    # older releases).  Cryptography handles OpenSSH and PEM keys without ever
+    # placing the passphrase in process arguments or the environment.
+    try:
+        with open(path, "rb") as source:
+            key_data = source.read()
+        private_key = None
+        for loader in (
+            serialization.load_ssh_private_key,
+            serialization.load_pem_private_key,
+        ):
+            try:
+                private_key = loader(key_data, password=passphrase.encode("utf-8"))
+                break
+            except (TypeError, ValueError):
+                continue
+        if private_key is None:
+            raise ValueError("Private key could not be decrypted.")
+        normalized = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.OpenSSH,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        descriptor = os.open(
+            normalized_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as destination:
+            destination.write(normalized)
+        os.replace(normalized_path, path)
+        os.chmod(path, 0o600)
+        return
+    except Exception as error:
         try:
-            proc = subprocess.run(
-                ["ssh-keygen", "-p", "-P", passphrase, "-N", "", "-f", path],
-                input="", stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                timeout=60, text=True,
-            )
-            if proc.returncode == 0:
-                os.chmod(path, 0o600)
-        except Exception:
+            os.remove(normalized_path)
+        except FileNotFoundError:
             pass
+        raise RuntimeError(
+            "The private key could not be decrypted with the supplied passphrase."
+        ) from error
 
 
 def _build_lftp_script(*, auth, host_url, port, username, password, ssh_key_path,
@@ -240,18 +271,27 @@ def _build_lftp_script(*, auth, host_url, port, username, password, ssh_key_path
     if mirror:
         lines += list(_LFTP_MIRROR_SETTINGS)
 
-    if ssh_key_path:
-        # SFTP via the system ssh -> supports every key type. lftp runs the
-        # connect-program through a shell, so shell-quote the username/key path (then
-        # lftp-quote the whole value) to keep an exotic username from injecting.
+    if auth.protocol == CoreAuthWebsite.Protocol.SFTP:
+        # Every SFTP auth mode must use the same reviewed host-key file as Paramiko
+        # validation. Without this, a connection can validate in the web process and
+        # then fail (or trust a different key) in lftp on the files worker.
         known_hosts_path = shlex.quote(settings.SSH_KNOWN_HOSTS_PATH)
-        connect = (
+        connect_parts = [
             f"ssh -a -x -o StrictHostKeyChecking=yes "
-            f"-o UserKnownHostsFile={known_hosts_path} -p {port} "
-            f"-l {shlex.quote(username)} -i {shlex.quote(ssh_key_path)}"
-        )
+            f"-o UserKnownHostsFile={known_hosts_path} "
+            f"-o ConnectTimeout={int(getattr(settings, 'SSH_CONNECT_TIMEOUT', 15))} "
+            f"-o ServerAliveInterval={int(getattr(settings, 'SSH_KEEPALIVE_SECONDS', 30))} "
+            f"-p {int(port)} -l {shlex.quote(username)}"
+        ]
+        if ssh_key_path:
+            connect_parts.append(
+                f"-o IdentitiesOnly=yes -i {shlex.quote(ssh_key_path)}"
+            )
+        connect = " ".join(connect_parts)
         lines.append(f"set sftp:connect-program {_lftp_quote(connect)}")
         lines.append(f"open -p {port} {_lftp_quote(host_url)}")
+        if not ssh_key_path:
+            lines.append(f"user {_lftp_quote(username)} {_lftp_quote(password)}")
     else:
         lines.append(f"open -p {port} {_lftp_quote(host_url)}")
         lines.append(f"user {_lftp_quote(username)} {_lftp_quote(password)}")
@@ -324,7 +364,12 @@ def _finalize_zip(backup, local_dir, *, keep_dir):
 
     # Zip the downloaded tree (no sudo / no chown). The zip path must be absolute:
     # cwd is local_dir, which in incremental mode is the node's cache directory.
-    create_zip(local_dir, local_zip, timeout=COMMAND_TIMEOUT)
+    create_zip(
+        local_dir,
+        local_zip,
+        timeout=COMMAND_TIMEOUT,
+        before_publish=backup.ensure_execution_fence,
+    )
     backup.size = os.stat(local_zip).st_size
     backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
     backup.save()
@@ -376,6 +421,7 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
     username = bs_decrypt(auth.username, encryption_key) or ""
     password = bs_decrypt(auth.password, encryption_key) or ""
     ssh_key_path = None
+    temporary_ssh_key = False
     lock_file = None
 
     try:
@@ -392,14 +438,8 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
         auth.check_connection()
 
         if auth.use_public_key:
-            # SaaS-only "BackupSheep adds its shared key to your server" auth.
-            raise NodeBackupFailedError(
-                node, backup.uuid_str, backup.attempt_no, backup.type,
-                "Managed public-key auth is not available in self-hosted BackupSheep. "
-                "Use a private key or username/password.",
-            )
-
-        if auth.use_private_key:
+            ssh_key_path = managed_private_key_path()
+        elif auth.use_private_key:
             # lftp starts the system ssh from its own process context. Use an
             # absolute path so a relative `_storage/...` key cannot resolve
             # against an unexpected working directory and fail authentication.
@@ -408,6 +448,7 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
                 fh.write(bs_decrypt(auth.private_key, encryption_key) or "")
             os.chmod(ssh_key_path, 0o600)
             _normalize_ssh_key(ssh_key_path, password)
+            temporary_ssh_key = True
 
         protocol = auth.get_protocol_display().lower()  # ftp / sftp / ftps
         if auth.protocol == CoreAuthWebsite.Protocol.FTPS and auth.ftps_use_explicit_ssl:
@@ -547,15 +588,23 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
     except NodeBackupFailedError:
         delete_from_disk.apply_async(args=[backup.uuid_str, "both"])
         raise
+    except BackupExecutionLeaseLostError:
+        # A replacement worker owns the canonical workspace/archive now. A stale
+        # worker must not schedule broad cleanup that could delete its successor's
+        # committed files.
+        raise
     except Exception as e:
-        _write_log(backup, f"Error: {e}\n")
         capture_exception(e)
+        failure = safe_backup_failure(e, stage="website_backup")
+        _write_log(backup, f"Error [{failure.code}]: {failure.detail}\n")
         delete_from_disk.apply_async(args=[backup.uuid_str, "both"])
-        if "timed out after" in str(e):
+        if failure.code == "BACKUP_TIMEOUT":
             raise NodeBackupTimeoutError(node, backup.uuid_str, backup.attempt_no, backup.type)
-        raise NodeBackupFailedError(node, backup.uuid_str, backup.attempt_no, backup.type, str(e))
+        raise NodeBackupFailedError(
+            node, backup.uuid_str, backup.attempt_no, backup.type, failure.detail
+        )
     finally:
-        if ssh_key_path and os.path.exists(ssh_key_path):
+        if temporary_ssh_key and ssh_key_path and os.path.exists(ssh_key_path):
             os.remove(ssh_key_path)
 
 
@@ -673,7 +722,12 @@ def _snapshot_tar(backup):
         """
         Create final backup zip folder
         """
-        create_zip(local_dir, local_zip, timeout=command_timeout)
+        create_zip(
+            local_dir,
+            local_zip,
+            timeout=command_timeout,
+            before_publish=backup.ensure_execution_fence,
+        )
         backup.size = os.stat(local_zip).st_size
         backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
         backup.save()
@@ -686,10 +740,12 @@ def _snapshot_tar(backup):
             args=[backup.uuid_str, "dir"],
         )
 
+    except BackupExecutionLeaseLostError:
+        raise
     except Exception as e:
-        _write_log(backup, f"Error: {e}\n")
-
         capture_exception(e)
+        failure = safe_backup_failure(e, stage="website_backup")
+        _write_log(backup, f"Error [{failure.code}]: {failure.detail}\n")
 
         """
         Delete files
@@ -698,11 +754,16 @@ def _snapshot_tar(backup):
             args=[backup.uuid_str, "both"],
         )
 
-        error = e.__str__()
-        if "timed out after" in e.__str__():
+        if failure.code == "BACKUP_TIMEOUT":
             raise NodeBackupTimeoutError(node, backup.uuid_str, backup.attempt_no, backup.type)
         else:
-            raise NodeBackupFailedError(node, backup.uuid_str, backup.attempt_no, backup.type, error)
+            raise NodeBackupFailedError(
+                node,
+                backup.uuid_str,
+                backup.attempt_no,
+                backup.type,
+                failure.detail,
+            )
     finally:
         """
         Delete temp SSH Key

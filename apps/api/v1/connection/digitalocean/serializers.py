@@ -6,8 +6,9 @@ from rest_framework import serializers
 from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
-    IntegrationDefault, bs_encrypt, bs_decrypt,
+    IntegrationDefault, bs_encrypt,
 )
+from apps.api.v1.utils.http import requests
 from apps.console.connection.models import (
     CoreConnection,
     CoreConnectionLocation,
@@ -22,25 +23,25 @@ from apps.api.v1.connection.serializers import (
 
 
 class CoreAuthDigitalOceanReadSerializer(serializers.ModelSerializer):
-    api_key = serializers.SerializerMethodField()
+    api_key_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreAuthDigitalOcean
         fields = (
             "id",
-            "api_key",
+            "api_key_configured",
             "info_name",
             "info_email",
         )
         datatables_always_serialize = (
             "id",
-            "api_key",
+            "api_key_configured",
             "info_name",
             "info_email",
         )
 
-    def get_api_key(self, obj):
-        return bs_decrypt(obj.api_key, self.context["encryption_key"])
+    def get_api_key_configured(self, obj):
+        return bool(obj.api_key)
 
 
 class CoreDigitalOceanConnectionReadSerializer(serializers.ModelSerializer):
@@ -99,7 +100,9 @@ class CoreDigitalOceanConnectionReadSerializer(serializers.ModelSerializer):
 
 
 class CoreAuthDigitalOceanWriteSerializer(serializers.ModelSerializer):
-    api_key = serializers.CharField(write_only=True)
+    api_key = serializers.CharField(write_only=True, required=False)
+    access_token = serializers.CharField(write_only=True, required=False, allow_null=True)
+    refresh_token = serializers.CharField(write_only=True, required=False, allow_null=True)
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -107,13 +110,26 @@ class CoreAuthDigitalOceanWriteSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
+        legacy_supplied = {"access_token", "refresh_token"}.intersection(data)
+        if "api_key" in data and legacy_supplied:
+            raise serializers.ValidationError(
+                {"credentials": "Configure either an API key or OAuth tokens, not both."}
+            )
+        if legacy_supplied and legacy_supplied != {"access_token", "refresh_token"}:
+            raise serializers.ValidationError(
+                {"credentials": "Access and refresh tokens must be replaced together."}
+            )
+        if "api_key" not in data and not legacy_supplied:
+            if getattr(getattr(self, "parent", None), "instance", None) is None:
+                raise serializers.ValidationError(
+                    {"credentials": "An API key or OAuth token pair is required."}
+                )
+            return data
         try:
-            import requests
-
-            api_key = data["api_key"]
+            credential = data.get("api_key") or data.get("access_token")
             headers = {
                 "content-type": "application/json",
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {credential}",
             }
             result = requests.get(
                 settings.DIGITALOCEAN_API + "/v2/account", headers=headers, verify=True
@@ -124,8 +140,10 @@ class CoreAuthDigitalOceanWriteSerializer(serializers.ModelSerializer):
                     "Please check your API Key and "
                     "make sure you whitelisted the BackupSheep Endpoint IP address."
                 )
-            data["api_key"] = bs_encrypt(api_key, self.context["encryption_key"])
-        except Exception as e:
+            for field in ("api_key", "access_token", "refresh_token"):
+                if data.get(field):
+                    data[field] = bs_encrypt(data[field], self.context["encryption_key"])
+        except Exception:
             raise serializers.ValidationError(
                 "Unable to authenticate. "
                 "Please check your api_key and "

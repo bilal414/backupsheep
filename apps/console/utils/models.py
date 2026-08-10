@@ -1,5 +1,12 @@
+import hashlib
+import uuid
+from datetime import timedelta
+
 import humanfriendly
-from django.db import models
+from django.contrib.contenttypes.fields import GenericRelation
+from django.contrib.contenttypes.models import ContentType
+from django.db import IntegrityError, models, transaction
+from django.utils import timezone
 from model_utils.models import TimeStampedModel
 
 from apps.console.account.models import CoreAccount
@@ -112,6 +119,10 @@ class UtilMariaDBOptions(models.Model):
         db_table = "util_mariadb_options"
 
 
+class BackupExecutionLeaseLostError(RuntimeError):
+    """A stale backup worker attempted to persist after losing its fence."""
+
+
 class UtilBackup(TimeStampedModel):
     class Status(models.IntegerChoices):
         PENDING = 1, "Pending"
@@ -163,6 +174,72 @@ class UtilBackup(TimeStampedModel):
         Status.UPLOAD_COMPLETE,
     )
 
+    EXECUTION_ERROR_MESSAGES = {
+        "PROVIDER_CREATE_OUTCOME_UNKNOWN": (
+            "The provider request outcome is unknown; reconciliation is required."
+        ),
+        "PROVIDER_NOT_FOUND": "The provider resource was not found.",
+        "PROVIDER_AUTH_FAILED": (
+            "The provider rejected the configured credentials or permissions."
+        ),
+        "PROVIDER_RATE_LIMIT": (
+            "The provider rate limit was reached; processing will resume later."
+        ),
+        "PROVIDER_TRANSIENT_OUTAGE": (
+            "The provider is temporarily unavailable; processing will resume later."
+        ),
+        "PROVIDER_TIMEOUT": (
+            "The provider request timed out; processing will resume later."
+        ),
+        "PROVIDER_REQUEST_FAILED": "The provider rejected the request.",
+        "PROVIDER_CLIENT_ERROR": "The provider client could not complete the request.",
+        "PROVIDER_FAILED": "The provider reported a terminal failure.",
+        "PROVIDER_OWNERSHIP_MISMATCH": "Provider ownership verification failed.",
+        "PROVIDER_MALFORMED_RESPONSE": (
+            "The provider returned an invalid or unsupported response."
+        ),
+        "SOURCE_ARTIFACT_INVALID": (
+            "The local backup artifact failed integrity validation."
+        ),
+        "STORAGE_UPLOAD_FAILED": "The storage upload could not be completed.",
+        "STORAGE_AUTH_FAILED": (
+            "The storage destination rejected the configured credentials or permissions."
+        ),
+        "STORAGE_DESTINATION_NOT_FOUND": (
+            "The configured storage destination was not found."
+        ),
+        "STORAGE_QUOTA_EXCEEDED": (
+            "The destination does not have enough available storage capacity."
+        ),
+        "STORAGE_RATE_LIMITED": (
+            "The storage provider rate limit was reached; processing will resume later."
+        ),
+        "STORAGE_TIMEOUT": (
+            "The storage operation timed out; processing will resume later."
+        ),
+        "STORAGE_TRANSIENT_FAILURE": (
+            "The storage provider is temporarily unavailable; processing will resume later."
+        ),
+        "STORAGE_INTEGRITY_FAILED": (
+            "The uploaded object failed integrity verification."
+        ),
+        "SOURCE_ARTIFACT_MISSING": (
+            "The committed local backup artifact is no longer available."
+        ),
+        "STORAGE_RECONCILIATION_REQUIRED": (
+            "The storage operation requires reconciliation before it can continue."
+        ),
+        "NO_VALID_STORAGE_DESTINATION": (
+            "No requested storage destination passed validation."
+        ),
+        "AIR_GAPPED_DESTINATION_REQUIRED": (
+            "The required air-gapped storage destination was not available."
+        ),
+        "WORKER_LEASE_LOST": (
+            "This worker lost ownership of the backup execution lease."
+        ),
+    }
+
     def __str__(self):
         return f"{self.name} "
 
@@ -180,8 +257,572 @@ class UtilBackup(TimeStampedModel):
     completed_on_attempt_no = models.IntegerField(null=True)
     notes = models.TextField(null=True)
 
+    # Durable execution data is kept in one provider-independent ledger rather than
+    # duplicating lease/error/progress columns across every concrete Core*Backup table.
+    # GenericRelation is a virtual field (no column is added to legacy backup tables)
+    # and gives ORM-level cascade cleanup when a backup row is deleted.
+    execution_records = GenericRelation(
+        "CoreBackupExecution",
+        content_type_field="backup_content_type",
+        object_id_field="backup_object_id",
+    )
+    artifact_records = GenericRelation(
+        "CoreBackupArtifact",
+        content_type_field="backup_content_type",
+        object_id_field="backup_object_id",
+    )
+
     class Meta:
         abstract = True
+
+    def bind_execution_fence(self, owner, token):
+        """Require subsequent instance saves to own this exact live lease."""
+        self._required_backup_lease_owner = str(owner or "")
+        self._required_backup_lease_token = str(token or "")
+        return self
+
+    def unbind_execution_fence(self):
+        """Remove the process-local save guard after the lease is released."""
+        self._required_backup_lease_owner = ""
+        self._required_backup_lease_token = ""
+        return self
+
+    def ensure_execution_fence(self):
+        """Fail before a local/provider side effect when this worker is stale."""
+        required_owner = getattr(self, "_required_backup_lease_owner", "")
+        required_token = getattr(self, "_required_backup_lease_token", "")
+        if not required_owner or not required_token:
+            # Direct engine calls in maintenance/tests remain backwards compatible;
+            # normal Celery execution binds a fence before invoking an engine.
+            return None
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(backup, create=False)
+            if (
+                state is None
+                or state.lease_owner != required_owner
+                or str(state.lease_token or "") != required_token
+                or not state.lease_expires_at
+                or state.lease_expires_at <= timezone.now()
+            ):
+                raise BackupExecutionLeaseLostError(
+                    "Backup execution lease ownership was lost."
+                )
+            return state
+
+    def save(self, *args, **kwargs):
+        required_owner = getattr(self, "_required_backup_lease_owner", "")
+        required_token = getattr(self, "_required_backup_lease_token", "")
+        if self.pk and required_owner and required_token:
+            with transaction.atomic():
+                backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+                state = self._locked_execution_state(backup, create=False)
+                if (
+                    state is None
+                    or state.lease_owner != required_owner
+                    or str(state.lease_token or "") != required_token
+                    or not state.lease_expires_at
+                    or state.lease_expires_at <= timezone.now()
+                ):
+                    raise BackupExecutionLeaseLostError(
+                        "Backup execution lease ownership was lost."
+                    )
+                return super().save(*args, **kwargs)
+        return super().save(*args, **kwargs)
+
+    @staticmethod
+    def _execution_models():
+        # Imported lazily because backup.models imports UtilBackup while Django builds
+        # the application model registry.
+        from apps.console.backup.models import CoreBackupArtifact, CoreBackupExecution
+
+        return CoreBackupExecution, CoreBackupArtifact
+
+    @classmethod
+    def _locked_execution_state(cls, backup, create=True):
+        """Return the execution row while the caller holds ``backup``'s row lock."""
+        execution_model, _ = cls._execution_models()
+        content_type = ContentType.objects.get_for_model(
+            backup, for_concrete_model=False
+        )
+        lookup = {
+            "backup_content_type": content_type,
+            "backup_object_id": backup.pk,
+        }
+        state = execution_model.objects.select_for_update().filter(**lookup).first()
+        if state is None and create:
+            # The locked concrete backup row serializes normal callers. Keep the
+            # IntegrityError fallback for data repair/admin code that may create the
+            # execution row without using these helpers.
+            try:
+                with transaction.atomic():
+                    state = execution_model.objects.create(**lookup)
+            except IntegrityError:
+                state = execution_model.objects.select_for_update().get(**lookup)
+        return state
+
+    def get_execution_state(self, create=False):
+        """Return this backup's durable execution state, creating it on demand."""
+        if self.pk is None:
+            raise ValueError("A backup must be saved before execution state is used.")
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            return self._locked_execution_state(backup, create=create)
+
+    def initialize_execution(
+        self,
+        *,
+        celery_task_id=None,
+        attempt_no=None,
+        task_name="",
+        worker_name="",
+        now=None,
+    ):
+        """Persist delivery/attempt metadata without claiming a worker lease.
+
+        Existing backup rows have no ledger row after migration; the first delivery or
+        recovery creates one with safe defaults. ``delivery_count`` records broker
+        redelivery independently from the Celery retry attempt number.
+        """
+        if self.pk is None:
+            raise ValueError("A backup must be saved before execution is initialized.")
+        now = now or timezone.now()
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(backup)
+            state.delivery_count += 1
+            if celery_task_id:
+                state.celery_task_id = str(celery_task_id)[:255]
+            if task_name:
+                state.task_name = str(task_name)[:255]
+            if worker_name:
+                state.worker_name = str(worker_name)[:255]
+            if attempt_no is not None:
+                try:
+                    state.attempt_count = max(
+                        state.attempt_count, max(int(attempt_no), 0)
+                    )
+                except (TypeError, ValueError):
+                    pass
+            if state.started_at is None:
+                state.started_at = now
+            state.save(
+                update_fields=[
+                    "delivery_count",
+                    "celery_task_id",
+                    "task_name",
+                    "worker_name",
+                    "attempt_count",
+                    "started_at",
+                    "modified",
+                ]
+            )
+            return state
+
+    def claim_execution(
+        self,
+        *,
+        lease_owner,
+        phase,
+        lease_seconds,
+        now=None,
+        increment_attempt=False,
+        respect_retry_at=True,
+    ):
+        """Atomically claim this active backup and return its fenced execution row.
+
+        A live lease blocks *all* deliveries, including a duplicate carrying the same
+        Celery task id. Once the lease expires, a new random token fences the old worker
+        from heartbeating, updating progress, or releasing the replacement's lease.
+        """
+        if self.pk is None:
+            raise ValueError("A backup must be saved before it can be claimed.")
+        owner = str(lease_owner or "").strip()
+        phase = str(phase or "").strip()
+        if not owner:
+            raise ValueError("lease_owner is required.")
+        if not phase:
+            raise ValueError("phase is required.")
+        try:
+            lease_seconds = int(lease_seconds)
+        except (TypeError, ValueError) as error:
+            raise ValueError("lease_seconds must be a positive integer.") from error
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be a positive integer.")
+
+        now = now or timezone.now()
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            if backup.status not in self.ACTIVE_STATUSES:
+                return None
+            state = self._locked_execution_state(backup)
+            if respect_retry_at and state.next_retry_at and state.next_retry_at > now:
+                return None
+            if (
+                state.lease_token
+                and state.lease_expires_at
+                and state.lease_expires_at > now
+            ):
+                return None
+
+            stale_lease = bool(
+                state.lease_owner
+                or state.lease_token
+                or state.lease_expires_at
+            )
+            if stale_lease:
+                metadata = dict(state.reconciliation_metadata or {})
+                history = list(metadata.get("stale_lease_takeovers") or [])
+                history.append(
+                    {
+                        "detected_at": now.isoformat(),
+                        "previous_owner": state.lease_owner,
+                        "previous_phase": state.phase,
+                        "previous_token": str(state.lease_token or ""),
+                        "previous_expires_at": (
+                            state.lease_expires_at.isoformat()
+                            if state.lease_expires_at
+                            else None
+                        ),
+                    }
+                )
+                metadata["stale_lease_takeovers"] = history[-20:]
+                state.reconciliation_metadata = metadata
+                if (
+                    state.reconciliation_state
+                    != state.ReconciliationState.MANUAL_REVIEW
+                ):
+                    state.reconciliation_state = state.ReconciliationState.REQUIRED
+                state.reconciliation_reason = "stale_execution_lease"
+
+            state.lease_owner = owner[:255]
+            state.phase = phase[:64]
+            state.lease_token = uuid.uuid4()
+            state.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            state.heartbeat_at = now
+            state.claim_count += 1
+            if increment_attempt:
+                state.attempt_count += 1
+            if state.started_at is None:
+                state.started_at = now
+            state.finished_at = None
+            state.save()
+            return state
+
+    def heartbeat_execution(
+        self,
+        *,
+        lease_owner,
+        lease_token,
+        lease_seconds,
+        progress_completed=None,
+        progress_total=None,
+        progress_unit=None,
+        worker_name=None,
+        now=None,
+    ):
+        """Renew a live lease and optionally persist monotonic progress.
+
+        The token check is a fencing guarantee: a worker that resumes after its lease
+        was taken over cannot overwrite the replacement worker's state.
+        """
+        try:
+            lease_seconds = int(lease_seconds)
+        except (TypeError, ValueError) as error:
+            raise ValueError("lease_seconds must be a positive integer.") from error
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be a positive integer.")
+        now = now or timezone.now()
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(backup, create=False)
+            if state is None or not state.lease_matches(
+                lease_owner, lease_token, now=now
+            ):
+                return None
+
+            if progress_completed is not None:
+                completed = int(progress_completed)
+                if completed < state.progress_completed:
+                    raise ValueError("progress_completed cannot move backwards.")
+                state.progress_completed = completed
+            if progress_total is not None:
+                total = int(progress_total)
+                if total < 0:
+                    raise ValueError("progress_total cannot be negative.")
+                if total < state.progress_completed:
+                    raise ValueError(
+                        "progress_total cannot be less than progress_completed."
+                    )
+                state.progress_total = total
+            if progress_unit is not None:
+                state.progress_unit = str(progress_unit)[:32]
+            if worker_name is not None:
+                state.worker_name = str(worker_name)[:255]
+            state.heartbeat_at = now
+            state.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            state.save(
+                update_fields=[
+                    "progress_completed",
+                    "progress_total",
+                    "progress_unit",
+                    "worker_name",
+                    "heartbeat_at",
+                    "lease_expires_at",
+                    "modified",
+                ]
+            )
+            return state
+
+    def release_execution(
+        self,
+        *,
+        lease_owner,
+        lease_token,
+        phase=None,
+        finished=False,
+        now=None,
+    ):
+        """Release a lease only when owner, token, and optional phase still match."""
+        now = now or timezone.now()
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(backup, create=False)
+            if state is None or not state.lease_matches(
+                lease_owner, lease_token, phase=phase, now=now, require_live=False
+            ):
+                return None
+            state.lease_owner = ""
+            state.lease_token = None
+            state.lease_expires_at = None
+            if finished:
+                state.finished_at = now
+                state.next_retry_at = None
+            state.save(
+                update_fields=[
+                    "lease_owner",
+                    "lease_token",
+                    "lease_expires_at",
+                    "finished_at",
+                    "next_retry_at",
+                    "modified",
+                ]
+            )
+            return state
+
+    def record_execution_error(
+        self,
+        *,
+        code,
+        message="",
+        retryable=None,
+        retry_at=None,
+        reconciliation_reason="",
+        reconciliation_metadata=None,
+        lease_owner=None,
+        lease_token=None,
+        now=None,
+    ):
+        """Persist a categorized, public-safe error, optionally worker-fenced.
+
+        ``message`` is accepted for API compatibility and secured diagnostics, but is
+        intentionally not written to the database. Provider/client exceptions often
+        contain bearer tokens, URLs, usernames, SQL, or response bodies. Operators can
+        correlate the full exception in Sentry using the execution correlation ID.
+        """
+        now = now or timezone.now()
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(backup)
+            if lease_token is not None and not state.lease_matches(
+                lease_owner, lease_token, now=now, require_live=False
+            ):
+                return None
+            safe_code = str(code or "UNKNOWN")[:64]
+            state.last_error_code = safe_code
+            state.last_error_message = self.EXECUTION_ERROR_MESSAGES.get(
+                safe_code,
+                "Backup execution encountered an error. Review secured diagnostics using the correlation ID.",
+            )
+            state.last_error_at = now
+            state.next_retry_at = retry_at
+            if retryable is not None:
+                execution_metadata = dict(state.metadata or {})
+                execution_metadata["retryable"] = bool(retryable)
+                state.metadata = execution_metadata
+            if reconciliation_reason:
+                if (
+                    state.reconciliation_state
+                    != state.ReconciliationState.MANUAL_REVIEW
+                ):
+                    state.reconciliation_state = state.ReconciliationState.REQUIRED
+                state.reconciliation_reason = str(reconciliation_reason)[:255]
+                if reconciliation_metadata:
+                    metadata = dict(state.reconciliation_metadata or {})
+                    metadata.update(dict(reconciliation_metadata))
+                    state.reconciliation_metadata = metadata
+            state.save()
+            return state
+
+    def record_provider_reference(
+        self,
+        *,
+        operation_id=None,
+        resource_id=None,
+        idempotency_key=None,
+        provider_status=None,
+        metadata=None,
+        lease_owner=None,
+        lease_token=None,
+    ):
+        """Persist provider recovery pointers before later phases are dispatched."""
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(backup)
+            if lease_token is not None and not state.lease_matches(
+                lease_owner, lease_token, require_live=False
+            ):
+                return None
+            if operation_id is not None:
+                state.provider_operation_id = str(operation_id)[:255]
+            if resource_id is not None:
+                state.provider_resource_id = str(resource_id)[:255]
+            if idempotency_key is not None:
+                state.provider_idempotency_key = str(idempotency_key)[:255]
+            if provider_status is not None:
+                state.provider_status = str(provider_status)[:64]
+            if metadata:
+                provider_metadata = dict(state.provider_metadata or {})
+                provider_metadata.update(dict(metadata))
+                state.provider_metadata = provider_metadata
+            state.save()
+            return state
+
+    def set_reconciliation_state(
+        self,
+        *,
+        reconciliation_state,
+        reason=None,
+        metadata=None,
+        lease_owner=None,
+        lease_token=None,
+        now=None,
+    ):
+        """Move reconciliation through required/in-progress/resolved with fencing."""
+        now = now or timezone.now()
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(backup)
+            valid_states = {choice for choice, _label in state.ReconciliationState.choices}
+            if reconciliation_state not in valid_states:
+                raise ValueError("Unknown reconciliation state.")
+            if lease_token is not None and not state.lease_matches(
+                lease_owner, lease_token, now=now, require_live=False
+            ):
+                return None
+            state.reconciliation_state = reconciliation_state
+            if reason is not None:
+                state.reconciliation_reason = str(reason)[:255]
+            reconciliation_metadata = dict(state.reconciliation_metadata or {})
+            if metadata:
+                reconciliation_metadata.update(dict(metadata))
+            reconciliation_metadata["state_changed_at"] = now.isoformat()
+            state.reconciliation_metadata = reconciliation_metadata
+            if reconciliation_state == state.ReconciliationState.RESOLVED:
+                state.next_retry_at = None
+            state.save(
+                update_fields=[
+                    "reconciliation_state",
+                    "reconciliation_reason",
+                    "reconciliation_metadata",
+                    "next_retry_at",
+                    "modified",
+                ]
+            )
+            return state
+
+    def record_artifact_integrity(
+        self,
+        *,
+        role,
+        object_key,
+        byte_count,
+        storage=None,
+        checksum_algorithm="",
+        checksum_value="",
+        etag="",
+        version_id="",
+        multipart_upload_id="",
+        verified_at=None,
+        metadata=None,
+        idempotency_key=None,
+    ):
+        """Upsert integrity evidence for one source or destination artifact."""
+        if self.pk is None:
+            raise ValueError("A backup must be saved before artifacts are recorded.")
+        byte_count = int(byte_count)
+        if byte_count < 0:
+            raise ValueError("byte_count cannot be negative.")
+        _, artifact_model = self._execution_models()
+        content_type = ContentType.objects.get_for_model(
+            self, for_concrete_model=False
+        )
+        if not idempotency_key:
+            material = "|".join(
+                [
+                    str(getattr(storage, "pk", "source") or "source"),
+                    str(role or "archive"),
+                    str(object_key or ""),
+                ]
+            )
+            idempotency_key = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        values = {
+            "storage": storage,
+            "role": str(role or "archive")[:32],
+            "object_key": str(object_key or ""),
+            "byte_count": byte_count,
+            "checksum_algorithm": str(checksum_algorithm or "")[:32],
+            "checksum_value": str(checksum_value or "")[:255],
+            "etag": str(etag or "")[:512],
+            "version_id": str(version_id or "")[:255],
+            "multipart_upload_id": str(multipart_upload_id or "")[:512],
+            "verified_at": verified_at,
+        }
+        with transaction.atomic():
+            backup = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(backup)
+            lookup = {
+                "backup_content_type": content_type,
+                "backup_object_id": self.pk,
+                "idempotency_key": str(idempotency_key)[:255],
+            }
+            artifact = artifact_model.objects.select_for_update().filter(
+                **lookup
+            ).first()
+            if artifact is None:
+                artifact = artifact_model(**lookup, metadata=dict(metadata or {}))
+            elif metadata is not None:
+                artifact.metadata = dict(metadata)
+            for field, value in values.items():
+                setattr(artifact, field, value)
+            artifact.save()
+            if str(role) == "source" and storage is None:
+                state.artifact_bytes = byte_count
+                state.artifact_checksum_algorithm = str(
+                    checksum_algorithm or ""
+                )[:32]
+                state.artifact_checksum = str(checksum_value or "")[:255]
+                state.artifact_verified_at = verified_at
+                state.save(
+                    update_fields=[
+                        "artifact_bytes",
+                        "artifact_checksum_algorithm",
+                        "artifact_checksum",
+                        "artifact_verified_at",
+                        "modified",
+                    ]
+                )
+            return artifact
 
     def exists_on_storage(self, storage_id=None):
         if storage_id:

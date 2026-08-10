@@ -1,9 +1,12 @@
 import ipaddress
 import json
+import math
 import os
+import shlex
+import uuid
 
-import boto3
-import requests
+from apps.api.v1.utils.http import request_timeout, requests
+from apps.api.v1.utils.boto import bounded_boto3_client
 from botocore.exceptions import ClientError
 from django.conf import settings
 from django.core.cache import cache
@@ -13,6 +16,7 @@ import time
 
 from django.utils.text import slugify
 from django_celery_beat.models import PeriodicTasks
+from google.auth.transport.requests import AuthorizedSession, Request
 from google.oauth2 import service_account
 from requests.exceptions import SSLError, JSONDecodeError
 from requests_toolbelt import SSLAdapter
@@ -39,17 +43,132 @@ from model_utils.models import TimeStampedModel
 from ..member.models import CoreMember
 from ..utils.models import UtilBase
 from ..vultr import iter_vultr_collection, vultr_request_timeout
+from .reliability import ClassifiedConnectionError, classified_connection_error
+from .ssh import cleanup_temporary_key, configure_host_keys, open_ssh_client
+
+
+_PROVIDER_SDK_TIMEOUT_DEFAULT = (10.0, 60.0)
+_PROVIDER_SDK_TIMEOUT_FLOOR = 0.1
+_PROVIDER_SDK_TIMEOUT_MAX_DEFAULT = 300.0
+_GOOGLE_TIMEOUT_UNSET = object()
+_GOOGLE_REFRESH_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _provider_sdk_timeout():
+    """Return a finite connect/read timeout pair for provider SDK clients.
+
+    Provider SDKs are constructed in model methods, so keep this policy local to
+    this module instead of changing process-wide SDK or requests defaults.  Invalid
+    settings fall back to conservative values and an operator-configurable ceiling
+    prevents an accidental multi-hour socket wait.
+    """
+
+    try:
+        maximum = float(
+            getattr(
+                settings,
+                "PROVIDER_HTTP_MAX_TIMEOUT",
+                _PROVIDER_SDK_TIMEOUT_MAX_DEFAULT,
+            )
+        )
+    except (TypeError, ValueError):
+        maximum = _PROVIDER_SDK_TIMEOUT_MAX_DEFAULT
+    if not math.isfinite(maximum) or maximum < _PROVIDER_SDK_TIMEOUT_FLOOR:
+        maximum = _PROVIDER_SDK_TIMEOUT_MAX_DEFAULT
+
+    values = []
+    for setting_name, default in zip(
+        ("PROVIDER_HTTP_CONNECT_TIMEOUT", "PROVIDER_HTTP_READ_TIMEOUT"),
+        _PROVIDER_SDK_TIMEOUT_DEFAULT,
+    ):
+        try:
+            value = float(getattr(settings, setting_name, default))
+        except (TypeError, ValueError):
+            value = default
+        if not math.isfinite(value):
+            value = default
+        values.append(min(max(value, _PROVIDER_SDK_TIMEOUT_FLOOR), maximum))
+    return tuple(values)
+
+
+class _BoundedGoogleAuthorizedSession(AuthorizedSession):
+    """Google auth session with bounded I/O and mutation-safe refresh behavior.
+
+    ``AuthorizedSession`` retries the original request after a credential refresh.
+    That is safe for reads, but a replayed POST/PATCH/DELETE can duplicate a
+    provider mutation when the first response was lost.  Reads retain the SDK's
+    bounded refresh behavior; mutations do not get an automatic credential-refresh
+    replay.  The caller's explicit timeout remains authoritative.
+    """
+
+    def __init__(self, credentials, *, timeout=None):
+        self._backupsheep_timeout = timeout or _provider_sdk_timeout()
+
+        # The auth-token exchange is a POST and has no BackupSheep idempotency
+        # token.  Use a private session with zero adapter retries; this does not
+        # alter requests or Google SDK process globals.
+        auth_session = requests.Session()
+        no_retry_adapter = requests.adapters.HTTPAdapter(max_retries=0)
+        auth_session.mount("http://", no_retry_adapter)
+        auth_session.mount("https://", no_retry_adapter)
+
+        super().__init__(
+            credentials,
+            auth_request=Request(auth_session),
+            refresh_timeout=self._backupsheep_timeout[1],
+        )
+
+        # AuthorizedSession inherits requests.Session.  Make the no-retry policy
+        # explicit for all methods; task-level recovery and provider idempotency
+        # witnesses handle retries outside this SDK client.
+        self.mount("http://", requests.adapters.HTTPAdapter(max_retries=0))
+        self.mount("https://", requests.adapters.HTTPAdapter(max_retries=0))
+
+    def request(
+        self,
+        method,
+        url,
+        data=None,
+        headers=None,
+        max_allowed_time=None,
+        timeout=_GOOGLE_TIMEOUT_UNSET,
+        **kwargs,
+    ):
+        if timeout is _GOOGLE_TIMEOUT_UNSET or timeout is None:
+            timeout = self._backupsheep_timeout
+
+        # AuthorizedSession's credential refresh can recursively replay a request.
+        # Only allow that replay for methods that are safe to repeat.  The private
+        # attempt marker is consumed by Google's implementation and is scoped to
+        # this request; no global state is changed.
+        if str(method).upper() not in _GOOGLE_REFRESH_SAFE_METHODS:
+            kwargs["_credential_refresh_attempt"] = self._max_refresh_attempts
+
+        return super().request(
+            method,
+            url,
+            data=data,
+            headers=headers,
+            max_allowed_time=max_allowed_time,
+            timeout=timeout,
+            **kwargs,
+        )
+
+
+def _oci_client_kwargs():
+    """Return bounded, no-automatic-retry kwargs for an OCI service client."""
+
+    import oci
+
+    return {
+        "timeout": _provider_sdk_timeout(),
+        "retry_strategy": oci.retry.NoneRetryStrategy(),
+    }
 
 
 def _configure_ssh_host_keys(ssh):
-    """Use reviewed known-host keys and reject unknown SSH servers."""
-    import paramiko
-
-    ssh.load_system_host_keys()
-    known_hosts_path = getattr(settings, "SSH_KNOWN_HOSTS_PATH", None)
-    if known_hosts_path and os.path.isfile(known_hosts_path):
-        ssh.load_host_keys(known_hosts_path)
-    ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+    """Backward-compatible wrapper around the shared strict SSH policy."""
+    configure_host_keys(ssh)
 
 
 class CoreIntegration(UtilBase):
@@ -377,17 +496,42 @@ class CoreAuthHetzner(TimeStampedModel):
         client = self.get_client()
         eligible_objects = []
         page = 1
+        seen_pages = set()
         while True:
+            if page in seen_pages or len(seen_pages) >= 1000:
+                raise APIException(
+                    detail="Hetzner returned invalid pagination metadata."
+                )
+            seen_pages.add(page)
             result = requests.get(
                 settings.HETZNER_API + "/v1/servers",
                 headers=client,
                 params={"page": page, "per_page": self.API_PAGE_SIZE},
                 verify=True,
+                timeout=request_timeout(),
             )
             if result.status_code == 200:
-                payload = result.json()
-                servers = payload.get("servers") or []
+                try:
+                    payload = result.json()
+                except Exception:
+                    raise APIException(
+                        detail="Hetzner returned an invalid resource response."
+                    ) from None
+                servers = payload.get("servers") if isinstance(payload, dict) else None
+                pagination = (
+                    (payload.get("meta") or {}).get("pagination")
+                    if isinstance(payload, dict)
+                    else None
+                )
+                if not isinstance(servers, list) or not isinstance(pagination, dict):
+                    raise APIException(
+                        detail="Hetzner returned an invalid resource response."
+                    )
                 for server in servers:
+                    if not isinstance(server, dict):
+                        raise APIException(
+                            detail="Hetzner returned an invalid resource response."
+                        )
                     server["_bs_unique_id"] = server.get("id", None)
                     server["_bs_name"] = server.get("name", None)
                     server["_bs_region"] = (
@@ -398,18 +542,27 @@ class CoreAuthHetzner(TimeStampedModel):
                     server["_bs_resource_type"] = "server"
                     eligible_objects.append(server)
             else:
-                try:
-                    detail = result.json().get("error", {}).get("message")
-                except Exception:
-                    detail = None
                 raise APIException(
-                    detail=detail or f"Hetzner API returned status {result.status_code}."
+                    detail=f"Hetzner API returned status {result.status_code}."
                 )
             result.close()
-            pagination = (payload.get("meta") or {}).get("pagination") or {}
             next_page = pagination.get("next_page")
             if not next_page:
                 break
+            if isinstance(next_page, bool):
+                raise APIException(
+                    detail="Hetzner returned invalid pagination metadata."
+                )
+            try:
+                next_page = int(next_page)
+            except (TypeError, ValueError):
+                raise APIException(
+                    detail="Hetzner returned invalid pagination metadata."
+                ) from None
+            if next_page <= page or next_page in seen_pages:
+                raise APIException(
+                    detail="Hetzner returned invalid pagination metadata."
+                )
             page = next_page
         return eligible_objects
 
@@ -422,6 +575,7 @@ class CoreAuthHetzner(TimeStampedModel):
             headers=client,
             params={"per_page": 1},
             verify=True,
+            timeout=request_timeout(),
         )
         if result.status_code == 200:
             return True
@@ -510,7 +664,7 @@ class CoreAuthAWS(TimeStampedModel):
     def get_client(self, service_name="ec2"):
         encryption_key = self.connection.account.get_encryption_key()
 
-        client = boto3.client(
+        client = bounded_boto3_client(
             service_name,
             region_name=self.region.code,
             aws_access_key_id=bs_decrypt(self.access_key, encryption_key),
@@ -622,7 +776,7 @@ class CoreAuthLightsail(TimeStampedModel):
     def get_client(self):
         encryption_key = self.connection.account.get_encryption_key()
 
-        client = boto3.client(
+        client = bounded_boto3_client(
             "lightsail",
             region_name=self.region.code,
             aws_access_key_id=bs_decrypt(self.access_key, encryption_key),
@@ -723,7 +877,7 @@ class CoreAuthAWSRDS(TimeStampedModel):
     def get_client(self):
         encryption_key = self.connection.account.get_encryption_key()
 
-        client = boto3.client(
+        client = bounded_boto3_client(
             "rds",
             region_name=self.region.code,
             aws_access_key_id=bs_decrypt(self.access_key, encryption_key),
@@ -795,7 +949,7 @@ class CoreAuthOVHCA(TimeStampedModel):
             application_key=settings.OVH_CA_APP_KEY,
             application_secret=settings.OVH_CA_APP_SECRET,
             consumer_key=bs_decrypt(self.consumer_key, encryption_key),
-            timeout=86400,
+            timeout=_provider_sdk_timeout(),
         )
         return client
 
@@ -866,7 +1020,7 @@ class CoreAuthOVHEU(TimeStampedModel):
             application_key=settings.OVH_EU_APP_KEY,
             application_secret=settings.OVH_EU_APP_SECRET,
             consumer_key=bs_decrypt(self.consumer_key, encryption_key),
-            timeout=86400,
+            timeout=_provider_sdk_timeout(),
         )
         return client
 
@@ -937,7 +1091,7 @@ class CoreAuthOVHUS(TimeStampedModel):
             application_key=settings.OVH_US_APP_KEY,
             application_secret=settings.OVH_US_APP_SECRET,
             consumer_key=bs_decrypt(self.consumer_key, encryption_key),
-            timeout=86400,
+            timeout=_provider_sdk_timeout(),
         )
         return client
 
@@ -1126,8 +1280,12 @@ class CoreAuthOracle(TimeStampedModel):
         if object_type == "cloud":
             pass
         elif object_type == "volume":
-            block_storage_client = oci.core.BlockstorageClient(config)
-            identity_client = oci.identity.IdentityClient(config)
+            block_storage_client = oci.core.BlockstorageClient(
+                config, **_oci_client_kwargs()
+            )
+            identity_client = oci.identity.IdentityClient(
+                config, **_oci_client_kwargs()
+            )
 
             """
             Volumes can live in child compartments, so list the volumes of the
@@ -1191,7 +1349,9 @@ class CoreAuthOracle(TimeStampedModel):
             user = self.user
         try:
             config = self.get_client(data=data)
-            identity = oci.identity.IdentityClient(config)
+            identity = oci.identity.IdentityClient(
+                config, **_oci_client_kwargs()
+            )
             oracle_user = identity.get_user(config["user"]).data
             return oracle_user.id == user
         except Exception as e:
@@ -1210,9 +1370,6 @@ class CoreAuthGoogleCloud(TimeStampedModel):
         db_table = "core_auth_google_cloud"
 
     def get_client(self, data=None):
-        import json
-        from google.auth.transport.requests import AuthorizedSession
-
         if data:
             service_key_json = json.loads(data["service_key"])
         else:
@@ -1221,7 +1378,7 @@ class CoreAuthGoogleCloud(TimeStampedModel):
 
         credentials = service_account.Credentials.from_service_account_info(service_key_json)
         scoped_credentials = credentials.with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
-        client = AuthorizedSession(scoped_credentials)
+        client = _BoundedGoogleAuthorizedSession(scoped_credentials)
         return client
 
     def get_eligible_objects(self, object_type="cloud"):
@@ -1511,14 +1668,12 @@ class CoreAuthWebsite(TimeStampedModel):
                 ssh.close()
                 if ssh_key_path:
                     os.remove(ssh_key_path)
+            except ClassifiedConnectionError:
+                raise
             except Exception as e:
                 raise NodeConnectionErrorWebsite(e.__str__())
 
     def get_sftp_client(self, data=None):
-        import paramiko
-        import tempfile
-        import os
-
         if data:
             username = data.get("username")
             password = data.get("password")
@@ -1539,77 +1694,22 @@ class CoreAuthWebsite(TimeStampedModel):
             use_private_key = self.use_private_key
             flag_use_sha1_key_verification = self.flag_use_sha1_key_verification
 
-        ssh_key_path = None
-
-        disabled_algorithms = None
-        if flag_use_sha1_key_verification:
-            disabled_algorithms = {"pubkeys": ["rsa-sha2-256", "rsa-sha2-512"]}
-
-        if use_public_key:
-            ssh = paramiko.SSHClient()
-            _configure_ssh_host_keys(ssh)
-            pkey = paramiko.RSAKey.from_private_key_file(settings.SSH_KEY_PATH)
-            ssh.connect(
-                host,
-                auth_timeout=180,
-                banner_timeout=180,
-                timeout=180,
-                port=int(port),
-                username=username,
-                pkey=pkey,
-                disabled_algorithms=disabled_algorithms,
-            )
+        ssh, ssh_key_path = open_ssh_client(
+            host=host,
+            port=port,
+            username=username,
+            password=password if not (use_public_key or use_private_key) else None,
+            private_key=private_key if use_private_key else None,
+            private_key_passphrase=password if use_private_key else None,
+            use_managed_key=bool(use_public_key),
+            allow_legacy_rsa=bool(flag_use_sha1_key_verification),
+        )
+        try:
             sftp = ssh.open_sftp()
-        elif use_private_key:
-            ssh = paramiko.SSHClient()
-            _configure_ssh_host_keys(ssh)
-            fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
-            try:
-                with os.fdopen(fd, "w") as tmp:
-                    tmp.write(private_key)
-                # The user's key can be Ed25519, RSA or ECDSA -- try each class with
-                # the passphrase (or None) until one parses it.
-                pkey = None
-                for key_cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
-                    try:
-                        pkey = key_cls.from_private_key_file(ssh_key_path, password=password or None)
-                        break
-                    except Exception:
-                        continue
-                if not pkey:
-                    raise NodeConnectionErrorSFTP()
-                ssh.connect(
-                    host,
-                    auth_timeout=180,
-                    banner_timeout=180,
-                    timeout=180,
-                    port=int(port),
-                    username=username,
-                    pkey=pkey,
-                    disabled_algorithms=disabled_algorithms,
-                )
-                sftp = ssh.open_sftp()
-            except Exception:
-                # Never leave the decrypted private key on disk when connecting fails.
-                if os.path.exists(ssh_key_path):
-                    os.remove(ssh_key_path)
-                raise
-        else:
-            ssh = paramiko.SSHClient()
-            _configure_ssh_host_keys(ssh)
-            ssh.connect(
-                host,
-                auth_timeout=180,
-                banner_timeout=180,
-                timeout=180,
-                port=int(port),
-                username=username,
-                password=password,
-                disabled_algorithms=disabled_algorithms,
-            )
-            sftp = ssh.open_sftp()
-        if not sftp:
-            raise NodeConnectionErrorSFTP()
+        except Exception as error:
+            ssh.close()
+            cleanup_temporary_key(ssh_key_path)
+            raise classified_connection_error(error, stage="sftp") from error
         return sftp, ssh, ssh_key_path
 
     def get_eligible_objects(self, path=None):
@@ -1889,7 +1989,7 @@ class CoreAuthDatabase(TimeStampedModel):
                 user=username,
                 passwd=password,
                 db=database_name,
-                connect_timeout=60,
+                connect_timeout=int(getattr(settings, "DATABASE_CONNECT_TIMEOUT", 15)),
                 ssl_disabled=(not use_ssl),
             )
         except Exception as e:
@@ -1902,7 +2002,7 @@ class CoreAuthDatabase(TimeStampedModel):
                     user=username,
                     passwd=password,
                     db=database_name,
-                    connect_timeout=60,
+                    connect_timeout=int(getattr(settings, "DATABASE_CONNECT_TIMEOUT", 15)),
                     ssl_disabled=False,
                 )
             except Exception:
@@ -1913,6 +2013,178 @@ class CoreAuthDatabase(TimeStampedModel):
                 " (the default on MySQL 8.4). Enable \"Use SSL/TLS\" on"
                 " this connection and validate again."
             )
+
+    @staticmethod
+    def _direct_postgresql_connect(
+        host, port, username, password, database_name, use_ssl
+    ):
+        import psycopg2
+
+        statement_timeout_ms = int(
+            getattr(settings, "DATABASE_STATEMENT_TIMEOUT_MS", 15000)
+        )
+        lock_timeout_ms = int(getattr(settings, "DATABASE_LOCK_TIMEOUT_MS", 5000))
+        return psycopg2.connect(
+            dbname=database_name,
+            user=username,
+            password=password,
+            host=host,
+            port=port,
+            connect_timeout=int(getattr(settings, "DATABASE_CONNECT_TIMEOUT", 15)),
+            sslmode="require" if use_ssl else "prefer",
+            options=(
+                f"-c statement_timeout={statement_timeout_ms} "
+                f"-c lock_timeout={lock_timeout_ms}"
+            ),
+        )
+
+    @staticmethod
+    def _mysql_option_value(value):
+        """Quote an option-file value without allowing new options to be injected."""
+        value = str(value or "")
+        value = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+        )
+        return f'"{value}"'
+
+    @staticmethod
+    def _mysql_identifier(value):
+        """Quote one MySQL identifier without allowing statement injection."""
+        return "`" + str(value or "").replace("`", "``") + "`"
+
+    @staticmethod
+    def _pgpass_value(value):
+        return str(value or "").replace("\\", "\\\\").replace(":", "\\:")
+
+    def _install_remote_database_credentials(
+        self,
+        ssh,
+        *,
+        host,
+        port,
+        username,
+        password,
+    ):
+        """Install short-lived 0600 client files in the SSH user's home.
+
+        Passwords never appear in a remote command, shell environment, process list,
+        or worker log.  The caller must invoke ``_remove_remote_database_credentials``
+        before closing the SSH client; every call site does so in ``finally``.
+        """
+        marker = uuid.uuid4().hex
+        mysql_name = f".backupsheep-{marker}.cnf"
+        pgpass_name = f".backupsheep-{marker}.pgpass"
+        mysql_content = "\n".join(
+            [
+                "[client]",
+                f"host={self._mysql_option_value(host)}",
+                f"port={self._mysql_option_value(port)}",
+                f"user={self._mysql_option_value(username)}",
+                f"password={self._mysql_option_value(password)}",
+                "",
+            ]
+        )
+        pgpass_content = (
+            f"{self._pgpass_value(host)}:{self._pgpass_value(port)}:*:"
+            f"{self._pgpass_value(username)}:{self._pgpass_value(password)}\n"
+        )
+        sftp = ssh.open_sftp()
+        created = []
+        try:
+            for name, content in (
+                (mysql_name, mysql_content),
+                (pgpass_name, pgpass_content),
+            ):
+                with sftp.open(name, "w") as handle:
+                    handle.write(content)
+                sftp.chmod(name, 0o600)
+                created.append(name)
+        except Exception:
+            for name in created:
+                try:
+                    sftp.remove(name)
+                except Exception:
+                    pass
+            raise
+        finally:
+            sftp.close()
+        return {
+            "files": (mysql_name, pgpass_name),
+            "mysql_option": (
+                f'--defaults-extra-file="$HOME/{mysql_name}"'
+            ),
+            "pgpass_env": f'PGPASSFILE="$HOME/{pgpass_name}"',
+        }
+
+    @staticmethod
+    def _remove_remote_database_credentials(ssh, credentials):
+        if not credentials:
+            return
+        try:
+            sftp = ssh.open_sftp()
+        except Exception:
+            return
+        try:
+            for name in credentials.get("files") or ():
+                try:
+                    sftp.remove(name)
+                except Exception:
+                    pass
+        finally:
+            sftp.close()
+
+    @staticmethod
+    def _postgres_remote_command(
+        credentials,
+        *,
+        host,
+        port,
+        username,
+        database_name,
+        sql=None,
+        list_databases=False,
+        tuples_only=False,
+    ):
+        """Build a shell-safe psql command; the password lives only in pgpass."""
+        parts = [
+            credentials["pgpass_env"],
+            "psql",
+            "--no-password",
+            f"--host={shlex.quote(str(host))}",
+            f"--port={shlex.quote(str(port))}",
+            f"--username={shlex.quote(str(username))}",
+        ]
+        if database_name:
+            parts.append(f"--dbname={shlex.quote(str(database_name))}")
+        if tuples_only:
+            parts.extend(["--quiet", "--tuples-only", "--no-align"])
+        if list_databases:
+            parts.append("--list")
+        if sql is not None:
+            parts.append(f"--command={shlex.quote(str(sql))}")
+        return " ".join(parts)
+
+    @staticmethod
+    def _run_remote_database_command(ssh, command):
+        """Run a bounded remote client command and require a successful exit."""
+        _stdin, stdout, stderr = ssh.exec_command(
+            command,
+            timeout=int(
+                getattr(settings, "DATABASE_VALIDATION_COMMAND_TIMEOUT", 30)
+            ),
+        )
+        output = " ".join(map(str, stdout.readlines() or "")).strip()
+        error = " ".join(map(str, stderr.readlines() or "")).strip()
+        channel = getattr(stdout, "channel", None)
+        status = channel.recv_exit_status() if channel is not None else 0
+        if status != 0:
+            # This detail is used only by the classifier and Sentry. Passwords are
+            # absent from both the command and client stderr because auth uses files.
+            raise RuntimeError(error or f"Database client exited with status {status}.")
+        return output, error
 
     @staticmethod
     def _mysql_version_slug(result):
@@ -1962,120 +2234,49 @@ class CoreAuthDatabase(TimeStampedModel):
 
         if use_public_key or use_private_key:
             ssh, ssh_key_path = self.get_ssh_client(data=data)
+            remote_credentials = None
             try:
+                remote_credentials = self._install_remote_database_credentials(
+                    ssh,
+                    host=host,
+                    port=port,
+                    username=username,
+                    password=password,
+                )
                 option_ssl_mode = ""
                 if use_ssl:
                     # The MariaDB client rejects the MySQL-style --ssl-mode flag.
                     option_ssl_mode = "--ssl" if type == self.DatabaseType.MARIADB else "--ssl-mode=PREFERRED"
 
-                if type == self.DatabaseType.MYSQL:
+                if type in (
+                    self.DatabaseType.MYSQL,
+                    self.DatabaseType.MARIADB,
+                ):
                     execstr = (
                         f"mysql"
+                        f" {remote_credentials['mysql_option']}"
                         f" {option_ssl_mode}"
                         f" --disable-column-names"
-                        f" -h'{host}'"
-                        f" -u'{username}'"
-                        f" -p'{password}'"
-                        f" --port='{port}'"
-                        f' -e"STATUS;"'
+                        f" --execute={shlex.quote('STATUS;')}"
                     )
-                    stdin, stdout, stderr = ssh.exec_command(execstr)
-
-                    """
-                    Check output. 
-                    """
-                    output_lines = stdout.readlines()
-
-                    """
-                    Check for any errors. 
-                    """
-                    error_lines = stderr.readlines()
-
-                    output = " ".join(map(str, output_lines or "")).strip("\n").strip()
-                    error = " ".join(map(str, error_lines or "")).strip("\n").strip()
+                    output, error = self._run_remote_database_command(ssh, execstr)
                     combined = f"{output}\n{error}"
-
-                    if "server:" in combined.lower() or "server version:" in combined.lower():
-                        pass
-                    else:
-                        combined = combined.replace(
-                            "[Warning] Using a password on the command line interface can be insecure", ""
-                        )
-                        raise IntegrationValidationError(combined)
-
-                elif type == self.DatabaseType.MARIADB:
-                    execstr = (
-                        f"mysql"
-                        f" {option_ssl_mode}"
-                        f" --disable-column-names"
-                        f" -h'{host}'"
-                        f" -u'{username}'"
-                        f" -p'{password}'"
-                        f" --port='{port}'"
-                        f' -e"STATUS;"'
-                    )
-                    stdin, stdout, stderr = ssh.exec_command(execstr)
-                    """
-                    Check output. 
-                    """
-                    output_lines = stdout.readlines()
-
-                    """
-                    Check for any errors. 
-                    """
-                    error_lines = stderr.readlines()
-
-                    output = " ".join(map(str, output_lines or "")).strip("\n").strip()
-                    error = " ".join(map(str, error_lines or "")).strip("\n").strip()
-                    combined = f"{output}\n{error}"
-
-                    if "server:" in combined.lower() or "server version:" in combined.lower():
-                        pass
-                    else:
-                        combined = combined.replace(
-                            "[Warning] Using a password on the command line interface can be insecure", ""
-                        )
-                        raise IntegrationValidationError(combined)
+                    if not (
+                        "server:" in combined.lower()
+                        or "server version:" in combined.lower()
+                    ):
+                        raise RuntimeError("Database client returned no server status.")
 
                 elif type == self.DatabaseType.POSTGRESQL:
-                    if all_databases:
-                        dbname = f"dbname='postgres'"
-                    else:
-                        dbname = f"dbname='{database_name}'"
-                    # execstr = (
-                    #     f'psql'
-                    #     f' "host={host}'
-                    #     f" user='{username}'"
-                    #     f" password='{password}'"
-                    #     f" port='{port}'"
-                    #     f" {dbname}"
-                    #     fr' sslmode=prefer" -lqt | cut -d \| -f 1'
-                    # )
-
-                    # PostgreSQL 14.5 on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 7.5.0-3ubuntu1~18.04) 7.5.0, 64-bit
-                    execstr = (
-                        f"psql"
-                        f' "host={host}'
-                        f" user='{username}'"
-                        f" password='{password}'"
-                        f" port={port}"
-                        f" {dbname}"
-                        f' sslmode=prefer" -c "SELECT version();"'
+                    execstr = self._postgres_remote_command(
+                        remote_credentials,
+                        host=host,
+                        port=port,
+                        username=username,
+                        database_name="postgres" if all_databases else database_name,
+                        sql="SELECT version();",
                     )
-
-                    stdin, stdout, stderr = ssh.exec_command(execstr)
-                    """
-                    Check output. 
-                    """
-                    output_lines = stdout.readlines()
-
-                    """
-                    Check for any errors. 
-                    """
-                    error_lines = stderr.readlines()
-
-                    output = " ".join(map(str, output_lines or "")).strip("\n").strip()
-                    error = " ".join(map(str, error_lines or "")).strip("\n").strip()
+                    output, error = self._run_remote_database_command(ssh, execstr)
                     combined = f"{output}\n{error}"
 
                     if "postgresql" in combined.lower() and "compiled by" in combined.lower():
@@ -2089,11 +2290,9 @@ class CoreAuthDatabase(TimeStampedModel):
                                 db_server_version = output_list[find_index(output_list, "postgresql") + 1]
 
                                 # Now get pg_dump version
-                                execstr = f"pg_dump --version"
-
-                                stdin, stdout, stderr = ssh.exec_command(execstr)
-                                output_lines = stdout.readlines()
-                                output_lines = " ".join(map(str, output_lines or "")).strip("\n").strip()
+                                output_lines, _error = self._run_remote_database_command(
+                                    ssh, "pg_dump --version"
+                                )
 
                                 # Server/pg_dump versions do not always parse as a single
                                 # number (e.g. '9.6.24', or extra distro suffixes) -- skip
@@ -2117,14 +2316,15 @@ class CoreAuthDatabase(TimeStampedModel):
                                             f" than your PostgreSQL version ({db_server_version})"
                                         )
                     else:
-                        raise IntegrationValidationError(combined)
+                        raise RuntimeError("PostgreSQL client returned no version.")
+            except ClassifiedConnectionError:
+                raise
+            except Exception as error:
+                raise classified_connection_error(error, stage="database") from error
             finally:
-                """
-                Delete temp SSH Key
-                """
+                self._remove_remote_database_credentials(ssh, remote_credentials)
                 ssh.close()
-                if ssh_key_path:
-                    os.remove(ssh_key_path)
+                cleanup_temporary_key(ssh_key_path)
         else:
             if type == self.DatabaseType.MYSQL:
                 try:
@@ -2135,7 +2335,7 @@ class CoreAuthDatabase(TimeStampedModel):
                     cursor.close()
                     db_con.close()
                 except Exception as e:
-                    raise IntegrationValidationError(e.__str__())
+                    raise classified_connection_error(e, stage="database") from e
             elif type == self.DatabaseType.MARIADB:
                 try:
                     db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
@@ -2145,15 +2345,16 @@ class CoreAuthDatabase(TimeStampedModel):
                     cursor.close()
                     db_con.close()
                 except Exception as e:
-                    raise IntegrationValidationError(e.__str__())
+                    raise classified_connection_error(e, stage="database") from e
             elif type == self.DatabaseType.POSTGRESQL:
                 try:
-                    db_con = psycopg2.connect(
-                        dbname=database_name,
-                        user=username,
-                        password=password,
-                        host=host,
-                        port=port,
+                    db_con = self._direct_postgresql_connect(
+                        host,
+                        port,
+                        username,
+                        password,
+                        database_name,
+                        use_ssl,
                     )
                     cursor = db_con.cursor()
                     cursor.execute("select relname from pg_class where relkind='r' and relname !~ '^(pg_|sql_)';")
@@ -2161,7 +2362,7 @@ class CoreAuthDatabase(TimeStampedModel):
                     cursor.close()
                     db_con.close()
                 except Exception as e:
-                    raise IntegrationValidationError(e.__str__())
+                    raise classified_connection_error(e, stage="database") from e
 
     """
     Find DB Version & automatically set correct version
@@ -2196,52 +2397,35 @@ class CoreAuthDatabase(TimeStampedModel):
 
         if use_public_key or use_private_key:
             ssh, ssh_key_path = self.get_ssh_client(data=data)
+            remote_credentials = None
             try:
+                remote_credentials = self._install_remote_database_credentials(
+                    ssh,
+                    host=host,
+                    port=port,
+                    username=username,
+                    password=password,
+                )
                 option_ssl_mode = ""
                 if use_ssl:
                     # The MariaDB client rejects the MySQL-style --ssl-mode flag.
                     option_ssl_mode = "--ssl" if type == self.DatabaseType.MARIADB else "--ssl-mode=PREFERRED"
 
-                if type == self.DatabaseType.MYSQL:
+                if type in (
+                    self.DatabaseType.MYSQL,
+                    self.DatabaseType.MARIADB,
+                ):
                     execstr = (
                         f"mysql"
+                        f" {remote_credentials['mysql_option']}"
                         f" {option_ssl_mode}"
                         f" --disable-column-names"
-                        f" -h'{host}'"
-                        f" -u'{username}'"
-                        f" -p'{password}'"
-                        f" --port='{port}'"
-                        f' -e"SELECT version();"'
+                        f" --execute={shlex.quote('SELECT version();')}"
                     )
-                    stdin, stdout, stderr = ssh.exec_command(execstr)
-                    output_lines = stdout.readlines()
+                    output, _error = self._run_remote_database_command(ssh, execstr)
                     db_type_version = None
-                    if output_lines:
-                        result = " ".join(map(str, output_lines)).strip("\n").strip()
-                        version = int(result.split(".")[0])
-                        if version >= 10:
-                            db_type = "mariadb"
-                        else:
-                            db_type = "mysql"
-                        db_version = result.split(".")[0] + "_" + result.split(".")[1]
-                        db_type_version = f"{db_type}_{db_version}"
-                    return db_type_version
-                elif type == self.DatabaseType.MARIADB:
-                    execstr = (
-                        f"mysql"
-                        f" {option_ssl_mode}"
-                        f" --disable-column-names"
-                        f" -h'{host}'"
-                        f" -u'{username}'"
-                        f" -p'{password}'"
-                        f" --port='{port}'"
-                        f' -e"SELECT version();"'
-                    )
-                    stdin, stdout, stderr = ssh.exec_command(execstr)
-                    output_lines = stdout.readlines()
-                    db_type_version = None
-                    if output_lines:
-                        result = " ".join(map(str, output_lines)).strip("\n").strip()
+                    if output:
+                        result = output.strip()
                         version = int(result.split(".")[0])
                         if version >= 10:
                             db_type = "mariadb"
@@ -2251,31 +2435,31 @@ class CoreAuthDatabase(TimeStampedModel):
                         db_type_version = f"{db_type}_{db_version}"
                     return db_type_version
                 elif type == self.DatabaseType.POSTGRESQL:
-                    execstr = (
-                        f"psql"
-                        f' "host={host}'
-                        f" user='{username}'"
-                        f" password='{password}'"
-                        f" port={port}"
-                        f' sslmode=prefer" -c "SELECT version();"'
+                    execstr = self._postgres_remote_command(
+                        remote_credentials,
+                        host=host,
+                        port=port,
+                        username=username,
+                        database_name=database_name or "postgres",
+                        sql="SELECT version();",
                     )
-                    stdin, stdout, stderr = ssh.exec_command(execstr)
-                    output_lines = stdout.readlines()
+                    output, _error = self._run_remote_database_command(ssh, execstr)
                     db_type_version = None
-                    if output_lines:
-                        result = " ".join(map(str, output_lines)).strip("\n").strip()
+                    if output:
+                        result = output.strip()
                         if "postgresql" in result.lower():
                             db_type = slugify(result.replace(".", "_")).split("-")[1].replace("postgresql", "postgres")
                             db_version = slugify(result.replace(".", "_")).split("-")[2]
                             db_type_version = f"{db_type}_{db_version}"
                     return db_type_version
+            except ClassifiedConnectionError:
+                raise
+            except Exception as error:
+                raise classified_connection_error(error, stage="database") from error
             finally:
-                """
-                Delete temp SSH Key
-                """
+                self._remove_remote_database_credentials(ssh, remote_credentials)
                 ssh.close()
-                if ssh_key_path:
-                    os.remove(ssh_key_path)
+                cleanup_temporary_key(ssh_key_path)
         else:
             if type == self.DatabaseType.MYSQL:
                 db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
@@ -2294,12 +2478,13 @@ class CoreAuthDatabase(TimeStampedModel):
                 db_con.close()
                 return self._mysql_version_slug(result)
             elif type == self.DatabaseType.POSTGRESQL:
-                db_con = psycopg2.connect(
-                    dbname=database_name,
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
+                db_con = self._direct_postgresql_connect(
+                    host,
+                    port,
+                    username,
+                    password,
+                    database_name,
+                    use_ssl,
                 )
                 cursor = db_con.cursor()
                 cursor.execute("select version();")
@@ -2337,10 +2522,6 @@ class CoreAuthDatabase(TimeStampedModel):
         return {"type": self.get_type_display(), "version": self.get_version_display()}
 
     def get_ssh_client(self, data=None):
-        import paramiko
-        import tempfile
-        import os
-
         if data:
             ssh_username = data.get("ssh_username")
             ssh_password = data.get("ssh_password")
@@ -2361,79 +2542,31 @@ class CoreAuthDatabase(TimeStampedModel):
             use_private_key = self.use_private_key
             flag_use_sha1_key_verification = self.flag_use_sha1_key_verification
 
-        ssh = None
-        ssh_key_path = None
-
-        disabled_algorithms = None
-        if flag_use_sha1_key_verification:
-            disabled_algorithms = {"pubkeys": ["rsa-sha2-256", "rsa-sha2-512"]}
-
-        if use_public_key:
-            ssh = paramiko.SSHClient()
-            _configure_ssh_host_keys(ssh)
-            pkey = paramiko.RSAKey.from_private_key_file(settings.SSH_KEY_PATH)
-            ssh.connect(
-                ssh_host,
-                auth_timeout=180,
-                banner_timeout=180,
-                timeout=180,
-                port=int(ssh_port),
-                username=ssh_username,
-                pkey=pkey,
-                disabled_algorithms=disabled_algorithms,
-            )
+        ssh, ssh_key_path = open_ssh_client(
+            host=ssh_host,
+            port=ssh_port,
+            username=ssh_username,
+            private_key=private_key if use_private_key else None,
+            private_key_passphrase=ssh_password if use_private_key else None,
+            use_managed_key=bool(use_public_key),
+            allow_legacy_rsa=bool(flag_use_sha1_key_verification),
+        )
+        try:
             sftp = ssh.open_sftp()
             sftp.listdir(".")
             sftp.close()
-        elif use_private_key:
-            ssh = paramiko.SSHClient()
-            _configure_ssh_host_keys(ssh)
-            fd, ssh_key_path = tempfile.mkstemp(dir=os.path.join(settings.BASE_DIR, "_storage"))
-            try:
-                with os.fdopen(fd, "w") as tmp:
-                    tmp.write(private_key)
-                # The user's key can be Ed25519, RSA or ECDSA -- try each class with
-                # the passphrase (or None) until one parses it.
-                pkey = None
-                for key_cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
-                    try:
-                        pkey = key_cls.from_private_key_file(ssh_key_path, password=ssh_password or None)
-                        break
-                    except Exception:
-                        continue
-                if not pkey:
-                    raise NodeConnectionErrorSSH()
-                ssh.connect(
-                    ssh_host,
-                    auth_timeout=180,
-                    banner_timeout=180,
-                    timeout=180,
-                    look_for_keys=False,
-                    port=int(ssh_port),
-                    username=ssh_username,
-                    pkey=pkey,
-                    disabled_algorithms=disabled_algorithms,
-                )
-                sftp = ssh.open_sftp()
-                sftp.listdir(".")
-                sftp.close()
-            except Exception:
-                # Never leave the decrypted private key on disk when connecting fails.
-                if os.path.exists(ssh_key_path):
-                    os.remove(ssh_key_path)
-                raise
-        if not ssh:
-            raise NodeConnectionErrorSSH()
+        except Exception as error:
+            ssh.close()
+            cleanup_temporary_key(ssh_key_path)
+            raise classified_connection_error(error, stage="sftp") from error
         return ssh, ssh_key_path
 
     def get_eligible_objects(self):
-        import mysql.connector
-        import psycopg2
-
         encryption_key = self.connection.account.get_encryption_key()
-
         eligible_objects = []
         self.check_connection(data=None, check_errors=True)
+        username = bs_decrypt(self.username, encryption_key)
+        password = bs_decrypt(self.password, encryption_key)
 
         try:
             option_ssl_mode = ""
@@ -2441,208 +2574,157 @@ class CoreAuthDatabase(TimeStampedModel):
                 # The MariaDB client rejects the MySQL-style --ssl-mode flag.
                 option_ssl_mode = "--ssl" if self.type == self.DatabaseType.MARIADB else "--ssl-mode=PREFERRED"
 
-            if self.type == self.DatabaseType.MYSQL:
+            if self.type in (
+                self.DatabaseType.MYSQL,
+                self.DatabaseType.MARIADB,
+            ):
                 if self.use_public_key or self.use_private_key:
-
                     ssh, ssh_key_path = self.get_ssh_client()
-
-                    if self.database_name:
+                    remote_credentials = None
+                    try:
+                        remote_credentials = self._install_remote_database_credentials(
+                            ssh,
+                            host=self.host,
+                            port=self.port,
+                            username=username,
+                            password=password,
+                        )
+                        query = (
+                            f"USE {self._mysql_identifier(self.database_name)}; SHOW TABLES;"
+                            if self.database_name
+                            else "SHOW DATABASES;"
+                        )
                         execstr = (
                             f"mysql"
+                            f" {remote_credentials['mysql_option']}"
                             f" {option_ssl_mode}"
                             f" --disable-column-names"
-                            f" -h'{self.host}'"
-                            f" -u'{bs_decrypt(self.username, encryption_key)}'"
-                            f" -p'{bs_decrypt(self.password, encryption_key)}'"
-                            f" --port='{self.port}'"
-                            f' -e"use {self.database_name}; show tables;"'
+                            f" --execute={shlex.quote(query)}"
                         )
-                    else:
-                        execstr = (
-                            f"mysql"
-                            f" {option_ssl_mode}"
-                            f" --disable-column-names"
-                            f" -h'{self.host}'"
-                            f" -u'{bs_decrypt(self.username, encryption_key)}'"
-                            f" -p'{bs_decrypt(self.password, encryption_key)}'"
-                            f' --port="{self.port}"'
-                            f' -e"show databases;"'
+                        output, _error = self._run_remote_database_command(
+                            ssh, execstr
                         )
-
-                    stdin, stdout, stderr = ssh.exec_command(execstr)
-                    #
-                    # for line in stderr:
-                    #     error = line.strip("\n").strip()
-                    #     if "warning" not in error.lower() and "info" not in error.lower():
-                    #         raise NodeConnectionErrorMYSQL(error)
-
-                    for line in stdout:
-                        database_name = line.strip("\n").strip()
-
-                        if database_name:
-                            eligible_objects.append({"name": database_name})
-                    """
-                    Delete temp SSH Key
-                    """
-                    ssh.close()
-                    if ssh_key_path:
-                        os.remove(ssh_key_path)
-                    eligible_objects = sorted(eligible_objects, key=lambda k: k["name"])
+                        for name in output.splitlines():
+                            name = name.strip()
+                            if name:
+                                eligible_objects.append({"name": name})
+                    finally:
+                        self._remove_remote_database_credentials(
+                            ssh, remote_credentials
+                        )
+                        ssh.close()
+                        cleanup_temporary_key(ssh_key_path)
                 else:
                     db_con = self._direct_mysql_connect(
                         self.host,
                         self.port,
-                        bs_decrypt(self.username, encryption_key),
-                        bs_decrypt(self.password, encryption_key),
+                        username,
+                        password,
                         self.database_name,
                         self.use_ssl,
                     )
-                    cursor = db_con.cursor()
-                    cursor.execute("SHOW TABLES")
-                    result = cursor.fetchall()
-                    for item in result:
-                        eligible_objects.append({"name": item[0]})
-                    eligible_objects = sorted(eligible_objects, key=lambda k: k["name"])
-                    cursor.close()
-                    db_con.close()
-            elif self.type == self.DatabaseType.MARIADB:
-                if self.use_public_key or self.use_private_key:
-                    ssh, ssh_key_path = self.get_ssh_client()
-
-                    if self.database_name:
-                        execstr = (
-                            f"mysql"
-                            f" {option_ssl_mode}"
-                            f" --disable-column-names"
-                            f" -h'{self.host}'"
-                            f" -u'{bs_decrypt(self.username, encryption_key)}'"
-                            f" -p'{bs_decrypt(self.password, encryption_key)}'"
-                            f" --port='{self.port}'"
-                            f' -e"use {self.database_name}; show tables;"'
+                    cursor = None
+                    try:
+                        cursor = db_con.cursor()
+                        cursor.execute(
+                            "SHOW TABLES" if self.database_name else "SHOW DATABASES"
                         )
-
-                    else:
-                        execstr = (
-                            f"mysql"
-                            f" {option_ssl_mode}"
-                            f" --disable-column-names"
-                            f" -h'{self.host}'"
-                            f" -u'{bs_decrypt(self.username, encryption_key)}'"
-                            f" -p'{bs_decrypt(self.password, encryption_key)}'"
-                            f' --port="{self.port}" -e"show databases;"'
-                        )
-
-                    stdin, stdout, stderr = ssh.exec_command(execstr)
-                    #
-                    # for line in stderr:
-                    #     error = line.strip("\n").strip()
-                    #     if "warning" not in error.lower() and "info" not in error.lower():
-                    #         raise NodeConnectionErrorMARIADB(error)
-
-                    for line in stdout:
-                        database_name = line.strip("\n").strip()
-                        if database_name:
-                            eligible_objects.append({"name": database_name})
-                    """
-                    Delete temp SSH Key
-                    """
-                    ssh.close()
-                    if ssh_key_path:
-                        os.remove(ssh_key_path)
-
-                    eligible_objects = sorted(eligible_objects, key=lambda k: k["name"])
-                else:
-                    db_con = self._direct_mysql_connect(
-                        self.host,
-                        self.port,
-                        bs_decrypt(self.username, encryption_key),
-                        bs_decrypt(self.password, encryption_key),
-                        self.database_name,
-                        self.use_ssl,
-                    )
-                    cursor = db_con.cursor()
-                    cursor.execute("SHOW TABLES")
-                    result = cursor.fetchall()
-                    for item in result:
-                        eligible_objects.append({"name": item[0]})
-                    eligible_objects = sorted(eligible_objects, key=lambda k: k["name"])
-                    cursor.close()
-                    db_con.close()
+                        for item in cursor.fetchall():
+                            eligible_objects.append({"name": item[0]})
+                    finally:
+                        try:
+                            if cursor is not None:
+                                cursor.close()
+                        finally:
+                            db_con.close()
             elif self.type == self.DatabaseType.POSTGRESQL:
                 if self.use_public_key or self.use_private_key:
                     ssh, ssh_key_path = self.get_ssh_client()
-
-                    if self.database_name:
-                        execstr = (
-                            'psql "host=%s'
-                            " user='%s'"
-                            " dbname='%s'"
-                            " password='%s'"
-                            " port=%s"
-                            r' sslmode=prefer" -c "\dt" -qAtX | cut -d \| -f 2'
-                            % (
-                                self.host,
-                                bs_decrypt(self.username, encryption_key),
-                                self.database_name,
-                                bs_decrypt(self.password, encryption_key),
-                                self.port,
-                            )
+                    remote_credentials = None
+                    try:
+                        remote_credentials = self._install_remote_database_credentials(
+                            ssh,
+                            host=self.host,
+                            port=self.port,
+                            username=username,
+                            password=password,
                         )
-                    else:
-                        execstr = (
-                            'psql "host=%s'
-                            " user='%s'"
-                            " password='%s'"
-                            " port=%s"
-                            r' sslmode=prefer" -lqt | cut -d \| -f 1'
-                            % (
-                                self.host,
-                                bs_decrypt(self.username, encryption_key),
-                                bs_decrypt(self.password, encryption_key),
-                                self.port,
+                        if self.database_name:
+                            database = self.database_name
+                            sql = (
+                                "SELECT tablename FROM pg_catalog.pg_tables "
+                                "WHERE schemaname NOT IN "
+                                "('pg_catalog','information_schema') "
+                                "ORDER BY tablename;"
                             )
+                        else:
+                            database = "postgres"
+                            sql = (
+                                "SELECT datname FROM pg_database "
+                                "WHERE datallowconn AND NOT datistemplate "
+                                "ORDER BY datname;"
+                            )
+                        command = self._postgres_remote_command(
+                            remote_credentials,
+                            host=self.host,
+                            port=self.port,
+                            username=username,
+                            database_name=database,
+                            sql=sql,
+                            tuples_only=True,
                         )
-
-                    stdin, stdout, stderr = ssh.exec_command(execstr)
-
-                    # for line in stderr:
-                    #     error = line.strip("\n").strip()
-                    #     if "warning" not in error.lower():
-                    #         raise NodeConnectionErrorPOSTGRESQL(error)
-
-                    for line in stdout:
-                        database_name = line.strip("\n").strip()
-                        if database_name:
-                            eligible_objects.append({"name": database_name})
-                    """
-                    Delete temp SSH Key
-                    """
-                    ssh.close()
-                    if ssh_key_path:
-                        os.remove(ssh_key_path)
-                    eligible_objects = sorted(eligible_objects, key=lambda k: k["name"])
+                        output, _error = self._run_remote_database_command(
+                            ssh, command
+                        )
+                        for name in output.splitlines():
+                            name = name.strip()
+                            if name:
+                                eligible_objects.append({"name": name})
+                    finally:
+                        self._remove_remote_database_credentials(
+                            ssh, remote_credentials
+                        )
+                        ssh.close()
+                        cleanup_temporary_key(ssh_key_path)
                 else:
-                    db_con = psycopg2.connect(
-                        dbname=self.database_name,
-                        user=bs_decrypt(self.username, encryption_key),
-                        password=bs_decrypt(self.password, encryption_key),
-                        host=self.host,
-                        port=self.port,
+                    db_con = self._direct_postgresql_connect(
+                        self.host,
+                        self.port,
+                        username,
+                        password,
+                        self.database_name or "postgres",
+                        self.use_ssl,
                     )
+                    cursor = None
+                    try:
+                        cursor = db_con.cursor()
+                        if self.database_name:
+                            cursor.execute(
+                                "SELECT tablename FROM pg_catalog.pg_tables "
+                                "WHERE schemaname NOT IN "
+                                "('pg_catalog','information_schema') "
+                                "ORDER BY tablename;"
+                            )
+                        else:
+                            cursor.execute(
+                                "SELECT datname FROM pg_database "
+                                "WHERE datallowconn AND NOT datistemplate "
+                                "ORDER BY datname;"
+                            )
+                        for item in cursor.fetchall():
+                            eligible_objects.append({"name": item[0]})
+                    finally:
+                        try:
+                            if cursor is not None:
+                                cursor.close()
+                        finally:
+                            db_con.close()
+        except ClassifiedConnectionError:
+            raise
+        except Exception as error:
+            raise classified_connection_error(error, stage="database") from error
 
-                    cursor = db_con.cursor()
-                    cursor.execute("select relname from pg_class where relkind='r' and relname !~ '^(pg_|sql_)';")
-                    result = cursor.fetchall()
-
-                    for item in result:
-                        eligible_objects.append({"name": item[0]})
-                    eligible_objects = sorted(eligible_objects, key=lambda k: k["name"])
-                    cursor.close()
-                    db_con.close()
-        except Exception as e:
-            raise NodeConnectionErrorEligibleObjects(e.__str__())
-
-        return eligible_objects
+        return sorted(eligible_objects, key=lambda item: item["name"])
 
     def validate(self, check_errors=None, raise_exp=None):
         try:
@@ -2698,7 +2780,6 @@ class CoreAuthWordPress(TimeStampedModel):
 
     def validate(self, data=None, check_errors=None, raise_exp=None):
         from bs4 import BeautifulSoup
-        import requests
         from requests.adapters import HTTPAdapter
         from urllib3 import Retry
         import ssl

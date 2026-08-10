@@ -2,7 +2,11 @@ import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 from apps.console.backup.models import CoreVultrDatabaseBackup
 from apps.console.node.models import CoreVultrDatabase
 
@@ -13,7 +17,7 @@ class CoreVultrDatabaseSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class CoreVultrDatabaseBackupSerializer(serializers.ModelSerializer):
+class CoreVultrDatabaseBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     vultr_database = CoreVultrDatabaseSerializer(read_only=True)
     status_display = serializers.SerializerMethodField()
     created_display = serializers.SerializerMethodField()
@@ -24,7 +28,14 @@ class CoreVultrDatabaseBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreVultrDatabaseBackup
         fields = "__all__"
-        datatables_always_serialize = ("id", "uuid", "name", "provider_status")
+        list_serializer_class = BackupExecutionStatusListSerializer
+        datatables_always_serialize = (
+            "id",
+            "uuid",
+            "name",
+            "provider_status",
+            "execution_status",
+        )
 
     @staticmethod
     def get_status_display(obj):

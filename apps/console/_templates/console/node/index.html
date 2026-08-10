@@ -428,6 +428,7 @@
                         notes: null,
                         node_type: null,
                         loading: null,
+                        backupRequestKey: null,
                         onDemandBackup: {
                             storage_point_ids: [],
                         },
@@ -470,12 +471,18 @@
                             this.node_name = node_name;
                             this.integration_code = integration_code;
                             this.node_type = node_type;
+                            this.backupRequestKey = null;
                         },
                         closeModal() {
                             this.open = false;
                         },
                         async createBackup() {
                             this.loading = true;
+                            if (!this.backupRequestKey) {
+                                this.backupRequestKey = (window.crypto && crypto.randomUUID)
+                                    ? crypto.randomUUID()
+                                    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                            }
 
                             let url = "/api/v1/nodes/" + this.node_id + "/take_snapshot/?" + new URLSearchParams({
                                 location: this.location_id,
@@ -485,12 +492,14 @@
                                 location: this.location_id,
                                 notes: this.onDemandBackup.notes,
                                 storage_point_ids: this.onDemandBackup.storage_point_ids,
+                                request_id: this.backupRequestKey,
                             }
 
                             let response = await fetch(url, {
                                 headers: {
                                     'Accept': 'application/json',
-                                    'Content-Type': 'application/json'
+                                    'Content-Type': 'application/json',
+                                    'Idempotency-Key': this.backupRequestKey,
                                 },
                                 method: 'POST',
                                 body: JSON.stringify(data)
@@ -516,6 +525,10 @@
                                     heading: 'Success!',
                                     details: json.detail
                                 });
+                                if (json.backup_request && json.backup_request.request_id) {
+                                    this.pollBackupRequest(json.backup_request.request_id, 0, this.node_id);
+                                }
+                                this.backupRequestKey = null;
                                 this.closeModal();
                             }).catch((error) => {
                                 Alpine.store('notifications').items.push({
@@ -525,6 +538,42 @@
                                     details: error.message
                                 });
                             });
+                        },
+                        async pollBackupRequest(requestId, attempt = 0, nodeId = null) {
+                            if (!requestId || attempt >= 120) return;
+                            nodeId = nodeId || this.node_id;
+                            window.setTimeout(async () => {
+                                try {
+                                    const url = `/api/v1/nodes/${nodeId}/backup_request_status/?request_id=${encodeURIComponent(requestId)}`;
+                                    const response = await fetch(url, {
+                                        headers: {'Accept': 'application/json'}
+                                    });
+                                    if (!response.ok) return;
+                                    const state = await response.json();
+                                    if ((state.status === 'claimed' || state.status === 'duplicate') && state.backup_id) {
+                                        Alpine.store('notifications').items.push({
+                                            show: true,
+                                            success: true,
+                                            heading: 'Backup started',
+                                            details: state.backup_status_display || 'The durable backup job is now in progress.'
+                                        });
+                                        window.location.reload();
+                                        return;
+                                    }
+                                    if (state.status === 'cancelled' || state.status === 'manual_review') {
+                                        Alpine.store('notifications').items.push({
+                                            show: true,
+                                            error: true,
+                                            heading: 'Backup needs attention',
+                                            details: state.message || 'The durable backup request requires operator review.'
+                                        });
+                                        return;
+                                    }
+                                    this.pollBackupRequest(requestId, attempt + 1, nodeId);
+                                } catch (error) {
+                                    this.pollBackupRequest(requestId, attempt + 1, nodeId);
+                                }
+                            }, 5000);
                         },
                         executeSearch(p_no, p_size) {
                             if(p_no){

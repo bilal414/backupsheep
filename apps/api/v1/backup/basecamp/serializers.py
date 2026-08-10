@@ -20,8 +20,11 @@ from apps.console.connection.models import (
 from apps.console.node.models import CoreBasecamp, CoreNode, CoreSchedule
 from apps.console.storage.models import CoreStorage, CoreStorageType
 from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
     CoreBackupScheduleSerializer,
     CoreBackupStorageSerializer,
+    SafeProviderMetadataMixin,
 )
 
 
@@ -35,7 +38,7 @@ class CoreBasecampSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreBasecampBackupStoragePointsSerializer(serializers.ModelSerializer):
+class CoreBasecampBackupStoragePointsSerializer(SafeProviderMetadataMixin, serializers.ModelSerializer):
     storage = CoreBackupStorageSerializer(read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
 
@@ -48,7 +51,7 @@ class CoreBasecampBackupStoragePointsSerializer(serializers.ModelSerializer):
         return obj.get_status_display()
 
 
-class CoreBasecampBackupSerializer(serializers.ModelSerializer):
+class CoreBasecampBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     basecamp = CoreBasecampSerializer(read_only=True)
     database = CoreBasecampSerializer(source="basecamp", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -64,11 +67,13 @@ class CoreBasecampBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreBasecampBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "stored_backups",
+            "execution_status",
         )
 
     @staticmethod

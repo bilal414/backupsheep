@@ -5,9 +5,12 @@ from django.db import transaction
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from apps.api.v1.storage.serializers import CoreStorageTypeSerializer
+from apps.api.v1.storage.serializers import (
+    CoreStorageTypeSerializer,
+    StorageCredentialReadSerializerMixin,
+    StorageCredentialWriteSerializerMixin,
+)
 from apps.api.v1.utils.api_helpers import (
-    bs_decrypt,
     CurrentMemberDefault,
     CurrentAccountDefault, StorageDefault, bs_encrypt,
 )
@@ -24,9 +27,8 @@ class CoreAWSRegionSerializer(serializers.ModelSerializer):
         datatables_always_serialize = ("id",)
 
 
-class CoreStorageAWSS3ReadSerializer(serializers.ModelSerializer):
-    access_key = serializers.SerializerMethodField()
-    secret_key = serializers.SerializerMethodField()
+class CoreStorageAWSS3ReadSerializer(StorageCredentialReadSerializerMixin, serializers.ModelSerializer):
+    credential_fields = ("access_key", "secret_key")
     region = CoreAWSRegionSerializer()
 
     class Meta:
@@ -62,14 +64,8 @@ class CoreStorageAWSS3ReadSerializer(serializers.ModelSerializer):
             "lifecycle_last_synced_at",
         )
 
-    def get_access_key(self, obj):
-        return bs_decrypt(obj.access_key, self.context["encryption_key"])
-
-    def get_secret_key(self, obj):
-        return bs_decrypt(obj.secret_key, self.context["encryption_key"])
-
-
-class CoreStorageAWSS3WriteSerializer(serializers.ModelSerializer):
+class CoreStorageAWSS3WriteSerializer(StorageCredentialWriteSerializerMixin, serializers.ModelSerializer):
+    credential_fields = ("access_key", "secret_key")
     access_key = serializers.CharField(write_only=True)
     secret_key = serializers.CharField(write_only=True)
     bucket_name = serializers.CharField(write_only=True)
@@ -127,7 +123,7 @@ class CoreStorageAWSS3WriteSerializer(serializers.ModelSerializer):
             # the real reason instead of an unhandled 500.
             raise serializers.ValidationError(str(e))
         except Exception as e:
-            raise serializers.ValidationError(f"Unable to authenticate. {e.__str__()}")
+            raise serializers.ValidationError("Unable to authenticate with the storage provider. Verify the credentials and configuration.")
         return data
 
 

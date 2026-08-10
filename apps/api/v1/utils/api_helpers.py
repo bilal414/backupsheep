@@ -30,6 +30,8 @@ import hmac
 import base64
 from google.cloud import storage as gc_storage
 from google.oauth2 import service_account
+from apps.api.v1.utils.http import requests
+from apps.api.v1.utils.boto import bounded_boto3_client
 
 
 def validate_crontab(cron_syntax, data=None):
@@ -405,10 +407,32 @@ def mkdir_p(path, add_bs_file=True):
 
 
 def get_error(error_text):
+    """Return a stable provider/worker message without exception text.
+
+    Provider SDK exceptions routinely embed signed URLs, account identifiers,
+    bearer tokens, request bodies, and database endpoints.  Older adapters call
+    this helper before constructing log-writing exceptions, so stringifying here
+    would turn a transient provider failure into a durable secret leak.
+    """
     try:
-        return str(error_text)
-    except:
-        return "n/a"
+        capture_exception(error_text)
+    except Exception:
+        pass
+    try:
+        from apps._tasks.integration.backup.errors import safe_backup_failure
+
+        failure = safe_backup_failure(error_text, stage="provider_operation")
+        if failure.code == "SOURCE_EXPORT_FAILED":
+            return (
+                "The provider operation failed. BackupSheep will retry or "
+                "reconcile it without exposing sensitive diagnostics."
+            )
+        return failure.detail
+    except Exception:
+        return (
+            "The provider operation failed. Secured diagnostics contain the "
+            "detailed cause."
+        )
 
 
 def get_all_files_in_directory(directory):
@@ -768,7 +792,7 @@ def aws_s3_create_presigned_url(bucket_name, object_name, expiration=3600):
         if bucket_name is None:
             bucket_name = settings.LOGS_S3_BUCKET
 
-        s3_client = boto3.client(
+        s3_client = bounded_boto3_client(
             "s3",
             # region_name="nyc3",
             endpoint_url=settings.LOGS_S3_ENDPOINT,
@@ -872,7 +896,6 @@ def ssrf_safe_get(url, max_redirects=5, **kwargs):
     Redirects are followed manually here; each Location is validated before use, and
     credentials are not forwarded across hosts.
     """
-    import requests
     from urllib.parse import urljoin, urlparse
 
     kwargs["allow_redirects"] = False

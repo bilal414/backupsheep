@@ -7,6 +7,7 @@ from apps.api.v1.connection.serializers import CoreConnectionSerializer
 from apps.api.v1.utils.api_helpers import CurrentMemberDefault, CurrentAccountDefault
 from apps.console.backup.models import CoreCloudRestore
 from apps.console.connection.models import CoreConnection
+from apps.api.v1.backup.serializers import RestoreExecutionStatusMixin
 from apps.console.node.models import (
     CoreNode,
 )
@@ -232,7 +233,7 @@ class CoreVolumeNodeWriteSerializer(serializers.ModelSerializer):
         return data
 
 
-class CoreCloudRestoreSerializer(serializers.ModelSerializer):
+class CoreCloudRestoreSerializer(RestoreExecutionStatusMixin, serializers.ModelSerializer):
     status_display = serializers.SerializerMethodField(read_only=True)
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()

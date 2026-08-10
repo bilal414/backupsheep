@@ -41,7 +41,7 @@ class CoreStorageLocalWriteSerializer(serializers.ModelSerializer):
             if not storage.validate(data):
                 raise ValueError("Please check the path and permissions.")
         except Exception as e:
-            raise serializers.ValidationError(f"Unable to validate local storage. {e.__str__()}")
+            raise serializers.ValidationError("Unable to validate local storage. Verify the path and permissions.")
         return data
 
 

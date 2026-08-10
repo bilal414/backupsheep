@@ -1,5 +1,5 @@
 import pytz
-import requests
+from apps.api.v1.utils.http import requests
 from django.conf import settings
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
@@ -9,7 +9,6 @@ from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
     IntegrationDefault,
-    bs_decrypt,
     bs_encrypt,
 )
 from apps.console.connection.models import (
@@ -27,21 +26,21 @@ from apps.api.v1.connection.serializers import (
 
 
 class CoreAuthVultrReadSerializer(serializers.ModelSerializer):
-    api_key = serializers.SerializerMethodField()
+    api_key_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreAuthVultr
         fields = (
             "id",
-            "api_key",
+            "api_key_configured",
         )
         datatables_always_serialize = (
             "id",
-            "api_key",
+            "api_key_configured",
         )
 
-    def get_api_key(self, obj):
-        return bs_decrypt(obj.api_key, self.context["encryption_key"])
+    def get_api_key_configured(self, obj):
+        return bool(obj.api_key)
 
 
 class CoreVultrConnectionReadSerializer(serializers.ModelSerializer):
@@ -100,7 +99,7 @@ class CoreVultrConnectionReadSerializer(serializers.ModelSerializer):
 
 
 class CoreAuthVultrWriteSerializer(serializers.ModelSerializer):
-    api_key = serializers.CharField(write_only=True)
+    api_key = serializers.CharField(write_only=True, required=False)
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -108,16 +107,23 @@ class CoreAuthVultrWriteSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
+        if "api_key" not in data:
+            if getattr(getattr(self, "parent", None), "instance", None) is None:
+                raise serializers.ValidationError({"api_key": "This field is required."})
+            return data
         error = "Please check your API Key and make sure you whitelisted the BackupSheep Endpoint IP address."
 
         api_key = data["api_key"]
         headers = {
             "Authorization": f"Bearer {api_key}",
         }
-        result = requests.get(f"{settings.VULTR_API}/v2/account", headers=headers)
+        try:
+            result = requests.get(f"{settings.VULTR_API}/v2/account", headers=headers)
+        except Exception:
+            raise serializers.ValidationError(
+                "Unable to authenticate. Vultr is temporarily unreachable."
+            )
         if result.status_code != 200:
-            if result.json().get("error"):
-                error = result.json().get("error")
             raise serializers.ValidationError(f"Unable to authenticate. {error}")
         data["api_key"] = bs_encrypt(api_key, self.context["encryption_key"])
         return data

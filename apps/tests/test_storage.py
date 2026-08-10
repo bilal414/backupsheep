@@ -1,4 +1,6 @@
 import os
+import base64
+import hashlib
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -164,12 +166,23 @@ class S3ImmutabilityTests(BaseTestCase):
             fh.write(b"immutable-backup")
         self.addCleanup(lambda: os.path.exists(local_zip) and os.remove(local_zip))
 
+        payload = b"immutable-backup"
+        digest = hashlib.sha256(payload)
         client = mock.MagicMock()
-        client.head_object.return_value = {
+        client.head_object.side_effect = [
+            ClientError({"Error": {"Code": "404"}}, "HeadObject"),
+            {
+            "ContentLength": len(payload),
             "VersionId": "version-1",
+            "ETag": '"etag-1"',
+            "Metadata": {
+                "backupsheep-sha256": digest.hexdigest(),
+                "backupsheep-bytes": str(len(payload)),
+            },
             "ObjectLockMode": "COMPLIANCE",
             "ObjectLockRetainUntilDate": timezone.now() + timedelta(days=30),
-        }
+            },
+        ]
         with mock.patch(
             "apps._tasks.integration.storage.aws_s3.boto3.client", return_value=client
         ):
@@ -178,10 +191,16 @@ class S3ImmutabilityTests(BaseTestCase):
         point.refresh_from_db()
         self.assertEqual(point.status, CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE)
         self.assertEqual(point.metadata["s3_object_lock"]["version_id"], "version-1")
-        upload_args = client.upload_fileobj.call_args.kwargs["ExtraArgs"]
+        upload_args = client.put_object.call_args.kwargs
         self.assertEqual(upload_args["ObjectLockMode"], "COMPLIANCE")
-        self.assertEqual(upload_args["ChecksumAlgorithm"], "SHA256")
+        self.assertEqual(
+            upload_args["ChecksumSHA256"],
+            base64.b64encode(digest.digest()).decode("ascii"),
+        )
         self.assertEqual(upload_args["ExpectedBucketOwner"], "123456789012")
+        self.assertEqual(
+            point.metadata["aws_s3_object"]["sha256"], digest.hexdigest()
+        )
 
     def test_active_object_lock_defers_deletion_and_keeps_parent_backup_complete(self):
         storage = self._protected_storage()
@@ -220,6 +239,9 @@ class S3ImmutabilityTests(BaseTestCase):
             "VersionId": "version-expired",
             "ObjectLockMode": "COMPLIANCE",
             "ObjectLockRetainUntilDate": timezone.now() - timedelta(days=1),
+            "Metadata": {
+                "backupsheep-backup-id": str(point.backup_id),
+            },
         }
 
         with mock.patch("boto3.client", return_value=client):
@@ -381,15 +403,25 @@ class LocalStorageUploadTests(BaseTestCase):
 class LocalStorageDeleteTests(BaseTestCase):
     def test_soft_delete_removes_file(self):
         with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
-            target = os.path.join(tmp, "backup.zip")
-            with open(target, "wb") as fh:
-                fh.write(b"zip-bytes")
             storage = make_local_storage(self.account, self.member)
             point = make_website_backup_point(
                 self.member, storage,
                 status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
-                storage_file_id=target,
             )
+            payload = b"zip-bytes"
+            target = os.path.join(tmp, f"{point.backup.uuid_str}.zip")
+            with open(target, "wb") as fh:
+                fh.write(payload)
+            point.storage_file_id = target
+            point.metadata = {
+                "local_object": {
+                    "object_key": os.path.basename(target),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "size_bytes": len(payload),
+                    "checksum_algorithm": "sha256",
+                }
+            }
+            point.save()
             point.soft_delete()
             point.refresh_from_db()
             self.assertFalse(os.path.exists(target))
@@ -406,11 +438,16 @@ class LocalStorageDeleteTests(BaseTestCase):
                 status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
                 storage_file_id=target,
             )
-            point.soft_delete()
+            self.assertFalse(point.soft_delete())
             point.refresh_from_db()
-            # the file is kept; only BackupSheep's record of it is closed out
+            # Protected copies remain visibly restorable and are not reported as
+            # deleted while the bytes still exist.
             self.assertTrue(os.path.exists(target))
-            self.assertEqual(point.status, CoreWebsiteBackupStoragePoints.Status.DELETE_COMPLETED)
+            self.assertEqual(
+                point.status,
+                CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+            )
+            self.assertIn("deletion_protection", point.metadata)
 
     def test_soft_delete_refuses_path_outside_root(self):
         with tempfile.TemporaryDirectory() as tmp, \
@@ -582,6 +619,9 @@ class S3ImmutabilityFollowupTests(BaseTestCase):
             "VersionId": "version-expired",
             "ObjectLockMode": "COMPLIANCE",
             "ObjectLockRetainUntilDate": timezone.now() - timedelta(days=1),
+            "Metadata": {
+                "backupsheep-backup-id": str(point.backup_id),
+            },
         }
 
         with mock.patch("boto3.client", return_value=client):

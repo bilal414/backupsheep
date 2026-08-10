@@ -1,5 +1,6 @@
 import boto3
-import requests
+from apps.api.v1.utils.http import requests
+from apps.api.v1.utils.boto import bounded_boto3_client
 from django.conf import settings
 from django.db import models
 from django.db.models import UniqueConstraint
@@ -126,7 +127,7 @@ class CoreNotificationLogEmail(TimeStampedModel):
             # If you are using dedicated IP then update this configset accordingly.
             config_set = "default"
 
-            ses_client = boto3.client(
+            ses_client = bounded_boto3_client(
                 "ses",
                 aws_access_key_id=site.email_cred("access_key_id", "SES_ACCESS_KEY_ID"),
                 aws_secret_access_key=site.email_cred("secret_access_key", "SES_SECRET_ACCESS_KEY"),

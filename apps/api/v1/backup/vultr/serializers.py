@@ -5,7 +5,11 @@ from apps.console.backup.models import (
     CoreVultrBackup,
 )
 from apps.console.node.models import CoreVultr, CoreNode, CoreSchedule
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 
 
 class CoreVultrSerializer(serializers.ModelSerializer):
@@ -18,7 +22,7 @@ class CoreVultrSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreVultrBackupSerializer(serializers.ModelSerializer):
+class CoreVultrBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     website = CoreVultrSerializer(source="vultr", read_only=True)
     database = CoreVultrSerializer(source="vultr", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -30,11 +34,13 @@ class CoreVultrBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreVultrBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "size_gigabytes",
+            "execution_status",
         )
 
     @staticmethod

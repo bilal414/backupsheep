@@ -5,7 +5,11 @@ from apps.console.backup.models import (
     CoreGoogleCloudBackup,
 )
 from apps.console.node.models import CoreGoogleCloud, CoreNode, CoreSchedule
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 
 
 class CoreGoogleCloudSerializer(serializers.ModelSerializer):
@@ -18,7 +22,7 @@ class CoreGoogleCloudSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreGoogleCloudBackupSerializer(serializers.ModelSerializer):
+class CoreGoogleCloudBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     website = CoreGoogleCloudSerializer(source="google_cloud", read_only=True)
     database = CoreGoogleCloudSerializer(source="google_cloud", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -30,11 +34,13 @@ class CoreGoogleCloudBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreGoogleCloudBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "size_gigabytes",
+            "execution_status",
         )
 
     @staticmethod

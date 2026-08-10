@@ -1,4 +1,6 @@
+import hashlib
 import json
+import re
 from datetime import timedelta
 
 import arrow
@@ -6,6 +8,7 @@ import boto3
 import pytz
 from botocore.config import Config
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Q
 from django.utils.dateparse import parse_datetime
 from django.utils.timezone import get_current_timezone
@@ -16,6 +19,7 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
+from apps.api.v1.utils.boto import bounded_boto3_client
 
 from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
@@ -57,6 +61,126 @@ def _log_activity(request, log_type, data):
         CoreLog.record(request.user.member.get_current_account(), log_type, data)
     except Exception:
         pass
+
+
+_RESTORE_MAX_DATABASE_IDENTIFIER_LENGTH = 63
+
+
+def _restore_identifier(value, field):
+    """Validate an API-provided database identifier without exposing secrets."""
+    value = "" if value is None else str(value)
+    if (
+        not value
+        or len(value) > _RESTORE_MAX_DATABASE_IDENTIFIER_LENGTH
+        or re.search(r"[\s;&|`$<>(){}\[\]\\'\"!*?~#/]", value)
+    ):
+        raise RestoreConfirmationRequired(
+            f"{field} is not a safe database identifier for restore."
+        )
+    return value
+
+
+def _restore_target_name(restore, source_database):
+    source_database = _restore_identifier(source_database, "source database")
+    correlation = str(restore.correlation_id).replace("-", "")
+    digest = hashlib.sha256(source_database.encode("utf-8")).hexdigest()[:12]
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", source_database).strip("_").lower()
+    slug = slug[:22] or "database"
+    return f"bs_restore_{correlation[:12]}_{slug}_{digest}"[:_RESTORE_MAX_DATABASE_IDENTIFIER_LENGTH]
+
+
+def _known_database_restore_sources(backup):
+    """Return source DB names known without opening the stored archive.
+
+    ``all_databases`` is intentionally represented as unknown.  The worker
+    locks the final mapping after the archive has been fully validated.
+    """
+    database = backup.database
+    auth = database.node.connection.auth_database
+    if bool(getattr(backup, "all_databases", False)) or bool(database.all_databases):
+        return None
+    if bool(getattr(backup, "tables", None)) or bool(getattr(backup, "all_tables", False)) or bool(database.all_tables):
+        return [_restore_identifier(auth.database_name, "source database")]
+    configured = list(database.databases or [])
+    if configured:
+        return sorted({_restore_identifier(value, "source database") for value in configured})
+    return [_restore_identifier(auth.database_name, "source database")]
+
+
+def _canonical_target_mapping(mapping):
+    return json.dumps(dict(sorted(mapping.items())), sort_keys=True, separators=(",", ":"))
+
+
+def _in_place_confirmation(mapping):
+    return f"IN_PLACE_RESTORE_TO:{_canonical_target_mapping(mapping)}"
+
+
+def _restore_request_state(backup, restore, request_data):
+    """Build immutable restore parameters before Celery is dispatched."""
+    mode = str(request_data.get("mode") or "fork").strip().lower()
+    if mode not in {"fork", "in_place"}:
+        raise RestoreConfirmationRequired("mode must be fork or in_place.")
+
+    known_sources = _known_database_restore_sources(backup)
+    if mode == "fork":
+        # Fork targets are deterministic but all-database archives are only
+        # knowable after the ZIP has passed full validation in the worker.
+        mapping = None
+        if known_sources:
+            mapping = {
+                source: _restore_target_name(restore, source)
+                for source in known_sources
+            }
+        params = {
+            "mode": "fork",
+            "target_mapping": mapping,
+            "mapping_locked": bool(mapping),
+            "source_backup_uuid": str(backup.uuid),
+        }
+        metadata = {
+            "mode": "fork",
+            "mapping_state": "locked" if mapping else "pending_archive_validation",
+            "target_checkpoints": {},
+        }
+        if mapping:
+            metadata["source_to_target"] = dict(mapping)
+        return params, metadata
+
+    raw_mapping = request_data.get("target_mapping")
+    if not isinstance(raw_mapping, dict) or not raw_mapping:
+        raise RestoreConfirmationRequired(
+            "in_place requires target_mapping and an exact target_confirmation."
+        )
+    mapping = {}
+    for source, target in sorted(raw_mapping.items(), key=lambda pair: str(pair[0])):
+        source = _restore_identifier(source, "source database")
+        target = _restore_identifier(target, "target database")
+        if target in mapping.values():
+            raise RestoreConfirmationRequired("target_mapping contains duplicate targets.")
+        mapping[source] = target
+    if known_sources and set(mapping) != set(known_sources):
+        raise RestoreConfirmationRequired(
+            "in_place target_mapping must name exactly the databases selected by this backup."
+        )
+    expected_confirmation = _in_place_confirmation(mapping)
+    if request_data.get("target_confirmation") != expected_confirmation:
+        raise RestoreConfirmationRequired(
+            "target_confirmation must exactly match the requested source-to-target mapping."
+        )
+    params = {
+        "mode": "in_place",
+        "target_mapping": dict(mapping),
+        "mapping_locked": True,
+        "target_confirmation": expected_confirmation,
+        "source_backup_uuid": str(backup.uuid),
+    }
+    metadata = {
+        "mode": "in_place",
+        "mapping_state": "locked",
+        "source_to_target": dict(mapping),
+        "target_checkpoints": {},
+    }
+    return params, metadata
 
 
 class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
@@ -124,8 +248,12 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                     return Response({"url": download_url, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
                 else:
                     raise DownloadStoragePointNotFound()
-            except Exception as e:
-                raise DownloadStoragePointError(e.__str__())
+            except DownloadStoragePointNotFound:
+                raise
+            except Exception:
+                # Provider/client exception bodies can contain endpoint details
+                # or credentials; keep the API contract generic.
+                raise DownloadStoragePointError()
         else:
             raise DownloadMissingParams()
 
@@ -135,8 +263,8 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             backup = self.get_object()
             storage_points = CoreDatabaseBackupStoragePointsSerializer(backup.stored_database_backups.all(), many=True).data
             return Response(storage_points, status=status.HTTP_200_OK)
-        except Exception as e:
-            raise StoragePointError(e.__str__())
+        except Exception:
+            raise StoragePointError()
 
     @action(detail=True, methods=["post"])
     def restore(self, request, pk=None):
@@ -145,7 +273,9 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
         backup = self.get_object()
 
         if request.data.get("confirm") is not True:
-            raise RestoreConfirmationRequired()
+            raise RestoreConfirmationRequired(
+                'Pass "confirm": true to start a restore. The default mode creates a new database fork.'
+            )
         if backup.status != CoreDatabaseBackup.Status.COMPLETE:
             raise RestoreBackupNotFound()
 
@@ -163,11 +293,29 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                 raise RestoreStoragePointRequired()
             stored_backup = stored_backups.first()
 
-        restore = CoreDatabaseRestore.objects.create(
-            backup=backup,
-            storage_point=stored_backup,
-            name=f"Restore of {backup.uuid}",
-        )
+        # The restore row is created before deriving fork names so its
+        # correlation id becomes the immutable idempotency seed.  No provider
+        # or database mutation occurs in this API request.
+        with transaction.atomic():
+            restore = CoreDatabaseRestore.objects.create(
+                backup=backup,
+                storage_point=stored_backup,
+                name=f"Restore of {backup.uuid}",
+            )
+            params, metadata = _restore_request_state(backup, restore, request.data)
+            restore.params = params
+            restore.execution_metadata = metadata
+            restore.execution_phase = "pending"
+            restore.progress_unit = "databases"
+            restore.save(
+                update_fields=[
+                    "params",
+                    "execution_metadata",
+                    "execution_phase",
+                    "progress_unit",
+                    "modified",
+                ]
+            )
 
         try:
             restore_database_backup.apply_async(
@@ -177,8 +325,10 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                     "restore_id": restore.id,
                 }
             )
-        except Exception as e:
-            raise RestoreCreateError(e.__str__())
+        except Exception:
+            # Never return broker/client exception bodies; they can contain
+            # connection details or credentials from a misconfigured worker.
+            raise RestoreCreateError()
 
         return Response(
             CoreDatabaseRestoreSerializer(restore).data,
@@ -230,7 +380,7 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
                 access_key = settings.AWS_S3_ACCESS_KEY
                 secret_key = settings.AWS_S3_SECRET_ACCESS_KEY
 
-            s3_client = boto3.client(
+            s3_client = bounded_boto3_client(
                 "s3",
                 endpoint_url=s3_endpoint,
                 aws_access_key_id=access_key,
@@ -247,7 +397,7 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             )
             return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         elif date < backup.created < date_aws_s3:
-            s3_client = boto3.client(
+            s3_client = bounded_boto3_client(
                 "s3",
                 endpoint_url=settings.LOGS_S3_ENDPOINT,
                 aws_access_key_id=settings.LOGS_S3_ACCESS_KEY_ID,
@@ -265,7 +415,7 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             response = response.replace(f"{settings.LOGS_S3_ENDPOINT}/logs", "https://logs.backupsheep.com")
             return Response({"url": response, "expire_in": int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))}, status=status.HTTP_201_CREATED)
         else:
-            s3_client = boto3.client(
+            s3_client = bounded_boto3_client(
                 "s3",
                 endpoint_url=settings.CEPH_S3_ENDPOINT,
                 aws_access_key_id=settings.AWS_ACCESS_KEY_ID,

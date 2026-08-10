@@ -1,13 +1,14 @@
 import subprocess
 import os
-import requests
+from apps.api.v1.utils.http import requests
 from sentry_sdk import capture_exception
+from apps._tasks.integration.backup.errors import safe_backup_failure
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.backup._archive import create_zip
 from apps.api.v1.utils.api_helpers import aws_s3_upload_log_file
 from apps.api.v1.utils.api_helpers import mkdir_p
 from apps._tasks.helper.tasks import delete_from_disk
-from apps.console.utils.models import UtilBackup
+from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 
 
 def collect_vaults_urls(item, path, client):
@@ -222,7 +223,12 @@ def snapshot_basecamp(backup):
                                         log_file.write(f"Unable to download file: {upload_name} \n")
 
         # ZIP all downloaded files.
-        create_zip(local_dir, local_zip, timeout=43200)
+        create_zip(
+            local_dir,
+            local_zip,
+            timeout=43200,
+            before_publish=backup.ensure_execution_fence,
+        )
 
         # Generate Report
         try:
@@ -252,16 +258,21 @@ def snapshot_basecamp(backup):
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "dir"],
         )
+    except BackupExecutionLeaseLostError:
+        raise
     except Exception as e:
-        log_file.write(f"Error: {e.__str__()} \n")
         capture_exception(e)
+        failure = safe_backup_failure(e, stage="basecamp_backup")
+        log_file.write(f"Error [{failure.code}]: {failure.detail}\n")
         """
         Delete files
         """
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "both"],
         )
-        raise NodeBackupFailedError(node, backup.uuid_str, backup.attempt_no, backup.type, e.__str__())
+        raise NodeBackupFailedError(
+            node, backup.uuid_str, backup.attempt_no, backup.type, failure.detail
+        )
     finally:
         """
         Upload log file and report file to BackupSheep storage.

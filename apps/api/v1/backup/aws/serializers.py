@@ -2,7 +2,11 @@ import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 from apps.console.backup.models import (
     CoreAWSBackup,
 )
@@ -19,7 +23,7 @@ class CoreAWSSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreAWSBackupSerializer(serializers.ModelSerializer):
+class CoreAWSBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     website = CoreAWSSerializer(source="aws", read_only=True)
     database = CoreAWSSerializer(source="aws", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -31,11 +35,13 @@ class CoreAWSBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreAWSBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "size_gigabytes",
+            "execution_status",
         )
 
     @staticmethod

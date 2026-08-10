@@ -1,18 +1,24 @@
 """Disposable AWS end-to-end test for the AWS S3/DynamoDB/RDS integrations.
 
-The script creates one uniquely prefixed fixture set, exercises backup and
+The script creates one explicitly prefixed fixture set, exercises backup and
 restore status through the BackupSheep models, verifies the restored data, and
-removes only the resources whose names carry this run's prefix.  It is intended
+can remove only resources whose exact IDs and ownership proofs were fsynced to
+the run ledger. It is intended
 to run inside the app image with AWS credentials supplied through the process
 environment; it never reads credentials from the repository.
+
+It never creates a Lightsail client and never mutates or deletes Lightsail.
+Mutation and cleanup are separate explicit opt-ins.
 
 Example:
 
     AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+      BACKUPSHEEP_E2E_RUN_ID=bs-e2e-20260810-5b4a6b63 \
+      BACKUPSHEEP_E2E_LEDGER_PATH=/code/_storage/e2e-ledgers/aws.json \
+      BACKUPSHEEP_E2E_APPLY=YES BACKUPSHEEP_E2E_CLEANUP=YES \
       python scripts/aws_s3_dynamodb_rds_e2e.py
 """
 
-import datetime as dt
 import ipaddress
 import json
 import os
@@ -28,6 +34,7 @@ import boto3
 import django
 import psycopg2
 from botocore.exceptions import ClientError
+from botocore.config import Config
 
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "backupsheep.settings")
@@ -47,21 +54,28 @@ from apps.console.connection.models import (  # noqa: E402
 from apps.console.node.models import CoreAWS, CoreAWSRDS, CoreNode  # noqa: E402
 from apps.console.utils.models import UtilBackup  # noqa: E402
 from apps.tests import factories  # noqa: E402
+from scripts.live_e2e_ledger import (  # noqa: E402
+    DurableResourceLedger,
+    LedgerError,
+    require_run_id,
+)
 
 
-REGION = os.environ.get("AWS_E2E_REGION", "us-east-1")
+REGION = os.environ.get("AWS_E2E_REGION", "us-east-2")
 POLL_SECONDS = max(int(os.environ.get("AWS_E2E_POLL_SECONDS", "20")), 5)
 TIMEOUT_SECONDS = max(int(os.environ.get("AWS_E2E_TIMEOUT_SECONDS", "3600")), 300)
-
-
-def _unique_prefix():
-    stamp = dt.datetime.now(dt.timezone.utc).strftime("%y%m%d%H%M%S")
-    return f"bs-codex-{stamp}-{secrets.token_hex(3)}"
-
-
-PREFIX = _unique_prefix()
+_RUN_ID = os.environ.get("BACKUPSHEEP_E2E_RUN_ID")
+PREFIX = require_run_id(_RUN_ID) if _RUN_ID else ""
+APPLY = os.environ.get("BACKUPSHEEP_E2E_APPLY") == "YES"
+CLEANUP = os.environ.get("BACKUPSHEEP_E2E_CLEANUP") == "YES"
+BOTO_CONFIG = Config(
+    connect_timeout=10,
+    read_timeout=60,
+    retries={"total_max_attempts": 1, "mode": "standard"},
+)
 S3_SOURCE = f"{PREFIX}-source"
 S3_RESTORE = f"{PREFIX}-restore"
+S3_STORAGE = f"{PREFIX}-storage"
 DDB_SOURCE = f"{PREFIX}-ddb"
 DDB_RESTORE = f"{PREFIX}-ddb-restore"
 RDS_SOURCE = f"{PREFIX}-rds"
@@ -72,6 +86,7 @@ BACKUP_VAULT = PREFIX
 ROLE_NAME = f"{PREFIX}-role"
 OBJECT_KEY = "fixture/marker.txt"
 MARKER = f"{PREFIX}:backup-restore-marker"
+OWNERSHIP_TAG = "BackupSheepE2E"
 
 
 def _not_found(error):
@@ -88,6 +103,8 @@ def _not_found(error):
         "InvalidGroup.NotFound",
         "NoSuchEntity",
         "ResourceNotFoundException",
+        "404",
+        "NotFound",
     }
 
 
@@ -254,8 +271,272 @@ def _wait_restore(node_object, restore, label):
     return {"state": restore.get_status_display(), "history": history[-8:]}
 
 
+def _tag_map(rows):
+    return {str(row.get("Key")): str(row.get("Value")) for row in rows or []}
+
+
+def _exact_exists(callback):
+    try:
+        callback()
+        return True
+    except ClientError as error:
+        if _not_found(error):
+            return False
+        raise
+
+
+def _s3_bucket_exists(s3, name):
+    try:
+        s3.head_bucket(Bucket=name)
+        return True
+    except ClientError as error:
+        status = int(
+            ((error.response or {}).get("ResponseMetadata") or {}).get(
+                "HTTPStatusCode", 0
+            )
+            or 0
+        )
+        if status == 404:
+            return False
+        # 301/403 still prove that the globally unique bucket name is occupied.
+        if status in {301, 403}:
+            return True
+        raise
+
+
+def _backup_vault_exists(backup_client, name):
+    """Use cursor pagination because Backup masks an absent vault as HTTP 403."""
+    next_token = None
+    seen_tokens = set()
+    while True:
+        params = {"MaxResults": 100}
+        if next_token:
+            params["NextToken"] = next_token
+        response = backup_client.list_backup_vaults(**params)
+        if any(
+            str(vault.get("BackupVaultName") or "") == name
+            for vault in (response.get("BackupVaultList") or [])
+        ):
+            return True
+        next_token = response.get("NextToken")
+        if not next_token:
+            return False
+        if next_token in seen_tokens:
+            raise RuntimeError("AWS Backup returned a repeated vault pagination token")
+        seen_tokens.add(next_token)
+
+
+def _exact_preflight(s3, dynamodb, rds, ec2, backup_client, iam):
+    """Refuse every exact target collision before the first mutation."""
+    collisions = {
+        "s3_source": _s3_bucket_exists(s3, S3_SOURCE),
+        "s3_restore": _s3_bucket_exists(s3, S3_RESTORE),
+        "s3_storage": _s3_bucket_exists(s3, S3_STORAGE),
+        "ddb_source": _exact_exists(
+            lambda: dynamodb.describe_table(TableName=DDB_SOURCE)
+        ),
+        "ddb_restore": _exact_exists(
+            lambda: dynamodb.describe_table(TableName=DDB_RESTORE)
+        ),
+        "rds_source": _exact_exists(
+            lambda: rds.describe_db_instances(DBInstanceIdentifier=RDS_SOURCE)
+        ),
+        "rds_restore": _exact_exists(
+            lambda: rds.describe_db_instances(DBInstanceIdentifier=RDS_RESTORE)
+        ),
+        "rds_snapshot": _exact_exists(
+            lambda: rds.describe_db_snapshots(
+                DBSnapshotIdentifier=f"{PREFIX}-rds-snapshot"
+            )
+        ),
+        "rds_subnet_group": _exact_exists(
+            lambda: rds.describe_db_subnet_groups(
+                DBSubnetGroupName=RDS_SUBNET_GROUP
+            )
+        ),
+        "backup_vault": _backup_vault_exists(backup_client, BACKUP_VAULT),
+        "iam_role": _exact_exists(lambda: iam.get_role(RoleName=ROLE_NAME)),
+        "security_group": bool(
+            ec2.describe_security_groups(
+                Filters=[{"Name": "group-name", "Values": [RDS_SECURITY_GROUP]}]
+            ).get("SecurityGroups")
+        ),
+    }
+    if any(collisions.values()):
+        occupied = sorted(key for key, value in collisions.items() if value)
+        raise RuntimeError(
+            "The explicit live-test target already exists: " + ", ".join(occupied)
+        )
+    return collisions
+
+
+def _s3_owned(s3, bucket):
+    try:
+        tags = s3.get_bucket_tagging(Bucket=bucket).get("TagSet") or []
+    except ClientError:
+        return False
+    return _tag_map(tags).get(OWNERSHIP_TAG) == PREFIX
+
+
+def _ddb_description_owned(dynamodb, name):
+    try:
+        table = dynamodb.describe_table(TableName=name)["Table"]
+        tags = dynamodb.list_tags_of_resource(
+            ResourceArn=table["TableArn"]
+        ).get("Tags") or []
+    except (ClientError, KeyError):
+        return None
+    return table if _tag_map(tags).get(OWNERSHIP_TAG) == PREFIX else False
+
+
+def _rds_description_owned(rds, identifier, *, snapshot=False):
+    try:
+        if snapshot:
+            resource = rds.describe_db_snapshots(
+                DBSnapshotIdentifier=identifier
+            )["DBSnapshots"][0]
+            arn = resource["DBSnapshotArn"]
+        else:
+            resource = rds.describe_db_instances(
+                DBInstanceIdentifier=identifier
+            )["DBInstances"][0]
+            arn = resource["DBInstanceArn"]
+        tags = rds.list_tags_for_resource(ResourceName=arn).get("TagList") or []
+    except ClientError as error:
+        if _not_found(error):
+            return None
+        raise
+    return resource if _tag_map(tags).get(OWNERSHIP_TAG) == PREFIX else False
+
+
+def _ec2_security_group_owned(ec2, identifier):
+    try:
+        groups = ec2.describe_security_groups(GroupIds=[identifier]).get(
+            "SecurityGroups", []
+        )
+    except ClientError as error:
+        if _not_found(error):
+            return None
+        raise
+    if len(groups) != 1:
+        return False
+    return groups[0] if _tag_map(groups[0].get("Tags")).get(OWNERSHIP_TAG) == PREFIX else False
+
+
+def _ledger_record(ledger, kind, resource_id, *, name=None, source=""):
+    ledger.record(
+        kind=kind,
+        resource_id=resource_id,
+        name=name or resource_id,
+        ownership={"tag_key": OWNERSHIP_TAG, "tag_value": PREFIX},
+        source_witness=source,
+    )
+
+
+def _register_rds_instance(ledger, rds, identifier, *, source=""):
+    """Persist an accepted RDS create as soon as exact tags are readable."""
+    started = time.monotonic()
+    while True:
+        owned = _rds_description_owned(rds, identifier)
+        if owned is False:
+            raise RuntimeError(f"AWS RDS ownership mismatch for {identifier}.")
+        if owned is not None:
+            _ledger_record(
+                ledger,
+                "rds_instance",
+                identifier,
+                name=identifier,
+                source=source,
+            )
+            return owned
+        if time.monotonic() - started > 120:
+            raise RuntimeError(
+                f"AWS accepted RDS instance {identifier}, but exact ownership "
+                "could not be read back; manual reconciliation is required."
+            )
+        _sleep()
+
+
+def _register_rds_snapshot(ledger, rds, identifier, *, source):
+    """Tag and ledger an accepted manual snapshot before its long availability wait."""
+    started = time.monotonic()
+    while True:
+        try:
+            rows = rds.describe_db_snapshots(
+                DBSnapshotIdentifier=identifier
+            ).get("DBSnapshots") or []
+        except ClientError as error:
+            if not _not_found(error):
+                raise
+            rows = []
+        if len(rows) > 1:
+            raise RuntimeError(f"AWS returned duplicate RDS snapshots for {identifier}.")
+        if rows:
+            snapshot = rows[0]
+            arn = str(snapshot.get("DBSnapshotArn") or "")
+            expected_prefix = f"arn:aws:rds:{REGION}:"
+            if (
+                snapshot.get("DBSnapshotIdentifier") != identifier
+                or str(snapshot.get("DBInstanceIdentifier") or "") != str(source)
+                or snapshot.get("SnapshotType") != "manual"
+                or not arn.startswith(expected_prefix)
+            ):
+                raise RuntimeError("AWS RDS snapshot source ownership read-back failed.")
+            rds.add_tags_to_resource(
+                ResourceName=arn,
+                Tags=[{"Key": OWNERSHIP_TAG, "Value": PREFIX}],
+            )
+            if not _rds_description_owned(rds, identifier, snapshot=True):
+                raise RuntimeError("AWS RDS snapshot tag read-back failed.")
+            _ledger_record(
+                ledger,
+                "rds_snapshot",
+                identifier,
+                name=identifier,
+                source=source,
+            )
+            return snapshot
+        if time.monotonic() - started > 120:
+            raise RuntimeError(
+                f"AWS accepted RDS snapshot {identifier}, but it could not be "
+                "read back; manual reconciliation is required."
+            )
+        _sleep()
+
+
+def _recover_local_fixture():
+    """Recover only the exact provider-specific local account after a restart."""
+    from django.contrib.auth import get_user_model
+
+    email = f"{PREFIX}-aws@example.invalid"
+    users = list(get_user_model().objects.filter(username=email, email=email)[:2])
+    if not users:
+        return None, None
+    if len(users) != 1:
+        raise RuntimeError("Multiple exact AWS E2E users were found.")
+    user = users[0]
+    try:
+        member = user.member
+    except Exception as error:
+        raise RuntimeError("The exact AWS E2E user has no member graph.") from error
+    memberships = list(member.memberships.select_related("account")[:2])
+    if len(memberships) != 1:
+        raise RuntimeError(
+            "The exact AWS E2E user does not own exactly one account."
+        )
+    account = memberships[0].account
+    expected_names = {
+        f"{PREFIX}-aws-connection",
+        f"{PREFIX}-rds-connection",
+    }
+    if account.connections.exclude(name__in=expected_names).exists():
+        raise RuntimeError("The exact AWS E2E account contains an unrelated connection.")
+    return account, user
+
+
 def main():
     report = {"prefix": PREFIX, "region": REGION, "tests": {}, "cleanup": []}
+    ledger = None
     created = {
         "role": False,
         "vault": False,
@@ -270,49 +551,42 @@ def main():
         "account": False,
     }
     account = None
+    user = None
     role_arn = None
     vault = None
     subnet_ids = []
     security_group_id = None
     rds_password = secrets.token_urlsafe(24)
     rds_snapshot_identifier = f"{PREFIX}-rds-snapshot"
-    rds = boto3.client("rds", region_name=REGION)
-    ec2 = boto3.client("ec2", region_name=REGION)
-    s3 = boto3.client("s3", region_name=REGION)
-    dynamodb = boto3.client("dynamodb", region_name=REGION)
-    backup_client = boto3.client("backup", region_name=REGION)
-    iam = boto3.client("iam", region_name=REGION)
+    rds = boto3.client("rds", region_name=REGION, config=BOTO_CONFIG)
+    ec2 = boto3.client("ec2", region_name=REGION, config=BOTO_CONFIG)
+    s3 = boto3.client("s3", region_name=REGION, config=BOTO_CONFIG)
+    dynamodb = boto3.client("dynamodb", region_name=REGION, config=BOTO_CONFIG)
+    backup_client = boto3.client("backup", region_name=REGION, config=BOTO_CONFIG)
+    iam = boto3.client("iam", region_name=REGION, config=BOTO_CONFIG)
 
     try:
-        identity = boto3.client("sts", region_name=REGION).get_caller_identity()
+        identity = boto3.client(
+            "sts", region_name=REGION, config=BOTO_CONFIG
+        ).get_caller_identity()
         report["account"] = identity.get("Account")
         report["caller"] = str(identity.get("Arn", "")).split("/")[-1]
+        ledger = DurableResourceLedger(
+            os.environ.get("BACKUPSHEEP_E2E_LEDGER_PATH"),
+            provider="aws",
+            run_id=PREFIX,
+            scope=f"{report['account']}:{REGION}",
+        )
 
-        # Read-only collision check. The random prefix must not exist before we
-        # create anything, and every cleanup target below is guarded by this prefix.
-        existing = {
-            "s3": [
-                b["Name"]
-                for b in s3.list_buckets().get("Buckets", [])
-                if b.get("Name", "").startswith(PREFIX)
-            ],
-            "dynamodb": [
-                n for n in dynamodb.list_tables().get("TableNames", []) if n.startswith(PREFIX)
-            ],
-            "rds": [
-                d["DBInstanceIdentifier"]
-                for d in rds.describe_db_instances().get("DBInstances", [])
-                if d.get("DBInstanceIdentifier", "").startswith(PREFIX)
-            ],
-            "vaults": [
-                v["BackupVaultName"]
-                for v in backup_client.list_backup_vaults().get("BackupVaultList", [])
-                if v.get("BackupVaultName", "").startswith(PREFIX)
-            ],
-        }
-        report["baseline_collisions"] = existing
-        if any(existing.values()):
-            raise RuntimeError(f"Unique test prefix is already in use: {existing}")
+        report["exact_preflight"] = _exact_preflight(
+            s3, dynamodb, rds, ec2, backup_client, iam
+        )
+        report["baseline_collisions"] = report["exact_preflight"]
+
+        if not APPLY:
+            report["status"] = "PREFLIGHT_PASS"
+            report["mode"] = "read_only"
+            return 0
 
         trust_policy = {
             "Version": "2012-10-17",
@@ -332,6 +606,14 @@ def main():
         )
         created["role"] = True
         role_arn = role["Role"]["Arn"]
+        observed_role = iam.get_role(RoleName=ROLE_NAME)["Role"]
+        role_tags = iam.list_role_tags(RoleName=ROLE_NAME).get("Tags") or []
+        if (
+            observed_role.get("Arn") != role_arn
+            or _tag_map(role_tags).get(OWNERSHIP_TAG) != PREFIX
+        ):
+            raise RuntimeError("AWS IAM role ownership read-back failed.")
+        _ledger_record(ledger, "iam_role", role_arn, name=ROLE_NAME)
         policy_arns = [
             "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup",
             "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores",
@@ -349,12 +631,27 @@ def main():
             BackupVaultTags={"BackupSheepE2E": PREFIX},
         )
         created["vault"] = True
+        vault_description = backup_client.describe_backup_vault(
+            BackupVaultName=BACKUP_VAULT
+        )
+        vault_arn = vault_description.get("BackupVaultArn")
+        vault_tags = backup_client.list_tags(ResourceArn=vault_arn).get("Tags") or {}
+        if not vault_arn or str(vault_tags.get(OWNERSHIP_TAG) or "") != PREFIX:
+            raise RuntimeError("AWS Backup vault ownership read-back failed.")
+        _ledger_record(ledger, "backup_vault", vault_arn, name=BACKUP_VAULT)
 
         create_bucket_args = {"Bucket": S3_SOURCE}
         if REGION != "us-east-1":
             create_bucket_args["CreateBucketConfiguration"] = {"LocationConstraint": REGION}
         s3.create_bucket(**create_bucket_args)
         created["source_bucket"] = True
+        s3.put_bucket_tagging(
+            Bucket=S3_SOURCE,
+            Tagging={"TagSet": [{"Key": OWNERSHIP_TAG, "Value": PREFIX}]},
+        )
+        if not _s3_owned(s3, S3_SOURCE):
+            raise RuntimeError("AWS source bucket ownership read-back failed.")
+        _ledger_record(ledger, "s3_bucket", S3_SOURCE)
         s3.put_bucket_versioning(
             Bucket=S3_SOURCE,
             VersioningConfiguration={"Status": "Enabled"},
@@ -371,8 +668,33 @@ def main():
             create_restore_bucket_args["CreateBucketConfiguration"] = {"LocationConstraint": REGION}
         s3.create_bucket(**create_restore_bucket_args)
         created["restore_bucket"] = True
+        s3.put_bucket_tagging(
+            Bucket=S3_RESTORE,
+            Tagging={"TagSet": [{"Key": OWNERSHIP_TAG, "Value": PREFIX}]},
+        )
+        if not _s3_owned(s3, S3_RESTORE):
+            raise RuntimeError("AWS restore bucket ownership read-back failed.")
+        _ledger_record(ledger, "s3_bucket", S3_RESTORE)
         s3.put_bucket_versioning(
             Bucket=S3_RESTORE,
+            VersioningConfiguration={"Status": "Enabled"},
+        )
+
+        create_storage_bucket_args = {"Bucket": S3_STORAGE}
+        if REGION != "us-east-1":
+            create_storage_bucket_args["CreateBucketConfiguration"] = {
+                "LocationConstraint": REGION
+            }
+        s3.create_bucket(**create_storage_bucket_args)
+        s3.put_bucket_tagging(
+            Bucket=S3_STORAGE,
+            Tagging={"TagSet": [{"Key": OWNERSHIP_TAG, "Value": PREFIX}]},
+        )
+        if not _s3_owned(s3, S3_STORAGE):
+            raise RuntimeError("AWS UI storage bucket ownership read-back failed.")
+        _ledger_record(ledger, "s3_bucket", S3_STORAGE)
+        s3.put_bucket_versioning(
+            Bucket=S3_STORAGE,
             VersioningConfiguration={"Status": "Enabled"},
         )
 
@@ -385,6 +707,9 @@ def main():
         )
         created["ddb_source"] = True
         dynamodb.get_waiter("table_exists").wait(TableName=DDB_SOURCE)
+        if not _ddb_description_owned(dynamodb, DDB_SOURCE):
+            raise RuntimeError("AWS DynamoDB source ownership read-back failed.")
+        _ledger_record(ledger, "dynamodb_table", DDB_SOURCE)
         dynamodb.put_item(
             TableName=DDB_SOURCE,
             Item={"id": {"S": "fixture"}, "marker": {"S": MARKER}},
@@ -427,6 +752,15 @@ def main():
             ],
         )["GroupId"]
         created["security_group"] = True
+        if not _ec2_security_group_owned(ec2, security_group_id):
+            raise RuntimeError("AWS security group ownership read-back failed.")
+        _ledger_record(
+            ledger,
+            "security_group",
+            security_group_id,
+            name=RDS_SECURITY_GROUP,
+            source=vpc_id,
+        )
         ec2.authorize_security_group_ingress(
             GroupId=security_group_id,
             IpPermissions=[
@@ -446,6 +780,22 @@ def main():
             Tags=[{"Key": "BackupSheepE2E", "Value": PREFIX}],
         )
         created["subnet_group"] = True
+        subnet_group = rds.describe_db_subnet_groups(
+            DBSubnetGroupName=RDS_SUBNET_GROUP
+        )["DBSubnetGroups"][0]
+        subnet_group_arn = subnet_group["DBSubnetGroupArn"]
+        subnet_tags = rds.list_tags_for_resource(
+            ResourceName=subnet_group_arn
+        ).get("TagList") or []
+        if _tag_map(subnet_tags).get(OWNERSHIP_TAG) != PREFIX:
+            raise RuntimeError("AWS RDS subnet group ownership read-back failed.")
+        _ledger_record(
+            ledger,
+            "rds_subnet_group",
+            subnet_group_arn,
+            name=RDS_SUBNET_GROUP,
+            source=",".join(sorted(subnet_ids)),
+        )
         rds.create_db_instance(
             DBInstanceIdentifier=RDS_SOURCE,
             DBInstanceClass=os.environ.get("AWS_E2E_RDS_CLASS", "db.t3.micro"),
@@ -463,6 +813,7 @@ def main():
             Tags=[{"Key": "BackupSheepE2E", "Value": PREFIX}],
         )
         created["rds_source"] = True
+        _register_rds_instance(ledger, rds, RDS_SOURCE)
         _wait(
             "source RDS availability",
             lambda: rds.describe_db_instances(DBInstanceIdentifier=RDS_SOURCE)[
@@ -471,15 +822,22 @@ def main():
             {"available"},
             {"failed", "incompatible-restore", "incompatible-network"},
         )
+        if not _rds_description_owned(rds, RDS_SOURCE):
+            raise RuntimeError("AWS RDS source ownership read-back failed.")
         _rds_marker(rds, RDS_SOURCE, rds_password)
 
         # Create the BackupSheep-side source graph only for the resources above.
-        account, member, _ = factories.make_account(
-            email=f"{PREFIX}@example.invalid"
+        account, member, user = factories.make_account(
+            email=f"{PREFIX}-aws@example.invalid"
         )
         created["account"] = True
         key = account.get_encryption_key()
-        aws_connection = factories.make_connection(account, member, code="aws")
+        aws_connection = factories.make_connection(
+            account,
+            member,
+            code="aws",
+            name=f"{PREFIX}-aws-connection",
+        )
         aws_auth = CoreAuthAWS.objects.create(
             connection=aws_connection,
             region=CoreAWSRegion.objects.get(code=REGION),
@@ -531,6 +889,18 @@ def main():
             raise AssertionError("Duplicate S3 create changed the provider job id")
         report["tests"]["S3 backup duplicate guard"] = {"status": "PASS", "job_id": first_s3_job}
         report["tests"]["S3 backup"] = _wait_backup(s3_backup, "S3 AWS Backup job")
+        s3_backup.refresh_from_db()
+        s3_backup_state = dict((s3_backup.metadata or {}).get("_aws_backup") or {})
+        s3_recovery_point = str(s3_backup_state.get("recovery_point_arn") or "")
+        if not s3_recovery_point:
+            raise RuntimeError("AWS S3 backup completed without a recovery point ARN.")
+        _ledger_record(
+            ledger,
+            "recovery_point",
+            s3_recovery_point,
+            name=BACKUP_VAULT,
+            source=S3_SOURCE,
+        )
 
         s3_restore = CoreCloudRestore.objects.create(
             node=s3_node,
@@ -557,6 +927,18 @@ def main():
         )
         ddb_node.aws.create_snapshot(ddb_backup)
         report["tests"]["DynamoDB backup"] = _wait_backup(ddb_backup, "DynamoDB AWS Backup job")
+        ddb_backup.refresh_from_db()
+        ddb_backup_state = dict((ddb_backup.metadata or {}).get("_aws_backup") or {})
+        ddb_recovery_point = str(ddb_backup_state.get("recovery_point_arn") or "")
+        if not ddb_recovery_point:
+            raise RuntimeError("AWS DynamoDB backup completed without a recovery point ARN.")
+        _ledger_record(
+            ledger,
+            "recovery_point",
+            ddb_recovery_point,
+            name=BACKUP_VAULT,
+            source=DDB_SOURCE,
+        )
         ddb_restore = CoreCloudRestore.objects.create(
             node=ddb_node,
             backup_id=ddb_backup.id,
@@ -573,10 +955,28 @@ def main():
         ).get("Item") or {}
         if item.get("marker", {}).get("S") != MARKER:
             raise AssertionError(f"DynamoDB restore marker mismatch: {item!r}")
+        restored_table = dynamodb.describe_table(TableName=DDB_RESTORE)["Table"]
+        dynamodb.tag_resource(
+            ResourceArn=restored_table["TableArn"],
+            Tags=[{"Key": OWNERSHIP_TAG, "Value": PREFIX}],
+        )
+        if not _ddb_description_owned(dynamodb, DDB_RESTORE):
+            raise RuntimeError("AWS DynamoDB restore ownership read-back failed.")
+        _ledger_record(
+            ledger,
+            "dynamodb_table",
+            DDB_RESTORE,
+            source=ddb_recovery_point,
+        )
         created["ddb_restore"] = True
         report["tests"]["DynamoDB restore data verification"] = {"status": "PASS"}
 
-        rds_connection = factories.make_connection(account, member, code="aws_rds")
+        rds_connection = factories.make_connection(
+            account,
+            member,
+            code="aws_rds",
+            name=f"{PREFIX}-rds-connection",
+        )
         rds_auth = CoreAuthAWSRDS.objects.create(
             connection=rds_connection,
             region=CoreAWSRegion.objects.get(code=REGION),
@@ -602,8 +1002,32 @@ def main():
             attempt_no=1,
         )
         rds_node.aws_rds.create_snapshot(rds_backup)
+        snapshot_identifier = str(rds_backup.unique_id or rds_snapshot_identifier)
+        _register_rds_snapshot(
+            ledger,
+            rds,
+            snapshot_identifier,
+            source=RDS_SOURCE,
+        )
         report["tests"]["RDS native snapshot"] = _wait_backup(
             rds_backup, "RDS native snapshot"
+        )
+        rds_backup.refresh_from_db()
+        snapshot_identifier = str(rds_backup.unique_id or rds_snapshot_identifier)
+        snapshot = rds.describe_db_snapshots(
+            DBSnapshotIdentifier=snapshot_identifier
+        )["DBSnapshots"][0]
+        rds.add_tags_to_resource(
+            ResourceName=snapshot["DBSnapshotArn"],
+            Tags=[{"Key": OWNERSHIP_TAG, "Value": PREFIX}],
+        )
+        if not _rds_description_owned(rds, snapshot_identifier, snapshot=True):
+            raise RuntimeError("AWS RDS snapshot ownership read-back failed.")
+        _ledger_record(
+            ledger,
+            "rds_snapshot",
+            snapshot_identifier,
+            source=RDS_SOURCE,
         )
         rds_restore = CoreCloudRestore.objects.create(
             node=rds_node,
@@ -618,6 +1042,41 @@ def main():
         )
         rds_node.aws_rds.restore_snapshot(rds_backup, rds_restore)
         created["rds_restore"] = True
+        started = time.monotonic()
+        while True:
+            try:
+                restoring = rds.describe_db_instances(
+                    DBInstanceIdentifier=RDS_RESTORE
+                )["DBInstances"][0]
+            except ClientError as error:
+                if not _not_found(error):
+                    raise
+                restoring = None
+            if restoring is not None:
+                restoring_arn = restoring["DBInstanceArn"]
+                if (
+                    restoring.get("DBInstanceIdentifier") != RDS_RESTORE
+                    or str(restoring.get("DBSnapshotIdentifier") or "")
+                    != snapshot_identifier
+                ):
+                    raise RuntimeError("AWS RDS restore source ownership read-back failed.")
+                rds.add_tags_to_resource(
+                    ResourceName=restoring_arn,
+                    Tags=[{"Key": OWNERSHIP_TAG, "Value": PREFIX}],
+                )
+                _register_rds_instance(
+                    ledger,
+                    rds,
+                    RDS_RESTORE,
+                    source=snapshot_identifier,
+                )
+                break
+            if time.monotonic() - started > 120:
+                raise RuntimeError(
+                    "AWS accepted the RDS restore, but the exact target could not "
+                    "be read back; manual reconciliation is required."
+                )
+            _sleep()
         _wait(
             "restored RDS availability",
             lambda: rds.describe_db_instances(DBInstanceIdentifier=RDS_RESTORE)[
@@ -626,6 +1085,15 @@ def main():
             {"available"},
             {"failed", "incompatible-restore", "incompatible-network", "incompatible-parameters"},
         )
+        restored_rds = rds.describe_db_instances(
+            DBInstanceIdentifier=RDS_RESTORE
+        )["DBInstances"][0]
+        rds.add_tags_to_resource(
+            ResourceName=restored_rds["DBInstanceArn"],
+            Tags=[{"Key": OWNERSHIP_TAG, "Value": PREFIX}],
+        )
+        if not _rds_description_owned(rds, RDS_RESTORE):
+            raise RuntimeError("AWS RDS restore ownership read-back failed.")
         _assert_rds_marker(rds, RDS_RESTORE, rds_password)
         rds_restore.status = CoreCloudRestore.Status.COMPLETE
         rds_restore.save(update_fields=["status", "modified"])
@@ -636,90 +1104,389 @@ def main():
         report["error"] = str(error)
         traceback.print_exc()
     finally:
-        # Cleanup is deliberately exact-name and prefix-scoped. Never enumerate
-        # and delete an existing user resource outside this run's names.
         cleanup_errors = []
-        for identifier in (RDS_RESTORE, RDS_SOURCE):
-            if identifier.startswith(PREFIX):
+        if not CLEANUP:
+            report["cleanup"] = {"status": "NOT_REQUESTED", "errors": []}
+        elif ledger is None:
+            report["cleanup"] = {
+                "status": "MANUAL_REVIEW",
+                "errors": ["Cleanup refused because the durable AWS ledger is unavailable."],
+            }
+        else:
+            def refuse(kind, identifier, reason):
+                cleanup_errors.append(f"{kind} {identifier}: {reason}")
                 try:
-                    _delete_rds_instance(rds, identifier)
-                except Exception as error:
-                    cleanup_errors.append(f"RDS {identifier}: {error}")
-        try:
-            if rds_snapshot_identifier.startswith(PREFIX):
-                rds.delete_db_snapshot(DBSnapshotIdentifier=rds_snapshot_identifier)
-        except Exception as error:
-            if not _not_found(error):
-                cleanup_errors.append(f"RDS snapshot: {error}")
-        for table in (DDB_RESTORE, DDB_SOURCE):
-            if table.startswith(PREFIX):
+                    ledger.mark_cleanup(
+                        kind, identifier, state="manual_review", error=reason
+                    )
+                except LedgerError:
+                    pass
+
+            # New/forked RDS instances first. Exact account/region tags and the
+            # durable ID are both required; a generated name has no authority.
+            for identifier in (RDS_RESTORE, RDS_SOURCE):
+                if not ledger.cleanup_eligible("rds_instance", identifier):
+                    continue
                 try:
-                    _delete_table(dynamodb, table)
+                    owned = _rds_description_owned(rds, identifier)
+                    if owned is None:
+                        ledger.mark_cleanup("rds_instance", identifier, state="absent")
+                    elif owned is False:
+                        refuse("rds_instance", identifier, "ownership tag mismatch")
+                    else:
+                        _delete_rds_instance(rds, identifier)
+                        ledger.mark_cleanup("rds_instance", identifier, state="absent")
                 except Exception as error:
-                    cleanup_errors.append(f"DynamoDB {table}: {error}")
-        for bucket in (S3_RESTORE, S3_SOURCE):
-            if bucket.startswith(PREFIX):
+                    refuse("rds_instance", identifier, f"ambiguous cleanup outcome: {error}")
+
+            for entry in ledger.entries("rds_snapshot"):
+                identifier = str(entry["resource_id"])
+                if not ledger.cleanup_eligible("rds_snapshot", identifier):
+                    continue
                 try:
-                    _delete_versioned_bucket(s3, bucket)
+                    owned = _rds_description_owned(rds, identifier, snapshot=True)
+                    if owned is None:
+                        ledger.mark_cleanup("rds_snapshot", identifier, state="absent")
+                    elif owned is False or str(owned.get("DBInstanceIdentifier")) != str(
+                        entry.get("source_witness")
+                    ):
+                        refuse("rds_snapshot", identifier, "ownership/source mismatch")
+                    else:
+                        rds.delete_db_snapshot(DBSnapshotIdentifier=identifier)
+                        ledger.mark_cleanup("rds_snapshot", identifier, state="deleted")
                 except Exception as error:
-                    cleanup_errors.append(f"S3 {bucket}: {error}")
-        if created["vault"]:
-            try:
-                deadline = time.monotonic() + 300
-                while time.monotonic() < deadline:
-                    points = backup_client.list_recovery_points_by_backup_vault(
-                        BackupVaultName=BACKUP_VAULT
-                    ).get("RecoveryPoints", [])
-                    if not points:
-                        break
-                    for point in points:
-                        backup_client.delete_recovery_point(
-                            BackupVaultName=BACKUP_VAULT,
-                            RecoveryPointArn=point["RecoveryPointArn"],
+                    refuse("rds_snapshot", identifier, f"ambiguous cleanup outcome: {error}")
+
+            for table in (DDB_RESTORE, DDB_SOURCE):
+                if not ledger.cleanup_eligible("dynamodb_table", table):
+                    continue
+                try:
+                    owned = _ddb_description_owned(dynamodb, table)
+                    if owned is None:
+                        ledger.mark_cleanup("dynamodb_table", table, state="absent")
+                    elif owned is False:
+                        refuse("dynamodb_table", table, "ownership tag mismatch")
+                    else:
+                        _delete_table(dynamodb, table)
+                        ledger.mark_cleanup("dynamodb_table", table, state="absent")
+                except Exception as error:
+                    refuse("dynamodb_table", table, f"ambiguous cleanup outcome: {error}")
+
+            allowed_buckets = {S3_RESTORE, S3_SOURCE, S3_STORAGE}
+            for bucket_entry in ledger.entries("s3_bucket"):
+                bucket = str(bucket_entry.get("resource_id") or "")
+                if not ledger.cleanup_eligible("s3_bucket", bucket):
+                    continue
+                if (
+                    bucket not in allowed_buckets
+                    or str(bucket_entry.get("name") or "") != bucket
+                ):
+                    refuse("s3_bucket", bucket, "unexpected ledger bucket name")
+                    continue
+                try:
+                    if not _s3_bucket_exists(s3, bucket):
+                        ledger.mark_cleanup("s3_bucket", bucket, state="absent")
+                    elif not _s3_owned(s3, bucket):
+                        refuse("s3_bucket", bucket, "ownership tag mismatch")
+                    else:
+                        _delete_versioned_bucket(s3, bucket)
+                        ledger.mark_cleanup("s3_bucket", bucket, state="absent")
+                except Exception as error:
+                    refuse("s3_bucket", bucket, f"ambiguous cleanup outcome: {error}")
+
+            # Delete only the exact recovery point ARNs recorded after completed
+            # BackupSheep jobs. Never enumerate a vault and delete arbitrary rows.
+            for entry in ledger.entries("recovery_point"):
+                recovery_point_arn = str(entry["resource_id"])
+                if not ledger.cleanup_eligible("recovery_point", recovery_point_arn):
+                    continue
+                source = str(entry.get("source_witness") or "")
+                expected_source_arn = (
+                    f"arn:aws:s3:::{source}"
+                    if source == S3_SOURCE
+                    else f"arn:aws:dynamodb:{REGION}:{report.get('account')}:table/{source}"
+                )
+                try:
+                    description = backup_client.describe_recovery_point(
+                        BackupVaultName=BACKUP_VAULT,
+                        RecoveryPointArn=recovery_point_arn,
+                    )
+                    if (
+                        str(description.get("RecoveryPointArn") or "")
+                        != recovery_point_arn
+                        or str(description.get("ResourceArn") or "")
+                        != expected_source_arn
+                    ):
+                        refuse(
+                            "recovery_point",
+                            recovery_point_arn,
+                            "source ownership mismatch",
                         )
-                    time.sleep(POLL_SECONDS)
-                backup_client.delete_backup_vault(BackupVaultName=BACKUP_VAULT)
-            except Exception as error:
-                cleanup_errors.append(f"AWS Backup vault: {error}")
-        if created["security_group"] and security_group_id:
-            try:
-                ec2.delete_security_group(GroupId=security_group_id)
-            except Exception as error:
-                if not _not_found(error):
-                    cleanup_errors.append(f"security group: {error}")
-        if created["subnet_group"]:
-            try:
-                rds.delete_db_subnet_group(DBSubnetGroupName=RDS_SUBNET_GROUP)
-            except Exception as error:
-                if not _not_found(error):
-                    cleanup_errors.append(f"RDS subnet group: {error}")
-        if created["role"]:
-            for policy_arn in (
-                "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup",
-                "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores",
-                "arn:aws:iam::aws:policy/AWSBackupServiceRolePolicyForS3Backup",
-                "arn:aws:iam::aws:policy/AWSBackupServiceRolePolicyForS3Restore",
-            ):
-                try:
-                    iam.detach_role_policy(RoleName=ROLE_NAME, PolicyArn=policy_arn)
+                        continue
+                    backup_client.delete_recovery_point(
+                        BackupVaultName=BACKUP_VAULT,
+                        RecoveryPointArn=recovery_point_arn,
+                    )
+                    ledger.mark_cleanup(
+                        "recovery_point", recovery_point_arn, state="deleted"
+                    )
+                except ClientError as error:
+                    if _not_found(error):
+                        ledger.mark_cleanup(
+                            "recovery_point", recovery_point_arn, state="absent"
+                        )
+                    else:
+                        refuse(
+                            "recovery_point",
+                            recovery_point_arn,
+                            f"ambiguous cleanup outcome: {error}",
+                        )
                 except Exception as error:
-                    if not _not_found(error):
-                        cleanup_errors.append(f"detach {policy_arn}: {error}")
-            try:
-                iam.delete_role(RoleName=ROLE_NAME)
-            except Exception as error:
-                if not _not_found(error):
-                    cleanup_errors.append(f"IAM role: {error}")
-        if created["account"] and account is not None:
-            try:
-                account.delete()
-            except Exception as error:
-                cleanup_errors.append(f"BackupSheep test account: {error}")
-        report["cleanup"] = {"status": "PASS" if not cleanup_errors else "FAIL", "errors": cleanup_errors}
+                    refuse(
+                        "recovery_point",
+                        recovery_point_arn,
+                        f"ambiguous cleanup outcome: {error}",
+                    )
+
+            vault_entries = ledger.entries("backup_vault")
+            if vault_entries:
+                vault_entry = vault_entries[0]
+                vault_resource_id = str(vault_entry["resource_id"])
+                if ledger.cleanup_eligible("backup_vault", vault_resource_id):
+                    try:
+                        description = backup_client.describe_backup_vault(
+                            BackupVaultName=BACKUP_VAULT
+                        )
+                        tags = backup_client.list_tags(
+                            ResourceArn=description["BackupVaultArn"]
+                        ).get("Tags") or {}
+                        remaining = backup_client.list_recovery_points_by_backup_vault(
+                            BackupVaultName=BACKUP_VAULT, MaxResults=1
+                        ).get("RecoveryPoints") or []
+                        if (
+                            description.get("BackupVaultArn") != vault_resource_id
+                            or str(tags.get(OWNERSHIP_TAG) or "") != PREFIX
+                            or remaining
+                        ):
+                            refuse(
+                                "backup_vault",
+                                vault_resource_id,
+                                "ownership mismatch or unrecorded recovery points remain",
+                            )
+                        else:
+                            backup_client.delete_backup_vault(
+                                BackupVaultName=BACKUP_VAULT
+                            )
+                            ledger.mark_cleanup(
+                                "backup_vault", vault_resource_id, state="deleted"
+                            )
+                    except ClientError as error:
+                        if _not_found(error):
+                            ledger.mark_cleanup(
+                                "backup_vault", vault_resource_id, state="absent"
+                            )
+                        else:
+                            refuse(
+                                "backup_vault",
+                                vault_resource_id,
+                                f"ambiguous cleanup outcome: {error}",
+                            )
+                    except Exception as error:
+                        refuse(
+                            "backup_vault",
+                            vault_resource_id,
+                            f"ambiguous cleanup outcome: {error}",
+                        )
+
+            for security_group_entry in ledger.entries("security_group"):
+                security_group_resource_id = str(
+                    security_group_entry["resource_id"]
+                )
+                if not ledger.cleanup_eligible(
+                    "security_group", security_group_resource_id
+                ):
+                    continue
+                try:
+                    owned = _ec2_security_group_owned(
+                        ec2, security_group_resource_id
+                    )
+                    if owned is None:
+                        ledger.mark_cleanup(
+                            "security_group",
+                            security_group_resource_id,
+                            state="absent",
+                        )
+                    elif (
+                        owned is False
+                        or owned.get("GroupName")
+                        != security_group_entry.get("name")
+                        or str(owned.get("VpcId") or "")
+                        != str(security_group_entry.get("source_witness") or "")
+                    ):
+                        refuse(
+                            "security_group",
+                            security_group_resource_id,
+                            "ownership/name/VPC mismatch",
+                        )
+                    else:
+                        ec2.delete_security_group(
+                            GroupId=security_group_resource_id
+                        )
+                        started = time.monotonic()
+                        while _ec2_security_group_owned(
+                            ec2, security_group_resource_id
+                        ) is not None:
+                            if time.monotonic() - started > 120:
+                                raise RuntimeError(
+                                    "security group remained after delete"
+                                )
+                            _sleep()
+                        ledger.mark_cleanup(
+                            "security_group",
+                            security_group_resource_id,
+                            state="deleted",
+                        )
+                except Exception as error:
+                    refuse(
+                        "security_group",
+                        security_group_resource_id,
+                        f"ambiguous cleanup outcome: {error}",
+                    )
+
+            subnet_entries = ledger.entries("rds_subnet_group")
+            if subnet_entries:
+                subnet_entry = subnet_entries[0]
+                subnet_resource_id = str(subnet_entry["resource_id"])
+                if ledger.cleanup_eligible("rds_subnet_group", subnet_resource_id):
+                    try:
+                        group = rds.describe_db_subnet_groups(
+                            DBSubnetGroupName=RDS_SUBNET_GROUP
+                        )["DBSubnetGroups"][0]
+                        tags = rds.list_tags_for_resource(
+                            ResourceName=group["DBSubnetGroupArn"]
+                        ).get("TagList") or []
+                        if (
+                            group["DBSubnetGroupArn"] != subnet_resource_id
+                            or _tag_map(tags).get(OWNERSHIP_TAG) != PREFIX
+                        ):
+                            refuse(
+                                "rds_subnet_group",
+                                subnet_resource_id,
+                                "ownership mismatch",
+                            )
+                        else:
+                            rds.delete_db_subnet_group(
+                                DBSubnetGroupName=RDS_SUBNET_GROUP
+                            )
+                            ledger.mark_cleanup(
+                                "rds_subnet_group", subnet_resource_id, state="deleted"
+                            )
+                    except ClientError as error:
+                        if _not_found(error):
+                            ledger.mark_cleanup(
+                                "rds_subnet_group", subnet_resource_id, state="absent"
+                            )
+                        else:
+                            refuse(
+                                "rds_subnet_group",
+                                subnet_resource_id,
+                                f"ambiguous cleanup outcome: {error}",
+                            )
+                    except Exception as error:
+                        refuse(
+                            "rds_subnet_group",
+                            subnet_resource_id,
+                            f"ambiguous cleanup outcome: {error}",
+                        )
+
+            role_entries = ledger.entries("iam_role")
+            if role_entries:
+                role_entry = role_entries[0]
+                role_resource_id = str(role_entry["resource_id"])
+                if ledger.cleanup_eligible("iam_role", role_resource_id):
+                    try:
+                        observed = iam.get_role(RoleName=ROLE_NAME)["Role"]
+                        tags = iam.list_role_tags(RoleName=ROLE_NAME).get("Tags") or []
+                        if (
+                            observed.get("Arn") != role_resource_id
+                            or _tag_map(tags).get(OWNERSHIP_TAG) != PREFIX
+                        ):
+                            refuse("iam_role", role_resource_id, "ownership mismatch")
+                        else:
+                            for policy_arn in (
+                                "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup",
+                                "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores",
+                                "arn:aws:iam::aws:policy/AWSBackupServiceRolePolicyForS3Backup",
+                                "arn:aws:iam::aws:policy/AWSBackupServiceRolePolicyForS3Restore",
+                            ):
+                                iam.detach_role_policy(
+                                    RoleName=ROLE_NAME, PolicyArn=policy_arn
+                                )
+                            iam.delete_role(RoleName=ROLE_NAME)
+                            ledger.mark_cleanup(
+                                "iam_role", role_resource_id, state="deleted"
+                            )
+                    except ClientError as error:
+                        if _not_found(error):
+                            ledger.mark_cleanup(
+                                "iam_role", role_resource_id, state="absent"
+                            )
+                        else:
+                            refuse(
+                                "iam_role",
+                                role_resource_id,
+                                f"ambiguous cleanup outcome: {error}",
+                            )
+                    except Exception as error:
+                        refuse(
+                            "iam_role",
+                            role_resource_id,
+                            f"ambiguous cleanup outcome: {error}",
+                        )
+
+            if account is None and not cleanup_errors:
+                try:
+                    account, user = _recover_local_fixture()
+                except Exception as error:
+                    cleanup_errors.append(f"recover BackupSheep test account: {error}")
+            if account is not None and not cleanup_errors:
+                try:
+                    account.delete()
+                except Exception as error:
+                    cleanup_errors.append(f"BackupSheep test account: {error}")
+            if user is not None and not cleanup_errors:
+                try:
+                    user.delete()
+                except Exception as error:
+                    cleanup_errors.append(f"BackupSheep test user: {error}")
+            report["cleanup"] = {
+                "status": "PASS" if not cleanup_errors else "MANUAL_REVIEW",
+                "errors": cleanup_errors,
+            }
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
 
-    return 0 if report.get("status") == "PASS" and not report["cleanup"]["errors"] else 1
+    cleanup_ok = report["cleanup"]["status"] in {"PASS", "NOT_REQUESTED"}
+    return 0 if report.get("status") == "PASS" and cleanup_ok else 1
 
 
 if __name__ == "__main__":
+    required = (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "BACKUPSHEEP_E2E_RUN_ID",
+        "BACKUPSHEEP_E2E_LEDGER_PATH",
+    )
+    missing = [name for name in required if not os.environ.get(name)]
+    if missing:
+        print(
+            json.dumps(
+                {
+                    "status": "FAIL",
+                    "error": "Missing required environment variables: "
+                    + ", ".join(missing),
+                },
+                indent=2,
+            )
+        )
+        sys.exit(1)
     sys.exit(main())

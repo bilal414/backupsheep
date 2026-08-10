@@ -5,7 +5,11 @@ from apps.console.backup.models import (
     CoreOVHUSBackup,
 )
 from apps.console.node.models import CoreOVHUS, CoreNode, CoreSchedule
-from apps.api.v1.backup.serializers import CoreBackupScheduleSerializer
+from apps.api.v1.backup.serializers import (
+    BackupExecutionStatusListSerializer,
+    BackupExecutionStatusMixin,
+    CoreBackupScheduleSerializer,
+)
 
 
 class CoreOVHUSSerializer(serializers.ModelSerializer):
@@ -18,7 +22,7 @@ class CoreOVHUSSerializer(serializers.ModelSerializer):
         )
 
 
-class CoreOVHUSBackupSerializer(serializers.ModelSerializer):
+class CoreOVHUSBackupSerializer(BackupExecutionStatusMixin, serializers.ModelSerializer):
     website = CoreOVHUSSerializer(source="ovh_us", read_only=True)
     database = CoreOVHUSSerializer(source="ovh_us", read_only=True)
     status_display = serializers.SerializerMethodField(read_only=True)
@@ -30,11 +34,13 @@ class CoreOVHUSBackupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreOVHUSBackup
         fields = "__all__"
+        list_serializer_class = BackupExecutionStatusListSerializer
         datatables_always_serialize = (
             "id",
             "uuid",
             "name",
             "size_gigabytes",
+            "execution_status",
         )
 
     @staticmethod

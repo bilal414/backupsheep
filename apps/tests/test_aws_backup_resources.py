@@ -4,7 +4,11 @@ from unittest import mock
 from botocore.exceptions import ClientError
 
 from apps.api.v1.utils.api_helpers import bs_encrypt
-from apps.console.backup.models import CoreAWSRDSBackup, CoreCloudRestore
+from apps.console.backup.models import (
+    CoreAWSBackup,
+    CoreAWSRDSBackup,
+    CoreCloudRestore,
+)
 from apps.console.connection.models import CoreAuthAWS, CoreAuthAWSRDS, CoreAWSRegion
 from apps.console.node.models import CoreAWS, CoreAWSRDS, CoreNode
 from apps.console.utils.models import UtilBackup
@@ -128,8 +132,15 @@ class AWSBackupResourceTests(BaseTestCase):
     def test_dynamodb_aws_backup_poll_persists_recovery_point_and_completes(self, describe_job):
         node, aws = self._make_aws_node(CoreAWS.ResourceType.DYNAMODB, "test-table")
         backup = self._backup(aws, uuid="ddb-backup", unique_id="job-456")
+        backup.metadata = {
+            "_aws_backup": {
+                "resource_arn": "arn:aws:dynamodb:us-east-1:123456789012:table/test-table"
+            }
+        }
+        backup.save(update_fields=["metadata", "modified"])
         describe_job.return_value = {
             "BackupJobId": "job-456",
+            "ResourceArn": "arn:aws:dynamodb:us-east-1:123456789012:table/test-table",
             "State": "COMPLETED",
             "RecoveryPointArn": "arn:aws:backup:us-east-1:123456789012:recovery-point/rp-1",
             "BackupSizeInBytes": 3_000_000_000,
@@ -158,6 +169,7 @@ class AWSBackupResourceTests(BaseTestCase):
         )
         backup.metadata = {
             "_aws_backup": {
+                "resource_arn": "arn:aws:s3:::source-bucket",
                 "recovery_point_arn": "arn:aws:backup:us-east-1:123456789012:recovery-point/rp-1"
             }
         }
@@ -275,7 +287,267 @@ class AWSBackupResourceTests(BaseTestCase):
                 )
 
         start.assert_not_called()
-        poll.assert_called_once_with(args=[node.id, restore.id], countdown=60)
+        poll.assert_called_once_with(args=[node.id, restore.id], countdown=30)
+
+
+class AWSDeletionRecoveryTests(BaseTestCase):
+    account_id = "123456789012"
+
+    def _node(
+        self,
+        *,
+        node_type=CoreNode.Type.CLOUD,
+        resource_type="instance",
+        unique_id=None,
+    ):
+        connection = factories.make_connection(self.account, self.member, code="aws")
+        key = self.account.get_encryption_key()
+        auth = CoreAuthAWS.objects.create(
+            connection=connection,
+            region=CoreAWSRegion.objects.get(code="us-east-1"),
+            access_key=bs_encrypt("access", key),
+            secret_key=bs_encrypt("secret", key),
+            backup_vault_name="test-vault",
+            backup_role_arn=(
+                "arn:aws:iam::123456789012:role/BackupSheepTest"
+            ),
+        )
+        node = CoreNode.objects.create(
+            connection=connection,
+            type=node_type,
+            name="aws-source",
+            added_by=self.member,
+        )
+        aws = CoreAWS.objects.create(
+            node=node,
+            name="aws-source",
+            unique_id=(
+                unique_id
+                or ("vol-source" if node_type == CoreNode.Type.VOLUME else "i-source")
+            ),
+            resource_type=resource_type,
+        )
+        return node, aws, auth
+
+    @staticmethod
+    def _client_error(code, operation):
+        return ClientError(
+            {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+            operation,
+        )
+
+    def _client_patch(self, auth, ec2, sts=None, backup_client=None):
+        sts = sts or mock.MagicMock()
+        sts.get_caller_identity.return_value = {"Account": self.account_id}
+
+        def get_client(_auth, service="ec2"):
+            if service == "sts":
+                return sts
+            if service == "backup" and backup_client is not None:
+                return backup_client
+            return ec2
+
+        return mock.patch.object(
+            CoreAuthAWS,
+            "get_client",
+            autospec=True,
+            side_effect=get_client,
+        )
+
+    def test_ami_child_deletion_resumes_after_lost_response(self):
+        _node, aws, auth = self._node()
+        backup = CoreAWSBackup.objects.create(
+            aws=aws,
+            uuid="ami-backup-marker",
+            unique_id="ami-owned",
+            status=UtilBackup.Status.DELETE_REQUESTED,
+        )
+        ec2 = mock.MagicMock()
+        ec2.describe_images.return_value = {
+            "Images": [
+                {
+                    "ImageId": "ami-owned",
+                    "Name": "ami-backup-marker",
+                    "Description": "ami-backup-marker",
+                    "OwnerId": self.account_id,
+                    "BlockDeviceMappings": [
+                        {"Ebs": {"SnapshotId": "snap-child-1"}},
+                        {"Ebs": {"SnapshotId": "snap-child-2"}},
+                    ],
+                }
+            ]
+        }
+        ec2.describe_snapshots.side_effect = [
+            {"Snapshots": [{"SnapshotId": "snap-child-1", "OwnerId": self.account_id}]},
+            {"Snapshots": [{"SnapshotId": "snap-child-2", "OwnerId": self.account_id}]},
+        ]
+        ec2.delete_snapshot.side_effect = [None, TimeoutError("lost response")]
+
+        with self._client_patch(auth, ec2), mock.patch(
+            "apps.console.backup.models.time.sleep"
+        ) as sleep:
+            self.assertFalse(backup.soft_delete())
+
+        sleep.assert_not_called()
+        backup.refresh_from_db()
+        state = backup.metadata["_aws_delete"]
+        self.assertEqual(state["children"]["snap-child-1"]["status"], "deleted")
+        self.assertEqual(
+            state["children"]["snap-child-2"]["status"],
+            "delete_outcome_unknown",
+        )
+        self.assertTrue(state["image_deregistered"])
+        self.assertNotIn("lease_token", state)
+        self.assertEqual(backup.status, UtilBackup.Status.DELETE_IN_PROGRESS)
+        ec2.deregister_image.assert_called_once_with(ImageId="ami-owned")
+
+        retry_ec2 = mock.MagicMock()
+        retry_ec2.describe_snapshots.side_effect = self._client_error(
+            "InvalidSnapshot.NotFound", "DescribeSnapshots"
+        )
+        with self._client_patch(auth, retry_ec2):
+            result = backup.soft_delete()
+
+        backup.refresh_from_db()
+        self.assertTrue(
+            result,
+            (backup.status, backup.metadata.get("_aws_delete")),
+        )
+
+        retry_ec2.describe_images.assert_not_called()
+        retry_ec2.deregister_image.assert_not_called()
+        retry_ec2.delete_snapshot.assert_not_called()
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.DELETE_COMPLETED)
+        self.assertEqual(
+            backup.metadata["_aws_delete"]["children"]["snap-child-2"]["status"],
+            "deleted",
+        )
+
+    def test_live_delete_lease_blocks_duplicate_worker(self):
+        _node, aws, _auth = self._node()
+        backup = CoreAWSBackup.objects.create(
+            aws=aws,
+            uuid="leased-delete",
+            unique_id="ami-leased",
+            status=UtilBackup.Status.DELETE_REQUESTED,
+        )
+        state, token = backup._claim_aws_delete_lease()
+
+        self.assertFalse(backup.soft_delete())
+        backup.refresh_from_db()
+        self.assertEqual(
+            backup.metadata["_aws_delete"]["lease_token"],
+            token,
+        )
+        backup._checkpoint_aws_delete(state, token, release=True)
+
+    def test_ebs_delete_rejects_missing_source_identity(self):
+        _node, aws, auth = self._node(
+            node_type=CoreNode.Type.VOLUME,
+            resource_type=CoreAWS.ResourceType.VOLUME,
+        )
+        backup = CoreAWSBackup.objects.create(
+            aws=aws,
+            uuid="ebs-marker",
+            unique_id="snap-owned",
+            status=UtilBackup.Status.DELETE_REQUESTED,
+        )
+        ec2 = mock.MagicMock()
+        ec2.describe_snapshots.return_value = {
+            "Snapshots": [
+                {
+                    "SnapshotId": "snap-owned",
+                    "Description": "ebs-marker",
+                    "OwnerId": self.account_id,
+                    # Deliberately no VolumeId.
+                }
+            ]
+        }
+
+        with self._client_patch(auth, ec2):
+            self.assertFalse(backup.soft_delete())
+
+        ec2.delete_snapshot.assert_not_called()
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.DELETE_FAILED)
+        self.assertEqual(
+            backup.get_execution_state().last_error_code,
+            "PROVIDER_OWNERSHIP_MISMATCH",
+        )
+
+    def test_recovery_point_lost_response_is_adopted_without_second_delete(self):
+        _node, aws, auth = self._node(
+            resource_type=CoreAWS.ResourceType.S3,
+            unique_id="source-bucket",
+        )
+        recovery_arn = "arn:aws:backup:us-east-1:123456789012:recovery-point/rp-1"
+        resource_arn = "arn:aws:s3:::source-bucket"
+        backup = CoreAWSBackup.objects.create(
+            aws=aws,
+            uuid="s3-delete-marker",
+            unique_id="job-1",
+            status=UtilBackup.Status.DELETE_REQUESTED,
+            metadata={
+                "_aws_backup": {
+                    "recovery_point_arn": recovery_arn,
+                    "resource_arn": resource_arn,
+                    "vault_name": "test-vault",
+                }
+            },
+        )
+        first = mock.MagicMock()
+        first.describe_recovery_point.return_value = {
+            "RecoveryPointArn": recovery_arn,
+            "ResourceArn": resource_arn,
+        }
+        first.delete_recovery_point.side_effect = TimeoutError("lost response")
+        with self._client_patch(auth, mock.MagicMock(), backup_client=first):
+            self.assertFalse(backup.soft_delete())
+
+        backup.refresh_from_db()
+        self.assertTrue(backup.metadata["_aws_delete"]["delete_started"])
+        second = mock.MagicMock()
+        second.describe_recovery_point.side_effect = self._client_error(
+            "ResourceNotFoundException", "DescribeRecoveryPoint"
+        )
+        with self._client_patch(auth, mock.MagicMock(), backup_client=second):
+            result = backup.soft_delete()
+
+        backup.refresh_from_db()
+        self.assertTrue(
+            result,
+            (backup.status, backup.metadata.get("_aws_delete")),
+        )
+
+        second.delete_recovery_point.assert_not_called()
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.DELETE_COMPLETED)
+
+    def test_unproven_not_found_never_becomes_delete_success(self):
+        _node, aws, auth = self._node(
+            node_type=CoreNode.Type.VOLUME,
+            resource_type=CoreAWS.ResourceType.VOLUME,
+        )
+        backup = CoreAWSBackup.objects.create(
+            aws=aws,
+            uuid="unproven-delete",
+            unique_id="snap-absent",
+            status=UtilBackup.Status.DELETE_REQUESTED,
+        )
+        ec2 = mock.MagicMock()
+        ec2.describe_snapshots.side_effect = self._client_error(
+            "InvalidSnapshot.NotFound", "DescribeSnapshots"
+        )
+        with self._client_patch(auth, ec2):
+            self.assertFalse(backup.soft_delete())
+
+        ec2.delete_snapshot.assert_not_called()
+        backup.refresh_from_db()
+        self.assertEqual(
+            backup.status,
+            UtilBackup.Status.DELETE_FAILED_NOT_FOUND,
+        )
 
 
 class TestAWSRDSNativeSnapshot(BaseTestCase):
@@ -361,6 +633,12 @@ class TestAWSRDSNativeSnapshot(BaseTestCase):
             "DBSnapshots": [
                 {
                     "DBSnapshotIdentifier": "rds-poll-backup",
+                    "DBInstanceIdentifier": "test-db-poll",
+                    "DBSnapshotArn": (
+                        "arn:aws:rds:us-east-1:123456789012:"
+                        "snapshot:rds-poll-backup"
+                    ),
+                    "SnapshotType": "manual",
                     "AllocatedStorage": 20,
                     "Status": "available",
                     "SnapshotCreateTime": datetime.now(timezone.utc),
@@ -368,7 +646,11 @@ class TestAWSRDSNativeSnapshot(BaseTestCase):
             ]
         }
 
-        with mock.patch.object(CoreAuthAWSRDS, "get_client", return_value=client):
+        with mock.patch.object(
+            CoreAWSRDSBackup,
+            "_rds_account_id",
+            return_value="123456789012",
+        ), mock.patch.object(CoreAuthAWSRDS, "get_client", return_value=client):
             result = backup.poll_status()
 
         self.assertEqual(result, UtilBackup.Status.COMPLETE)
@@ -471,4 +753,4 @@ class TestAWSRDSNativeSnapshot(BaseTestCase):
             )
 
         start.assert_not_called()
-        poll.assert_called_once_with(args=[node.id, restore.id], countdown=60)
+        poll.assert_called_once_with(args=[node.id, restore.id], countdown=30)

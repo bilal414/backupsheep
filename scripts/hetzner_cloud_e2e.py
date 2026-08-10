@@ -1,8 +1,9 @@
 """Safety-first Hetzner Cloud end-to-end test for BackupSheep.
 
-This harness creates one uniquely named Hetzner server, drives the existing
+This harness creates one explicitly named Hetzner server, drives the existing
 BackupSheep Hetzner snapshot/restore methods against it, and removes only
-resources whose exact name/description, ID, and ownership label match this
+resources whose exact name/description, ID, ownership label, and fsynced ledger
+entry match this
 run.  It intentionally does not call a volume-snapshot endpoint: the current
 Hetzner Cloud API has no native volume snapshot/restore operation, and the
 current BackupSheep integration is expected to reject that path explicitly.
@@ -13,6 +14,8 @@ Required environment variables:
     HETZNER_E2E_SERVER_TYPE   # e.g. cx23; must be available in the project
     HETZNER_E2E_LOCATION       # e.g. fsn1; must be available in the project
     HETZNER_E2E_IMAGE          # an available system image name or numeric ID
+    BACKUPSHEEP_E2E_RUN_ID     # explicit DNS-safe run identity
+    BACKUPSHEEP_E2E_LEDGER_PATH # durable JSON ledger path
 
 Optional environment variables:
 
@@ -28,13 +31,15 @@ Run this from the application image/environment, for example:
     HETZNER_E2E_SERVER_TYPE=cx23 \
     HETZNER_E2E_LOCATION=fsn1 \
     HETZNER_E2E_IMAGE=ubuntu-24.04 \
+    BACKUPSHEEP_E2E_RUN_ID=bs-e2e-20260810-5b4a6b63 \
+    BACKUPSHEEP_E2E_LEDGER_PATH=/code/_storage/e2e-ledgers/hetzner.json \
+    BACKUPSHEEP_E2E_APPLY=YES BACKUPSHEEP_E2E_CLEANUP=YES \
       python scripts/hetzner_cloud_e2e.py
 """
 
-import datetime as dt
+import hashlib
 import json
 import os
-import secrets
 import sys
 import time
 
@@ -45,6 +50,11 @@ import requests
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "backupsheep.settings")
+
+from scripts.live_e2e_ledger import (  # noqa: E402
+    DurableResourceLedger,
+    require_run_id,
+)
 
 
 class HarnessError(RuntimeError):
@@ -73,11 +83,6 @@ def _api_host():
     return configured
 
 
-def _unique_prefix():
-    stamp = dt.datetime.now(dt.timezone.utc).strftime("%y%m%d%H%M%S")
-    return f"bs-e2e-{stamp}-{secrets.token_hex(3)}"
-
-
 class HetznerHarness:
     LABEL_KEY = "backupsheep.com/e2e"
 
@@ -91,7 +96,7 @@ class HetznerHarness:
                 "Content-Type": "application/json",
             }
         )
-        self.prefix = _unique_prefix()
+        self.prefix = require_run_id(os.environ.get("BACKUPSHEEP_E2E_RUN_ID"))
         self.source_name = f"{self.prefix}-source"
         self.restore_name = f"{self.prefix}-restore"
         self.snapshot_description = f"{self.prefix}-server-snapshot"
@@ -102,13 +107,27 @@ class HetznerHarness:
         self.timeout_seconds = max(
             int(os.environ.get("HETZNER_E2E_TIMEOUT_SECONDS", "1800")), 60
         )
+        self.apply = os.environ.get("BACKUPSHEEP_E2E_APPLY") == "YES"
+        self.cleanup_enabled = os.environ.get("BACKUPSHEEP_E2E_CLEANUP") == "YES"
+        scope = (
+            f"{self.api}:"
+            f"{hashlib.sha256(token.encode()).hexdigest()[:16]}"
+        )
+        self.ledger = DurableResourceLedger(
+            os.environ.get("BACKUPSHEEP_E2E_LEDGER_PATH"),
+            provider="hetzner_cloud",
+            run_id=self.prefix,
+            scope=scope,
+        )
         self.created = {
             "source_server_id": None,
             "restore_server_id": None,
             "snapshot_image_id": None,
             "account": None,
             "member": None,
+            "user": None,
         }
+        self._hydrate_created_from_ledger()
         self.mutation_started = False
         self.report = {
             "prefix": self.prefix,
@@ -118,6 +137,33 @@ class HetznerHarness:
             "tests": {},
             "cleanup": {"status": "NOT_RUN", "errors": []},
         }
+
+    def _hydrate_created_from_ledger(self):
+        """Recover exact provider IDs after the original harness process died."""
+        for entry in self.ledger.entries():
+            if entry.get("cleanup_state") not in {"eligible", "failed"}:
+                continue
+            kind = entry.get("kind")
+            name = entry.get("name")
+            identifier = str(entry.get("resource_id") or "")
+            if not identifier:
+                raise HarnessError("The durable ledger contains an empty provider ID")
+            if kind == "server" and name == self.source_name:
+                field = "source_server_id"
+            elif kind == "server" and name == self.restore_name:
+                field = "restore_server_id"
+            elif kind == "snapshot_image" and name == self.snapshot_description:
+                field = "snapshot_image_id"
+            else:
+                raise HarnessError(
+                    "The durable ledger contains a resource outside this exact run"
+                )
+            existing = self.created[field]
+            if existing and str(existing) != identifier:
+                raise HarnessError(
+                    f"The durable ledger contains multiple IDs for {field}"
+                )
+            self.created[field] = identifier
 
     @property
     def labels(self):
@@ -163,6 +209,7 @@ class HetznerHarness:
         """Read one paginated collection without mutating provider state."""
         items = []
         page = 1
+        seen_pages = set()
         base_params = dict(params or {})
         while True:
             query = {**base_params, "page": page, "per_page": 50}
@@ -173,6 +220,9 @@ class HetznerHarness:
             if not next_page:
                 return items
             page = int(next_page)
+            if page in seen_pages or page < 1:
+                raise HarnessError("Hetzner returned a repeated or invalid pagination page")
+            seen_pages.add(page)
 
     def get_resource(self, resource, identifier):
         try:
@@ -252,11 +302,29 @@ class HetznerHarness:
             raise HarnessError(
                 f"Configured location {self.location!r} is not available in this project"
             )
+        priced_locations = {
+            str(price.get("location") or "")
+            for price in (selected_type.get("prices") or [])
+        }
+        if priced_locations and self.location not in priced_locations:
+            raise HarnessError(
+                f"Configured server type {self.server_type!r} is not offered in "
+                f"location {self.location!r}"
+            )
+        server_architecture = str(selected_type.get("architecture") or "")
         selected_image = next(
             (
                 item
                 for item in images
-                if str(item.get("id")) == self.image or item.get("name") == self.image
+                if (
+                    str(item.get("id")) == self.image
+                    or item.get("name") == self.image
+                )
+                and (
+                    not server_architecture
+                    or not item.get("architecture")
+                    or item.get("architecture") == server_architecture
+                )
             ),
             None,
         )
@@ -269,6 +337,7 @@ class HetznerHarness:
             "location_id": selected_location.get("id"),
             "image_id": selected_image.get("id"),
             "image_type": selected_image.get("type"),
+            "architecture": server_architecture or selected_image.get("architecture"),
         }
 
     def create_server(self, name, role):
@@ -280,14 +349,37 @@ class HetznerHarness:
             "start_after_create": True,
             "labels": self.labels,
         }
-        self.mutation_started = True
         response = self.request("POST", "/servers", expected=(201,), json=payload)
         server = response.get("server") or {}
         identifier = server.get("id")
         if identifier is None:
             raise HarnessError(f"Hetzner server create returned no server ID for {role}")
+        started = time.monotonic()
+        while True:
+            observed = self.get_resource("servers", identifier)
+            if observed is not None:
+                break
+            if time.monotonic() - started > 60:
+                raise HarnessError(
+                    f"Hetzner accepted {role} server creation but read-back is unavailable; "
+                    "the resource was left for manual reconciliation"
+                )
+            time.sleep(3)
+        if (
+            str(observed.get("id")) != str(identifier)
+            or observed.get("name") != name
+            or (observed.get("labels") or {}).get(self.LABEL_KEY) != self.prefix
+        ):
+            raise HarnessError(f"Hetzner {role} server ownership read-back failed")
+        self.ledger.record(
+            kind="server",
+            resource_id=identifier,
+            name=name,
+            ownership={"label_key": self.LABEL_KEY, "label_value": self.prefix},
+            source_witness=role,
+        )
         self.created[f"{role}_server_id"] = str(identifier)
-        return server
+        return observed
 
     def wait_for(self, label, callback, complete, failed=()):
         started = time.monotonic()
@@ -320,11 +412,12 @@ class HetznerHarness:
         from apps.console.node.models import CoreHetzner, CoreNode
         from apps.tests import factories
 
-        account, member, _ = factories.make_account(
-            email=f"{self.prefix}@example.invalid"
+        account, member, user = factories.make_account(
+            email=f"{self.prefix}-hetzner@example.invalid"
         )
         self.created["account"] = account
         self.created["member"] = member
+        self.created["user"] = user
         key = account.get_encryption_key()
         connection = factories.make_connection(
             account, member, code="hetzner", name=f"{self.prefix}-connection"
@@ -345,6 +438,38 @@ class HetznerHarness:
             unique_id=str(source_id),
         )
         return account, member, node, provider
+
+    def _recover_local_fixture(self):
+        """Find only the exact run-owned local account graph after a restart."""
+        from django.contrib.auth import get_user_model
+
+        email = f"{self.prefix}-hetzner@example.invalid"
+        users = list(
+            get_user_model().objects.filter(username=email, email=email)[:2]
+        )
+        if not users:
+            return None, None
+        if len(users) != 1:
+            raise HarnessError("Multiple exact local E2E users were found")
+        user = users[0]
+        try:
+            member = user.member
+        except Exception as error:
+            raise HarnessError("The exact local E2E user has no member graph") from error
+        memberships = list(member.memberships.select_related("account")[:2])
+        if len(memberships) != 1:
+            raise HarnessError(
+                "The exact local E2E user does not own exactly one account"
+            )
+        account = memberships[0].account
+        foreign_connections = account.connections.exclude(
+            name__startswith=self.prefix
+        ).exists()
+        if foreign_connections:
+            raise HarnessError(
+                "The exact local E2E account contains an unrelated connection"
+            )
+        return account, user
 
     def run_server_backup_restore(self):
         from apps.console.backup.models import CoreCloudRestore, CoreHetznerBackup
@@ -383,10 +508,32 @@ class HetznerHarness:
             raise HarnessError("Created Hetzner image is missing or is not a snapshot")
         if image.get("description") != self.snapshot_description:
             raise HarnessError("Created Hetzner snapshot description does not match this run")
+        expected_backup_labels = provider._backup_labels(
+            {
+                "marker": backup.uuid_str,
+                "source_id": provider.unique_id,
+                "scope": provider._backup_scope(),
+            }
+        )
+        if any(
+            str((image.get("labels") or {}).get(key) or "") != value
+            for key, value in expected_backup_labels.items()
+        ):
+            raise HarnessError("Created Hetzner snapshot ownership labels do not match")
         if image.get("status") != "available":
             raise HarnessError(
                 f"Created Hetzner snapshot did not become available: {image.get('status')!r}"
             )
+        self.ledger.record(
+            kind="snapshot_image",
+            resource_id=self.created["snapshot_image_id"],
+            name=self.snapshot_description,
+            ownership={
+                "description": self.snapshot_description,
+                "labels": expected_backup_labels,
+            },
+            source_witness=source_id,
+        )
         self.report["tests"]["server snapshot"] = {
             "status": "PASS",
             "image_id": self.created["snapshot_image_id"],
@@ -435,6 +582,13 @@ class HetznerHarness:
             raise HarnessError(
                 f"Restored Hetzner server is not running: {restored_server.get('status')!r}"
             )
+        self.ledger.record(
+            kind="server",
+            resource_id=self.created["restore_server_id"],
+            name=self.restore_name,
+            ownership={"label_key": self.LABEL_KEY, "label_value": self.prefix},
+            source_witness=self.created["snapshot_image_id"],
+        )
         restore.status = restore_status
         restore.save(update_fields=["status", "modified"])
         self.report["tests"]["server restore"] = {
@@ -479,7 +633,7 @@ class HetznerHarness:
             provider.create_snapshot(backup)
         except NodeBackupFailedError as error:
             message = str(error)
-            if "does not provide native volume snapshots" not in message:
+            if "does not support native backups" not in message:
                 raise HarnessError(
                     "Hetzner volume path failed, but not with the expected explicit "
                     f"unsupported-capability error: {message}"
@@ -507,40 +661,30 @@ class HetznerHarness:
         return matches[0] if matches else None
 
     def _find_owned_snapshot(self):
+        from apps.console.node.models import CoreHetzner
+
         matches = [
             item
             for item in self.collection("images", {"type": "snapshot"})
             if item.get("description") == self.snapshot_description
+            and (item.get("labels") or {}).get(CoreHetzner.BACKUP_LABEL_KEY)
+            == self.snapshot_description
         ]
         if len(matches) > 1:
             raise HarnessError("Multiple exact owned snapshot matches found")
         return matches[0] if matches else None
 
-    def adopt_after_partial_create(self, cleanup_errors):
-        """Recover IDs after a lost create response, still using exact ownership."""
-        if not self.mutation_started:
-            return
-        try:
-            if not self.created["source_server_id"]:
-                source = self._find_owned_server(self.source_name)
-                if source:
-                    self.created["source_server_id"] = str(source["id"])
-            if not self.created["restore_server_id"]:
-                restored = self._find_owned_server(self.restore_name)
-                if restored:
-                    self.created["restore_server_id"] = str(restored["id"])
-            if not self.created["snapshot_image_id"]:
-                snapshot = self._find_owned_snapshot()
-                if snapshot:
-                    self.created["snapshot_image_id"] = str(snapshot["id"])
-        except Exception as error:
-            cleanup_errors.append(f"adopt partial creates: {self._safe_error(error)}")
-
     def _delete_owned_server(self, identifier, expected_name, cleanup_errors):
         if not identifier:
             return
+        if not self.ledger.cleanup_eligible("server", identifier):
+            cleanup_errors.append(
+                f"refused server deletion for {identifier}: no durable ownership ledger entry"
+            )
+            return
         resource = self.get_resource("servers", identifier)
         if not resource:
+            self.ledger.mark_cleanup("server", identifier, state="absent")
             return
         owned = (
             str(resource.get("id")) == str(identifier)
@@ -548,6 +692,9 @@ class HetznerHarness:
             and (resource.get("labels") or {}).get(self.LABEL_KEY) == self.prefix
         )
         if not owned:
+            self.ledger.mark_cleanup(
+                "server", identifier, state="manual_review", error="ownership mismatch"
+            )
             cleanup_errors.append(
                 f"refused server deletion for {identifier}: exact ownership proof failed"
             )
@@ -555,24 +702,45 @@ class HetznerHarness:
         try:
             self.request("DELETE", f"/servers/{identifier}", expected=(200, 204))
         except Exception as error:
+            self.ledger.mark_cleanup(
+                "server", identifier, state="manual_review", error=self._safe_error(error)
+            )
             cleanup_errors.append(
                 f"delete server {identifier}: {self._safe_error(error)}"
             )
 
     def _delete_owned_snapshot(self, identifier, cleanup_errors):
+        from apps.console.node.models import CoreHetzner
+
         if not identifier:
+            return
+        if not self.ledger.cleanup_eligible("snapshot_image", identifier):
+            cleanup_errors.append(
+                f"refused image deletion for {identifier}: no durable ownership ledger entry"
+            )
             return
         image = self.get_resource("images", identifier)
         if not image:
+            self.ledger.mark_cleanup("snapshot_image", identifier, state="absent")
             return
         bound_to = image.get("bound_to")
         owned = (
             str(image.get("id")) == str(identifier)
             and image.get("type") == "snapshot"
             and image.get("description") == self.snapshot_description
+            and (image.get("labels") or {}).get(CoreHetzner.BACKUP_LABEL_KEY)
+            == self.snapshot_description
+            and (image.get("labels") or {}).get(CoreHetzner.BACKUP_SOURCE_LABEL_KEY)
+            == str(self.created["source_server_id"])
             and (not bound_to or str(bound_to) == str(self.created["source_server_id"]))
         )
         if not owned:
+            self.ledger.mark_cleanup(
+                "snapshot_image",
+                identifier,
+                state="manual_review",
+                error="ownership mismatch",
+            )
             cleanup_errors.append(
                 f"refused image deletion for {identifier}: exact ownership proof failed"
             )
@@ -580,6 +748,12 @@ class HetznerHarness:
         try:
             self.request("DELETE", f"/images/{identifier}", expected=(200, 204))
         except Exception as error:
+            self.ledger.mark_cleanup(
+                "snapshot_image",
+                identifier,
+                state="manual_review",
+                error=self._safe_error(error),
+            )
             cleanup_errors.append(
                 f"delete snapshot image {identifier}: {self._safe_error(error)}"
             )
@@ -602,6 +776,13 @@ class HetznerHarness:
                 ],
             }
             if not any(remaining.values()):
+                for kind, identifier in (
+                    ("server", self.created["restore_server_id"]),
+                    ("server", self.created["source_server_id"]),
+                    ("snapshot_image", self.created["snapshot_image_id"]),
+                ):
+                    if identifier and self.ledger.cleanup_eligible(kind, identifier):
+                        self.ledger.mark_cleanup(kind, identifier, state="absent")
                 self.report["cleanup"]["remaining_exact_prefix_resources"] = remaining
                 return
             if time.monotonic() - started > min(self.timeout_seconds, 300):
@@ -614,7 +795,13 @@ class HetznerHarness:
 
     def cleanup(self):
         cleanup_errors = []
-        self.adopt_after_partial_create(cleanup_errors)
+        if not self.cleanup_enabled:
+            self.report["cleanup"] = {
+                "status": "NOT_REQUESTED",
+                "errors": [],
+                "provider_resources_considered": {},
+            }
+            return
         # Delete the restore target first, then the source server, then its image.
         self._delete_owned_server(
             self.created["restore_server_id"], self.restore_name, cleanup_errors
@@ -626,11 +813,24 @@ class HetznerHarness:
         self._wait_until_owned_resources_absent(cleanup_errors)
 
         account = self.created.get("account")
-        if account is not None:
+        user = self.created.get("user")
+        if account is None and not cleanup_errors:
+            try:
+                account, user = self._recover_local_fixture()
+            except Exception as error:
+                cleanup_errors.append(
+                    f"recover local test account: {self._safe_error(error)}"
+                )
+        if account is not None and not cleanup_errors:
             try:
                 account.delete()
             except Exception as error:
                 cleanup_errors.append(f"delete local test account: {self._safe_error(error)}")
+        if user is not None and not cleanup_errors:
+            try:
+                user.delete()
+            except Exception as error:
+                cleanup_errors.append(f"delete local test user: {self._safe_error(error)}")
 
         self.report["cleanup"] = {
             "status": "PASS" if not cleanup_errors else "FAIL",
@@ -644,8 +844,25 @@ class HetznerHarness:
 
     def run(self):
         try:
+            if (
+                self.cleanup_enabled
+                and not self.apply
+                and any(
+                    self.ledger.cleanup_eligible(
+                        entry.get("kind"), entry.get("resource_id")
+                    )
+                    for entry in self.ledger.entries()
+                )
+            ):
+                self.report["status"] = "PASS"
+                self.report["mode"] = "cleanup_only"
+                return 0
             self.baseline()
             self.preflight_capabilities()
+            if not self.apply:
+                self.report["status"] = "PREFLIGHT_PASS"
+                self.report["mode"] = "read_only"
+                return 0
             self.run_server_backup_restore()
             self.run_volume_capability_guard()
             self.report["status"] = "PASS"
@@ -655,7 +872,8 @@ class HetznerHarness:
         finally:
             self.cleanup()
             print(json.dumps(self.report, indent=2, sort_keys=True, default=str))
-        return 0 if self.report.get("status") == "PASS" and self.report["cleanup"]["status"] == "PASS" else 1
+        cleanup_ok = self.report["cleanup"]["status"] in {"PASS", "NOT_REQUESTED"}
+        return 0 if self.report.get("status") == "PASS" and cleanup_ok else 1
 
 
 def main():
@@ -664,6 +882,8 @@ def main():
         "HETZNER_E2E_SERVER_TYPE",
         "HETZNER_E2E_LOCATION",
         "HETZNER_E2E_IMAGE",
+        "BACKUPSHEEP_E2E_RUN_ID",
+        "BACKUPSHEEP_E2E_LEDGER_PATH",
     )
     missing = [name for name in required if not os.environ.get(name)]
     if missing:

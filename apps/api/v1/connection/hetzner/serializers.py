@@ -7,8 +7,9 @@ from apps.console.account.models import CoreAccount
 from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
-    IntegrationDefault, bs_encrypt, bs_decrypt,
+    IntegrationDefault, bs_encrypt,
 )
+from apps.api.v1.utils.http import requests
 from apps.console.connection.models import (
     CoreConnection,
     CoreIntegration,
@@ -22,21 +23,21 @@ from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreCo
 
 
 class CoreAuthHetznerReadSerializer(serializers.ModelSerializer):
-    api_key = serializers.SerializerMethodField()
+    api_key_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = CoreAuthHetzner
         fields = (
             "id",
-            "api_key",
+            "api_key_configured",
         )
         datatables_always_serialize = (
             "id",
-            "api_key",
+            "api_key_configured",
         )
 
-    def get_api_key(self, obj):
-        return bs_decrypt(obj.api_key, self.context["encryption_key"])
+    def get_api_key_configured(self, obj):
+        return bool(obj.api_key)
 
 
 class CoreHetznerConnectionReadSerializer(serializers.ModelSerializer):
@@ -95,7 +96,7 @@ class CoreHetznerConnectionReadSerializer(serializers.ModelSerializer):
 
 
 class CoreAuthHetznerWriteSerializer(serializers.ModelSerializer):
-    api_key = serializers.CharField(write_only=True)
+    api_key = serializers.CharField(write_only=True, required=False)
     connection = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -103,9 +104,11 @@ class CoreAuthHetznerWriteSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
+        if "api_key" not in data:
+            if getattr(getattr(self, "parent", None), "instance", None) is None:
+                raise serializers.ValidationError({"api_key": "This field is required."})
+            return data
         try:
-            import requests
-
             api_key = data["api_key"]
             headers = {
                 "content-type": "application/json",
@@ -124,7 +127,7 @@ class CoreAuthHetznerWriteSerializer(serializers.ModelSerializer):
                     "make sure you whitelisted the BackupSheep Endpoint IP address."
                 )
             data["api_key"] = bs_encrypt(api_key, self.context["encryption_key"])
-        except Exception as e:
+        except Exception:
             raise serializers.ValidationError(
                 "Unable to authenticate. "
                 "Please check your api_key and "

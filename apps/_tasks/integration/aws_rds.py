@@ -94,10 +94,33 @@ def backup_aws_rds(
             Connect with website and generate snapshot 
             """
             if not backup.unique_id:
-                from apps._tasks.helper.tasks import run_provider_create
-                if run_provider_create(
-                    backup, self.request.id, node.aws_rds.create_snapshot
-                ) is None:
+                try:
+                    created_or_adopted = backup.create_snapshot(
+                        task_id=self.request.id
+                    )
+                except Exception:
+                    # The backup-row implementation persists an immutable RDS
+                    # request witness and marks ambiguous provider outcomes for
+                    # reconciliation before it re-raises.  Poll that durable
+                    # identity instead of consuming finite Celery retries and
+                    # eventually turning a possibly-created snapshot into a
+                    # false terminal failure.
+                    execution = backup.get_execution_state(create=False)
+                    if (
+                        execution is not None
+                        and execution.reconciliation_state == "required"
+                    ):
+                        from apps._tasks.helper.tasks import poll_cloud_backup
+
+                        poll_cloud_backup.apply_async(
+                            args=[node.id, backup.id], countdown=60
+                        )
+                        return
+                    raise
+                if not created_or_adopted:
+                    return
+                backup.refresh_from_db()
+                if backup.status not in UtilBackup.ACTIVE_STATUSES:
                     return
 
             """

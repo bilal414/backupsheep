@@ -1,8 +1,9 @@
 import subprocess
 import os
-import requests
+from apps.api.v1.utils.http import requests
 import re
 from sentry_sdk import capture_exception
+from apps._tasks.integration.backup.errors import safe_backup_failure
 import hashlib
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from apps._tasks.exceptions import NodeBackupFailedError
@@ -10,7 +11,7 @@ from apps._tasks.integration.backup._archive import create_zip
 from apps.api.v1.utils.api_helpers import check_string_in_file, aws_s3_upload_log_file
 from apps.api.v1.utils.api_helpers import mkdir_p, safe_basename, ssrf_safe_get
 from apps._tasks.helper.tasks import delete_from_disk
-from apps.console.utils.models import UtilBackup
+from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 import time
 
 
@@ -305,7 +306,12 @@ def snapshot_wordpress(backup):
         log_file.write(f"Rebuild backup history on Updraft: {_redact_url(url)} \n")
 
         # ZIP all downloaded files.
-        create_zip(local_dir, local_zip, timeout=43200)
+        create_zip(
+            local_dir,
+            local_zip,
+            timeout=43200,
+            before_publish=backup.ensure_execution_fence,
+        )
 
         # Generate Report
         try:
@@ -341,10 +347,12 @@ def snapshot_wordpress(backup):
         delete_from_disk.apply_async(
             args=[backup.uuid_str, "dir"],
         )
+    except BackupExecutionLeaseLostError:
+        raise
     except Exception as e:
-        error = _redact_error(str(e))
-        log_file.write(f"Error: {error} \n")
-        capture_exception(RuntimeError(error))
+        capture_exception(e)
+        failure = safe_backup_failure(e, stage="wordpress_backup")
+        log_file.write(f"Error [{failure.code}]: {failure.detail}\n")
         """
         Delete files
         """
@@ -352,7 +360,7 @@ def snapshot_wordpress(backup):
             args=[backup.uuid_str, "both"],
         )
         raise NodeBackupFailedError(
-            node, backup.uuid_str, backup.attempt_no, backup.type, error
+            node, backup.uuid_str, backup.attempt_no, backup.type, failure.detail
         )
     finally:
         """
