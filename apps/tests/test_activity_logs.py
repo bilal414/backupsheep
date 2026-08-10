@@ -131,6 +131,34 @@ class ConsoleLogViewFilterTests(BaseTestCase):
         # Nothing is filtered out (force_login above also wrote an AUTH row).
         self.assertEqual(len(self._rows(r)), CoreLog.objects.count())
 
+    def test_stale_backup_log_without_connection_does_not_500(self):
+        """Historical rows may outlive the connection they reference."""
+        node = factories.make_website_node(self.account, self.member)
+        CoreLog.record(
+            self.account,
+            CoreLog.Type.BACKUP,
+            {"node_id": node.id, "backup_id": 987654, "message": "legacy row"},
+        )
+
+        response = self.client.get("/console/logs/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "987654")
+
+    def test_malformed_pagination_and_numeric_filters_are_ignored(self):
+        response = self.client.get(
+            "/console/logs/",
+            {
+                "p_no": "not-a-page",
+                "p_size": "not-a-size",
+                "node": "not-a-node",
+                "backup": "not-a-backup",
+                "integration": "not-an-integration",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+
 
 class ApiLogViewTests(BaseTestCase):
     def setUp(self):

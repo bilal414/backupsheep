@@ -1183,16 +1183,27 @@
                                     </p>
                                 </div>
                             {% endif %}
-                            <div class="mt-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="alert">
-                                <svg class="mt-0.5 h-5 w-5 flex-none text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/>
-                                </svg>
-                                <p class="min-w-0 flex-1 leading-6">
-                                    <strong class="font-semibold">Warning:</strong> This overwrites data on your server.
-                                    {% if object.type == 3 %}Website files{% else %}Database tables{% endif %}
-                                    will be replaced with the contents of this backup.
-                                </p>
-                            </div>
+                            {% if object.type == 3 %}
+                                <div class="mt-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="alert">
+                                    <svg class="mt-0.5 h-5 w-5 flex-none text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/>
+                                    </svg>
+                                    <p class="min-w-0 flex-1 leading-6">
+                                        <strong class="font-semibold">Warning:</strong> This overwrites website files on your server.
+                                        Files not included in this backup are deleted only when you enable the delete option above.
+                                    </p>
+                                </div>
+                            {% else %}
+                                <div class="mt-4 flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status">
+                                    <svg class="mt-0.5 h-5 w-5 flex-none text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75m6 2.25a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
+                                    </svg>
+                                    <p class="min-w-0 flex-1 leading-6">
+                                        <strong class="font-semibold">Safe fork:</strong> This creates a new database from the backup.
+                                        Your source database and its existing data remain unchanged.
+                                    </p>
+                                </div>
+                            {% endif %}
                             <div class="mt-4">
                                 <label class="flex items-start gap-3 text-sm font-medium text-slate-700">
                                     <input type="checkbox" x-model="restore.confirm"

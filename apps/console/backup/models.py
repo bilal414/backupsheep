@@ -5859,6 +5859,135 @@ class CoreAWSBackup(UtilBackup):
             raise AWSNativeOwnershipError("AWS source resource account did not match.")
         return source
 
+    @staticmethod
+    def _aws_native_validate_source_configuration(configuration, witness):
+        if not isinstance(configuration, dict):
+            raise AWSNativeMalformedResponse(
+                "AWS returned malformed source restore configuration."
+            )
+        source_type = str(witness.get("source_type") or "")
+        if str(configuration.get("source_type") or "") != source_type:
+            raise AWSNativeOwnershipError(
+                "AWS source restore configuration type did not match."
+            )
+        if str(configuration.get("source_id") or "") != str(
+            witness.get("source_id") or ""
+        ):
+            raise AWSNativeOwnershipError(
+                "AWS source restore configuration identity did not match."
+            )
+        normalized = {
+            "schema": 1,
+            "source_type": source_type,
+            "source_id": str(witness.get("source_id") or ""),
+        }
+        if source_type == "instance":
+            instance_type = str(configuration.get("instance_type") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}", instance_type):
+                raise AWSNativeMalformedResponse(
+                    "AWS source instance type is missing or malformed."
+                )
+            security_group_ids = []
+            groups = configuration.get("security_group_ids")
+            if groups is None:
+                groups = []
+            if (
+                not isinstance(groups, list)
+                or len(groups) > 32
+            ):
+                raise AWSNativeMalformedResponse(
+                    "AWS source security-group configuration is malformed."
+                )
+            for group_id in groups:
+                group_id = str(group_id or "").strip()
+                if not re.fullmatch(r"sg-[0-9A-Fa-f]{8,32}", group_id):
+                    raise AWSNativeMalformedResponse(
+                        "AWS source security-group identity is malformed."
+                    )
+                if group_id not in security_group_ids:
+                    security_group_ids.append(group_id)
+            subnet_id = str(configuration.get("subnet_id") or "").strip()
+            if subnet_id and not re.fullmatch(
+                r"subnet-[0-9A-Fa-f]{8,32}", subnet_id
+            ):
+                raise AWSNativeMalformedResponse(
+                    "AWS source subnet identity is malformed."
+                )
+            key_name = str(configuration.get("key_name") or "").strip()
+            if len(key_name) > 255 or any(ord(value) < 32 for value in key_name):
+                raise AWSNativeMalformedResponse(
+                    "AWS source key-name configuration is malformed."
+                )
+            normalized.update(
+                {
+                    "instance_type": instance_type,
+                    "subnet_id": subnet_id,
+                    "security_group_ids": security_group_ids,
+                    "key_name": key_name,
+                }
+            )
+            return normalized
+
+        availability_zone = str(
+            configuration.get("availability_zone") or ""
+        ).strip()
+        if not availability_zone or not re.fullmatch(
+            r"[A-Za-z0-9-]{3,64}", availability_zone
+        ):
+            raise AWSNativeMalformedResponse(
+                "AWS source volume availability zone is missing or malformed."
+            )
+        normalized["availability_zone"] = availability_zone
+        return normalized
+
+    @classmethod
+    def _aws_native_source_configuration(cls, source, witness):
+        """Persist the minimum non-secret source settings needed for a restore.
+
+        A backup must remain restorable after its source is deleted. AMIs do not
+        retain the source instance type, subnet, security groups, or EC2 key-name,
+        and EBS snapshots do not provide a future placement zone. Capture those
+        immutable restore inputs before the snapshot mutation and keep them in the
+        fenced provider ledger; never retain addresses, user data, IAM credentials,
+        or provider response bodies.
+        """
+        if not isinstance(source, dict):
+            raise AWSNativeMalformedResponse(
+                "AWS returned malformed source restore configuration."
+            )
+        source_type = str(witness.get("source_type") or "")
+        if source_type == "instance":
+            groups = source.get("SecurityGroups") or []
+            if (
+                not isinstance(groups, list)
+                or len(groups) > 32
+                or any(not isinstance(group, dict) for group in groups)
+            ):
+                raise AWSNativeMalformedResponse(
+                    "AWS source security-group configuration is malformed."
+                )
+            configuration = {
+                "source_type": source_type,
+                "source_id": str(witness.get("source_id") or ""),
+                "instance_type": source.get("InstanceType"),
+                "subnet_id": source.get("SubnetId") or "",
+                "security_group_ids": [
+                    group.get("GroupId")
+                    for group in groups
+                ],
+                "key_name": source.get("KeyName") or "",
+            }
+        else:
+            configuration = {
+                "source_type": source_type,
+                "source_id": str(witness.get("source_id") or ""),
+                "availability_zone": source.get("AvailabilityZone"),
+            }
+        return cls._aws_native_validate_source_configuration(
+            configuration,
+            witness,
+        )
+
     @classmethod
     def _aws_native_find_owned(cls, resources, witness):
         if any(not isinstance(item, dict) for item in resources):
@@ -6324,7 +6453,32 @@ class CoreAWSBackup(UtilBackup):
                 provider_status="reconciling",
             )
             client = auth.get_client("ec2")
-            self._aws_native_source(client, witness)
+            state = self.get_execution_state(create=False)
+            provider_metadata = (
+                dict(state.provider_metadata or {}) if state is not None else {}
+            )
+            stored_source_configuration = provider_metadata.get(
+                "source_configuration"
+            )
+            if stored_source_configuration is not None:
+                source_configuration = (
+                    self._aws_native_validate_source_configuration(
+                        stored_source_configuration,
+                        witness,
+                    )
+                )
+            else:
+                source = self._aws_native_source(client, witness)
+                source_configuration = self._aws_native_source_configuration(
+                    source, witness
+                )
+                self._aws_native_persist_witness(
+                    witness,
+                    owner=owner,
+                    token=token,
+                    provider_status="reconciling",
+                    metadata={"source_configuration": source_configuration},
+                )
 
             state, request = self._aws_native_request()
             provider_id = str(

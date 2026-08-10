@@ -57,6 +57,7 @@ EXACT_PROVIDER_CODES = frozenset(
         "google_drive",
         "onedrive",
         "pcloud",
+        "idrive",
     }
 )
 PROVIDER_STATE_KEYS = {
@@ -66,6 +67,7 @@ PROVIDER_STATE_KEYS = {
     "pcloud": "pcloud_object",
     "google_drive": "google_drive_upload",
     "onedrive": "onedrive_upload",
+    "idrive": "idrive_s3_object",
 }
 
 
@@ -106,6 +108,17 @@ def _normalise_sha256(value):
     return value
 
 
+def _integrity_restore_error(stored_backup, code, message):
+    """Keep committed IDrive ledger failures on the safe provider error path."""
+    try:
+        provider_code = str(stored_backup.storage.type.code or "")
+    except AttributeError:
+        provider_code = ""
+    if provider_code == "idrive":
+        return _SafeProviderRestoreError(code, message)
+    return RestoreError(message)
+
+
 def _expected_integrity(stored_backup):
     """Return the one committed SHA-256 identity for this exact storage object.
 
@@ -144,7 +157,15 @@ def _expected_integrity(stored_backup):
             continue
         checksum = _normalise_sha256(artifact.checksum_value)
         if str(artifact.checksum_algorithm or "").lower() == "sha256" and checksum:
-            candidates.append((int(artifact.byte_count), checksum, "artifact ledger"))
+            try:
+                byte_count = int(artifact.byte_count)
+            except (TypeError, ValueError):
+                raise _integrity_restore_error(
+                    stored_backup,
+                    "MALFORMED_PROVIDER_STATE",
+                    "stored backup integrity metadata is invalid.",
+                ) from None
+            candidates.append((byte_count, checksum, "artifact ledger"))
 
     for state in (stored_backup.metadata or {}).values():
         if not isinstance(state, dict):
@@ -157,17 +178,27 @@ def _expected_integrity(stored_backup):
         try:
             candidates.append((int(byte_count), checksum, "storage metadata"))
         except (TypeError, ValueError):
-            raise RestoreError("stored backup integrity metadata is invalid.")
+            raise _integrity_restore_error(
+                stored_backup,
+                "MALFORMED_PROVIDER_STATE",
+                "stored backup integrity metadata is invalid.",
+            ) from None
 
     identities = {(size, checksum) for size, checksum, _source in candidates}
     if len(identities) > 1:
-        raise RestoreError(
-            "stored backup integrity records disagree; restore was stopped safely."
+        raise _integrity_restore_error(
+            stored_backup,
+            "INTEGRITY_LEDGER_CONFLICT",
+            "stored backup integrity records disagree; restore was stopped safely.",
         )
     if identities:
         size, checksum = identities.pop()
         if size <= 0:
-            raise RestoreError("stored backup integrity metadata has an invalid size.")
+            raise _integrity_restore_error(
+                stored_backup,
+                "MALFORMED_PROVIDER_STATE",
+                "stored backup integrity metadata has an invalid size.",
+            )
         return {"size_bytes": size, "sha256": checksum}
 
     source_is_committed = backup.artifact_records.filter(
@@ -176,8 +207,10 @@ def _expected_integrity(stored_backup):
         verified_at__isnull=False,
     ).exists()
     if source_is_committed:
-        raise RestoreError(
-            "this backup has no committed integrity record for the selected storage copy."
+        raise _integrity_restore_error(
+            stored_backup,
+            "MISSING_PROVIDER_STATE",
+            "this backup has no committed integrity record for the selected storage copy.",
         )
     return None
 
@@ -555,6 +588,21 @@ def _safe_provider_failure(
         from google.api_core import exceptions as google_exceptions
 
         timeout_types += (google_exceptions.DeadlineExceeded,)
+    except (ImportError, AttributeError):
+        pass
+    try:
+        from botocore import exceptions as botocore_exceptions
+
+        timeout_types += (
+            botocore_exceptions.ConnectTimeoutError,
+            botocore_exceptions.ReadTimeoutError,
+        )
+        transient_types += (
+            botocore_exceptions.ConnectionClosedError,
+            botocore_exceptions.EndpointConnectionError,
+            botocore_exceptions.ProxyConnectionError,
+            botocore_exceptions.SSLError,
+        )
     except (ImportError, AttributeError):
         pass
 
@@ -1835,6 +1883,346 @@ def _onedrive_download(stored_backup, dest_zip_path, expected, state):
         raise _safe_provider_failure("OneDrive", error) from None
 
 
+def _normalise_s3_version(value):
+    value = str(value or "").strip()
+    return "" if value.lower() == "null" else value
+
+
+def _committed_s3_etag(stored_backup, state, provider):
+    """Return one committed ETag for an exact S3-compatible object."""
+    etags = set()
+    state_etag = str(state.get("etag") or "").strip()
+    if state_etag and state_etag.lower() != "null":
+        etags.add(state_etag)
+
+    object_key = str(stored_backup.storage_file_id or "")
+    try:
+        artifact_etags = (
+            stored_backup.backup.artifact_records.filter(
+                storage_id=stored_backup.storage_id,
+                role__in=("archive", "destination"),
+                object_key=object_key,
+                verified_at__isnull=False,
+            )
+            .exclude(etag__in=("", "null"))
+            .values_list("etag", flat=True)
+        )
+        etags.update(
+            str(etag).strip()
+            for etag in artifact_etags
+            if str(etag or "").strip().lower() != "null"
+        )
+    except (AttributeError, TypeError, ValueError):
+        # In-memory restore doubles do not always expose the complete Django
+        # queryset API. The durable provider state remains authoritative for
+        # those callers; production models always take the query path above.
+        pass
+
+    if len(etags) > 1:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_STATE_CONFLICT",
+            f"the committed {provider} object ETag records disagree.",
+        )
+    return next(iter(etags), "")
+
+
+def _idrive_s3_state(stored_backup, expected):
+    """Load and validate the committed IDrive/S3-compatible object identity."""
+    metadata = getattr(stored_backup, "metadata", None) or {}
+    if not isinstance(metadata, dict):
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "stored backup provider state is malformed; restore was stopped safely.",
+        )
+    state_key = PROVIDER_STATE_KEYS["idrive"]
+    if state_key not in metadata:
+        if _destination_ledger_exists(stored_backup):
+            raise _SafeProviderRestoreError(
+                "MISSING_PROVIDER_STATE",
+                "the committed backup has no provider identity for restore.",
+            )
+        # Rows from before the object ledger was introduced remain on the
+        # explicit legacy generate_download_url path.
+        return None
+
+    raw_state = metadata.get(state_key)
+    if not isinstance(raw_state, dict) or not raw_state:
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "stored backup provider state is malformed; restore was stopped safely.",
+        )
+    state = copy.deepcopy(raw_state)
+    if str(state.get("phase") or "").lower() != "committed":
+        raise _SafeProviderRestoreError(
+            "UNCOMMITTED_PROVIDER_STATE",
+            "the selected backup provider object was not durably committed.",
+        )
+    if str(state.get("checksum_algorithm") or "sha256").lower() != "sha256":
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the selected backup has unsupported committed integrity metadata.",
+        )
+
+    object_key = str(state.get("object_key") or "")
+    storage_file_id = str(stored_backup.storage_file_id or "")
+    if not object_key or "\x00" in object_key:
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the selected backup has an invalid committed object key.",
+        )
+    if not storage_file_id or object_key != storage_file_id:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_STATE_CONFLICT",
+            "the committed object key disagrees with the storage point.",
+        )
+
+    state_checksum = _normalise_sha256(state.get("sha256"))
+    try:
+        state_size = int(state.get("size_bytes"))
+    except (TypeError, ValueError):
+        state_size = -1
+    if state_checksum is None or state_size <= 0:
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the selected backup has invalid committed integrity metadata.",
+        )
+    if not expected or (
+        expected["sha256"] != state_checksum
+        or int(expected["size_bytes"]) != state_size
+    ):
+        raise _SafeProviderRestoreError(
+            "INTEGRITY_LEDGER_CONFLICT",
+            "the selected backup integrity records disagree; restore was stopped safely.",
+        )
+
+    bucket_candidates = {
+        str(state[field]).strip()
+        for field in ("bucket", "bucket_name")
+        if state.get(field) not in (None, "", "null")
+    }
+    if len(bucket_candidates) > 1:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_STATE_CONFLICT",
+            "the committed object bucket records disagree.",
+        )
+
+    state["object_key"] = object_key
+    state["sha256"] = state_checksum
+    state["size_bytes"] = state_size
+    state["etag"] = _committed_s3_etag(
+        stored_backup, state, "IDrive Object Storage"
+    )
+    if not state["etag"]:
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the selected backup has no committed object ETag.",
+        )
+
+    state_version = _normalise_s3_version(state.get("version_id"))
+    try:
+        committed_version = _normalise_s3_version(
+            stored_backup.committed_version_id()
+        )
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            "the committed object version records disagree.",
+        ) from None
+    if state_version and committed_version and state_version != committed_version:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            "the committed object version records disagree.",
+        )
+    state["version_id"] = committed_version or state_version
+    if bucket_candidates:
+        state["bucket_name"] = next(iter(bucket_candidates))
+    return state
+
+
+def _validate_idrive_s3_head(
+    stored_backup,
+    head,
+    state,
+    expected,
+    *,
+    bucket,
+    object_key,
+    etag,
+    version_id,
+):
+    if not isinstance(head, dict):
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_RESPONSE",
+            "IDrive Object Storage returned malformed backup metadata.",
+        )
+    reported_bucket = head.get("Bucket")
+    reported_key = head.get("Key")
+    if reported_bucket not in (None, bucket) or reported_key not in (None, object_key):
+        raise _SafeProviderRestoreError(
+            "PROVIDER_OWNERSHIP_MISMATCH",
+            "IDrive Object Storage returned a different backup object.",
+        )
+    try:
+        remote_size = int(head.get("ContentLength"))
+    except (TypeError, ValueError):
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_RESPONSE",
+            "IDrive Object Storage returned malformed backup size metadata.",
+        ) from None
+    if not expected or remote_size != int(expected["size_bytes"]):
+        raise _SafeProviderRestoreError(
+            "INTEGRITY_MISMATCH",
+            "the committed IDrive Object Storage byte count changed.",
+        )
+    try:
+        stored_backup.verify_s3_head_ownership(head)
+    except Exception as error:
+        message = str(error).lower()
+        code = (
+            "PROVIDER_VERSION_DRIFT"
+            if "version" in message
+            else "INTEGRITY_MISMATCH"
+            if "integrity" in message
+            else "PROVIDER_OWNERSHIP_MISMATCH"
+        )
+        raise _SafeProviderRestoreError(
+            code,
+            "the committed IDrive Object Storage object failed ownership or integrity verification.",
+        ) from None
+
+    remote_etag = str(head.get("ETag") or "").strip()
+    if not remote_etag:
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_RESPONSE",
+            "IDrive Object Storage returned no object ETag.",
+        )
+    if remote_etag != etag:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            "the committed IDrive Object Storage object ETag changed.",
+        )
+
+    remote_version = _normalise_s3_version(head.get("VersionId"))
+    if version_id and remote_version != version_id:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            "the committed IDrive Object Storage object version changed.",
+        )
+    if not version_id and remote_version:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            "the committed IDrive Object Storage object version was not recorded.",
+        )
+    return head
+
+
+def _idrive_s3_download(stored_backup, dest_zip_path, expected, state):
+    """Download one committed IDrive/S3-compatible object by exact identity."""
+    provider = "IDrive Object Storage"
+    response = None
+    body = None
+    try:
+        storage_config = stored_backup.storage.storage_idrive
+        bucket = str(getattr(storage_config, "bucket_name", "") or "").strip()
+        object_key = state["object_key"]
+        if not bucket:
+            raise _SafeProviderRestoreError(
+                "MALFORMED_PROVIDER_STATE",
+                "IDrive Object Storage has no configured backup bucket.",
+            )
+        if state.get("bucket_name") and state["bucket_name"] != bucket:
+            raise _SafeProviderRestoreError(
+                "PROVIDER_STATE_CONFLICT",
+                "the committed object bucket disagrees with the storage configuration.",
+            )
+
+        from apps._tasks.integration.storage import idrive as idrive_adapter
+
+        # The adapter owns credential decryption and bounded/retrying boto
+        # configuration. Credentials are passed only as the in-memory account
+        # encryption key and never copied into restore metadata or exceptions.
+        client = idrive_adapter._s3_client(
+            storage_config,
+            stored_backup.storage.account.get_encryption_key(),
+        )
+        version_id = _normalise_s3_version(state.get("version_id"))
+        request = {"Bucket": bucket, "Key": object_key}
+        if version_id:
+            request["VersionId"] = version_id
+
+        def verify_head():
+            head = client.head_object(**request)
+            return _validate_idrive_s3_head(
+                stored_backup,
+                head,
+                state,
+                expected,
+                bucket=bucket,
+                object_key=object_key,
+                etag=state["etag"],
+                version_id=version_id,
+            )
+
+        verify_head()
+        response = client.get_object(**request)
+        _validate_idrive_s3_head(
+            stored_backup,
+            response,
+            state,
+            expected,
+            bucket=bucket,
+            object_key=object_key,
+            etag=state["etag"],
+            version_id=version_id,
+        )
+        body = response.get("Body") if isinstance(response, dict) else None
+        read = getattr(body, "read", None)
+        if not callable(read):
+            raise _SafeProviderRestoreError(
+                "MALFORMED_PROVIDER_RESPONSE",
+                "IDrive Object Storage returned no readable backup stream.",
+            )
+
+        def chunks():
+            while True:
+                value = read(CHUNK_SIZE)
+                if value == b"":
+                    return
+                if value is None or isinstance(value, str):
+                    raise _SafeProviderRestoreError(
+                        "MALFORMED_PROVIDER_RESPONSE",
+                        "IDrive Object Storage returned a malformed backup stream.",
+                    )
+                try:
+                    value = bytes(value)
+                except (TypeError, ValueError):
+                    raise _SafeProviderRestoreError(
+                        "MALFORMED_PROVIDER_RESPONSE",
+                        "IDrive Object Storage returned a malformed backup stream.",
+                    ) from None
+                if not value:
+                    raise _SafeProviderRestoreError(
+                        "MALFORMED_PROVIDER_RESPONSE",
+                        "IDrive Object Storage returned a malformed backup stream.",
+                    )
+                yield value
+
+        _materialize_provider_stream(
+            chunks(),
+            dest_zip_path,
+            expected,
+            verify_head,
+        )
+    except RestoreError:
+        raise
+    except Exception as error:
+        raise _safe_provider_failure(provider, error) from None
+    finally:
+        _close_response(body)
+        if response is not None and response is not body:
+            _close_response(response)
+
+
 def _aws_s3_committed_etag(stored_backup):
     """Return the one committed ETag for this exact storage object."""
     object_key = str(stored_backup.storage_file_id or "")
@@ -1970,6 +2358,8 @@ def _aws_s3_download(stored_backup, dest_zip_path, expected):
 def _fetch_exact_provider(stored_backup, dest_zip_path, expected, provider_code, state):
     if provider_code == "aws_s3":
         return _aws_s3_download(stored_backup, dest_zip_path, expected)
+    if provider_code == "idrive":
+        return _idrive_s3_download(stored_backup, dest_zip_path, expected, state)
     if provider_code == "azure":
         return _azure_download(stored_backup, dest_zip_path, expected, state)
     if provider_code == "dropbox":
@@ -2011,11 +2401,12 @@ def fetch_backup_zip(stored_backup, dest_zip_path):
             # S3 identity is split across the destination artifact, version ID,
             # storage metadata, and provider-owned object metadata rather than a
             # single generic provider-state record.
-            state = (
-                None
-                if provider_code == "aws_s3"
-                else _provider_state(stored_backup, provider_code, expected)
-            )
+            if provider_code == "aws_s3":
+                state = None
+            elif provider_code == "idrive":
+                state = _idrive_s3_state(stored_backup, expected)
+            else:
+                state = _provider_state(stored_backup, provider_code, expected)
             if aws_s3_exact or state is not None:
                 _fetch_exact_provider(
                     stored_backup,

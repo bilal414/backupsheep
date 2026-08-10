@@ -153,6 +153,12 @@ class AWSNativeEC2EBSReliabilityTests(BaseTestCase):
                             {
                                 "InstanceId": source_id,
                                 "OwnerId": account,
+                                "InstanceType": "t3.micro",
+                                "SubnetId": "subnet-0123456789abcdef0",
+                                "SecurityGroups": [
+                                    {"GroupId": "sg-0123456789abcdef0"}
+                                ],
+                                "KeyName": "backup-restore-key",
                                 "Placement": {"AvailabilityZone": f"{region}a"},
                                 "State": {"Name": "running"},
                             }
@@ -222,7 +228,13 @@ class AWSNativeEC2EBSReliabilityTests(BaseTestCase):
                 )
                 client = mock.MagicMock()
                 self._configure_source(client, kind, aws.unique_id)
-                _source_method, list_method, create_method = self._api_methods(kind)
+                source_method, list_method, create_method = self._api_methods(kind)
+                getattr(client, source_method).side_effect = [
+                    self._source_response(kind, aws.unique_id),
+                    AssertionError(
+                        "a durable retry must not require the deleted source"
+                    ),
+                ]
                 resource = self._resource(
                     kind,
                     backup.uuid_str,
@@ -269,6 +281,45 @@ class AWSNativeEC2EBSReliabilityTests(BaseTestCase):
                 )
                 self.assertTrue(state.provider_metadata["adopted"])
                 getattr(client, create_method).assert_called_once()
+                getattr(client, source_method).assert_called_once()
+
+    def test_native_backup_persists_source_restore_configuration(self):
+        backup, aws, auth = self._make_backup(
+            "instance", suffix="source-configuration"
+        )
+        client = mock.MagicMock()
+        self._configure_source(client, "instance", aws.unique_id)
+        resource = self._resource(
+            "instance",
+            backup.uuid_str,
+            aws.unique_id,
+            resource_id="ami-source-configuration",
+            state="available",
+        )
+        client.describe_images.side_effect = [
+            self._collection_response("instance", []),
+            self._collection_response("instance", [resource]),
+        ]
+        client.create_image.return_value = {
+            "ImageId": "ami-source-configuration"
+        }
+
+        with self._client_patch(auth, client):
+            backup.create_snapshot(task_id="source-configuration-worker")
+
+        state = backup.get_execution_state(create=False)
+        self.assertEqual(
+            state.provider_metadata["source_configuration"],
+            {
+                "schema": 1,
+                "source_type": "instance",
+                "source_id": aws.unique_id,
+                "instance_type": "t3.micro",
+                "subnet_id": "subnet-0123456789abcdef0",
+                "security_group_ids": ["sg-0123456789abcdef0"],
+                "key_name": "backup-restore-key",
+            },
+        )
 
     def test_celery_entry_point_uses_backup_row_durable_protocol(self):
         backup, aws, _auth = self._make_backup(

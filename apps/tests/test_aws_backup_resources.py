@@ -19,6 +19,12 @@ from apps.tests.base import BaseTestCase
 
 
 class AWSBackupResourceTests(BaseTestCase):
+    DDB_ACCOUNT_ID = "123456789012"
+    DDB_RECOVERY_POINT = (
+        "arn:aws:backup:us-east-1:123456789012:recovery-point/rp-restore-1"
+    )
+    DDB_RESTORE_TARGET = "ddb-restore-owned"
+
     def test_backup_idempotency_token_is_stable_and_provider_sized(self):
         token = idempotency_token("backup", "a-resource-name")
 
@@ -50,6 +56,63 @@ class AWSBackupResourceTests(BaseTestCase):
             resource_type=resource_type,
         )
         return node, aws
+
+    def _completed_dynamodb_restore(self):
+        node, aws = self._make_aws_node(
+            CoreAWS.ResourceType.DYNAMODB,
+            "source-table",
+        )
+        backup = self._backup(
+            aws,
+            uuid="ddb-owned-backup",
+            unique_id="backup-job-1",
+            status=UtilBackup.Status.COMPLETE,
+        )
+        marker = "backupsheep-restore-ddb-owned"
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name=self.DDB_RESTORE_TARGET,
+            resource_id=self.DDB_RESTORE_TARGET,
+            provider_job_id="restore-job-1",
+            restore_marker=marker,
+            status=CoreCloudRestore.Status.IN_PROGRESS,
+            operation_phase=CoreCloudRestore.OperationPhase.POLLING,
+            params={
+                "_bs_marker_required": True,
+                "_bs_provider_name": marker,
+                "_backupsheep_restore": {
+                    "provider": "aws_backup",
+                    "source_id": self.DDB_RECOVERY_POINT,
+                    "target_kind": "dynamodb",
+                    "target_name": self.DDB_RESTORE_TARGET,
+                    "marker": marker,
+                },
+            },
+        )
+        table_arn = (
+            "arn:aws:dynamodb:us-east-1:123456789012:table/"
+            f"{self.DDB_RESTORE_TARGET}"
+        )
+        dynamodb = mock.MagicMock()
+        dynamodb.describe_table.return_value = {
+            "Table": {
+                "TableName": self.DDB_RESTORE_TARGET,
+                "TableArn": table_arn,
+                "TableStatus": "ACTIVE",
+            }
+        }
+        sts = mock.MagicMock()
+        sts.get_caller_identity.return_value = {"Account": self.DDB_ACCOUNT_ID}
+        job = {
+            "RestoreJobId": restore.provider_job_id,
+            "RecoveryPointArn": self.DDB_RECOVERY_POINT,
+            "CreatedResourceArn": table_arn,
+            "AccountId": self.DDB_ACCOUNT_ID,
+            "ResourceType": "DynamoDB",
+            "Status": "COMPLETED",
+        }
+        return node, restore, dynamodb, sts, job, table_arn
 
     @staticmethod
     def _backup(aws, *, uuid="backup-1", unique_id="", status=UtilBackup.Status.IN_PROGRESS):
@@ -269,6 +332,200 @@ class AWSBackupResourceTests(BaseTestCase):
             start_restore.call_args.args[1],
             "dynamodb",
         )
+
+    @mock.patch("apps._tasks.integration.aws_backup.describe_restore_job")
+    def test_completed_dynamodb_restore_tags_then_verifies_before_completion(
+        self, describe_restore
+    ):
+        node, restore, dynamodb, sts, job, table_arn = (
+            self._completed_dynamodb_restore()
+        )
+        describe_restore.return_value = job
+        expected_tags = [
+            {"Key": "BackupSheepRestore", "Value": restore.restore_marker},
+            {"Key": "BackupSheepSource", "Value": self.DDB_RECOVERY_POINT},
+        ]
+        dynamodb.list_tags_of_resource.side_effect = [
+            {"Tags": []},
+            {"Tags": expected_tags},
+        ]
+
+        def client(service="ec2"):
+            return sts if service == "sts" else dynamodb
+
+        with mock.patch.object(
+            node.connection.auth_aws,
+            "get_client",
+            side_effect=client,
+        ):
+            first = node.aws.check_restore(restore)
+            restore.refresh_from_db()
+            self.assertEqual(first, CoreCloudRestore.Status.IN_PROGRESS)
+            self.assertEqual(
+                restore.params["_bs_dynamodb_tagging"]["state"],
+                "submitted",
+            )
+            self.assertTrue(restore.params["_bs_create_outcome_unknown"])
+            dynamodb.tag_resource.assert_called_once_with(
+                ResourceArn=table_arn,
+                Tags=expected_tags,
+            )
+
+            second = node.aws.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(second, CoreCloudRestore.Status.COMPLETE)
+        self.assertEqual(
+            restore.params["_bs_dynamodb_tagging"]["state"],
+            "verified",
+        )
+        self.assertFalse(restore.params["_bs_create_outcome_unknown"])
+        self.assertEqual(
+            restore.operation_phase,
+            CoreCloudRestore.OperationPhase.COMPLETE,
+        )
+        self.assertEqual(dynamodb.tag_resource.call_count, 1)
+
+    @mock.patch("apps._tasks.integration.aws_backup.describe_restore_job")
+    def test_dynamodb_tag_lost_response_retries_same_idempotent_tags(
+        self, describe_restore
+    ):
+        node, restore, dynamodb, sts, job, table_arn = (
+            self._completed_dynamodb_restore()
+        )
+        describe_restore.return_value = job
+        expected_tags = [
+            {"Key": "BackupSheepRestore", "Value": restore.restore_marker},
+            {"Key": "BackupSheepSource", "Value": self.DDB_RECOVERY_POINT},
+        ]
+        dynamodb.list_tags_of_resource.side_effect = [
+            {"Tags": []},
+            {"Tags": []},
+            {"Tags": expected_tags},
+        ]
+        dynamodb.tag_resource.side_effect = [TimeoutError("lost response"), None]
+
+        def client(service="ec2"):
+            return sts if service == "sts" else dynamodb
+
+        with mock.patch.object(
+            node.connection.auth_aws,
+            "get_client",
+            side_effect=client,
+        ):
+            self.assertEqual(
+                node.aws.check_restore(restore),
+                CoreCloudRestore.Status.IN_PROGRESS,
+            )
+            restore.refresh_from_db()
+            tagging = dict(restore.params["_bs_dynamodb_tagging"])
+            tagging["last_attempt_at"] = "2000-01-01T00:00:00+00:00"
+            restore.params["_bs_dynamodb_tagging"] = tagging
+            restore.save(update_fields=["params", "modified"])
+
+            self.assertEqual(
+                node.aws.check_restore(restore),
+                CoreCloudRestore.Status.IN_PROGRESS,
+            )
+            self.assertEqual(
+                node.aws.check_restore(restore),
+                CoreCloudRestore.Status.COMPLETE,
+            )
+
+        self.assertEqual(dynamodb.tag_resource.call_count, 2)
+        self.assertEqual(
+            dynamodb.tag_resource.call_args_list[0],
+            dynamodb.tag_resource.call_args_list[1],
+        )
+        self.assertEqual(
+            dynamodb.tag_resource.call_args.kwargs["ResourceArn"],
+            table_arn,
+        )
+
+    @mock.patch("apps._tasks.integration.aws_backup.describe_restore_job")
+    def test_dynamodb_conflicting_restore_tag_fails_closed(self, describe_restore):
+        node, restore, dynamodb, sts, job, _table_arn = (
+            self._completed_dynamodb_restore()
+        )
+        describe_restore.return_value = job
+        dynamodb.list_tags_of_resource.return_value = {
+            "Tags": [
+                {"Key": "BackupSheepRestore", "Value": "another-restore"}
+            ]
+        }
+
+        def client(service="ec2"):
+            return sts if service == "sts" else dynamodb
+
+        with mock.patch.object(
+            node.connection.auth_aws,
+            "get_client",
+            side_effect=client,
+        ):
+            status = node.aws.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(status, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(
+            restore.operation_phase,
+            CoreCloudRestore.OperationPhase.MANUAL_REVIEW,
+        )
+        self.assertEqual(restore.last_error_code, "PROVIDER_OWNERSHIP_MISMATCH")
+        dynamodb.tag_resource.assert_not_called()
+
+    @mock.patch("apps._tasks.integration.aws_backup.describe_restore_job")
+    def test_dynamodb_repeated_tag_cursor_fails_closed(self, describe_restore):
+        node, restore, dynamodb, sts, job, _table_arn = (
+            self._completed_dynamodb_restore()
+        )
+        describe_restore.return_value = job
+        dynamodb.list_tags_of_resource.side_effect = [
+            {"Tags": [], "NextToken": "loop"},
+            {"Tags": [], "NextToken": "loop"},
+        ]
+
+        def client(service="ec2"):
+            return sts if service == "sts" else dynamodb
+
+        with mock.patch.object(
+            node.connection.auth_aws,
+            "get_client",
+            side_effect=client,
+        ):
+            status = node.aws.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(status, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(restore.last_error_code, "PROVIDER_MALFORMED_RESPONSE")
+        dynamodb.tag_resource.assert_not_called()
+
+    @mock.patch("apps._tasks.integration.aws_backup.describe_restore_job")
+    def test_dynamodb_restore_rejects_wrong_job_created_resource(
+        self, describe_restore
+    ):
+        node, restore, dynamodb, sts, job, _table_arn = (
+            self._completed_dynamodb_restore()
+        )
+        job["CreatedResourceArn"] = (
+            "arn:aws:dynamodb:us-east-1:123456789012:table/foreign-table"
+        )
+        describe_restore.return_value = job
+
+        def client(service="ec2"):
+            return sts if service == "sts" else dynamodb
+
+        with mock.patch.object(
+            node.connection.auth_aws,
+            "get_client",
+            side_effect=client,
+        ):
+            status = node.aws.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(status, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(restore.last_error_code, "PROVIDER_OWNERSHIP_MISMATCH")
+        dynamodb.list_tags_of_resource.assert_not_called()
+        dynamodb.tag_resource.assert_not_called()
 
     def test_restore_redelivery_with_provider_job_id_only_resumes_polling(self):
         node, aws = self._make_aws_node(CoreAWS.ResourceType.S3, "source-bucket")

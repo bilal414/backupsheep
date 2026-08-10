@@ -238,7 +238,20 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         )
         client = mock.MagicMock()
         client.describe_instances.return_value = {
-            "Reservations": [{"Instances": [{"InstanceType": "t3.micro"}]}]
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": "i-source",
+                            "InstanceType": "t3.micro",
+                            "SubnetId": "subnet-0123456789abcdef0",
+                            "SecurityGroups": [
+                                {"GroupId": "sg-0123456789abcdef0"}
+                            ],
+                        }
+                    ]
+                }
+            ]
         }
         client.run_instances.side_effect = raw_requests.Timeout("aws-secret")
         with mock.patch.object(CoreAuthAWS, "get_client", return_value=client):
@@ -272,6 +285,87 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         restore.refresh_from_db()
         self.assertEqual(restore.resource_id, "i-restored")
         client.run_instances.assert_not_called()
+
+    def test_aws_ec2_restore_infers_and_persists_source_network_configuration(self):
+        node, backup = self._aws()
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="aws-network-restored",
+            params={},
+        )
+        client = mock.MagicMock()
+        client.describe_instances.return_value = {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": "i-source",
+                            "InstanceType": "t3.micro",
+                            "SubnetId": "subnet-0123456789abcdef0",
+                            "SecurityGroups": [
+                                {"GroupId": "sg-0123456789abcdef0"}
+                            ],
+                            "KeyName": "restore-key",
+                        }
+                    ]
+                }
+            ]
+        }
+        client.run_instances.return_value = {
+            "Instances": [{"InstanceId": "i-network-restored"}]
+        }
+
+        with mock.patch.object(CoreAuthAWS, "get_client", return_value=client):
+            node.aws.restore_snapshot(backup, restore)
+
+        request = client.run_instances.call_args.kwargs
+        self.assertEqual(request["InstanceType"], "t3.micro")
+        self.assertEqual(request["SubnetId"], "subnet-0123456789abcdef0")
+        self.assertEqual(
+            request["SecurityGroupIds"], ["sg-0123456789abcdef0"]
+        )
+        self.assertEqual(request["KeyName"], "restore-key")
+        restore.refresh_from_db()
+        self.assertEqual(
+            restore.params["_bs_source_configuration"]["security_group_ids"],
+            ["sg-0123456789abcdef0"],
+        )
+
+    def test_aws_ec2_restore_uses_durable_configuration_after_source_deletion(self):
+        node, backup = self._aws()
+        backup.record_provider_reference(
+            metadata={
+                "source_configuration": {
+                    "schema": 1,
+                    "source_type": "instance",
+                    "source_id": "i-source",
+                    "instance_type": "t3.micro",
+                    "subnet_id": "subnet-0123456789abcdef0",
+                    "security_group_ids": ["sg-0123456789abcdef0"],
+                    "key_name": "restore-key",
+                }
+            }
+        )
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="aws-source-deleted-restored",
+            params={},
+        )
+        client = mock.MagicMock()
+        client.run_instances.return_value = {
+            "Instances": [{"InstanceId": "i-source-deleted-restored"}]
+        }
+
+        with mock.patch.object(CoreAuthAWS, "get_client", return_value=client):
+            node.aws.restore_snapshot(backup, restore)
+
+        client.describe_instances.assert_not_called()
+        self.assertEqual(
+            client.run_instances.call_args.kwargs["SecurityGroupIds"],
+            ["sg-0123456789abcdef0"],
+        )
 
     def test_aws_ec2_source_mismatch_fails_closed_before_polling(self):
         node, backup = self._aws()

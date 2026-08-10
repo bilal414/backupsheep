@@ -93,10 +93,14 @@
                                     </td>
                                     <td class="px-4 py-3">
                                         <span class="font-mono text-xs text-slate-700">
-                                            {% if log.backup %}
-                                                {{ log.backup.uuid|default:'n/a' }}
+                                            {% if log.console_backup %}
+                                                {{ log.console_backup.uuid|default:'n/a' }}
                                             {% elif log.backup_name %}
                                                 {{ log.backup_name|default:'n/a' }}
+                                            {% elif log.data.backup_id %}
+                                                {{ log.data.backup_id }}
+                                            {% else %}
+                                                n/a
                                             {% endif %}
                                         </span>
                                     </td>

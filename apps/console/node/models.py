@@ -1776,18 +1776,31 @@ class CoreDigitalOcean(UtilCloud):
                     return
 
             if target_kind == "instance":
-                instance_type = params.get("instance_type")
-                if not instance_type:
-                    response = client.describe_instances(InstanceIds=[self.unique_id])
-                    instances = self._aws_restore_instances(response)
-                    instance_type = instances[0].get("InstanceType") if instances else None
-                if not instance_type:
-                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                source_configuration = self._aws_restore_source_configuration(
+                    client, backup, "instance"
+                )
+                effective_configuration = dict(source_configuration)
+                for key in (
+                    "instance_type",
+                    "subnet_id",
+                    "security_group_ids",
+                    "key_name",
+                ):
+                    if key in params:
+                        effective_configuration[key] = params[key]
+                effective_configuration = self._aws_normalize_restore_source_configuration(
+                    effective_configuration,
+                    source_type="instance",
+                    source_id=self.unique_id,
+                )
+                params["_bs_source_configuration"] = source_configuration
+                restore.params = params
+                restore.save(update_fields=["params", "modified"])
                 instance_data = {
                     "ImageId": backup.unique_id,
                     "MinCount": 1,
                     "MaxCount": 1,
-                    "InstanceType": instance_type,
+                    "InstanceType": effective_configuration["instance_type"],
                     "TagSpecifications": [{
                         "ResourceType": "instance",
                         "Tags": [
@@ -1797,12 +1810,14 @@ class CoreDigitalOcean(UtilCloud):
                         ],
                     }],
                 }
-                if params.get("key_name"):
-                    instance_data["KeyName"] = params["key_name"]
-                if params.get("subnet_id"):
-                    instance_data["SubnetId"] = params["subnet_id"]
-                if params.get("security_group_ids"):
-                    instance_data["SecurityGroupIds"] = params["security_group_ids"]
+                if effective_configuration.get("key_name"):
+                    instance_data["KeyName"] = effective_configuration["key_name"]
+                if effective_configuration.get("subnet_id"):
+                    instance_data["SubnetId"] = effective_configuration["subnet_id"]
+                if effective_configuration.get("security_group_ids"):
+                    instance_data["SecurityGroupIds"] = effective_configuration[
+                        "security_group_ids"
+                    ]
                 _restore_begin_mutation(restore)
                 response = client.run_instances(**instance_data)
                 instances = response.get("Instances") if isinstance(response, dict) else None
@@ -1813,16 +1828,27 @@ class CoreDigitalOcean(UtilCloud):
                 _restore_adopt(restore, resource_id, provider_status="pending")
                 return
 
-            availability_zone = params.get("availability_zone")
-            if not availability_zone:
-                response = client.describe_volumes(VolumeIds=[self.unique_id])
-                volumes = response.get("Volumes") if isinstance(response, dict) else None
-                availability_zone = volumes[0].get("AvailabilityZone") if isinstance(volumes, list) and volumes else None
-            if not availability_zone:
-                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            source_configuration = self._aws_restore_source_configuration(
+                client, backup, "volume"
+            )
+            availability_zone = params.get(
+                "availability_zone",
+                source_configuration["availability_zone"],
+            )
+            effective_configuration = self._aws_normalize_restore_source_configuration(
+                {
+                    **source_configuration,
+                    "availability_zone": availability_zone,
+                },
+                source_type="volume",
+                source_id=self.unique_id,
+            )
+            params["_bs_source_configuration"] = source_configuration
+            restore.params = params
+            restore.save(update_fields=["params", "modified"])
             _restore_begin_mutation(restore)
             response = client.create_volume(
-                AvailabilityZone=availability_zone,
+                AvailabilityZone=effective_configuration["availability_zone"],
                 SnapshotId=backup.unique_id,
                 TagSpecifications=[{
                     "ResourceType": "volume",
@@ -1881,8 +1907,39 @@ class CoreDigitalOcean(UtilCloud):
                     if self.resource_type == self.ResourceType.S3:
                         auth.get_client("s3").head_bucket(Bucket=target)
                     else:
-                        table = auth.get_client("dynamodb").describe_table(TableName=target).get("Table") or {}
-                        if table.get("TableStatus") != "ACTIVE":
+                        dynamodb = auth.get_client("dynamodb")
+                        response = dynamodb.describe_table(TableName=target)
+                        if not isinstance(response, dict) or not isinstance(
+                            response.get("Table"), dict
+                        ):
+                            raise _RestoreProviderError(
+                                "PROVIDER_MALFORMED_RESPONSE"
+                            )
+                        table = response["Table"]
+                        table_status = str(table.get("TableStatus") or "").upper()
+                        if table_status in {"CREATING", "UPDATING"}:
+                            return _restore_status("IN_PROGRESS")
+                        if table_status != "ACTIVE":
+                            if table_status in {
+                                "DELETING",
+                                "INACCESSIBLE_ENCRYPTION_CREDENTIALS",
+                                "ARCHIVING",
+                                "ARCHIVED",
+                                "REPLICATION_NOT_AUTHORIZED",
+                            }:
+                                return _restore_safe_failure(
+                                    restore, "PROVIDER_FAILED"
+                                )
+                            raise _RestoreProviderError(
+                                "PROVIDER_MALFORMED_RESPONSE"
+                            )
+                        if not self._aws_dynamodb_restore_ownership_verified(
+                            auth,
+                            dynamodb,
+                            restore,
+                            result,
+                            table,
+                        ):
                             return _restore_status("IN_PROGRESS")
                     restore.operation_phase = _restore_phase("COMPLETE")
                     restore.save(update_fields=["operation_phase", "modified"])
@@ -4007,6 +4064,323 @@ class CoreAWS(UtilCloud):
     _aws_find_restore_resource = CoreDigitalOcean._aws_find_restore_resource
     _restore_snapshot_aws = CoreDigitalOcean._restore_snapshot_aws
     _check_restore_aws = CoreDigitalOcean._check_restore_aws
+
+    @staticmethod
+    def _aws_normalize_restore_source_configuration(
+        configuration, *, source_type, source_id
+    ):
+        if not isinstance(configuration, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if str(configuration.get("source_type") or "") != str(source_type):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        if str(configuration.get("source_id") or "") != str(source_id):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        normalized = {
+            "schema": 1,
+            "source_type": str(source_type),
+            "source_id": str(source_id),
+        }
+        if source_type == "instance":
+            instance_type = str(configuration.get("instance_type") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}", instance_type):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            subnet_id = str(configuration.get("subnet_id") or "").strip()
+            if subnet_id and not re.fullmatch(
+                r"subnet-[0-9A-Fa-f]{8,32}", subnet_id
+            ):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            security_group_ids = configuration.get("security_group_ids")
+            if security_group_ids is None:
+                security_group_ids = []
+            if not isinstance(security_group_ids, list) or len(security_group_ids) > 32:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            normalized_groups = []
+            for group_id in security_group_ids:
+                group_id = str(group_id or "").strip()
+                if not re.fullmatch(r"sg-[0-9A-Fa-f]{8,32}", group_id):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                if group_id not in normalized_groups:
+                    normalized_groups.append(group_id)
+            key_name = str(configuration.get("key_name") or "").strip()
+            if len(key_name) > 255 or any(ord(value) < 32 for value in key_name):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            normalized.update(
+                {
+                    "instance_type": instance_type,
+                    "subnet_id": subnet_id,
+                    "security_group_ids": normalized_groups,
+                    "key_name": key_name,
+                }
+            )
+            return normalized
+
+        availability_zone = str(
+            configuration.get("availability_zone") or ""
+        ).strip()
+        if not availability_zone or not re.fullmatch(
+            r"[A-Za-z0-9-]{3,64}", availability_zone
+        ):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        normalized["availability_zone"] = availability_zone
+        return normalized
+
+    def _aws_restore_source_configuration(self, client, backup, source_type):
+        source_id = str(self.unique_id or "")
+        state = backup.get_execution_state(create=False)
+        provider_metadata = (
+            dict(state.provider_metadata or {}) if state is not None else {}
+        )
+        stored = provider_metadata.get("source_configuration")
+        if stored is not None:
+            return self._aws_normalize_restore_source_configuration(
+                stored,
+                source_type=source_type,
+                source_id=source_id,
+            )
+
+        # Compatibility for backups created before source configuration was
+        # durable. Read the still-existing source once and persist the resulting
+        # safe witness on the restore row before any provider mutation.
+        if source_type == "instance":
+            response = client.describe_instances(InstanceIds=[source_id])
+            instances = self._aws_restore_instances(response)
+            if (
+                len(instances) != 1
+                or str(instances[0].get("InstanceId") or "") != source_id
+            ):
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+            source = instances[0]
+            configuration = {
+                "source_type": "instance",
+                "source_id": source_id,
+                "instance_type": source.get("InstanceType"),
+                "subnet_id": source.get("SubnetId") or "",
+                "security_group_ids": [
+                    group.get("GroupId")
+                    for group in source.get("SecurityGroups") or []
+                    if isinstance(group, dict)
+                ],
+                "key_name": source.get("KeyName") or "",
+            }
+        else:
+            response = client.describe_volumes(VolumeIds=[source_id])
+            volumes = response.get("Volumes") if isinstance(response, dict) else None
+            if (
+                not isinstance(volumes, list)
+                or len(volumes) != 1
+                or str(volumes[0].get("VolumeId") or "") != source_id
+            ):
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+            configuration = {
+                "source_type": "volume",
+                "source_id": source_id,
+                "availability_zone": volumes[0].get("AvailabilityZone"),
+            }
+        return self._aws_normalize_restore_source_configuration(
+            configuration,
+            source_type=source_type,
+            source_id=source_id,
+        )
+
+    @staticmethod
+    def _aws_dynamodb_restore_tags(client, table_arn):
+        """Read every DynamoDB tag page with bounded cursor-loop guards."""
+        tags = {}
+        token = None
+        seen_tokens = set()
+        for _page_number in range(100):
+            request = {"ResourceArn": table_arn}
+            if token:
+                request["NextToken"] = token
+            response = client.list_tags_of_resource(**request)
+            if not isinstance(response, dict):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            page = response.get("Tags")
+            if not isinstance(page, list) or len(page) > 50:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            for item in page:
+                if not isinstance(item, dict):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                key = item.get("Key")
+                value = item.get("Value")
+                if not isinstance(key, str) or not isinstance(value, str):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                if key in tags:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                tags[key] = value
+            next_token = response.get("NextToken")
+            if next_token in (None, ""):
+                return tags
+            if not isinstance(next_token, str) or next_token in seen_tokens:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            seen_tokens.add(next_token)
+            token = next_token
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+
+    @staticmethod
+    def _aws_dynamodb_restore_table_identity(auth, table, target_name):
+        if not isinstance(table, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        table_name = str(table.get("TableName") or "")
+        table_arn = str(table.get("TableArn") or "")
+        match = re.fullmatch(
+            r"arn:(?P<partition>[a-z0-9-]+):dynamodb:"
+            r"(?P<region>[a-z0-9-]+):(?P<account>[0-9]{12}):"
+            r"table/(?P<table>[A-Za-z0-9_.-]{3,255})",
+            table_arn,
+        )
+        if not match:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        account_id = str(
+            (auth.get_client("sts").get_caller_identity() or {}).get("Account")
+            or ""
+        )
+        if not re.fullmatch(r"[0-9]{12}", account_id):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if (
+            table_name != str(target_name)
+            or match.group("table") != str(target_name)
+            or match.group("region") != str(auth.region.code)
+            or match.group("account") != account_id
+        ):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        return table_arn, account_id
+
+    def _aws_dynamodb_restore_ownership_verified(
+        self,
+        auth,
+        client,
+        restore,
+        job,
+        table,
+    ):
+        """Tag and verify a completed DynamoDB restore before adopting success.
+
+        AWS Backup creates the table but does not propagate application ownership
+        tags. The table ARN and restore-job identity are therefore verified first;
+        only then is an idempotent tag mutation permitted. A crash or lost response
+        is safe because every retry reads the exact ARN before applying the same
+        key/value pair, and completion waits for eventually-consistent readback.
+        """
+        params = _restore_params(restore)
+        identity = params.get("_backupsheep_restore") or {}
+        target_name = str(restore.resource_id or identity.get("target_name") or "")
+        source_id = str(identity.get("source_id") or "")
+        marker = _restore_marker_value(restore)
+        if not target_name or not source_id or not marker:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+
+        table_arn, account_id = self._aws_dynamodb_restore_table_identity(
+            auth, table, target_name
+        )
+        if not isinstance(job, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if (
+            str(job.get("RestoreJobId") or "") != str(restore.provider_job_id)
+            or str(job.get("RecoveryPointArn") or "") != source_id
+            or str(job.get("CreatedResourceArn") or "") != table_arn
+            or str(job.get("AccountId") or "") != account_id
+            or str(job.get("ResourceType") or "").casefold() != "dynamodb"
+        ):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+
+        expected = {
+            "BackupSheepRestore": marker,
+            "BackupSheepSource": source_id,
+        }
+        tags = self._aws_dynamodb_restore_tags(client, table_arn)
+        for key, value in expected.items():
+            if key in tags and tags[key] != value:
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+
+        if all(tags.get(key) == value for key, value in expected.items()):
+            tagging = dict(params.get("_bs_dynamodb_tagging") or {})
+            tagging.update(
+                {
+                    "schema": 1,
+                    "state": "verified",
+                    "table_arn": table_arn,
+                    "expected_tags": expected,
+                    "verified_at": timezone.now().isoformat(),
+                }
+            )
+            params["_bs_dynamodb_tagging"] = tagging
+            params["_bs_marker_verified"] = True
+            params["_bs_create_outcome_unknown"] = False
+            restore.params = params
+            restore.operation_phase = _restore_phase("POLLING")
+            restore.error = ""
+            restore.save(
+                update_fields=[
+                    "params",
+                    "operation_phase",
+                    "error",
+                    "modified",
+                ]
+            )
+            return True
+
+        tagging = dict(params.get("_bs_dynamodb_tagging") or {})
+        now = timezone.now()
+        last_attempt_at = None
+        try:
+            last_attempt_at = datetime.datetime.fromisoformat(
+                str(tagging.get("last_attempt_at") or "")
+            )
+            if timezone.is_naive(last_attempt_at):
+                last_attempt_at = timezone.make_aware(last_attempt_at)
+        except (TypeError, ValueError):
+            last_attempt_at = None
+        retry_seconds = min(
+            3600,
+            max(
+                5,
+                int(
+                    getattr(
+                        settings,
+                        "DYNAMODB_RESTORE_TAG_RETRY_SECONDS",
+                        30,
+                    )
+                ),
+            ),
+        )
+        should_submit = (
+            last_attempt_at is None
+            or (now - last_attempt_at).total_seconds() >= retry_seconds
+        )
+        if not should_submit:
+            return False
+
+        tagging.update(
+            {
+                "schema": 1,
+                "state": "intent",
+                "table_arn": table_arn,
+                "expected_tags": expected,
+                "attempt_count": int(tagging.get("attempt_count") or 0) + 1,
+                "last_attempt_at": now.isoformat(),
+            }
+        )
+        params["_bs_dynamodb_tagging"] = tagging
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+        _restore_begin_mutation(restore)
+        client.tag_resource(
+            ResourceArn=table_arn,
+            Tags=[
+                {"Key": key, "Value": value}
+                for key, value in expected.items()
+                if tags.get(key) != value
+            ],
+        )
+        params = _restore_params(restore)
+        tagging = dict(params.get("_bs_dynamodb_tagging") or {})
+        tagging["state"] = "submitted"
+        params["_bs_dynamodb_tagging"] = tagging
+        restore.params = params
+        restore.operation_phase = _restore_phase("POLLING")
+        restore.save(update_fields=["params", "operation_phase", "modified"])
+        return False
 
     def _aws_s3_restore_source_buckets(self, backup):
         """Return source bucket identifiers without retaining provider details."""
