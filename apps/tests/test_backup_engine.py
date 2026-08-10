@@ -754,6 +754,37 @@ class NormalizeSshKeyTests(TestCase):
                 mock.patch("paramiko.RSAKey", rsa),
                 mock.patch("paramiko.ECDSAKey", ec))
 
+    def test_materialize_restores_terminal_newline_and_owner_only_mode(self):
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, True)
+        generated_path = os.path.join(tmp_dir, "generated_ed25519")
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", generated_path],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with open(generated_path, encoding="utf-8") as source:
+            key_without_newline = source.read().rstrip("\n")
+
+        materialized_path = os.path.join(tmp_dir, "materialized_ed25519")
+        W._materialize_ssh_private_key(materialized_path, key_without_newline)
+
+        with open(materialized_path, "rb") as source:
+            materialized = source.read()
+        self.assertTrue(materialized.endswith(b"\n"))
+        self.assertFalse(materialized.endswith(b"\n\n"))
+        self.assertEqual(stat.S_IMODE(os.stat(materialized_path).st_mode), 0o600)
+        parsed = subprocess.run(
+            ["ssh-keygen", "-y", "-f", materialized_path],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+
     def test_paramiko_write_failure_uses_in_process_crypto(self):
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 

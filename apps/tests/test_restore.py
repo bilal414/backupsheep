@@ -872,6 +872,39 @@ class WebsiteRestoreEngineTests(RestoreBackendBase):
         self.assertIn("mirror -R", scripts[0])
         self.assertIn('"."', scripts[0])
 
+    def test_private_key_restore_uses_canonical_materializer(self):
+        from apps.api.v1.utils.api_helpers import bs_encrypt
+
+        node, backup = self._website_backup(
+            all_paths=False, paths=[{"path": "public_html", "type": "directory"}]
+        )
+        auth = node.connection.auth_website
+        auth.protocol = CoreAuthWebsite.Protocol.SFTP
+        auth.port = 22
+        auth.use_private_key = True
+        key_without_newline = (
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            "fixture\n"
+            "-----END OPENSSH PRIVATE KEY-----"
+        )
+        auth.private_key = bs_encrypt(
+            key_without_newline,
+            self.account.get_encryption_key(),
+        )
+        auth.save()
+        self._last_zip = self._make_zip({"public_html/index.html": "hi"})
+        restore = self._restore_row(backup)
+
+        with mock.patch.object(
+            RW, "_materialize_ssh_private_key"
+        ) as materialize, mock.patch.object(RW, "_normalize_ssh_key"):
+            self._run_engine(backup, restore)
+
+        materialize.assert_called_once_with(
+            f"_storage/ssh_restore_{backup.uuid_str}",
+            key_without_newline,
+        )
+
     def test_missing_path_in_archive_fails_before_lftp(self):
         node, backup = self._website_backup(
             all_paths=False, paths=[{"path": "public_html", "type": "directory"}]

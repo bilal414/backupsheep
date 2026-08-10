@@ -35,6 +35,7 @@ from apps._tasks.integration.backup.website import (
     _PREFLIGHT_FLOOR,
     _build_lftp_script,
     _lftp_quote,
+    _materialize_ssh_private_key,
     _normalize_ssh_key,
 )
 from apps._tasks.integration.restore_common import (
@@ -905,9 +906,10 @@ def restore_website(backup, restore):
         if auth.use_private_key:
             suffix = f"_{work_suffix}" if _has_restore_fence(restore) else ""
             ssh_key_path = f"_storage/ssh_restore_{backup.uuid_str}{suffix}"
-            with open(ssh_key_path, "w") as key_file:
-                key_file.write(bs_decrypt(auth.private_key, encryption_key) or "")
-            os.chmod(ssh_key_path, 0o600)
+            _materialize_ssh_private_key(
+                ssh_key_path,
+                bs_decrypt(auth.private_key, encryption_key),
+            )
             _normalize_ssh_key(ssh_key_path, password)
             temporary_ssh_key = True
 

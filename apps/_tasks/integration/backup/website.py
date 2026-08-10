@@ -253,6 +253,35 @@ def _normalize_ssh_key(path, passphrase):
         ) from error
 
 
+def _materialize_ssh_private_key(path, private_key):
+    """Write decrypted key material in the format required by system OpenSSH.
+
+    Text fields and serializers commonly remove the final newline from an
+    OpenSSH private key. Paramiko accepts that representation, but the system
+    ``ssh`` process used by lftp rejects it with ``error in libcrypto``. Keep
+    line endings canonical, restore exactly one terminal newline, and create the
+    file with owner-only permissions before any external process can observe it.
+    """
+    material = (private_key or "").replace("\r\n", "\n").replace("\r", "\n")
+    if material:
+        material = material.rstrip("\n") + "\n"
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as key_file:
+            descriptor = None
+            key_file.write(material)
+            key_file.flush()
+            os.fsync(key_file.fileno())
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def _build_lftp_script(*, auth, host_url, port, username, password, ssh_key_path,
                        parallel, transfer, mirror):
     """Compose the full lftp command script for one transfer (settings + connect + auth
@@ -444,9 +473,10 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
             # absolute path so a relative `_storage/...` key cannot resolve
             # against an unexpected working directory and fail authentication.
             ssh_key_path = os.path.abspath(f"_storage/ssh_{backup.uuid}")
-            with open(ssh_key_path, "w") as fh:
-                fh.write(bs_decrypt(auth.private_key, encryption_key) or "")
-            os.chmod(ssh_key_path, 0o600)
+            _materialize_ssh_private_key(
+                ssh_key_path,
+                bs_decrypt(auth.private_key, encryption_key),
+            )
             _normalize_ssh_key(ssh_key_path, password)
             temporary_ssh_key = True
 
