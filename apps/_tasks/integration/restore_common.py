@@ -50,6 +50,7 @@ GLACIER_SENTINELS = ("restore_requested", "restore_in_progress")
 # never turn a stored path into an unauthenticated/current-object download.
 EXACT_PROVIDER_CODES = frozenset(
     {
+        "aws_s3",
         "azure",
         "dropbox",
         "google_cloud",
@@ -493,8 +494,11 @@ def _error_status(error):
             return status
     response = getattr(error, "response", None)
     if isinstance(response, dict):
+        metadata = response.get("ResponseMetadata") or {}
         return _coerce_status(
-            response.get("status_code") or response.get("StatusCode")
+            response.get("status_code")
+            or response.get("StatusCode")
+            or metadata.get("HTTPStatusCode")
         ) or 0
     return 0
 
@@ -511,7 +515,13 @@ def _safe_provider_failure(
         return error
     if isinstance(error, RestoreError):
         return error
-    code_value = getattr(error, "error_code", None) or getattr(error, "code", "")
+    response = getattr(error, "response", None)
+    provider_error = response.get("Error") if isinstance(response, dict) else None
+    code_value = (
+        getattr(error, "error_code", None)
+        or getattr(error, "code", "")
+        or (provider_error or {}).get("Code")
+    )
     if callable(code_value):
         try:
             code_value = code_value()
@@ -551,6 +561,10 @@ def _safe_provider_failure(
     # Permanent identity and authorization failures take precedence over a
     # coincidental transport/status hint. They must never become retryable.
     if status == 404 or code in {
+        "404",
+        "NOSUCHBUCKET",
+        "NOSUCHKEY",
+        "NOSUCHVERSION",
         "NOT_FOUND",
         "PROVIDER_NOT_FOUND",
         "STORAGE_DESTINATION_NOT_FOUND",
@@ -561,6 +575,9 @@ def _safe_provider_failure(
             provider_status=status or None,
         )
     if status in {401, 403} or code in {
+        "ACCESSDENIED",
+        "INVALIDACCESSKEYID",
+        "SIGNATUREDOESNOTMATCH",
         "AUTH_FAILED",
         "PROVIDER_AUTH_FAILED",
         "STORAGE_AUTH_FAILED",
@@ -602,7 +619,13 @@ def _safe_provider_failure(
             retry_after=retry_after,
             provider_status=status or None,
         )
-    if status == 429 or code in {"RATE_LIMITED", "STORAGE_RATE_LIMITED"}:
+    if status == 429 or code in {
+        "RATE_LIMITED",
+        "STORAGE_RATE_LIMITED",
+        "SLOWDOWN",
+        "THROTTLING",
+        "THROTTLINGEXCEPTION",
+    }:
         return _SafeProviderRestoreError(
             "PROVIDER_RATE_LIMITED",
             f"{provider} rate-limited restore; retry later.",
@@ -615,6 +638,10 @@ def _safe_provider_failure(
         or status >= 500
         or isinstance(error, transient_types)
         or code in {
+            "INTERNALERROR",
+            "REQUESTTIMEOUT",
+            "REQUESTTIMEOUTEXCEPTION",
+            "SERVICEUNAVAILABLE",
             "TRANSIENT_OUTAGE",
             "PROVIDER_TRANSIENT_FAILURE",
         }
@@ -1808,7 +1835,141 @@ def _onedrive_download(stored_backup, dest_zip_path, expected, state):
         raise _safe_provider_failure("OneDrive", error) from None
 
 
+def _aws_s3_committed_etag(stored_backup):
+    """Return the one committed ETag for this exact storage object."""
+    object_key = str(stored_backup.storage_file_id or "")
+    etags = set(
+        stored_backup.backup.artifact_records.filter(
+            storage_id=stored_backup.storage_id,
+            role__in=("archive", "destination"),
+            object_key=object_key,
+            verified_at__isnull=False,
+        )
+        .exclude(etag="")
+        .values_list("etag", flat=True)
+    )
+    state = (stored_backup.metadata or {}).get("aws_s3_object") or {}
+    if isinstance(state, dict) and state.get("etag"):
+        etags.add(str(state["etag"]))
+    if len(etags) > 1:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_STATE_CONFLICT",
+            "the committed AWS S3 ETag records disagree.",
+        )
+    return next(iter(etags), "")
+
+
+def _validate_aws_s3_head(stored_backup, head, expected, *, etag, version_id):
+    if not isinstance(head, dict):
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_RESPONSE",
+            "AWS S3 returned malformed backup metadata.",
+        )
+    try:
+        stored_backup.verify_s3_head_ownership(head)
+    except (TypeError, ValueError, RuntimeError) as error:
+        message = str(error).lower()
+        code = (
+            "PROVIDER_VERSION_DRIFT"
+            if "version" in message
+            else "INTEGRITY_MISMATCH"
+            if "integrity" in message
+            else "PROVIDER_OWNERSHIP_MISMATCH"
+        )
+        raise _SafeProviderRestoreError(
+            code,
+            "the committed AWS S3 object failed ownership or integrity verification.",
+        ) from error
+    if expected and int(head.get("ContentLength", -1)) != int(expected["size_bytes"]):
+        raise _SafeProviderRestoreError(
+            "INTEGRITY_MISMATCH",
+            "the committed AWS S3 object byte count changed.",
+        )
+    if etag and str(head.get("ETag") or "") != etag:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            "the committed AWS S3 object ETag changed.",
+        )
+    if version_id and str(head.get("VersionId") or "") != version_id:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            "the committed AWS S3 object version changed.",
+        )
+    return head
+
+
+def _aws_s3_download(stored_backup, dest_zip_path, expected):
+    """Download the exact committed S3 version through the authenticated SDK."""
+    object_key = str(stored_backup.storage_file_id or "")
+    if not object_key or "\x00" in object_key:
+        raise _SafeProviderRestoreError(
+            "INVALID_PROVIDER_PATH",
+            "the committed AWS S3 object key is invalid.",
+        )
+    try:
+        storage_config = stored_backup.storage.storage_aws_s3
+        values = storage_config._connection_values()
+        client = storage_config._s3_client(values)
+        version_id = stored_backup.committed_version_id()
+        etag = _aws_s3_committed_etag(stored_backup)
+        request = {
+            "Bucket": values["bucket_name"],
+            "Key": object_key,
+            **storage_config.expected_bucket_owner_kwargs(
+                values.get("expected_bucket_owner")
+            ),
+        }
+        if version_id:
+            request["VersionId"] = version_id
+
+        def verified_head():
+            head = client.head_object(**request)
+            return _validate_aws_s3_head(
+                stored_backup,
+                head,
+                expected,
+                etag=etag,
+                version_id=version_id,
+            )
+
+        initial = verified_head()
+        if str(initial.get("StorageClass") or "") in {"GLACIER", "DEEP_ARCHIVE"}:
+            if 'ongoing-request="false"' not in str(initial.get("Restore") or ""):
+                raise RestoreError(
+                    "backup is archived in Glacier/Deep Archive — restore it with the storage provider first"
+                )
+        response = client.get_object(**request)
+        _validate_aws_s3_head(
+            stored_backup,
+            response,
+            expected,
+            etag=etag,
+            version_id=version_id,
+        )
+        body = response.get("Body")
+        if body is None or not callable(getattr(body, "read", None)):
+            raise _SafeProviderRestoreError(
+                "MALFORMED_PROVIDER_RESPONSE",
+                "AWS S3 returned no readable backup stream.",
+            )
+        try:
+            _materialize_provider_stream(
+                iter(lambda: body.read(CHUNK_SIZE), b""),
+                dest_zip_path,
+                expected,
+                verified_head,
+            )
+        finally:
+            _close_response(body)
+    except RestoreError:
+        raise
+    except Exception as error:
+        raise _safe_provider_failure("AWS S3", error) from None
+
+
 def _fetch_exact_provider(stored_backup, dest_zip_path, expected, provider_code, state):
+    if provider_code == "aws_s3":
+        return _aws_s3_download(stored_backup, dest_zip_path, expected)
     if provider_code == "azure":
         return _azure_download(stored_backup, dest_zip_path, expected, state)
     if provider_code == "dropbox":
@@ -1843,8 +2004,19 @@ def fetch_backup_zip(stored_backup, dest_zip_path):
     else:
         provider_code = str(getattr(stored_backup.storage.type, "code", "") or "")
         if provider_code in EXACT_PROVIDER_CODES:
-            state = _provider_state(stored_backup, provider_code, expected)
-            if state is not None:
+            aws_s3_exact = provider_code == "aws_s3" and (
+                _destination_ledger_exists(stored_backup)
+                or "aws_s3_object" in (stored_backup.metadata or {})
+            )
+            # S3 identity is split across the destination artifact, version ID,
+            # storage metadata, and provider-owned object metadata rather than a
+            # single generic provider-state record.
+            state = (
+                None
+                if provider_code == "aws_s3"
+                else _provider_state(stored_backup, provider_code, expected)
+            )
+            if aws_s3_exact or state is not None:
                 _fetch_exact_provider(
                     stored_backup,
                     dest_zip_path,

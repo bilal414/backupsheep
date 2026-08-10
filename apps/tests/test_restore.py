@@ -697,6 +697,117 @@ class FetchBackupZipTests(RestoreBackendBase):
         self.assertTrue(kwargs.get("stream"))
         self.assertIn("timeout", kwargs)
 
+    def _committed_aws_s3_copy(self, payload):
+        _node, backup = self._website_backup()
+        storage = factories.make_storage(
+            self.account,
+            self.member,
+            code="aws_s3",
+            bucket="restore-e2e-bucket",
+        )
+        storage_config = storage.storage_aws_s3
+        storage_config.expected_bucket_owner = "123456789012"
+        storage_config.save(update_fields=["expected_bucket_owner", "modified"])
+        stored = self._website_point(
+            backup,
+            "prefix/backup.zip",
+            storage=storage,
+        )
+        digest = hashlib.sha256(payload).hexdigest()
+        stored.metadata = {
+            "aws_s3_object": {
+                "phase": "committed",
+                "object_key": stored.storage_file_id,
+                "size_bytes": len(payload),
+                "sha256": digest,
+                "etag": '"etag-1"',
+                "version_id": "version-1",
+            }
+        }
+        stored.save(update_fields=["metadata", "modified"])
+        backup.record_artifact_integrity(
+            role="destination",
+            object_key=stored.storage_file_id,
+            byte_count=len(payload),
+            storage=storage,
+            checksum_algorithm="sha256",
+            checksum_value=digest,
+            etag='"etag-1"',
+            version_id="version-1",
+            verified_at=timezone.now(),
+        )
+        head = {
+            "ContentLength": len(payload),
+            "ETag": '"etag-1"',
+            "VersionId": "version-1",
+            "Metadata": {
+                "backupsheep-backup-id": str(backup.id),
+                "backupsheep-bytes": str(len(payload)),
+                "backupsheep-sha256": digest,
+            },
+        }
+        return stored, storage_config, head
+
+    def test_aws_s3_restore_streams_exact_committed_version_without_presigned_url(self):
+        payload = b"PK\x03\x04" + b"s3-exact-version" * 100
+        stored, storage_config, head = self._committed_aws_s3_copy(payload)
+        client = mock.Mock()
+        client.head_object.side_effect = [dict(head), dict(head)]
+        client.get_object.return_value = {**head, "Body": io.BytesIO(payload)}
+        destination = os.path.join(self.tmp, "aws-s3.zip")
+
+        with mock.patch.object(
+            type(storage_config),
+            "_connection_values",
+            return_value={
+                "bucket_name": storage_config.bucket_name,
+                "expected_bucket_owner": storage_config.expected_bucket_owner,
+            },
+        ), mock.patch.object(
+            type(storage_config), "_s3_client", return_value=client
+        ), mock.patch.object(
+            type(stored), "generate_download_url"
+        ) as legacy_url:
+            restore_common.fetch_backup_zip(stored, destination)
+
+        with open(destination, "rb") as restored:
+            self.assertEqual(restored.read(), payload)
+        legacy_url.assert_not_called()
+        expected_request = {
+            "Bucket": "restore-e2e-bucket",
+            "Key": "prefix/backup.zip",
+            "VersionId": "version-1",
+            "ExpectedBucketOwner": "123456789012",
+        }
+        self.assertEqual(client.head_object.call_count, 2)
+        client.head_object.assert_called_with(**expected_request)
+        client.get_object.assert_called_once_with(**expected_request)
+
+    def test_aws_s3_restore_rejects_etag_drift_before_download(self):
+        payload = b"PK\x03\x04" + b"s3-etag-drift"
+        stored, storage_config, head = self._committed_aws_s3_copy(payload)
+        head["ETag"] = '"different-etag"'
+        client = mock.Mock()
+        client.head_object.return_value = head
+        destination = os.path.join(self.tmp, "aws-s3-drift.zip")
+
+        with mock.patch.object(
+            type(storage_config),
+            "_connection_values",
+            return_value={
+                "bucket_name": storage_config.bucket_name,
+                "expected_bucket_owner": storage_config.expected_bucket_owner,
+            },
+        ), mock.patch.object(
+            type(storage_config), "_s3_client", return_value=client
+        ):
+            with self.assertRaises(RestoreError) as context:
+                restore_common.fetch_backup_zip(stored, destination)
+
+        self.assertEqual(context.exception.code, "PROVIDER_VERSION_DRIFT")
+        client.get_object.assert_not_called()
+        self.assertFalse(os.path.exists(destination))
+
 
 class ExtractBackupZipTests(RestoreBackendBase):
     def test_extracts_tree(self):
