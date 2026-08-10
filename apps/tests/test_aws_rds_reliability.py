@@ -9,7 +9,11 @@ from django.utils import timezone
 from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps._tasks.helper import tasks as helper_tasks
 from apps._tasks.integration.aws_rds import backup_aws_rds
-from apps.console.backup.models import CoreAWSRDSBackup, CoreBackupExecution
+from apps.console.backup.models import (
+    CoreAWSRDSBackup,
+    CoreBackupExecution,
+    CoreCloudRestore,
+)
 from apps.console.connection.models import (
     CoreAuthAWSRDS,
     CoreAWSRegion,
@@ -109,6 +113,39 @@ class AWSRDSReliabilityTests(BaseTestCase):
         state = self.backup.get_execution_state(create=False)
         state.lease_expires_at = timezone.now() - timedelta(seconds=1)
         state.save(update_fields=["lease_expires_at", "modified"])
+
+    def _restore(self, name="rds-restore-target"):
+        return CoreCloudRestore.objects.create(
+            node=self.rds.node,
+            backup_id=self.backup.id,
+            name=name,
+            params={"db_instance_class": "db.t3.micro"},
+        )
+
+    @staticmethod
+    def _restored_instance(restore, marker, *, tags="owned", source=None):
+        tag_list = []
+        if tags == "owned":
+            tag_list = [
+                {"Key": "BackupSheepRestore", "Value": marker},
+                {
+                    "Key": "BackupSheepSource",
+                    "Value": source or "rds-reliability-backup",
+                },
+            ]
+        elif tags == "foreign":
+            tag_list = [
+                {"Key": "BackupSheepRestore", "Value": "another-restore"}
+            ]
+        return {
+            "DBInstanceIdentifier": restore.name,
+            "DBInstanceArn": (
+                "arn:aws:rds:us-east-1:123456789012:db:" + restore.name
+            ),
+            "DBSnapshotIdentifier": source or "rds-reliability-backup",
+            "DBInstanceStatus": "creating",
+            "TagList": tag_list,
+        }
 
     def test_celery_entry_point_uses_durable_backup_row_create_protocol(self):
         self.backup.status = UtilBackup.Status.COMPLETE
@@ -234,6 +271,119 @@ class AWSRDSReliabilityTests(BaseTestCase):
             self.assertIsNone(self.backup.create_snapshot(task_id="rds-duplicate-worker"))
 
         self.client.create_db_snapshot.assert_called_once()
+
+    def test_lost_restore_response_adopts_exact_tagged_target_without_duplicate(self):
+        restore = self._restore()
+        not_found = self._client_error(
+            "DBInstanceNotFound", operation="DescribeDBInstances"
+        )
+        self.client.describe_db_instances.side_effect = [
+            not_found,
+            {
+                "DBInstances": [
+                    self._restored_instance(restore, "placeholder")
+                ]
+            },
+        ]
+        self.client.restore_db_instance_from_db_snapshot.side_effect = TimeoutError(
+            "lost response"
+        )
+
+        with self._clients():
+            result = self.rds.restore_snapshot(self.backup, restore)
+        self.assertEqual(result, CoreCloudRestore.Status.IN_PROGRESS)
+        restore.refresh_from_db()
+        marker = restore.restore_marker
+        self.client.list_tags_for_resource.return_value = {
+            "TagList": self._restored_instance(restore, marker)["TagList"]
+        }
+
+        with self._clients():
+            self.rds.restore_snapshot(self.backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, restore.name)
+        self.assertEqual(restore.status, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertFalse(restore.params["_bs_create_outcome_unknown"])
+        self.client.restore_db_instance_from_db_snapshot.assert_called_once()
+
+    def test_restore_reconciliation_waits_for_eventually_consistent_tags(self):
+        restore = self._restore()
+        restore.params = {"_bs_create_outcome_unknown": True}
+        restore.save(update_fields=["params", "modified"])
+        self.client.describe_db_instances.return_value = {
+            "DBInstances": [self._restored_instance(restore, "ignored", tags="empty")]
+        }
+        self.client.list_tags_for_resource.return_value = {"TagList": []}
+
+        with self._clients():
+            result = self.rds.restore_snapshot(self.backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(result, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertEqual(restore.status, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertTrue(restore.params["_bs_create_outcome_unknown"])
+        self.assertIsNone(restore.resource_id)
+        self.client.restore_db_instance_from_db_snapshot.assert_not_called()
+
+    def test_restore_reconciliation_rejects_foreign_tag_list(self):
+        restore = self._restore()
+        restore.params = {"_bs_create_outcome_unknown": True}
+        restore.save(update_fields=["params", "modified"])
+        self.client.describe_db_instances.return_value = {
+            "DBInstances": [
+                self._restored_instance(restore, "ignored", tags="foreign")
+            ]
+        }
+        self.client.list_tags_for_resource.return_value = {
+            "TagList": self._restored_instance(
+                restore, "ignored", tags="foreign"
+            )["TagList"]
+        }
+
+        with self._clients():
+            result = self.rds.restore_snapshot(self.backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(result, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(
+            restore.last_error_code, "PROVIDER_OWNERSHIP_MISMATCH"
+        )
+        self.assertIsNone(restore.resource_id)
+        self.client.restore_db_instance_from_db_snapshot.assert_not_called()
+
+    def test_restore_poll_requires_exact_rds_tag_list(self):
+        restore = self._restore()
+        restore.resource_id = restore.name
+        restore.restore_marker = "backupsheep-restore-rds-poll"
+        restore.params = {
+            "_bs_marker_required": True,
+            "_backupsheep_restore": {
+                "source_id": self.backup.unique_id,
+            },
+        }
+        restore.save()
+        self.client.describe_db_instances.return_value = {
+            "DBInstances": [
+                self._restored_instance(
+                    restore, restore.restore_marker, tags="foreign"
+                )
+            ]
+        }
+        self.client.list_tags_for_resource.return_value = {
+            "TagList": self._restored_instance(
+                restore, restore.restore_marker, tags="foreign"
+            )["TagList"]
+        }
+
+        with self._clients():
+            result = self.rds.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(result, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(
+            restore.last_error_code, "PROVIDER_OWNERSHIP_MISMATCH"
+        )
 
     def test_duplicate_exact_matches_fail_closed_and_never_create(self):
         matches = [self._snapshot(), self._snapshot()]

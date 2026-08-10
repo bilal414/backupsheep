@@ -417,6 +417,7 @@ def _restore_marker_matches(resource, marker):
     tags = _restore_tags(
         resource.get("tags")
         or resource.get("Tags")
+        or resource.get("TagList")
         or resource.get("labels")
         or resource.get("freeformTags")
         or resource.get("freeform_tags")
@@ -554,7 +555,17 @@ def _restore_verify_target(restore, resource, *, source_id=None, marker=None, so
         _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
         return False
     marker_required = bool(marker_required if marker_required is not None else _restore_params(restore).get("_bs_marker_required"))
-    has_marker_fields = any(key in resource for key in ("tags", "Tags", "labels", "freeformTags", "freeform_tags"))
+    has_marker_fields = any(
+        key in resource
+        for key in (
+            "tags",
+            "Tags",
+            "TagList",
+            "labels",
+            "freeformTags",
+            "freeform_tags",
+        )
+    )
     if marker and marker_required and has_marker_fields and not _restore_marker_matches(resource, marker):
         _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
         return False
@@ -4920,6 +4931,30 @@ class CoreAWSRDS(UtilCloud):
         identifier = re.sub(r"^[^a-zA-Z]+", "", identifier)
         return identifier[:63].rstrip("-")
 
+    @staticmethod
+    def _restore_instance_with_tags(client, instance):
+        """Read the current RDS ownership tags for one exact restore target."""
+
+        if not isinstance(instance, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        arn = str(instance.get("DBInstanceArn") or "")
+        if not arn:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        response = client.list_tags_for_resource(ResourceName=arn)
+        if not isinstance(response, dict) or not isinstance(
+            response.get("TagList"), list
+        ):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        enriched = dict(instance)
+        enriched["TagList"] = list(response["TagList"])
+        return enriched
+
+    @staticmethod
+    def _restore_tags_pending(instance, marker):
+        tags = _restore_tags(instance.get("TagList") or [])
+        values = set(tags) | set(tags.values())
+        return not tags and str(marker) not in values
+
     def _restore_snapshot_rds(self, backup, restore):
         client = self.node.connection.auth_aws_rds.get_client()
         identifier = self._restore_identifier(restore)
@@ -4951,6 +4986,19 @@ class CoreAWSRDS(UtilCloud):
                 if classified.code != "PROVIDER_NOT_FOUND":
                     raise classified
             if existing:
+                existing = self._restore_instance_with_tags(client, existing)
+                if self._restore_tags_pending(existing, marker) and _restore_unknown(
+                    restore
+                ):
+                    return _restore_handle_error(
+                        restore,
+                        _RestoreProviderError(
+                            "PROVIDER_TRANSIENT_OUTAGE",
+                            retryable=True,
+                            unknown_outcome=True,
+                        ),
+                        mutation=False,
+                    )
                 if not _restore_verify_target(
                     restore,
                     existing,
@@ -4985,7 +5033,29 @@ class CoreAWSRDS(UtilCloud):
                 if params.get(key) is not None:
                     request[provider_key] = params[key]
             _restore_begin_mutation(restore)
-            client.restore_db_instance_from_db_snapshot(**request)
+            response = client.restore_db_instance_from_db_snapshot(**request)
+            created = response.get("DBInstance") if isinstance(response, dict) else None
+            if not isinstance(created, dict):
+                _restore_unknown_outcome(
+                    restore, code="PROVIDER_MALFORMED_RESPONSE"
+                )
+                return _restore_status("IN_PROGRESS")
+            if (
+                str(created.get("DBInstanceIdentifier") or "") != identifier
+                or str(created.get("DBSnapshotIdentifier") or "")
+                != str(backup.unique_id)
+            ):
+                return _restore_safe_failure(
+                    restore,
+                    "PROVIDER_OWNERSHIP_MISMATCH",
+                    manual_review=True,
+                )
+            if "TagList" in created and not _restore_marker_matches(created, marker):
+                return _restore_safe_failure(
+                    restore,
+                    "PROVIDER_OWNERSHIP_MISMATCH",
+                    manual_review=True,
+                )
             _restore_adopt(restore, identifier, provider_status="creating")
         except Exception as error:
             if isinstance(error, _RestoreProviderError):
@@ -5006,12 +5076,22 @@ class CoreAWSRDS(UtilCloud):
             instances = response.get("DBInstances") if isinstance(response, dict) else None
             if not isinstance(instances, list) or len(instances) != 1:
                 return _restore_safe_failure(restore, "PROVIDER_NOT_FOUND")
-            instance = instances[0]
+            instance = self._restore_instance_with_tags(client, instances[0])
+            marker = _restore_marker_value(restore)
+            if self._restore_tags_pending(instance, marker):
+                return _restore_handle_error(
+                    restore,
+                    _RestoreProviderError(
+                        "PROVIDER_TRANSIENT_OUTAGE", retryable=True
+                    ),
+                    mutation=False,
+                    raise_terminal=False,
+                )
             if not _restore_verify_target(
                 restore,
                 instance,
                 source_id=(_restore_params(restore).get("_backupsheep_restore") or {}).get("source_id"),
-                marker=_restore_marker_value(restore),
+                marker=marker,
                 source_keys=("DBSnapshotIdentifier",),
             ):
                 return _restore_status("FAILED")

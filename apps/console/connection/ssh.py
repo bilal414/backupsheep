@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import os
+import socket
 import tempfile
 
 import paramiko
 from django.conf import settings
 
 from .reliability import ClassifiedConnectionError, classified_connection_error
+
+
+class SSHHostKeyScanError(Exception):
+    """Safe, typed failure raised while reading a server's SSH host key."""
+
+    def __init__(self, code: str, detail: str, status_code: int = 502):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+        self.status_code = status_code
 
 
 def _timeout(name: str, default: int) -> int:
@@ -135,3 +146,64 @@ def open_ssh_client(
 def cleanup_temporary_key(path) -> None:
     if path and os.path.exists(path):
         os.remove(path)
+
+
+def scan_host_key(host, port, timeout=None):
+    """Complete only the SSH transport handshake and return the server key.
+
+    This deliberately never calls an authentication method.  The TCP socket and
+    Paramiko handshake each receive a finite timeout so preview/approval cannot
+    pin an API worker indefinitely.  The caller is responsible for comparing the
+    returned key with an approved fingerprint before allowing authenticated SSH.
+    """
+
+    bounded_timeout = timeout
+    if bounded_timeout is None:
+        bounded_timeout = _timeout("SSH_HOST_KEY_SCAN_TIMEOUT", 10)
+    try:
+        bounded_timeout = max(1, min(float(bounded_timeout), 30.0))
+    except (TypeError, ValueError):
+        bounded_timeout = 10.0
+
+    raw_socket = None
+    transport = None
+    try:
+        raw_socket = socket.create_connection(
+            (str(host), int(port)), timeout=bounded_timeout
+        )
+        raw_socket.settimeout(bounded_timeout)
+        transport = paramiko.Transport(raw_socket)
+        transport.start_client(timeout=bounded_timeout)
+        key = transport.get_remote_server_key()
+        if key is None:
+            raise paramiko.SSHException("missing server host key")
+        return key
+    except (socket.timeout, TimeoutError):
+        raise SSHHostKeyScanError(
+            "ssh_timeout", "SSH host-key scan timed out.", status_code=504
+        )
+    except (OSError, socket.error):
+        raise SSHHostKeyScanError(
+            "ssh_unreachable", "Unable to reach the SSH host.", status_code=502
+        )
+    except paramiko.SSHException:
+        raise SSHHostKeyScanError(
+            "ssh_handshake_failed", "SSH handshake failed.", status_code=502
+        )
+    except SSHHostKeyScanError:
+        raise
+    except Exception:
+        raise SSHHostKeyScanError(
+            "ssh_scan_failed", "Unable to read the SSH host key.", status_code=502
+        )
+    finally:
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception:
+                pass
+        elif raw_socket is not None:
+            try:
+                raw_socket.close()
+            except Exception:
+                pass

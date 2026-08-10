@@ -238,3 +238,22 @@ class ConnectionSetupTemplateResilienceTests(SimpleTestCase):
             section.index('border-t border-slate-200'),
             section.index('{% if ssh_managed_key_enabled %}'),
         )
+
+    def test_unknown_ssh_host_key_has_explicit_review_and_approval_flow(self):
+        self.assertIn("async previewSSHHostKey()", self.source)
+        self.assertIn("async approveSSHHostKey(replace = false)", self.source)
+        self.assertIn("/api/v1/utils/ssh-host-keys/preview/", self.source)
+        self.assertIn("/api/v1/utils/ssh-host-keys/approve/", self.source)
+        self.assertIn("hostKeyReview?.fingerprint", self.source)
+        self.assertIn("Approve this host key and retry", self.source)
+        self.assertIn("Replace verified host key and retry", self.source)
+        self.assertIn("await this.previewSSHHostKey()", self.source)
+        self.assertIn("await this.saveConnection()", self.source)
+        self.assertNotIn("hostKeyReview?.key_base64", self.source)
+
+    def test_ssh_security_switches_have_distinct_accessible_names(self):
+        self.assertIn('aria-label="Use your private key"', self.source)
+        self.assertIn(
+            'aria-label="Use legacy SHA-1 key verification"',
+            self.source,
+        )

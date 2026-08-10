@@ -21,6 +21,11 @@
                        x-bind:class="object_type === 'dynamodb' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
                        class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">DynamoDB Tables</a>
                 {% endif %}
+                {% if integration.code == "vultr" %}
+                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'vultr_database' %}"
+                       x-bind:class="object_type === 'vultr_database' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
+                       class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">Managed Databases</a>
+                {% endif %}
             </nav>
         </div>
 
@@ -98,7 +103,7 @@
                                             <svg x-cloak x-show="object_type==='volume'" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                                                 <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
                                             </svg>
-                                            <svg x-cloak x-show="object_type==='s3' || object_type==='dynamodb'" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                            <svg x-cloak x-show="object_type==='s3' || object_type==='dynamodb' || object_type==='vultr_database'" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                                                 <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z"/>
                                             </svg>
                                         </span>
@@ -192,9 +197,15 @@
 
             async linkObject(object) {
                 Alpine.store('showLoading').toggle();
-                let endpointObjectCode = (this.integration_code === "aws" &&
-                    (this.object_type === "s3" || this.object_type === "dynamodb")) ? "cloud" : "{{object_code}}";
-                let url = "/api/v1/" + endpointObjectCode + "s/" + this.integration_code + "/";
+                const isAWSBackupResource = this.integration_code === "aws"
+                    && (this.object_type === "s3" || this.object_type === "dynamodb");
+                const isVultrDatabase = this.integration_code === "vultr"
+                    && this.object_type === "vultr_database";
+                let endpointObjectCode = (isAWSBackupResource || isVultrDatabase)
+                    ? "cloud" : "{{object_code}}";
+                let endpointIntegrationCode = isVultrDatabase
+                    ? "vultr_database" : this.integration_code;
+                let url = "/api/v1/" + endpointObjectCode + "s/" + endpointIntegrationCode + "/";
 
                 let project_id = null;
                 let zone = null;
@@ -226,6 +237,13 @@
                     zone: zone,
                     metadata: object
                 };
+                if (isVultrDatabase) {
+                    delete data.resource_type;
+                    data.engine = object._bs_engine || object.database_engine || object.engine || '';
+                    data.region = object.region || object._bs_region || '';
+                    data.plan = object.plan || '';
+                    data.provider_status = object.status || '';
+                }
                 let response = await fetch(url, {
                     headers: {
                         'Accept': 'application/json',

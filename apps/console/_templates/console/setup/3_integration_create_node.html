@@ -70,7 +70,7 @@
             {% include "console/setup/_setup_wordpress_node.html" %}
         {% elif integration_code == "database" %}
             {% include "console/setup/_setup_database_node.html" %}
-        {% elif object_code == "cloud" or object_code == "volume" or object_code == "s3" or object_code == "dynamodb" %}
+        {% elif object_code == "cloud" or object_code == "volume" or object_code == "s3" or object_code == "dynamodb" or object_code == "vultr_database" %}
             {% include "console/setup/_setup_cloud_node.html" %}
         {% endif %}
     </div>
