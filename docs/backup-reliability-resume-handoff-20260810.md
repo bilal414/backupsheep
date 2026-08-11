@@ -5,7 +5,13 @@ backup hardening and live provider validation work. It intentionally contains no
 credentials, passwords, private keys, session cookies, or unredacted provider
 tokens.
 
-## Stop point
+> **Superseded stop point:** the authoritative final checkpoint is now
+> `docs/backup-reliability-final-wrap-up-20260810.md`, at implementation commit
+> `e43ef8e9c77019db919720a49e693583eda9c0dc`. The sections below preserve the
+> earlier plan and evidence chronology; do not use their older pending lists as
+> the current resume order.
+
+## Historical stop point (superseded)
 
 - Working branch: `develop`.
 - Integrated implementation checkpoint: `4be0ce809681fb6770af33fea14a10949d3b26d8`.
