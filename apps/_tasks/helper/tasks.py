@@ -846,6 +846,20 @@ def _notify_cloud_failure_once(node, backup, should_notify, status):
             backup.type,
             "Cloud provider reported the snapshot as errored.",
         )
+        # Provider polling persists the categorized failure before the
+        # notification boundary. Carry only that stable code across the legacy
+        # exception interface; CoreNode's notification contract allowlists it
+        # before putting anything in an account log or email.
+        try:
+            execution = backup.get_execution_state(create=False)
+            stable_error_code = str(
+                getattr(execution, "last_error_code", "") or ""
+            ).strip().upper()[:64]
+        except Exception as error:
+            capture_exception(error)
+            stable_error_code = ""
+        if stable_error_code:
+            error.error_code = stable_error_code
     node.notify_backup_fail(error, backup.type)
 
 

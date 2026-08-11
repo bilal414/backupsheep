@@ -118,6 +118,31 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         current.refresh_from_db()
         self.assertEqual(current.execution_phase, "validated")
 
+    def test_cloud_restore_root_task_id_survives_poll_recovery_takeover(self):
+        _node, _backup, restore = self._cloud_restore()
+        restore.celery_task_id = "root-restore-request"
+        restore.save(update_fields=["celery_task_id", "modified"])
+
+        first = DurableRestoreLease(
+            restore, phase="provider_create", task_id="root-restore-request"
+        )
+        initial = first.claim()
+        self._stop_without_release(first)
+        CoreCloudRestore.objects.filter(pk=restore.pk).update(
+            lease_expires_at=timezone.now() - timedelta(seconds=1)
+        )
+
+        recovery = DurableRestoreLease(
+            restore, phase="provider_poll", task_id="poll-recovery-delivery"
+        )
+        current = recovery.claim()
+        self.addCleanup(recovery.release)
+
+        self.assertEqual(initial.celery_task_id, "root-restore-request")
+        self.assertEqual(current.celery_task_id, "root-restore-request")
+        self.assertEqual(current.attempt_count, initial.attempt_count + 1)
+        self.assertIn("poll-recovery-delivery", current.lease_owner)
+
     def test_task_never_persists_secret_bearing_restore_exception(self):
         node, backup, restore = self._restore()
         canary = "Bearer live-token password=database-secret"

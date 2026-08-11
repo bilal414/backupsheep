@@ -104,7 +104,11 @@ class DurableRestoreLease:
             restore.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
             restore.heartbeat_at = now
             restore.attempt_count += 1
-            restore.celery_task_id = self.task_id or restore.celery_task_id
+            # The root restore task id is the durable request identity. Poll and
+            # recovery deliveries have their own lease owner and must not replace
+            # that identity; it is used for correlation and idempotent adoption.
+            if not restore.celery_task_id and self.task_id:
+                restore.celery_task_id = self.task_id
             restore.status = restore.Status.IN_PROGRESS
             restore.last_error_code = ""
             restore.error = None

@@ -14,6 +14,7 @@ from apps.api.v1.backup.website.serializers import (
     CoreWebsiteBackupSerializer,
     CoreWebsiteRestoreSerializer,
 )
+from apps.api.v1.backup.serializers import _safe_provider_status
 from apps.console.backup.models import (
     CoreBackupArtifact,
     CoreBackupExecution,
@@ -26,6 +27,14 @@ from apps.tests.base import BaseTestCase
 
 
 class ExecutionStatusApiTests(BaseTestCase):
+    def test_documented_rds_lifecycle_statuses_remain_visible(self):
+        self.assertEqual(
+            _safe_provider_status("configuring-enhanced-monitoring"),
+            "configuring-enhanced-monitoring",
+        )
+        self.assertEqual(_safe_provider_status("restore-error"), "restore-error")
+        self.assertEqual(_safe_provider_status("provider-secret-canary"), "unknown")
+
     def _backup(self, *, status=None):
         node = factories.make_website_node(self.account, self.member)
         return CoreWebsiteBackup.objects.create(

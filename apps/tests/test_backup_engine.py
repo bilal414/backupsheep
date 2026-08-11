@@ -83,6 +83,61 @@ class PollCloudBackupTests(BaseTestCase):
         self.assertEqual(backup.status, UtilBackup.Status.FAILED)
         notify.assert_called_once()
 
+    def test_provider_failure_code_survives_notification_correlation(self):
+        node, backup = self._backup()
+        execution = backup.record_execution_error(
+            code="PROVIDER_OWNERSHIP_MISMATCH",
+            message="provider response must never be persisted",
+        )
+        execution.reconciliation_state = execution.ReconciliationState.MANUAL_REVIEW
+        execution.reconciliation_reason = "PROVIDER_OWNERSHIP_MISMATCH"
+        execution.reconciliation_metadata = {"proof": "durable"}
+        execution.save(
+            update_fields=[
+                "reconciliation_state",
+                "reconciliation_reason",
+                "reconciliation_metadata",
+                "modified",
+            ]
+        )
+
+        with mock.patch.object(
+            CoreDigitalOceanBackup,
+            "poll_status",
+            return_value=UtilBackup.Status.FAILED,
+        ), mock.patch.object(
+            backup.__class__, "record_execution_error", wraps=backup.record_execution_error
+        ) as record_error, mock.patch(
+            "apps._tasks.helper.tasks.send_postmark_email.delay"
+        ):
+            helper_tasks.poll_cloud_backup.apply(args=[node.id, backup.id])
+
+        record_error.assert_not_called()
+        backup.refresh_from_db()
+        persisted = backup.get_execution_state(create=False)
+        self.assertEqual(persisted.last_error_code, "PROVIDER_OWNERSHIP_MISMATCH")
+        self.assertEqual(
+            persisted.last_error_message,
+            "Provider ownership verification failed.",
+        )
+        self.assertEqual(
+            persisted.reconciliation_state,
+            persisted.ReconciliationState.MANUAL_REVIEW,
+        )
+        self.assertEqual(persisted.reconciliation_metadata, {"proof": "durable"})
+
+        with mock.patch.object(node, "notify_backup_fail") as notify:
+            helper_tasks._notify_cloud_failure_once(
+                node, backup, True, UtilBackup.Status.FAILED
+            )
+        notification_error = notify.call_args.args[0]
+        self.assertEqual(
+            notification_error.error_code, "PROVIDER_OWNERSHIP_MISMATCH"
+        )
+        contract = node._backup_notification_contract(notification_error)
+        self.assertEqual(contract["code"], "PROVIDER_OWNERSHIP_MISMATCH")
+        self.assertIn("ownership", contract["remediation"].lower())
+
     def test_in_progress_requeues(self):
         node, backup = self._backup()
         with mock.patch.object(CoreDigitalOceanBackup, "poll_status",

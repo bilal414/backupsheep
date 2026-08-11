@@ -12,6 +12,7 @@ from functools import partial
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, mixins
 from rest_framework import viewsets
@@ -62,6 +63,8 @@ _CLOUD_RESTORE_MAX_PARAM_DEPTH = 16
 _CLOUD_RESTORE_MAX_PARAM_ITEMS = 1000
 _CLOUD_RESTORE_MAX_PARAM_BYTES = 64 * 1024
 _CLOUD_RESTORE_MISSING = object()
+_CLOUD_RESTORE_MANUAL_RESUME_MAX_COUNT = 1000
+_CLOUD_RESTORE_MANUAL_RESUME_HISTORY_LIMIT = 10
 
 
 def _normalize_cloud_restore_params(value):
@@ -241,6 +244,7 @@ class CoreNodeView(viewsets.ModelViewSet):
         "reset_incremental": "node_changes",
         "take_snapshot": "backup_create",
         "restore_backup": "backup_create",
+        "resume_restore": "backup_create",
     }
     serializer_class = CoreNodeSerializer
     all_fields = [f.name for f in CoreNode._meta.get_fields()]
@@ -566,6 +570,250 @@ class CoreNodeView(viewsets.ModelViewSet):
             response_data,
             status=(status.HTTP_201_CREATED if created else status.HTTP_200_OK),
         )
+
+    @action(detail=True, methods=["post"])
+    def resume_restore(self, request, pk=None):
+        """Resume read-only provider verification for one existing target.
+
+        This action is deliberately separate from ``restore_backup``.  It may
+        only move a failed/manual-review row with an already persisted provider
+        pointer back to polling; it never invokes a provider create/restore
+        endpoint.  The row lock and durable manual-resume sequence make two
+        operator clicks converge on one Celery delivery.
+        """
+        from apps._tasks.integration.restore import poll_cloud_restore
+        from apps.console.backup.models import CoreCloudRestore
+
+        node = self.get_object()
+        if not isinstance(request.data, Mapping) or set(request.data.keys()) != {
+            "restore_id"
+        }:
+            return Response(
+                {
+                    "code": "restore_id_required",
+                    "detail": "A single restore_id is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        raw_restore_id = request.data.get("restore_id")
+        if isinstance(raw_restore_id, bool):
+            raw_restore_id = None
+        try:
+            restore_id = int(raw_restore_id)
+        except (TypeError, ValueError, OverflowError):
+            restore_id = 0
+        if restore_id < 1:
+            return Response(
+                {
+                    "code": "restore_id_required",
+                    "detail": "A valid restore_id is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        queued = False
+        resume_sequence = None
+        task_id = None
+        restore = None
+        try:
+            with transaction.atomic():
+                # The node came from the account/group-scoped queryset above.
+                # Requiring the restore to point back to that exact node prevents
+                # an authenticated member from probing or operating another
+                # account's restore by primary key.
+                restore = (
+                    CoreCloudRestore.objects.select_for_update()
+                    .filter(pk=restore_id, node=node)
+                    .first()
+                )
+                if restore is None:
+                    return Response(
+                        {
+                            "code": "restore_not_found",
+                            "detail": "The restore was not found for this node.",
+                        },
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                # A second click after the first transaction committed is a
+                # successful no-op. It must not create a second poll message or
+                # increment the bounded operator history.
+                if restore.status == CoreCloudRestore.Status.IN_PROGRESS:
+                    response_data = dict(CoreCloudRestoreSerializer(restore).data)
+                    response_data.update(
+                        {
+                            "idempotent_replay": True,
+                            "manual_resume_enqueued": False,
+                            "code": "restore_resume_already_active",
+                        }
+                    )
+                    return Response(response_data, status=status.HTTP_200_OK)
+
+                if restore.status == CoreCloudRestore.Status.COMPLETE:
+                    return Response(
+                        {
+                            "code": "restore_already_complete",
+                            "detail": "The restore is already complete and was not changed.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                if not (
+                    restore.status == CoreCloudRestore.Status.FAILED
+                    and restore.operation_phase
+                    == CoreCloudRestore.OperationPhase.MANUAL_REVIEW
+                ):
+                    return Response(
+                        {
+                            "code": "restore_not_manual_review",
+                            "detail": "Only failed restores awaiting manual review can be resumed.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                provider_pointer = str(
+                    restore.resource_id or restore.provider_job_id or ""
+                ).strip()
+                if not provider_pointer:
+                    return Response(
+                        {
+                            "code": "restore_provider_pointer_missing",
+                            "detail": "This failed restore has no provider target to verify safely.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                metadata = dict(restore.execution_metadata or {})
+                try:
+                    previous_count = int(
+                        metadata.get("manual_resume_count") or 0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    previous_count = 0
+                previous_count = max(0, previous_count)
+                if previous_count >= _CLOUD_RESTORE_MANUAL_RESUME_MAX_COUNT:
+                    return Response(
+                        {
+                            "code": "restore_manual_resume_limit_reached",
+                            "detail": "This restore has reached its safe manual-resume limit.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                resume_sequence = previous_count + 1
+                resumed_at = timezone.now().isoformat()
+                history = metadata.get("manual_resume_history")
+                if not isinstance(history, list):
+                    history = []
+                history = [item for item in history if isinstance(item, dict)]
+                history.append(
+                    {
+                        "sequence": resume_sequence,
+                        "requested_at": resumed_at,
+                    }
+                )
+                metadata["manual_resume_count"] = resume_sequence
+                metadata["manual_resume_at"] = resumed_at
+                metadata["manual_resume_history"] = history[
+                    -_CLOUD_RESTORE_MANUAL_RESUME_HISTORY_LIMIT:
+                ]
+                # Keep the original request task identity available even after
+                # a poll delivery claims a worker lease. The model field itself
+                # is intentionally not rewritten by this operator action.
+                if restore.celery_task_id and not metadata.get("root_celery_task_id"):
+                    metadata["root_celery_task_id"] = restore.celery_task_id
+
+                task_id = f"cloud-restore-resume-{restore.id}-{resume_sequence}"
+                restore.execution_metadata = metadata
+                restore.status = CoreCloudRestore.Status.IN_PROGRESS
+                restore.operation_phase = CoreCloudRestore.OperationPhase.POLLING
+                restore.execution_phase = "provider_polling"
+                restore.error = None
+                restore.last_error_code = ""
+                restore.next_retry_at = None
+                # Fence any stale failed-worker lease before the read-only poll
+                # is delivered. The poll task will claim a fresh lease.
+                restore.lease_owner = ""
+                restore.lease_token = None
+                restore.lease_expires_at = None
+                restore.heartbeat_at = None
+                restore.save(
+                    update_fields=[
+                        "execution_metadata",
+                        "status",
+                        "operation_phase",
+                        "execution_phase",
+                        "error",
+                        "last_error_code",
+                        "next_retry_at",
+                        "lease_owner",
+                        "lease_token",
+                        "lease_expires_at",
+                        "heartbeat_at",
+                        "modified",
+                    ]
+                )
+                _log_activity(
+                    request,
+                    CoreLog.Type.RESTORE,
+                    {
+                        "message": f"Restore verification resumed for node '{node.name}'.",
+                        "action": "restore_resume_verification",
+                        "actor_email": request.user.email,
+                        "restore_id": restore.id,
+                        "restore_name": restore.name,
+                        "node_id": node.id,
+                        "node_name": node.name,
+                        "resume_sequence": resume_sequence,
+                    },
+                )
+                queued = True
+                transaction.on_commit(
+                    partial(
+                        poll_cloud_restore.apply_async,
+                        task_id=task_id,
+                        args=[node.id, restore.id],
+                    )
+                )
+        except Exception:
+            # The database transition is committed before on_commit callbacks
+            # publish to Celery. If the broker acknowledgement is lost, leave
+            # the active row for resume_in_progress_restores and return only a
+            # safe recovery message; a repeat click remains idempotent.
+            if queued and resume_sequence is not None:
+                durable = (
+                    CoreCloudRestore.objects.filter(
+                        pk=restore_id,
+                        node=node,
+                        status=CoreCloudRestore.Status.IN_PROGRESS,
+                        execution_metadata__manual_resume_count=resume_sequence,
+                    )
+                    .first()
+                )
+                if durable is not None:
+                    response_data = dict(CoreCloudRestoreSerializer(durable).data)
+                    response_data.update(
+                        {
+                            "idempotent_replay": False,
+                            "manual_resume_enqueued": False,
+                            "code": "restore_resume_saved_for_recovery",
+                        }
+                    )
+                    return Response(response_data, status=status.HTTP_202_ACCEPTED)
+            raise RestoreCreateError(
+                "The restore resume request could not be accepted. Please retry safely."
+            )
+
+        response_data = dict(CoreCloudRestoreSerializer(restore).data)
+        response_data.update(
+            {
+                "idempotent_replay": False,
+                "manual_resume_enqueued": True,
+                "resume_sequence": resume_sequence,
+            }
+        )
+        return Response(response_data, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=["get"])
     def restores(self, request, pk=None):

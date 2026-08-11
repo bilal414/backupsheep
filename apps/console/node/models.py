@@ -5422,6 +5422,72 @@ class CoreLightsail(UtilCloud):
 
 
 class CoreAWSRDS(UtilCloud):
+    """AWS RDS source integration with an explicit restore status policy.
+
+    The policy follows the DB instance status values returned by
+    ``DescribeDBInstances`` in the AWS RDS User Guide. ``available`` is the only
+    successful restore state. The documented transitional states remain
+    ``IN_PROGRESS`` so a restore can converge through provider work such as
+    enhanced-monitoring configuration, backup, storage initialization, or an
+    engine upgrade. Known failure/deletion states become a terminal provider
+    failure. Any value outside these sets is malformed and becomes manual review;
+    it is never silently treated as in progress.
+    """
+
+    _RDS_RESTORE_SUCCESS_STATUSES = frozenset({"available"})
+    _RDS_RESTORE_IN_PROGRESS_STATUSES = frozenset(
+        {
+            "backing-up",
+            "configuring-enhanced-monitoring",
+            "configuring-iam-database-auth",
+            "configuring-log-exports",
+            "converting-to-vpc",
+            "creating",
+            "modifying",
+            "moving-to-vpc",
+            "rebooting",
+            "resetting-master-credentials",
+            "renaming",
+            "starting",
+            "stopped",
+            "stopping",
+            "storage-config-upgrade",
+            "storage-initialization",
+            "storage-optimization",
+            "upgrading",
+            # Official recoverable/maintenance states are also known and
+            # nonterminal, even though they are uncommon immediately after a
+            # snapshot restore.
+            "inaccessible-encryption-credentials-recoverable",
+            "maintenance",
+        }
+    )
+    _RDS_RESTORE_TERMINAL_FAILURE_STATUSES = frozenset(
+        {
+            "failed",
+            "restore-error",
+            "incompatible-restore",
+            "incompatible-network",
+            "incompatible-parameters",
+            "storage-full",
+            "upgrade-failed",
+            "deleted",
+            "deleting",
+            # Other official RDS states that cannot be treated as a successful
+            # restore target. ``delete-precheck`` is fail-closed because the
+            # provider is already validating deletion of the target.
+            "delete-precheck",
+            "inaccessible-encryption-credentials",
+            "incompatible-create",
+            "incompatible-option-group",
+            "insufficient-capacity",
+        }
+    )
+    _RDS_RESTORE_KNOWN_STATUSES = (
+        _RDS_RESTORE_SUCCESS_STATUSES
+        | _RDS_RESTORE_IN_PROGRESS_STATUSES
+        | _RDS_RESTORE_TERMINAL_FAILURE_STATUSES
+    )
     _RDS_RESTORE_DEFAULT_KEYS = (
         "db_instance_class",
         "db_subnet_group_name",
@@ -5682,6 +5748,16 @@ class CoreAWSRDS(UtilCloud):
             tags.get("BackupSheepRestore") == str(marker)
             and tags.get("BackupSheepSource") == str(source_id)
         )
+
+    @staticmethod
+    def _rds_record_restore_provider_status(restore, provider_status):
+        """Persist the safe status token shown by restore execution status APIs."""
+        params = _restore_params(restore)
+        if params.get("_bs_provider_status") == provider_status:
+            return
+        params["_bs_provider_status"] = str(provider_status)[:64]
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
 
     @classmethod
     def _validate_rds_restore_default(cls, key, value):
@@ -6640,18 +6716,39 @@ class CoreAWSRDS(UtilCloud):
                 restore.resource_id
             ):
                 return _restore_status("FAILED")
-            status = instance.get("DBInstanceStatus")
-            if status == "available":
+            raw_status = instance.get("DBInstanceStatus")
+            status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+            if status not in self._RDS_RESTORE_KNOWN_STATUSES:
+                # Do not leave the UI showing the earlier create status when AWS
+                # returns a new, malformed, or otherwise unsupported value.
+                self._rds_record_restore_provider_status(restore, "unknown")
+                return _restore_safe_failure(
+                    restore,
+                    "PROVIDER_MALFORMED_RESPONSE",
+                    manual_review=True,
+                )
+            self._rds_record_restore_provider_status(restore, status)
+            if status in self._RDS_RESTORE_SUCCESS_STATUSES:
                 if reconciliation_pending:
                     self._rds_restore_resolve_reconciliation(restore)
                 restore.operation_phase = _restore_phase("COMPLETE")
                 restore.save(update_fields=["operation_phase", "modified"])
                 return _restore_status("COMPLETE")
-            if status in {"failed", "incompatible-restore", "incompatible-network", "incompatible-parameters", "deleted"}:
+            if status in self._RDS_RESTORE_TERMINAL_FAILURE_STATUSES:
                 return _restore_safe_failure(restore, "PROVIDER_FAILED")
-            if status not in {"creating", "backing-up", "modifying", "rebooting", "starting", "stopped", "available"}:
-                return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
-            return _restore_status("IN_PROGRESS")
+            if status in self._RDS_RESTORE_IN_PROGRESS_STATUSES:
+                if restore.status != _restore_status("IN_PROGRESS"):
+                    restore.status = _restore_status("IN_PROGRESS")
+                    restore.save(update_fields=["status", "modified"])
+                return _restore_status("IN_PROGRESS")
+            # Keep this guard even though the known-status set above is derived
+            # from the three policy sets; it makes future edits fail closed if a
+            # status is accidentally added without a lifecycle classification.
+            return _restore_safe_failure(
+                restore,
+                "PROVIDER_MALFORMED_RESPONSE",
+                manual_review=True,
+            )
         except Exception as error:
             classified = _restore_exception(error, mutation=False)
             return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
@@ -10245,12 +10342,26 @@ class CoreNode(TimeStampedModel):
                     else None
                 )
                 if backup:
-                    state = backup.record_execution_error(
-                        code=code,
-                        message=_BACKUP_NOTIFICATION_MESSAGES[code],
-                    )
+                    # A durable execution is the source of truth for provider
+                    # classification. Notification delivery can be retried after
+                    # the provider poll has finalized the row, so never turn that
+                    # delivery into a second, generic execution failure or erase
+                    # its reconciliation evidence.
+                    state = backup.get_execution_state(create=False)
                     if state and getattr(state, "correlation_id", None):
                         return str(state.correlation_id)
+
+                    # Rows created before the durable execution ledger existed still
+                    # need a stable correlation id. Materialize only the generic
+                    # legacy error in that case; provider-specific state must have
+                    # already been persisted by the provider flow above.
+                    if state is None:
+                        state = backup.record_execution_error(
+                            code="BACKUP_FAILED",
+                            message=_BACKUP_NOTIFICATION_MESSAGES["BACKUP_FAILED"],
+                        )
+                        if state and getattr(state, "correlation_id", None):
+                            return str(state.correlation_id)
             except Exception as execution_error:
                 # The notification still has a safe deterministic ID if a legacy
                 # backup row cannot yet materialize its execution ledger.

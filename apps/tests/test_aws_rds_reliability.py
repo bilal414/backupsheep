@@ -1461,6 +1461,66 @@ class AWSRDSReliabilityTests(BaseTestCase):
             restore.last_error_code, "PROVIDER_OWNERSHIP_MISMATCH"
         )
 
+    def _check_restore_provider_status(self, status):
+        restore = self._restore(name=f"rds-status-{status.replace('-', '-')}")
+        marker = f"backupsheep-restore-{restore.id}"
+        restore.resource_id = restore.name
+        restore.restore_marker = marker
+        restore.params = {
+            "_bs_marker_required": True,
+            "_backupsheep_restore": {"source_id": self.backup.unique_id},
+        }
+        restore.save(
+            update_fields=["resource_id", "restore_marker", "params", "modified"]
+        )
+        instance = self._restored_instance(restore, marker)
+        instance["DBInstanceStatus"] = status
+        self.client.describe_db_instances.return_value = {
+            "DBInstances": [instance]
+        }
+        self.client.list_tags_for_resource.return_value = {
+            "TagList": instance["TagList"]
+        }
+
+        with self._clients():
+            result = self.rds.check_restore(restore)
+
+        restore.refresh_from_db()
+        return result, restore
+
+    def test_rds_restore_transitional_statuses_are_in_progress_and_visible(self):
+        statuses = {
+            "configuring-enhanced-monitoring",
+            "backing-up",
+            *CoreAWSRDS._RDS_RESTORE_IN_PROGRESS_STATUSES,
+        }
+        for status in sorted(statuses):
+            with self.subTest(status=status):
+                result, restore = self._check_restore_provider_status(status)
+                self.assertEqual(result, CoreCloudRestore.Status.IN_PROGRESS)
+                self.assertEqual(restore.status, CoreCloudRestore.Status.IN_PROGRESS)
+                self.assertEqual(restore.params["_bs_provider_status"], status)
+
+    def test_rds_restore_terminal_statuses_are_provider_failures(self):
+        for status in ("restore-error", "storage-full", "upgrade-failed"):
+            with self.subTest(status=status):
+                result, restore = self._check_restore_provider_status(status)
+                self.assertEqual(result, CoreCloudRestore.Status.FAILED)
+                self.assertEqual(restore.last_error_code, "PROVIDER_FAILED")
+                self.assertEqual(
+                    restore.operation_phase, CoreCloudRestore.OperationPhase.FAILED
+                )
+                self.assertEqual(restore.params["_bs_provider_status"], status)
+
+    def test_rds_restore_unknown_status_is_manual_review(self):
+        result, restore = self._check_restore_provider_status("future-rds-state")
+        self.assertEqual(result, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(restore.last_error_code, "PROVIDER_MALFORMED_RESPONSE")
+        self.assertEqual(
+            restore.operation_phase, CoreCloudRestore.OperationPhase.MANUAL_REVIEW
+        )
+        self.assertEqual(restore.params["_bs_provider_status"], "unknown")
+
     def test_duplicate_exact_matches_fail_closed_and_never_create(self):
         matches = [self._snapshot(), self._snapshot()]
         self.client.describe_db_snapshots.return_value = {"DBSnapshots": matches}
