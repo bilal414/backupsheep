@@ -4,10 +4,12 @@ These tests mock the provider boundary.  The live create/restore/cleanup matrix 
 kept in ``scripts/hetzner_cloud_e2e.py`` so the unit suite never needs credentials.
 """
 
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
 
 from django.conf import settings
+from django.utils import timezone
 
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.restore import restore_cloud_backup
@@ -419,6 +421,48 @@ class HetznerSnapshotTests(BaseTestCase):
 
 
 class HetznerRestoreTests(BaseTestCase):
+    def test_restore_zero_match_waits_then_fails_without_duplicate_create(self):
+        node = make_hetzner_node(self.account, self.member)
+        backup = make_backup(node, status=UtilBackup.Status.COMPLETE, unique_id="789")
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restore-zero-match",
+            params={"_bs_create_outcome_unknown": True},
+        )
+        empty = response(
+            200,
+            {"servers": [], "meta": {"pagination": {"next_page": None}}},
+        )
+        with mock.patch.object(
+            CoreAuthHetzner, "get_client", return_value={"Authorization": "Bearer test"}
+        ), mock.patch(
+            "apps.console.node.models.requests.get", return_value=empty
+        ), mock.patch("apps.console.node.models.requests.post") as post:
+            first = node.hetzner.restore_snapshot(backup, restore)
+            self.assertEqual(first, CoreCloudRestore.Status.IN_PROGRESS)
+            restore.refresh_from_db()
+            state = dict(restore.params["_bs_restore_reconciliation"])
+            state["mutation_started_at"] = (
+                timezone.now() - timedelta(seconds=60)
+            ).isoformat()
+            state["visibility_deadline_at"] = (
+                timezone.now() - timedelta(seconds=1)
+            ).isoformat()
+            restore.params["_bs_restore_reconciliation"] = state
+            restore.save(update_fields=["params", "modified"])
+            second = node.hetzner.restore_snapshot(backup, restore)
+            third = node.hetzner.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(second, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertEqual(third, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(
+            restore.params["_bs_last_error_code"],
+            "PROVIDER_RECONCILIATION_REQUIRED",
+        )
+        post.assert_not_called()
+
     def test_restore_task_redelivery_resumes_polling_without_provider_create(self):
         node = make_hetzner_node(self.account, self.member)
         backup = make_backup(node, status=UtilBackup.Status.COMPLETE, unique_id="789")

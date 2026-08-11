@@ -6,12 +6,14 @@ ambiguous ownership fails closed, and that provider failures are persisted as
 safe categories rather than response text.
 """
 
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
 from uuid import UUID
 
 import requests as raw_requests
 from botocore.exceptions import ClientError
+from django.utils import timezone
 
 from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.backup.models import CoreCloudRestore
@@ -96,6 +98,48 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         )
         return node, backup
 
+    def _aws_volume(self):
+        connection = factories.make_connection(self.account, self.member, code="aws")
+        CoreAuthAWS.objects.create(
+            connection=connection,
+            region=CoreAWSRegion.objects.get(code="us-east-1"),
+            access_key=bs_encrypt("access", self.account.get_encryption_key()),
+            secret_key=bs_encrypt("secret", self.account.get_encryption_key()),
+        )
+        node = CoreNode.objects.create(
+            connection=connection,
+            type=CoreNode.Type.VOLUME,
+            name="aws-volume-source",
+            added_by=self.member,
+        )
+        integration = CoreAWS.objects.create(
+            node=node,
+            name="aws-volume-source",
+            unique_id="vol-source",
+            resource_type=CoreAWS.ResourceType.VOLUME,
+        )
+        backup = integration.backups.create(
+            uuid="aws-volume-backup",
+            unique_id="snap-source",
+            status=UtilBackup.Status.COMPLETE,
+            type=UtilBackup.Type.ON_DEMAND,
+            attempt_no=1,
+        )
+        return node, backup
+
+    @staticmethod
+    def expire_reconciliation(restore):
+        restore.refresh_from_db()
+        state = dict(restore.params["_bs_restore_reconciliation"])
+        state["mutation_started_at"] = (
+            timezone.now() - timedelta(seconds=60)
+        ).isoformat()
+        state["visibility_deadline_at"] = (
+            timezone.now() - timedelta(seconds=1)
+        ).isoformat()
+        restore.params["_bs_restore_reconciliation"] = state
+        restore.save(update_fields=["params", "modified"])
+
     def test_http_categories_are_explicit_and_never_response_text(self):
         cases = {
             404: "PROVIDER_NOT_FOUND",
@@ -135,6 +179,7 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         self.assertTrue(restore.params["_bs_create_outcome_unknown"])
         self.assertEqual(restore.params["_bs_last_error_code"], "PROVIDER_TIMEOUT")
         self.assertNotIn("provider-secret", restore.error)
+        self.assertIn("timeout", create.call_args.kwargs)
         marker = restore.restore_marker
         candidate = response(
             200,
@@ -165,6 +210,62 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         self.assertFalse(restore.params["_bs_create_outcome_unknown"])
         create.assert_called_once()
         duplicate_create.assert_not_called()
+
+    def test_digitalocean_inventory_timeout_is_classified_and_read_only(self):
+        node, backup = self._digitalocean()
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="do-inventory-timeout",
+            params={"size": "s-1vcpu-1gb", "_bs_create_outcome_unknown": True},
+        )
+        with mock.patch.object(
+            CoreAuthDigitalOcean,
+            "get_client",
+            return_value={"Authorization": "Bearer test-token"},
+        ), mock.patch(
+            "apps.console.node.models.requests.get",
+            side_effect=raw_requests.Timeout("inventory-secret"),
+        ) as inventory, mock.patch("apps.console.node.models.requests.post") as create:
+            result = node.digitalocean.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(result, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertEqual(restore.params["_bs_last_error_code"], "PROVIDER_TIMEOUT")
+        self.assertTrue(restore.params["_bs_create_outcome_unknown"])
+        self.assertIn("timeout", inventory.call_args.kwargs)
+        create.assert_not_called()
+
+    def test_digitalocean_zero_match_waits_then_fails_without_duplicate_create(self):
+        node, backup = self._digitalocean()
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="do-zero-match",
+            params={"size": "s-1vcpu-1gb", "_bs_create_outcome_unknown": True},
+        )
+        empty = response(200, {"droplets": [], "meta": {"total": 0}})
+        with mock.patch.object(
+            CoreAuthDigitalOcean,
+            "get_client",
+            return_value={"Authorization": "Bearer test-token"},
+        ), mock.patch(
+            "apps.console.node.models.requests.get", return_value=empty
+        ), mock.patch("apps.console.node.models.requests.post") as create:
+            first = node.digitalocean.restore_snapshot(backup, restore)
+            self.assertEqual(first, CoreCloudRestore.Status.IN_PROGRESS)
+            self.expire_reconciliation(restore)
+            second = node.digitalocean.restore_snapshot(backup, restore)
+            third = node.digitalocean.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(second, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertEqual(third, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(
+            restore.params["_bs_last_error_code"],
+            "PROVIDER_RECONCILIATION_REQUIRED",
+        )
+        create.assert_not_called()
 
     def test_digitalocean_duplicate_marker_matches_fail_closed(self):
         node, backup = self._digitalocean()
@@ -285,6 +386,71 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         restore.refresh_from_db()
         self.assertEqual(restore.resource_id, "i-restored")
         client.run_instances.assert_not_called()
+
+    def test_aws_ec2_and_ebs_zero_match_waits_without_mutation(self):
+        for make_source, resource_kind in (
+            (self._aws, "ec2"),
+            (self._aws_volume, "ebs"),
+        ):
+            with self.subTest(resource_kind=resource_kind):
+                node, backup = make_source()
+                restore = CoreCloudRestore.objects.create(
+                    node=node,
+                    backup_id=backup.id,
+                    name=f"aws-{resource_kind}-zero-match",
+                    params={"_bs_create_outcome_unknown": True},
+                )
+                client = mock.MagicMock()
+                if resource_kind == "ec2":
+                    client.describe_instances.return_value = {
+                        "Reservations": []
+                    }
+                else:
+                    client.describe_volumes.return_value = {"Volumes": []}
+                with mock.patch.object(CoreAuthAWS, "get_client", return_value=client):
+                    first = node.aws.restore_snapshot(backup, restore)
+                    self.assertEqual(first, CoreCloudRestore.Status.IN_PROGRESS)
+                    self.expire_reconciliation(restore)
+                    second = node.aws.restore_snapshot(backup, restore)
+                    third = node.aws.restore_snapshot(backup, restore)
+
+                restore.refresh_from_db()
+                self.assertEqual(second, CoreCloudRestore.Status.IN_PROGRESS)
+                self.assertEqual(third, CoreCloudRestore.Status.FAILED)
+                self.assertEqual(
+                    restore.params["_bs_last_error_code"],
+                    "PROVIDER_RECONCILIATION_REQUIRED",
+                )
+                client.run_instances.assert_not_called()
+                client.create_volume.assert_not_called()
+
+    def test_digitalocean_poll_timeout_is_classified_and_has_timeout(self):
+        node, backup = self._digitalocean()
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="do-poll-timeout",
+            resource_id="901",
+            restore_marker="backupsheep-restore-poll-timeout",
+            params={
+                "_bs_marker_required": True,
+                "_backupsheep_restore": {"source_id": backup.unique_id},
+            },
+        )
+        with mock.patch.object(
+            CoreAuthDigitalOcean,
+            "get_client",
+            return_value={"Authorization": "Bearer test-token"},
+        ), mock.patch(
+            "apps.console.node.models.requests.get",
+            side_effect=raw_requests.Timeout("poll-secret"),
+        ) as poll:
+            result = node.digitalocean.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(result, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertEqual(restore.params["_bs_last_error_code"], "PROVIDER_TIMEOUT")
+        self.assertIn("timeout", poll.call_args.kwargs)
 
     def test_aws_ec2_restore_infers_and_persists_source_network_configuration(self):
         node, backup = self._aws()

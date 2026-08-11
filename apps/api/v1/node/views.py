@@ -718,6 +718,13 @@ class CoreNodeView(viewsets.ModelViewSet):
                 metadata["manual_resume_history"] = history[
                     -_CLOUD_RESTORE_MANUAL_RESUME_HISTORY_LIMIT:
                 ]
+                params = dict(restore.params or {})
+                # These are presentation/error rollups, not provider identity
+                # witnesses.  Keeping a terminal code while the exact target is
+                # actively being verified makes the UI report a failure and a
+                # running restore at the same time.
+                params.pop("_bs_last_error_code", None)
+                params.pop("_bs_last_error_category", None)
                 # Keep the original request task identity available even after
                 # a poll delivery claims a worker lease. The model field itself
                 # is intentionally not rewritten by this operator action.
@@ -726,6 +733,7 @@ class CoreNodeView(viewsets.ModelViewSet):
 
                 task_id = f"cloud-restore-resume-{restore.id}-{resume_sequence}"
                 restore.execution_metadata = metadata
+                restore.params = params
                 restore.status = CoreCloudRestore.Status.IN_PROGRESS
                 restore.operation_phase = CoreCloudRestore.OperationPhase.POLLING
                 restore.execution_phase = "provider_polling"
@@ -741,6 +749,7 @@ class CoreNodeView(viewsets.ModelViewSet):
                 restore.save(
                     update_fields=[
                         "execution_metadata",
+                        "params",
                         "status",
                         "operation_phase",
                         "execution_phase",
@@ -786,21 +795,36 @@ class CoreNodeView(viewsets.ModelViewSet):
                     CoreCloudRestore.objects.filter(
                         pk=restore_id,
                         node=node,
-                        status=CoreCloudRestore.Status.IN_PROGRESS,
                         execution_metadata__manual_resume_count=resume_sequence,
                     )
                     .first()
                 )
                 if durable is not None:
                     response_data = dict(CoreCloudRestoreSerializer(durable).data)
+                    terminal = durable.status in {
+                        CoreCloudRestore.Status.COMPLETE,
+                        CoreCloudRestore.Status.FAILED,
+                    }
                     response_data.update(
                         {
                             "idempotent_replay": False,
                             "manual_resume_enqueued": False,
-                            "code": "restore_resume_saved_for_recovery",
+                            "resume_sequence": resume_sequence,
+                            "code": (
+                                "restore_resume_reconciled"
+                                if terminal
+                                else "restore_resume_saved_for_recovery"
+                            ),
                         }
                     )
-                    return Response(response_data, status=status.HTTP_202_ACCEPTED)
+                    return Response(
+                        response_data,
+                        status=(
+                            status.HTTP_200_OK
+                            if terminal
+                            else status.HTTP_202_ACCEPTED
+                        ),
+                    )
             raise RestoreCreateError(
                 "The restore resume request could not be accepted. Please retry safely."
             )

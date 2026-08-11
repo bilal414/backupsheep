@@ -361,6 +361,288 @@ def _restore_unknown(restore):
     return bool(_restore_params(restore).get("_bs_create_outcome_unknown"))
 
 
+_RESTORE_RECONCILIATION_DEFAULT_SECONDS = 15 * 60
+_RESTORE_RECONCILIATION_MAX_SECONDS = 60 * 60
+_RESTORE_RECONCILIATION_MIN_OBSERVATIONS = 3
+_RESTORE_RECONCILIATION_MAX_OBSERVATIONS = 20
+
+
+def _restore_reconciliation_seconds():
+    try:
+        value = int(
+            getattr(
+                settings,
+                "CLOUD_RESTORE_VISIBILITY_WINDOW_SECONDS",
+                _RESTORE_RECONCILIATION_DEFAULT_SECONDS,
+            )
+        )
+    except (TypeError, ValueError):
+        value = _RESTORE_RECONCILIATION_DEFAULT_SECONDS
+    return min(_RESTORE_RECONCILIATION_MAX_SECONDS, max(60, value))
+
+
+def _restore_reconciliation_observations():
+    try:
+        value = int(
+            getattr(
+                settings,
+                "CLOUD_RESTORE_VISIBILITY_MIN_OBSERVATIONS",
+                _RESTORE_RECONCILIATION_MIN_OBSERVATIONS,
+            )
+        )
+    except (TypeError, ValueError):
+        value = _RESTORE_RECONCILIATION_MIN_OBSERVATIONS
+    return min(
+        _RESTORE_RECONCILIATION_MAX_OBSERVATIONS,
+        max(_RESTORE_RECONCILIATION_MIN_OBSERVATIONS, value),
+    )
+
+
+def _restore_reconciliation_timestamp(value):
+    if isinstance(value, datetime.datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        raw = value.strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed = datetime.datetime.fromisoformat(raw)
+        except (TypeError, ValueError) as error:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from error
+    else:
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _restore_reconciliation_state(restore):
+    params = _restore_params(restore)
+    value = params.get("_bs_restore_reconciliation")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+    return dict(value)
+
+
+def _restore_begin_reconciliation(restore):
+    """Persist a bounded, read-only visibility witness for an accepted create."""
+    params = _restore_params(restore)
+    reconciliation = _restore_reconciliation_state(restore)
+    if not reconciliation.get("mutation_started_at"):
+        started_at = params.get("_bs_mutation_started_at")
+        if started_at:
+            started = _restore_reconciliation_timestamp(started_at)
+        else:
+            started = timezone.now()
+            params["_bs_mutation_started_at"] = started.isoformat()
+        reconciliation = {
+            "mutation_started_at": started.isoformat(),
+            "visibility_deadline_at": (
+                started
+                + datetime.timedelta(seconds=_restore_reconciliation_seconds())
+            ).isoformat(),
+            "minimum_observations": _restore_reconciliation_observations(),
+            "visibility_observations": 0,
+            "zero_match_observations": 0,
+            "missing_target_observations": 0,
+            "resolved_at": None,
+        }
+    params["_bs_restore_reconciliation"] = reconciliation
+    params["_bs_create_outcome_unknown"] = True
+    params["_bs_last_error_category"] = "unknown_outcome"
+    restore.params = params
+    restore.operation_phase = _restore_phase("CREATE_UNKNOWN")
+    restore.save(update_fields=["params", "operation_phase", "modified"])
+    return reconciliation
+
+
+def _restore_observe_zero_match(
+    restore,
+    *,
+    provider_error_code="PROVIDER_NOT_FOUND",
+    observation_kind="zero_match",
+):
+    """Record one read-only visibility observation without another create."""
+    if observation_kind not in {"zero_match", "missing_target"}:
+        raise ValueError("Unsupported restore reconciliation observation.")
+    params = _restore_params(restore)
+    reconciliation = _restore_reconciliation_state(restore)
+    if not reconciliation.get("mutation_started_at"):
+        reconciliation = _restore_begin_reconciliation(restore)
+        params = _restore_params(restore)
+
+    now = timezone.now()
+    started = _restore_reconciliation_timestamp(
+        reconciliation.get("mutation_started_at")
+    )
+    deadline = _restore_reconciliation_timestamp(
+        reconciliation.get("visibility_deadline_at")
+    )
+    if deadline < started or deadline - started > datetime.timedelta(
+        seconds=_RESTORE_RECONCILIATION_MAX_SECONDS
+    ):
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+    try:
+        minimum = int(reconciliation.get("minimum_observations"))
+        observations = int(reconciliation.get("visibility_observations", 0))
+        zero_matches = int(reconciliation.get("zero_match_observations", 0))
+        missing_targets = int(reconciliation.get("missing_target_observations", 0))
+    except (TypeError, ValueError) as error:
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from error
+    if not (
+        _RESTORE_RECONCILIATION_MIN_OBSERVATIONS
+        <= minimum
+        <= _RESTORE_RECONCILIATION_MAX_OBSERVATIONS
+    ) or min(observations, zero_matches, missing_targets) < 0:
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+
+    observations += 1
+    if observation_kind == "zero_match":
+        zero_matches += 1
+    else:
+        missing_targets += 1
+    exhausted = now >= deadline and observations >= minimum
+    reconciliation.update(
+        {
+            "visibility_observations": observations,
+            "zero_match_observations": zero_matches,
+            "missing_target_observations": missing_targets,
+            "last_observation": observation_kind,
+            "last_observed_at": now.isoformat(),
+            "last_provider_error_code": str(provider_error_code)[:64],
+        }
+    )
+    params["_bs_restore_reconciliation"] = reconciliation
+    params["_bs_last_provider_error_code"] = str(provider_error_code)[:64]
+    if exhausted:
+        params["_bs_last_error_code"] = "PROVIDER_RECONCILIATION_REQUIRED"
+        params["_bs_last_error_category"] = "manual_review"
+        restore.params = params
+        restore.last_error_code = "PROVIDER_RECONCILIATION_REQUIRED"
+        restore.error = _restore_message("PROVIDER_RECONCILIATION_REQUIRED")
+        restore.status = _restore_status("FAILED")
+        restore.operation_phase = _restore_phase("MANUAL_REVIEW")
+        restore.next_retry_at = None
+    else:
+        params["_bs_last_error_code"] = str(provider_error_code)[:64]
+        params["_bs_last_error_category"] = "reconciliation_wait"
+        restore.params = params
+        restore.last_error_code = str(provider_error_code)[:64]
+        restore.error = _restore_message(provider_error_code)
+        restore.status = _restore_status("IN_PROGRESS")
+        restore.operation_phase = _restore_phase("RECONCILING")
+        restore.next_retry_at = now + datetime.timedelta(seconds=60)
+    restore.save(
+        update_fields=[
+            "params",
+            "last_error_code",
+            "error",
+            "status",
+            "operation_phase",
+            "next_retry_at",
+            "modified",
+        ]
+    )
+    return restore.status
+
+
+def _restore_resolve_reconciliation(restore):
+    params = _restore_params(restore)
+    reconciliation = _restore_reconciliation_state(restore)
+    if reconciliation:
+        reconciliation["resolved_at"] = timezone.now().isoformat()
+        params["_bs_restore_reconciliation"] = reconciliation
+    params["_bs_create_outcome_unknown"] = False
+    params["_bs_last_error_category"] = ""
+    params["_bs_last_provider_error_code"] = ""
+    params["_bs_last_error_code"] = ""
+    restore.params = params
+    restore.last_error_code = ""
+    restore.error = ""
+    restore.next_retry_at = None
+    restore.save(
+        update_fields=[
+            "params",
+            "last_error_code",
+            "error",
+            "next_retry_at",
+            "modified",
+        ]
+    )
+
+
+def _aws_arn_account_id(arn):
+    parts = str(arn or "").split(":")
+    if len(parts) < 6 or parts[0] != "arn" or not parts[4]:
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+    return parts[4]
+
+
+def _aws_backup_restore_identity(auth, resource_type, recovery_point_arn, target_id):
+    """Build the exact account/type/target identity used for AWS Backup jobs."""
+    account_id = _aws_arn_account_id(recovery_point_arn)
+    recovery_parts = str(recovery_point_arn).split(":")
+    partition = recovery_parts[1]
+    if resource_type == "s3":
+        target_arn = f"arn:{partition}:s3:::{target_id}"
+        api_resource_type = "S3"
+    elif resource_type == "dynamodb":
+        region = str(getattr(getattr(auth, "region", None), "code", "") or "")
+        if not region:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        target_arn = f"arn:{partition}:dynamodb:{region}:{account_id}:table/{target_id}"
+        api_resource_type = "DynamoDB"
+    else:
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+    return {
+        "account_id": account_id,
+        "resource_type": api_resource_type,
+        "recovery_point_arn": str(recovery_point_arn),
+        "target_arn": target_arn,
+    }
+
+
+def _aws_validate_backup_restore_job(
+    job,
+    *,
+    expected,
+    provider_job_id=None,
+    allow_transitional_missing_target=False,
+    allow_failed_missing_target=False,
+):
+    if not isinstance(job, dict):
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+    required = (
+        "RestoreJobId",
+        "RecoveryPointArn",
+        "AccountId",
+        "ResourceType",
+    )
+    if any(not str(job.get(key) or "").strip() for key in required):
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+    if provider_job_id is not None and str(job["RestoreJobId"]) != str(provider_job_id):
+        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+    if str(job["RecoveryPointArn"]) != expected["recovery_point_arn"]:
+        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+    if str(job["AccountId"]) != expected["account_id"]:
+        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+    if str(job["ResourceType"]) != expected["resource_type"]:
+        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+    created_resource_arn = str(job.get("CreatedResourceArn") or "").strip()
+    if not created_resource_arn:
+        status = str(job.get("Status") or "").upper()
+        if allow_transitional_missing_target and status in {"PENDING", "RUNNING"}:
+            return job
+        if allow_failed_missing_target and status in {"FAILED", "ABORTED"}:
+            return job
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+    if created_resource_arn != expected["target_arn"]:
+        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+    return job
+
+
 def _restore_record_scan(restore, *, item_count, match_count):
     """Persist bounded inventory proof used to explain a fenced restore retry."""
     params = _restore_params(restore)
@@ -388,6 +670,9 @@ def _restore_candidates(restore, candidates, *, source_id=None, marker=None, id_
         _restore_safe_failure(restore, "PROVIDER_DUPLICATE_MATCH", manual_review=True)
         raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
     if not matched:
+        if candidates:
+            _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
         if _restore_unknown(restore):
             _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
             raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
@@ -450,7 +735,7 @@ def _restore_source_matches(resource, source_id, *keys):
     values = {str(value) for value in values if value is not None}
     # Some providers omit the source field after creation. In that case the
     # provider-side marker remains the ownership proof for new restores.
-    return not values or expected in values or any(expected in value for value in values)
+    return not values or expected in values
 
 
 def _restore_http_class(response, *, mutation=False):
@@ -1554,6 +1839,7 @@ class CoreDigitalOcean(UtilCloud):
             headers=client,
             params={"tag_name": marker, "per_page": 200},
             verify=True,
+            timeout=request_timeout(),
         )
         problem = _restore_http_class(response)
         if problem:
@@ -1578,12 +1864,36 @@ class CoreDigitalOcean(UtilCloud):
             raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
         return resources
 
-    def _find_aws_backup_restore_job(self, client, *, recovery_point_arn, target_id):
+    def _find_aws_backup_restore_job(
+        self,
+        client,
+        *,
+        recovery_point_arn,
+        target_id,
+        expected=None,
+    ):
+        """Find exactly one owned AWS Backup restore job.
+
+        AWS Backup's ``ListRestoreJobs`` API has no RecoveryPointArn filter.
+        Keep the request within the SDK model (account/resource type plus
+        pagination), then perform the complete identity match locally.
+        """
+        if expected is None:
+            expected = _aws_backup_restore_identity(
+                self.node.connection.auth_aws,
+                self.resource_type,
+                recovery_point_arn,
+                target_id,
+            )
         jobs = []
         token = None
         seen = set()
         while True:
-            request = {"RecoveryPointArn": recovery_point_arn, "MaxResults": 100}
+            request = {
+                "ByAccountId": expected["account_id"],
+                "ByResourceType": expected["resource_type"],
+                "MaxResults": 1000,
+            }
             if token:
                 request["NextToken"] = token
             response = client.list_restore_jobs(**request)
@@ -1592,12 +1902,33 @@ class CoreDigitalOcean(UtilCloud):
             page = response.get("RestoreJobs") or []
             if not isinstance(page, list):
                 raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
-            jobs.extend(
-                item for item in page
-                if isinstance(item, dict)
-                and str(item.get("RecoveryPointArn") or recovery_point_arn) == str(recovery_point_arn)
-                and str(target_id) in str(item.get("CreatedResourceArn") or item.get("ResourceArn") or "")
-            )
+            for item in page:
+                if not isinstance(item, dict):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                # The created target ARN is the strongest local discriminator
+                # after the provider-side list filters. AWS may omit it while
+                # a PENDING/RUNNING job is still materializing, so retain one
+                # exact source/account/type transitional witness and let the
+                # poll path wait for the target ARN before completion.
+                created_resource_arn = str(item.get("CreatedResourceArn") or "")
+                if created_resource_arn == str(expected["target_arn"]):
+                    _aws_validate_backup_restore_job(item, expected=expected)
+                    jobs.append(item)
+                elif (
+                    not created_resource_arn
+                    and str(item.get("RecoveryPointArn") or "")
+                    == str(expected["recovery_point_arn"])
+                    and str(item.get("AccountId") or "")
+                    == str(expected["account_id"])
+                    and str(item.get("ResourceType") or "")
+                    == str(expected["resource_type"])
+                ):
+                    _aws_validate_backup_restore_job(
+                        item,
+                        expected=expected,
+                        allow_transitional_missing_target=True,
+                    )
+                    jobs.append(item)
             next_token = response.get("NextToken")
             if not next_token:
                 break
@@ -1663,32 +1994,65 @@ class CoreDigitalOcean(UtilCloud):
                 target_kind=target_kind,
                 target_name=target_id,
             )
+            expected = _aws_backup_restore_identity(
+                auth,
+                self.resource_type,
+                recovery_point_arn,
+                target_id,
+            )
             if restore.provider_job_id:
                 return
             client = auth.get_client("s3" if target_kind == "s3" else "dynamodb")
             try:
                 if _restore_unknown(restore):
-                    jobs = self._find_aws_backup_restore_job(
-                        auth.get_client("backup"),
-                        recovery_point_arn=recovery_point_arn,
-                        target_id=target_id,
-                    )
+                    backup_client = auth.get_client("backup")
+                    job_id = None
+                    persisted_metadata = params.get("_aws_backup_restore_metadata")
+                    persisted_token = params.get("_aws_backup_restore_token")
+                    if isinstance(persisted_metadata, dict) and persisted_token:
+                        # AWS Backup documents replaying a successful request
+                        # with the same idempotency token as a successful
+                        # no-op. This is the primary lost-response adoption
+                        # path and cannot start a second restore.
+                        replay = start_restore_job(
+                            auth,
+                            self.resource_type,
+                            recovery_point_arn,
+                            persisted_metadata,
+                            str(persisted_token),
+                        )
+                        job_id = replay.get("RestoreJobId") if isinstance(replay, dict) else None
+                    jobs = []
+                    if not job_id:
+                        jobs = self._find_aws_backup_restore_job(
+                            backup_client,
+                            recovery_point_arn=recovery_point_arn,
+                            target_id=target_id,
+                            expected=expected,
+                        )
+                        if jobs:
+                            job_id = jobs[0].get("RestoreJobId")
                     if not jobs:
-                        return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
-                    job = jobs[0]
-                    job_id = job.get("RestoreJobId")
+                        if not job_id:
+                            return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
                     if not job_id:
                         raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
-                    params["_aws_backup_restore_metadata"] = dict(params.get("_aws_backup_restore_metadata") or {})
+                    params["_aws_backup_restore_metadata"] = dict(
+                        params.get("_aws_backup_restore_metadata") or {}
+                    )
                     params["_aws_backup_restore_metadata"]["BackupSheepRestoreMarker"] = marker
+                    job = jobs[0] if jobs else {}
+                    # Commit the AWS job pointer in the same row update that
+                    # clears the unknown-outcome fence and records the target.
+                    # A worker crash must never leave resource_id durable while
+                    # provider_job_id is still only in process memory.
+                    restore.provider_job_id = str(job_id)
                     _restore_adopt(
                         restore,
                         target_id,
                         provider_status=job.get("Status"),
                         params_update=params,
                     )
-                    restore.provider_job_id = str(job_id)
-                    restore.save(update_fields=["provider_job_id", "modified"])
                     return
 
                 if target_kind == "s3":
@@ -1720,9 +2084,19 @@ class CoreDigitalOcean(UtilCloud):
                         if key in params and params[key] is not None:
                             restore_metadata[key] = str(params[key])
 
+                # Destination preflight/tag-safety helpers persist durable
+                # witnesses on the restore row. Reload the params before adding
+                # the AWS request identity so those proofs are never overwritten
+                # by the snapshot taken before preflight.
+                params = _restore_params(restore)
                 token = idempotency_token("restore", restore.id)
                 params["_aws_backup_restore_metadata"] = restore_metadata
                 params["_aws_backup_restore_token"] = token
+                # The request identity must be durable before StartRestoreJob;
+                # otherwise a worker crash between provider acceptance and the
+                # row update would leave no token/metadata to replay safely.
+                restore.params = params
+                restore.save(update_fields=["params", "modified"])
                 _restore_begin_mutation(restore)
                 response = start_restore_job(
                     auth,
@@ -1735,14 +2109,13 @@ class CoreDigitalOcean(UtilCloud):
                 if not job_id:
                     _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
                     return _restore_status("IN_PROGRESS")
+                restore.provider_job_id = str(job_id)
                 _restore_adopt(
                     restore,
                     target_id,
                     provider_status="created",
                     params_update=params,
                 )
-                restore.provider_job_id = str(job_id)
-                restore.save(update_fields=["provider_job_id", "modified"])
                 return
             except Exception as error:
                 if isinstance(error, _RestoreProviderError):
@@ -1770,8 +2143,10 @@ class CoreDigitalOcean(UtilCloud):
                 candidates = self._aws_find_restore_resource(
                     client, marker=marker, source_id=backup.unique_id, resource_type=target_kind
                 )
-                if len(candidates) != 1:
-                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                if len(candidates) > 1:
+                    return _restore_safe_failure(restore, "PROVIDER_DUPLICATE_MATCH", manual_review=True)
+                if not candidates:
+                    return _restore_observe_zero_match(restore)
                 candidate = _restore_candidates(
                     restore,
                     candidates,
@@ -1894,24 +2269,61 @@ class CoreDigitalOcean(UtilCloud):
                     return _restore_status("IN_PROGRESS")
                 metadata = params.get("_backupsheep_restore") or {}
                 try:
+                    recovery_point_arn = metadata.get("source_id")
+                    target_id = restore.resource_id or metadata.get("target_name")
+                    expected = _aws_backup_restore_identity(
+                        auth,
+                        self.resource_type,
+                        recovery_point_arn,
+                        target_id,
+                    )
                     jobs = self._find_aws_backup_restore_job(
                         auth.get_client("backup"),
-                        recovery_point_arn=metadata.get("source_id"),
-                        target_id=restore.resource_id or metadata.get("target_name"),
+                        recovery_point_arn=recovery_point_arn,
+                        target_id=target_id,
+                        expected=expected,
                     )
                     if len(jobs) != 1:
                         return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
-                    restore.provider_job_id = str(jobs[0].get("RestoreJobId") or "")
-                    if not restore.provider_job_id:
+                    job_id = str(jobs[0].get("RestoreJobId") or "")
+                    if not job_id:
                         return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
-                    restore.save(update_fields=["provider_job_id", "modified"])
+                    restore.provider_job_id = job_id
+                    _restore_adopt(
+                        restore,
+                        target_id,
+                        provider_status=jobs[0].get("Status"),
+                    )
                 except Exception as error:
                     return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
             try:
                 result = describe_restore_job(auth, restore.provider_job_id)
-                if not isinstance(result, dict):
-                    return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
-                state = str(result.get("Status") or "").upper()
+                metadata = params.get("_backupsheep_restore") or {}
+                expected = _aws_backup_restore_identity(
+                    auth,
+                    self.resource_type,
+                    metadata.get("source_id"),
+                    restore.resource_id or metadata.get("target_name"),
+                )
+                state = str(result.get("Status") or "").upper() if isinstance(result, dict) else ""
+                _aws_validate_backup_restore_job(
+                    result,
+                    expected=expected,
+                    provider_job_id=restore.provider_job_id,
+                    allow_transitional_missing_target=state in {"PENDING", "RUNNING"},
+                    allow_failed_missing_target=True,
+                )
+                if state in {"FAILED", "ABORTED"}:
+                    return _restore_safe_failure(restore, "PROVIDER_FAILED")
+                if not str(result.get("CreatedResourceArn") or "").strip():
+                    return _restore_observe_zero_match(
+                        restore,
+                        provider_error_code="PROVIDER_RECONCILIATION_REQUIRED",
+                        observation_kind="missing_target",
+                    )
+                reconciliation = _restore_reconciliation_state(restore)
+                if reconciliation and not reconciliation.get("resolved_at"):
+                    _restore_resolve_reconciliation(restore)
                 if state == "COMPLETED":
                     target = restore.resource_id
                     if self.resource_type == self.ResourceType.S3:
@@ -1954,9 +2366,7 @@ class CoreDigitalOcean(UtilCloud):
                     restore.operation_phase = _restore_phase("COMPLETE")
                     restore.save(update_fields=["operation_phase", "modified"])
                     return _restore_status("COMPLETE")
-                if state in {"FAILED", "ABORTED", "EXPIRED"}:
-                    return _restore_safe_failure(restore, "PROVIDER_FAILED")
-                if state not in {"PENDING", "RUNNING", "PARTIAL"}:
+                if state not in {"PENDING", "RUNNING"}:
                     return _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True)
                 return _restore_status("IN_PROGRESS")
             except Exception as error:
@@ -2022,21 +2432,24 @@ class CoreDigitalOcean(UtilCloud):
         if _restore_unknown(restore):
             try:
                 candidate = self._find_restore_resource(client, restore, marker)
-                if candidate:
-                    resource = _restore_candidates(
-                        restore,
-                        candidate,
-                        source_id=backup.unique_id,
-                        marker=marker,
-                        marker_match=lambda item, value: _restore_marker_matches(item, value),
-                        source_match=lambda item, source: _restore_source_matches(
-                            item, source, "image", "image_id", "snapshot_id"
-                        ),
-                    )
-                    if resource:
-                        return
-                _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
-                raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+                if len(candidate) > 1:
+                    _restore_safe_failure(restore, "PROVIDER_DUPLICATE_MATCH", manual_review=True)
+                    raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+                if not candidate:
+                    return _restore_observe_zero_match(restore)
+                resource = _restore_candidates(
+                    restore,
+                    candidate,
+                    source_id=backup.unique_id,
+                    marker=marker,
+                    marker_match=lambda item, value: _restore_marker_matches(item, value),
+                    source_match=lambda item, source: _restore_source_matches(
+                        item, source, "image", "image_id", "snapshot_id"
+                    ),
+                )
+                if resource:
+                    return
+                return _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
             except Exception as error:
                 if isinstance(error, _RestoreProviderError):
                     if error.code in {"PROVIDER_RATE_LIMIT", "PROVIDER_TIMEOUT", "PROVIDER_TRANSIENT_OUTAGE"}:
@@ -2054,6 +2467,7 @@ class CoreDigitalOcean(UtilCloud):
                         f"{settings.DIGITALOCEAN_API}/v2/droplets/{self.unique_id}",
                         headers=client,
                         verify=True,
+                        timeout=request_timeout(),
                     )
                     problem = _restore_http_class(result)
                     if problem:
@@ -2078,6 +2492,7 @@ class CoreDigitalOcean(UtilCloud):
                     headers=client,
                     json=droplet_data,
                     verify=True,
+                    timeout=request_timeout(),
                 )
                 problem = _restore_http_class(result, mutation=True)
                 if problem:
@@ -2101,6 +2516,7 @@ class CoreDigitalOcean(UtilCloud):
                         f"{settings.DIGITALOCEAN_API}/v2/volumes/{self.unique_id}",
                         headers=client,
                         verify=True,
+                        timeout=request_timeout(),
                     )
                     problem = _restore_http_class(result)
                     if problem:
@@ -2121,6 +2537,7 @@ class CoreDigitalOcean(UtilCloud):
                     headers=client,
                     json=volume_data,
                     verify=True,
+                    timeout=request_timeout(),
                 )
                 problem = _restore_http_class(result, mutation=True)
                 if problem:
@@ -2157,9 +2574,10 @@ class CoreDigitalOcean(UtilCloud):
                 return _restore_status("IN_PROGRESS")
             try:
                 candidate = self._find_restore_resource(client, restore, marker)
-                if len(candidate) != 1:
-                    _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
-                    return _restore_status("FAILED")
+                if len(candidate) > 1:
+                    return _restore_safe_failure(restore, "PROVIDER_DUPLICATE_MATCH", manual_review=True)
+                if not candidate:
+                    return _restore_observe_zero_match(restore)
                 resource = _restore_candidates(
                     restore,
                     candidate,
@@ -2178,6 +2596,7 @@ class CoreDigitalOcean(UtilCloud):
                     f"{settings.DIGITALOCEAN_API}/v2/droplets/{restore.resource_id}",
                     headers=client,
                     verify=True,
+                    timeout=request_timeout(),
                 )
                 problem = _restore_http_class(result)
                 if problem:
@@ -2204,6 +2623,7 @@ class CoreDigitalOcean(UtilCloud):
                 f"{settings.DIGITALOCEAN_API}/v2/volumes/{restore.resource_id}",
                 headers=client,
                 verify=True,
+                timeout=request_timeout(),
             )
             problem = _restore_http_class(result)
             if problem:
@@ -2651,8 +3071,7 @@ class CoreHetzner(UtilCloud):
                     )
                     return
                 if _restore_unknown(restore):
-                    _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
-                    raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+                    return _restore_observe_zero_match(restore)
             except Exception as error:
                 if isinstance(error, _RestoreProviderError):
                     raise
@@ -2753,7 +3172,7 @@ class CoreHetzner(UtilCloud):
             try:
                 existing = self._find_restore_server(client, restore.id)
                 if not existing:
-                    return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                    return _restore_observe_zero_match(restore)
                 if not _restore_verify_target(
                     restore,
                     existing,

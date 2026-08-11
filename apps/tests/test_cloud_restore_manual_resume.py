@@ -11,6 +11,7 @@ from django.test import SimpleTestCase, TransactionTestCase
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
+from apps._tasks.integration import restore as restore_tasks
 from apps.api.v1.node.views import CoreNodeView
 from apps.console.backup.models import CoreCloudRestore
 from apps.console.connection.models import CoreIntegration
@@ -35,7 +36,12 @@ class ManualCloudRestoreResumeApiTests(TransactionTestCase):
             "node": node or self.node,
             "backup_id": 91,
             "name": "existing-provider-target",
-            "params": {"region": "us-east-2", "witness": "preserve-me"},
+            "params": {
+                "region": "us-east-2",
+                "witness": "preserve-me",
+                "_bs_last_error_code": "PROVIDER_OWNERSHIP_MISMATCH",
+                "_bs_last_error_category": "manual_review",
+            },
             "resource_id": "provider-target-91",
             "provider_job_id": "provider-job-91",
             "restore_marker": "restore-marker-91",
@@ -74,7 +80,7 @@ class ManualCloudRestoreResumeApiTests(TransactionTestCase):
             "provider_job_id": restore.provider_job_id,
             "restore_marker": restore.restore_marker,
             "request_fingerprint": restore.request_fingerprint,
-            "params": restore.params,
+            "params": {"region": "us-east-2", "witness": "preserve-me"},
         }
 
         with mock.patch(
@@ -111,6 +117,8 @@ class ManualCloudRestoreResumeApiTests(TransactionTestCase):
             restore.request_fingerprint, original["request_fingerprint"]
         )
         self.assertEqual(restore.params, original["params"])
+        self.assertIsNone(response.data["error"])
+        self.assertIsNone(response.data["execution_status"]["last_error_code"])
         self.assertEqual(restore.execution_metadata["opaque_control"], "preserve-me")
         self.assertEqual(restore.execution_metadata["manual_resume_count"], 1)
         self.assertEqual(
@@ -176,6 +184,64 @@ class ManualCloudRestoreResumeApiTests(TransactionTestCase):
             replay = self._post(self.node, restore.id)
         self.assertEqual(replay.status_code, 200)
         replay_poll.assert_not_called()
+
+    def test_broker_ack_loss_serializes_rapid_complete_row_and_resume_sequence(self):
+        restore = self._restore()
+
+        def publish_then_complete(*_args, **kwargs):
+            restore_tasks.poll_cloud_restore.apply(args=kwargs["args"])
+            raise RuntimeError("broker acknowledgement was lost")
+
+        with mock.patch.object(
+            CoreCloudRestore,
+            "poll_status",
+            return_value=CoreCloudRestore.Status.COMPLETE,
+        ), mock.patch.object(restore_tasks, "notify_restore_completed"), mock.patch(
+            "apps._tasks.integration.restore.poll_cloud_restore.apply_async",
+            side_effect=publish_then_complete,
+        ):
+            response = self._post(self.node, restore.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], restore.id)
+        self.assertEqual(response.data["status"], CoreCloudRestore.Status.COMPLETE)
+        self.assertEqual(response.data["execution_status"]["status"], "complete")
+        self.assertEqual(response.data["resume_sequence"], 1)
+        self.assertEqual(response.data["code"], "restore_resume_reconciled")
+        self.assertFalse(response.data["manual_resume_enqueued"])
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, CoreCloudRestore.Status.COMPLETE)
+        self.assertEqual(restore.execution_metadata["manual_resume_count"], 1)
+
+    def test_broker_ack_loss_serializes_rapid_failed_row_and_resume_sequence(self):
+        restore = self._restore()
+
+        def publish_then_fail(*_args, **kwargs):
+            restore_tasks.poll_cloud_restore.apply(args=kwargs["args"])
+            raise RuntimeError("broker acknowledgement was lost")
+
+        with mock.patch.object(
+            CoreCloudRestore,
+            "poll_status",
+            return_value=CoreCloudRestore.Status.FAILED,
+        ), mock.patch.object(restore_tasks, "notify_restore_failed"), mock.patch(
+            "apps._tasks.integration.restore.poll_cloud_restore.apply_async",
+            side_effect=publish_then_fail,
+        ):
+            response = self._post(self.node, restore.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], restore.id)
+        self.assertEqual(response.data["status"], CoreCloudRestore.Status.FAILED)
+        self.assertEqual(response.data["execution_status"]["status"], "failed")
+        self.assertEqual(response.data["resume_sequence"], 1)
+        self.assertEqual(response.data["code"], "restore_resume_reconciled")
+        self.assertFalse(response.data["manual_resume_enqueued"])
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(restore.execution_metadata["manual_resume_count"], 1)
 
     def test_cross_account_restore_id_is_not_visible_or_resumable(self):
         other_account, other_member, _other_user = factories.make_account()
@@ -291,3 +357,22 @@ class ManualCloudRestoreResumeTemplateTests(SimpleTestCase):
             self.source,
         )
         self.assertIn("String(item.resource_id || item.provider_job_id || '').trim()", self.source)
+
+    def test_duplicate_name_polling_stays_on_the_tracked_restore_id(self):
+        polling_block = self.source.split(
+            "async getNativeCloudRestores(showErrors = false, allowNameRecovery = false)",
+            1,
+        )[1].split("async startNativeCloudRestore()", 1)[0]
+        tracked_branch = polling_block.split("if (trackedId !== null)", 1)[1].split(
+            "else if (allowNameRecovery)", 1
+        )[0]
+        self.assertIn(
+            "records.find(item => this.nativeRestoreId(item.id) === trackedId)",
+            tracked_branch,
+        )
+        self.assertNotIn("item.name", tracked_branch)
+        self.assertIn("else if (allowNameRecovery)", polling_block)
+        self.assertIn(
+            "const matches = records.filter(item => String(item.name || '').trim() === targetName)",
+            polling_block,
+        )

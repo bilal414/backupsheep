@@ -138,6 +138,26 @@ class PollCloudBackupTests(BaseTestCase):
         self.assertEqual(contract["code"], "PROVIDER_OWNERSHIP_MISMATCH")
         self.assertIn("ownership", contract["remediation"].lower())
 
+    def test_notification_lookup_failure_uses_generic_safe_contract(self):
+        node, backup = self._backup()
+        sensitive_lookup_detail = "provider-token=do-not-leak-or-persist"
+
+        with mock.patch.object(
+            backup,
+            "get_execution_state",
+            side_effect=RuntimeError(sensitive_lookup_detail),
+        ), mock.patch.object(node, "notify_backup_fail") as notify:
+            helper_tasks._notify_cloud_failure_once(
+                node, backup, True, UtilBackup.Status.FAILED
+            )
+
+        notify.assert_called_once()
+        notification_error = notify.call_args.args[0]
+        contract = node._backup_notification_contract(notification_error)
+        self.assertEqual(contract["code"], "SOURCE_EXPORT_FAILED")
+        self.assertNotIn(sensitive_lookup_detail, str(notification_error))
+        self.assertNotIn(sensitive_lookup_detail, str(contract))
+
     def test_in_progress_requeues(self):
         node, backup = self._backup()
         with mock.patch.object(CoreDigitalOceanBackup, "poll_status",

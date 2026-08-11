@@ -4,11 +4,13 @@ import json
 from unittest import mock
 
 from botocore.exceptions import ClientError
+from botocore.session import get_session
+from botocore.stub import Stubber
 
 from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.backup.models import CoreCloudRestore
 from apps.console.connection.models import CoreAuthAWS, CoreAWSRegion
-from apps.console.node.models import CoreAWS, CoreNode
+from apps.console.node.models import CoreAWS, CoreNode, _aws_backup_restore_identity
 from apps.console.utils.models import UtilBackup
 from apps._tasks.integration.aws_backup import idempotency_token
 from apps.tests import factories
@@ -186,6 +188,36 @@ class AWSS3RestoreDestinationSafetyTests(BaseTestCase):
         start_restore.assert_called_once()
 
     @mock.patch("apps._tasks.integration.aws_backup.start_restore_job")
+    def test_target_and_provider_job_pointer_are_persisted_atomically(self, start_restore):
+        node, _aws, backup, restore, auth, s3, backup_client = self._fixture()
+        start_restore.return_value = {"RestoreJobId": "restore-job-atomic"}
+        persisted_pointer_states = []
+        original_save = CoreCloudRestore.save
+
+        def recording_save(instance, *args, **kwargs):
+            result = original_save(instance, *args, **kwargs)
+            persisted_pointer_states.append(
+                (instance.resource_id, instance.provider_job_id)
+            )
+            return result
+
+        with self._client_patch(auth, s3, backup_client), mock.patch.object(
+            CoreCloudRestore,
+            "save",
+            autospec=True,
+            side_effect=recording_save,
+        ):
+            node.aws.restore_snapshot(backup, restore)
+
+        target_states = [
+            state for state in persisted_pointer_states if state[0] == "restore-bucket"
+        ]
+        self.assertTrue(target_states)
+        self.assertTrue(
+            all(job_id == "restore-job-atomic" for _target, job_id in target_states)
+        )
+
+    @mock.patch("apps._tasks.integration.aws_backup.start_restore_job")
     def test_suspended_or_unversioned_destination_is_rejected(self, start_restore):
         for status in ("Suspended", None):
             with self.subTest(status=status):
@@ -319,6 +351,8 @@ class AWSS3RestoreDestinationSafetyTests(BaseTestCase):
                     "RestoreJobId": "adopted-restore-job",
                     "RecoveryPointArn": backup.metadata["_aws_backup"]["recovery_point_arn"],
                     "CreatedResourceArn": "arn:aws:s3:::restore-bucket",
+                    "AccountId": "123456789012",
+                    "ResourceType": "S3",
                     "Status": "RUNNING",
                 }
             ]
@@ -357,7 +391,7 @@ class AWSS3RestoreDestinationSafetyTests(BaseTestCase):
     @mock.patch("apps._tasks.integration.aws_backup.start_restore_job")
     def test_lost_restore_response_sets_unknown_and_replay_adopts_once(self, start_restore):
         node, _aws, backup, restore, auth, s3, backup_client = self._fixture()
-        start_restore.return_value = {}
+        start_restore.side_effect = [{}, {"RestoreJobId": "recovered-after-lost-response"}]
 
         with self._client_patch(auth, s3, backup_client):
             node.aws.restore_snapshot(backup, restore)
@@ -368,22 +402,238 @@ class AWSS3RestoreDestinationSafetyTests(BaseTestCase):
         first_token = start_restore.call_args.args[4]
         self.assertEqual(first_token, idempotency_token("restore", restore.id))
 
-        backup_client.list_restore_jobs.return_value = {
-            "RestoreJobs": [
-                {
-                    "RestoreJobId": "recovered-after-lost-response",
-                    "RecoveryPointArn": backup.metadata["_aws_backup"]["recovery_point_arn"],
-                    "CreatedResourceArn": "arn:aws:s3:::restore-bucket",
-                    "Status": "RUNNING",
-                }
-            ]
-        }
         with self._client_patch(auth, s3, backup_client):
             node.aws.restore_snapshot(backup, restore)
 
         restore.refresh_from_db()
         self.assertEqual(restore.provider_job_id, "recovered-after-lost-response")
-        self.assertEqual(start_restore.call_count, 1)
+        self.assertEqual(start_restore.call_count, 2)
+        self.assertEqual(start_restore.call_args_list[0].args[4], start_restore.call_args_list[1].args[4])
+        self.assertEqual(
+            start_restore.call_args_list[1].args[4],
+            idempotency_token("restore", restore.id),
+        )
+        backup_client.list_restore_jobs.assert_not_called()
         s3.list_objects_v2.assert_called_once()
         s3.list_object_versions.assert_called_once()
         s3.list_multipart_uploads.assert_called_once()
+
+    def test_list_restore_jobs_uses_sdk_valid_filters_and_exact_identity(self):
+        node, _aws, backup, restore, auth, _s3, _backup_client = self._fixture()
+        recovery_point_arn = backup.metadata["_aws_backup"]["recovery_point_arn"]
+        expected = _aws_backup_restore_identity(
+            auth, "s3", recovery_point_arn, "restore-bucket"
+        )
+        backup_client = get_session().create_client(
+            "backup",
+            region_name="us-east-1",
+            aws_access_key_id="access",
+            aws_secret_access_key="secret",
+        )
+        job = {
+            "RestoreJobId": "restore-job-shape",
+            "RecoveryPointArn": recovery_point_arn,
+            "CreatedResourceArn": expected["target_arn"],
+            "AccountId": expected["account_id"],
+            "ResourceType": expected["resource_type"],
+            "Status": "RUNNING",
+        }
+        with Stubber(backup_client) as stubber:
+            stubber.add_response(
+                "list_restore_jobs",
+                {"RestoreJobs": [job]},
+                {
+                    "ByAccountId": expected["account_id"],
+                    "ByResourceType": expected["resource_type"],
+                    "MaxResults": 1000,
+                },
+            )
+            jobs = node.aws._find_aws_backup_restore_job(
+                backup_client,
+                recovery_point_arn=recovery_point_arn,
+                target_id="restore-bucket",
+                expected=expected,
+            )
+
+        self.assertEqual([item["RestoreJobId"] for item in jobs], ["restore-job-shape"])
+
+    def test_list_restore_jobs_rejects_same_target_with_wrong_identity(self):
+        node, _aws, backup, restore, auth, _s3, _backup_client = self._fixture()
+        recovery_point_arn = backup.metadata["_aws_backup"]["recovery_point_arn"]
+        expected = _aws_backup_restore_identity(
+            auth, "s3", recovery_point_arn, "restore-bucket"
+        )
+        backup_client = mock.MagicMock()
+        backup_client.list_restore_jobs.return_value = {
+            "RestoreJobs": [{
+                "RestoreJobId": "foreign-job",
+                "RecoveryPointArn": "arn:aws:backup:us-east-1:123456789012:recovery-point/foreign",
+                "CreatedResourceArn": expected["target_arn"],
+                "AccountId": expected["account_id"],
+                "ResourceType": expected["resource_type"],
+                "Status": "RUNNING",
+            }]
+        }
+
+        with self.assertRaises(ValueError) as raised:
+            node.aws._find_aws_backup_restore_job(
+                backup_client,
+                recovery_point_arn=recovery_point_arn,
+                target_id="restore-bucket",
+                expected=expected,
+            )
+
+        self.assertEqual(raised.exception.code, "PROVIDER_OWNERSHIP_MISMATCH")
+
+    def test_list_restore_jobs_rejects_duplicate_exact_targets(self):
+        node, _aws, backup, _restore, auth, _s3, _backup_client = self._fixture()
+        recovery_point_arn = backup.metadata["_aws_backup"]["recovery_point_arn"]
+        expected = _aws_backup_restore_identity(
+            auth, "s3", recovery_point_arn, "restore-bucket"
+        )
+        job = {
+            "RestoreJobId": "duplicate-job",
+            "RecoveryPointArn": recovery_point_arn,
+            "CreatedResourceArn": expected["target_arn"],
+            "AccountId": expected["account_id"],
+            "ResourceType": expected["resource_type"],
+            "Status": "RUNNING",
+        }
+        backup_client = mock.MagicMock()
+        backup_client.list_restore_jobs.return_value = {
+            "RestoreJobs": [job, {**job, "RestoreJobId": "duplicate-job-2"}]
+        }
+
+        with self.assertRaises(ValueError) as raised:
+            node.aws._find_aws_backup_restore_job(
+                backup_client,
+                recovery_point_arn=recovery_point_arn,
+                target_id="restore-bucket",
+                expected=expected,
+            )
+
+        self.assertEqual(raised.exception.code, "PROVIDER_DUPLICATE_MATCH")
+
+    def test_list_restore_jobs_accepts_exact_transitional_job_without_target_arn(self):
+        node, _aws, backup, _restore, auth, _s3, _backup_client = self._fixture()
+        recovery_point_arn = backup.metadata["_aws_backup"]["recovery_point_arn"]
+        expected = _aws_backup_restore_identity(
+            auth, "s3", recovery_point_arn, "restore-bucket"
+        )
+        backup_client = mock.MagicMock()
+        backup_client.list_restore_jobs.return_value = {
+            "RestoreJobs": [{
+                "RestoreJobId": "transitional-job",
+                "RecoveryPointArn": recovery_point_arn,
+                "AccountId": expected["account_id"],
+                "ResourceType": expected["resource_type"],
+                "Status": "RUNNING",
+            }]
+        }
+
+        jobs = node.aws._find_aws_backup_restore_job(
+            backup_client,
+            recovery_point_arn=recovery_point_arn,
+            target_id="restore-bucket",
+            expected=expected,
+        )
+
+        self.assertEqual([item["RestoreJobId"] for item in jobs], ["transitional-job"])
+
+    @mock.patch("apps._tasks.integration.aws_backup.start_restore_job")
+    def test_missing_created_resource_arn_is_transitional_until_exact_poll(self, start_restore):
+        node, _aws, backup, restore, auth, s3, backup_client = self._fixture()
+        start_restore.return_value = {"RestoreJobId": "restore-job-transitional"}
+        with self._client_patch(auth, s3, backup_client):
+            node.aws.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        backup_client.describe_restore_job.return_value = {
+            "RestoreJobId": "restore-job-transitional",
+            "RecoveryPointArn": backup.metadata["_aws_backup"]["recovery_point_arn"],
+            "AccountId": "123456789012",
+            "ResourceType": "S3",
+            "Status": "RUNNING",
+        }
+        with self._client_patch(auth, s3, backup_client):
+            first = node.aws.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(first, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertEqual(
+            restore.params["_bs_restore_reconciliation"]["missing_target_observations"],
+            1,
+        )
+        self.assertEqual(restore.operation_phase, CoreCloudRestore.OperationPhase.RECONCILING)
+        self.assertNotEqual(restore.status, CoreCloudRestore.Status.FAILED)
+
+        backup_client.describe_restore_job.return_value = {
+            "RestoreJobId": "restore-job-transitional",
+            "RecoveryPointArn": backup.metadata["_aws_backup"]["recovery_point_arn"],
+            "CreatedResourceArn": "arn:aws:s3:::restore-bucket",
+            "AccountId": "123456789012",
+            "ResourceType": "S3",
+            "Status": "COMPLETED",
+        }
+        with self._client_patch(auth, s3, backup_client):
+            second = node.aws.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(second, CoreCloudRestore.Status.COMPLETE)
+        self.assertEqual(restore.last_error_code, "")
+
+    @mock.patch("apps._tasks.integration.aws_backup.start_restore_job")
+    def test_failed_job_without_created_target_is_provider_failure(self, start_restore):
+        node, _aws, backup, restore, auth, s3, backup_client = self._fixture()
+        start_restore.return_value = {"RestoreJobId": "restore-job-failed"}
+        with self._client_patch(auth, s3, backup_client):
+            node.aws.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        backup_client.describe_restore_job.return_value = {
+            "RestoreJobId": "restore-job-failed",
+            "RecoveryPointArn": backup.metadata["_aws_backup"]["recovery_point_arn"],
+            "AccountId": "123456789012",
+            "ResourceType": "S3",
+            "Status": "FAILED",
+        }
+        with self._client_patch(auth, s3, backup_client):
+            result = node.aws.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(result, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(restore.status, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(restore.last_error_code, "PROVIDER_FAILED")
+        self.assertEqual(
+            restore.operation_phase,
+            CoreCloudRestore.OperationPhase.FAILED,
+        )
+
+    @mock.patch("apps._tasks.integration.aws_backup.start_restore_job")
+    def test_unsupported_restore_job_state_is_not_treated_as_in_progress(self, start_restore):
+        node, _aws, backup, restore, auth, s3, backup_client = self._fixture()
+        start_restore.return_value = {"RestoreJobId": "restore-job-unsupported"}
+        with self._client_patch(auth, s3, backup_client):
+            node.aws.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        backup_client.describe_restore_job.return_value = {
+            "RestoreJobId": "restore-job-unsupported",
+            "RecoveryPointArn": backup.metadata["_aws_backup"]["recovery_point_arn"],
+            "CreatedResourceArn": "arn:aws:s3:::restore-bucket",
+            "AccountId": "123456789012",
+            "ResourceType": "S3",
+            # EXPIRED is a backup-job state, not a current AWS restore-job state.
+            "Status": "EXPIRED",
+        }
+        with self._client_patch(auth, s3, backup_client):
+            result = node.aws.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(result, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(restore.status, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(restore.last_error_code, "PROVIDER_MALFORMED_RESPONSE")
+        self.assertEqual(
+            restore.operation_phase,
+            CoreCloudRestore.OperationPhase.MANUAL_REVIEW,
+        )

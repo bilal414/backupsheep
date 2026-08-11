@@ -14,6 +14,7 @@ from apps._tasks.integration.restore_lease import (
     RestoreLeaseBusy,
 )
 from apps.api.v1.backup import serializers as backup_serializers
+from apps.api.v1.node.serializers import CoreCloudRestoreSerializer
 from apps.console.backup.models import (
     CoreCloudRestore,
     CoreDigitalOceanBackup,
@@ -142,6 +143,135 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         self.assertEqual(current.celery_task_id, "root-restore-request")
         self.assertEqual(current.attempt_count, initial.attempt_count + 1)
         self.assertIn("poll-recovery-delivery", current.lease_owner)
+
+    def test_successful_cloud_poll_clears_stale_public_error_rollups(self):
+        node, _backup, restore = self._cloud_restore()
+        restore.resource_id = "provider-target"
+        restore.celery_task_id = "root-restore-request"
+        restore.params = {
+            "witness": "preserve-me",
+            "_bs_last_error_code": "PROVIDER_MALFORMED_RESPONSE",
+            "_bs_last_error_category": "manual_review",
+        }
+        restore.error = "stale safe failure"
+        restore.last_error_code = "PROVIDER_MALFORMED_RESPONSE"
+        restore.status = restore.Status.IN_PROGRESS
+        restore.operation_phase = restore.OperationPhase.POLLING
+        restore.save()
+
+        with mock.patch.object(
+            CoreCloudRestore,
+            "poll_status",
+            return_value=CoreCloudRestore.Status.COMPLETE,
+        ), mock.patch.object(restore_tasks, "notify_restore_completed"):
+            restore_tasks.poll_cloud_restore.apply(args=[node.id, restore.id])
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, restore.Status.COMPLETE)
+        self.assertEqual(restore.operation_phase, restore.OperationPhase.COMPLETE)
+        self.assertEqual(restore.params, {"witness": "preserve-me"})
+        self.assertEqual(restore.last_error_code, "")
+        self.assertIsNone(restore.error)
+        data = CoreCloudRestoreSerializer(restore).data
+        self.assertIsNone(data["error"])
+        self.assertIsNone(data["execution_status"]["last_error_code"])
+
+    def test_healthy_in_progress_poll_clears_stale_public_error_rollups(self):
+        node, _backup, restore = self._cloud_restore()
+        restore.resource_id = "provider-target"
+        restore.params = {
+            "witness": "preserve-me",
+            "_bs_last_error_code": "PROVIDER_TRANSIENT_OUTAGE",
+            "_bs_last_error_category": "provider",
+        }
+        restore.status = restore.Status.IN_PROGRESS
+        restore.operation_phase = restore.OperationPhase.POLLING
+        restore.error = "The provider is temporarily unavailable."
+        restore.last_error_code = "RESTORE_TRANSIENT_FAILURE"
+        restore.save()
+
+        transient = RestoreError("provider outage")
+        transient.code = "PROVIDER_TRANSIENT_OUTAGE"
+        transient.retryable = True
+        with mock.patch.object(
+            CoreCloudRestore,
+            "poll_status",
+            side_effect=[transient, CoreCloudRestore.Status.IN_PROGRESS],
+        ), mock.patch.object(restore_tasks.poll_cloud_restore, "apply_async"):
+            restore_tasks.poll_cloud_restore.apply(args=[node.id, restore.id])
+            restore.refresh_from_db()
+            self.assertEqual(
+                restore.last_error_code,
+                "RESTORE_TRANSIENT_FAILURE",
+            )
+            self.assertIsNotNone(restore.error)
+            CoreCloudRestore.objects.filter(pk=restore.pk).update(
+                next_retry_at=timezone.now() - timedelta(seconds=1)
+            )
+
+            restore_tasks.poll_cloud_restore.apply(args=[node.id, restore.id])
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, restore.Status.IN_PROGRESS)
+        self.assertEqual(restore.operation_phase, restore.OperationPhase.POLLING)
+        self.assertEqual(restore.params, {"witness": "preserve-me"})
+        self.assertEqual(restore.last_error_code, "")
+        self.assertIsNone(restore.error)
+        data = CoreCloudRestoreSerializer(restore).data
+        self.assertIsNone(data["error"])
+        self.assertIsNone(data["execution_status"]["last_error_code"])
+
+    def test_in_progress_poll_preserves_error_written_by_current_reconciliation(self):
+        node, _backup, restore = self._cloud_restore()
+        restore.resource_id = "provider-target"
+        restore.params = {
+            "witness": "preserve-me",
+            "_bs_last_error_code": "PROVIDER_TRANSIENT_OUTAGE",
+            "_bs_last_error_category": "retryable",
+        }
+        restore.status = restore.Status.IN_PROGRESS
+        restore.operation_phase = restore.OperationPhase.POLLING
+        restore.error = "stale safe failure"
+        restore.last_error_code = "PROVIDER_TRANSIENT_OUTAGE"
+        restore.save()
+
+        def current_reconciliation(row):
+            params = dict(row.params or {})
+            params["_bs_last_error_code"] = "PROVIDER_NOT_FOUND"
+            params["_bs_last_error_category"] = "reconciliation_wait"
+            row.params = params
+            row.last_error_code = "PROVIDER_NOT_FOUND"
+            row.error = "The provider target is not visible yet."
+            row.operation_phase = row.OperationPhase.RECONCILING
+            row.next_retry_at = timezone.now() + timedelta(seconds=60)
+            row.save()
+            return row.Status.IN_PROGRESS
+
+        with mock.patch.object(
+            CoreCloudRestore,
+            "poll_status",
+            autospec=True,
+            side_effect=current_reconciliation,
+        ), mock.patch.object(
+            restore_tasks.poll_cloud_restore, "apply_async"
+        ) as requeue:
+            restore_tasks.poll_cloud_restore.apply(args=[node.id, restore.id])
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, restore.Status.IN_PROGRESS)
+        self.assertEqual(
+            restore.operation_phase,
+            restore.OperationPhase.RECONCILING,
+        )
+        self.assertEqual(restore.execution_phase, "provider_reconciling")
+        self.assertEqual(restore.last_error_code, "PROVIDER_NOT_FOUND")
+        self.assertEqual(
+            restore.params["_bs_last_error_category"],
+            "reconciliation_wait",
+        )
+        self.assertEqual(restore.params["witness"], "preserve-me")
+        self.assertGreater(requeue.call_args.kwargs["countdown"], 0)
+        self.assertLessEqual(requeue.call_args.kwargs["countdown"], 60)
 
     def test_task_never_persists_secret_bearing_restore_exception(self):
         node, backup, restore = self._restore()

@@ -2672,6 +2672,7 @@
                 nativeRestoreStarted: false,
                 nativeRestoreStatus: null,
                 nativeRestoreExecutionStatus: null,
+                nativeRestoreTrackedId: null,
                 nativeRestoreList: [],
                 nativeRestoreError: '',
                 nativeRestorePollHandle: null,
@@ -3041,6 +3042,10 @@
                 nativeRestoreStatusIsTerminal(item) {
                     return ['complete', 'failed', 'manual_review'].includes(this.nativeRestoreStatusCategory(item));
                 },
+                nativeRestoreId(value) {
+                    const id = Number(value);
+                    return Number.isSafeInteger(id) && id > 0 ? id : null;
+                },
                 nativeRestoreCanResume(item) {
                     if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
                     const execution = item.execution_status && typeof item.execution_status === 'object'
@@ -3054,10 +3059,12 @@
                         phase === 'manual_review';
                 },
                 adoptNativeRestoreTargetIfPresent() {
-                    if (this.nativeRestoreStarted) return;
+                    if (this.nativeRestoreStarted || this.nativeRestoreTrackedId) return;
                     const targetName = this.nativeRestoreTargetName();
-                    const exact = this.nativeRestoreList.find(item => String(item.name || '').trim() === targetName);
+                    const matches = this.nativeRestoreList.filter(item => String(item.name || '').trim() === targetName);
+                    const exact = matches.length === 1 ? matches[0] : null;
                     if (exact) {
+                        this.nativeRestoreTrackedId = this.nativeRestoreId(exact.id);
                         this.nativeRestoreStatus = exact;
                         this.nativeRestoreExecutionStatus = this.executionStatusView(exact);
                         this.nativeRestoreStarted = true;
@@ -3094,6 +3101,7 @@
                     this.nativeRestoreStarted = false;
                     this.nativeRestoreStatus = null;
                     this.nativeRestoreExecutionStatus = null;
+                    this.nativeRestoreTrackedId = null;
                     this.nativeRestoreError = '';
                 },
                 openNativeCloudRestoreModal(backupId, backupUuid, backupStatus) {
@@ -3105,6 +3113,7 @@
                     this.nativeRestoreStarted = false;
                     this.nativeRestoreStatus = null;
                     this.nativeRestoreExecutionStatus = null;
+                    this.nativeRestoreTrackedId = null;
                     this.nativeRestoreList = [];
                     this.nativeRestoreError = '';
                     this.nativeRestore = {
@@ -3116,7 +3125,7 @@
                         requestId: null,
                         requestTargetName: '',
                     };
-                    this.getNativeCloudRestores(true);
+                    this.getNativeCloudRestores(true, true);
                 },
                 closeNativeCloudRestoreModal() {
                     this.clearNativeRestorePoll();
@@ -3127,6 +3136,7 @@
                     this.nativeRestoreStarted = false;
                     this.nativeRestoreStatus = null;
                     this.nativeRestoreExecutionStatus = null;
+                    this.nativeRestoreTrackedId = null;
                     this.nativeRestoreList = [];
                     this.nativeRestoreError = '';
                     this.nativeRestore = {
@@ -3155,7 +3165,7 @@
                         this.getNativeCloudRestores(false);
                     }, 5000);
                 },
-                async getNativeCloudRestores(showErrors = false) {
+                async getNativeCloudRestores(showErrors = false, allowNameRecovery = false) {
                     if (this.nativeRestorePolling || !this.nativeRestore.backupId) return false;
                     this.nativeRestorePolling = true;
                     try {
@@ -3168,13 +3178,21 @@
                                 .filter(item => String(item.backup_id) === String(this.nativeRestore.backupId))
                             : [];
                         this.nativeRestoreList = records;
-                        const targetName = this.nativeRestoreTargetName();
-                        const exact = records.find(item => String(item.name || '').trim() === targetName);
+                        const trackedId = this.nativeRestoreId(this.nativeRestoreTrackedId);
+                        let exact = null;
+                        if (trackedId !== null) {
+                            exact = records.find(item => this.nativeRestoreId(item.id) === trackedId);
+                        } else if (allowNameRecovery) {
+                            const targetName = this.nativeRestoreTargetName();
+                            const matches = records.filter(item => String(item.name || '').trim() === targetName);
+                            exact = matches.length === 1 ? matches[0] : null;
+                            if (exact) this.nativeRestoreTrackedId = this.nativeRestoreId(exact.id);
+                        }
                         if (exact) {
                             this.nativeRestoreStatus = exact;
                             this.nativeRestoreExecutionStatus = this.executionStatusView(exact);
                             this.nativeRestoreStarted = true;
-                        } else if (!this.nativeRestoreStarted) {
+                        } else if (!this.nativeRestoreStarted && allowNameRecovery) {
                             this.nativeRestoreStatus = null;
                             this.nativeRestoreExecutionStatus = null;
                         }
@@ -3193,7 +3211,6 @@
                 },
                 async startNativeCloudRestore() {
                     if (!this.nativeRestoreCanSubmit()) return;
-                    const targetName = this.nativeRestoreTargetName();
                     this.nativeRestoreSubmitting = true;
                     this.nativeRestoreError = '';
                     try {
@@ -3216,17 +3233,18 @@
                         const json = await response.json();
                         const idempotentReplay = json && json.idempotent_replay === true;
                         this.nativeRestoreStatus = json && typeof json === 'object' && !Array.isArray(json) ? json : null;
+                        this.nativeRestoreTrackedId = this.nativeRestoreId(json && json.id);
                         this.nativeRestoreExecutionStatus = this.executionStatusView(this.nativeRestoreStatus);
                         this.nativeRestoreStarted = true;
-                        await this.getNativeCloudRestores(false);
+                        await this.getNativeCloudRestores(false, !this.nativeRestoreTrackedId);
                         this.startNativeRestorePolling();
                         Alpine.store('notifications').items.push({show: true, success: true, heading: idempotentReplay ? 'Restore request recovered' : 'Restore started', details: idempotentReplay ? 'The existing idempotent restore request is now being tracked.' : 'The safe fork restore is now being tracked.'});
                     } catch (error) {
                         // A lost response can still mean the API created the durable
-                        // restore row. Reconcile by target name before surfacing an
-                        // error or allowing another click.
-                        const recovered = await this.getNativeCloudRestores(false);
-                        if (recovered && this.nativeRestoreStatus && String(this.nativeRestoreStatus.name || '').trim() === targetName) {
+                        // restore row. Name matching is limited to this initial
+                        // lost-response recovery; later polls require the row ID.
+                        const recovered = await this.getNativeCloudRestores(false, !this.nativeRestoreTrackedId);
+                        if (recovered && this.nativeRestoreStatus) {
                             this.nativeRestoreStarted = true;
                             this.startNativeRestorePolling();
                             Alpine.store('notifications').items.push({show: true, success: true, heading: 'Restore request recovered', details: 'The restore request was accepted and its status was recovered.'});
@@ -3250,6 +3268,7 @@
                     this.nativeRestoreError = '';
                     this.nativeRestore.backupId = item.backup_id;
                     this.nativeRestore.name = String(item.name || '').trim();
+                    this.nativeRestoreTrackedId = this.nativeRestoreId(item.id);
                     this.nativeRestore.destinationBucketName = this.nativeRestoreResourceKind === 'aws_s3'
                         ? this.nativeRestore.name
                         : '';
@@ -3277,6 +3296,9 @@
                         this.nativeRestoreStatus = payload && typeof payload === 'object' && !Array.isArray(payload)
                             ? payload
                             : item;
+                        this.nativeRestoreTrackedId = this.nativeRestoreId(
+                            this.nativeRestoreStatus && this.nativeRestoreStatus.id
+                        ) || this.nativeRestoreTrackedId;
                         this.nativeRestoreExecutionStatus = this.executionStatusView(this.nativeRestoreStatus);
                         await this.getNativeCloudRestores(false);
                         this.startNativeRestorePolling();
@@ -3288,8 +3310,8 @@
                         });
                     } catch (error) {
                         const recovered = await this.getNativeCloudRestores(false);
-                        if (recovered && this.nativeRestoreStatus && !this.nativeRestoreStatusIsTerminal(this.nativeRestoreStatus)) {
-                            this.startNativeRestorePolling();
+                        if (recovered && this.nativeRestoreStatus) {
+                            if (!this.nativeRestoreStatusIsTerminal(this.nativeRestoreStatus)) this.startNativeRestorePolling();
                             Alpine.store('notifications').items.push({
                                 show: true,
                                 success: true,

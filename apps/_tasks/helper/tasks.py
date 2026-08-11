@@ -855,8 +855,8 @@ def _notify_cloud_failure_once(node, backup, should_notify, status):
             stable_error_code = str(
                 getattr(execution, "last_error_code", "") or ""
             ).strip().upper()[:64]
-        except Exception as error:
-            capture_exception(error)
+        except Exception as lookup_error:
+            capture_exception(lookup_error)
             stable_error_code = ""
         if stable_error_code:
             error.error_code = stable_error_code

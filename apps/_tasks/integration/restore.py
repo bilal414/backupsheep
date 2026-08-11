@@ -418,6 +418,36 @@ def _defer_cloud_restore_reconciliation(
     return True
 
 
+def _clear_cloud_restore_error_rollups(restore):
+    """Clear presentation-only errors after a healthy provider observation.
+
+    Provider identity and reconciliation witnesses live in their own fields.
+    These values are only safe UI/error rollups, so a later healthy lifecycle
+    observation must not continue presenting an earlier transient or manual
+    review result as the current state.
+    """
+    params = dict(restore.params or {})
+    params.pop("_bs_last_error_code", None)
+    params.pop("_bs_last_error_category", None)
+    restore.params = params
+    restore.last_error_code = ""
+    restore.error = None
+
+
+def _cloud_restore_has_current_error_rollup(restore):
+    """Return whether this provider observation wrote a current safe error."""
+    params = dict(restore.params or {})
+    return any(
+        str(value or "").strip()
+        for value in (
+            restore.last_error_code,
+            restore.error,
+            params.get("_bs_last_error_code"),
+            params.get("_bs_last_error_category"),
+        )
+    )
+
+
 @current_app.task(
     name="restore_cloud_backup",
     track_started=True,
@@ -583,7 +613,16 @@ def poll_cloud_restore(self, node_id, restore_id, started_at=None, interval=120,
             return
 
         try:
+            # Clear only on this in-memory observation first. A provider adapter
+            # that sees a fresh retry/reconciliation condition writes a new safe
+            # rollup during poll_status(); a healthy observation leaves this
+            # object clear. This distinguishes a current provider condition from
+            # stale UI state without erasing durable ownership witnesses.
+            _clear_cloud_restore_error_rollups(restore)
             status = restore.poll_status()
+            provider_observation_has_error = (
+                _cloud_restore_has_current_error_rollup(restore)
+            )
         except Exception as error:
             capture_exception(error)
             code, message, retryable = _restore_error_outcome(error)
@@ -611,14 +650,13 @@ def poll_cloud_restore(self, node_id, restore_id, started_at=None, interval=120,
         metadata = dict(restore.execution_metadata or {})
         metadata["consecutive_poll_failures"] = 0
         restore.execution_metadata = metadata
-        restore.next_retry_at = None
 
         if status == CoreCloudRestore.Status.COMPLETE:
+            _clear_cloud_restore_error_rollups(restore)
             restore.status = CoreCloudRestore.Status.COMPLETE
             restore.operation_phase = restore.OperationPhase.COMPLETE
             restore.execution_phase = "complete"
-            restore.last_error_code = ""
-            restore.error = None
+            restore.next_retry_at = None
             restore.save()
             _notify_once(
                 restore,
@@ -648,11 +686,32 @@ def poll_cloud_restore(self, node_id, restore_id, started_at=None, interval=120,
             return
 
         restore.status = CoreCloudRestore.Status.IN_PROGRESS
-        restore.operation_phase = restore.OperationPhase.POLLING
-        restore.execution_phase = "provider_polling"
+        if provider_observation_has_error:
+            # Keep an error/reconciliation phase that the adapter wrote during
+            # this exact observation. The outer task must not turn a bounded
+            # no-match witness into a falsely healthy POLLING state.
+            if restore.operation_phase == restore.OperationPhase.RECONCILING:
+                restore.execution_phase = "provider_reconciling"
+            elif restore.operation_phase == restore.OperationPhase.CREATE_UNKNOWN:
+                restore.execution_phase = "provider_create_unknown"
+            else:
+                restore.operation_phase = restore.OperationPhase.POLLING
+                restore.execution_phase = "provider_poll_retry"
+        else:
+            restore.operation_phase = restore.OperationPhase.POLLING
+            restore.execution_phase = "provider_polling"
+            restore.next_retry_at = None
+            _clear_cloud_restore_error_rollups(restore)
         restore.save()
+        countdown = interval
+        if restore.next_retry_at:
+            retry_seconds = int(
+                (restore.next_retry_at - timezone.now()).total_seconds()
+            )
+            countdown = max(1, retry_seconds)
         poll_cloud_restore.apply_async(
-            args=[node_id, restore_id, None, interval, timeout], countdown=interval
+            args=[node_id, restore_id, None, interval, timeout],
+            countdown=countdown,
         )
     except (RestoreLeaseLost, RestoreExecutionLeaseLostError) as error:
         capture_exception(error)
