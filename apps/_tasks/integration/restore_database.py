@@ -21,6 +21,7 @@ permissions and removed in ``finally`` blocks.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -65,6 +66,56 @@ POSTGRES_MARKER_SCHEMA = "__backupsheep_restore"
 POSTGRES_MARKER_TABLE = "marker"
 MAX_DATABASE_IDENTIFIER_LENGTH = 63
 DATABASE_RESTORE_PERMISSION_ERROR_CODE = "DATABASE_RESTORE_PERMISSION_DENIED"
+SFTP_OPEN_TIMEOUT = 30
+REMOTE_RESTORE_PREFIX = ".backupsheep_restore_"
+REMOTE_RESTORE_CORRELATION_RE = r"(?:[0-9a-f]{32}|[0-9a-f]{64})"
+REMOTE_RESTORE_ARTIFACT_RE = re.compile(
+    rf"^{re.escape(REMOTE_RESTORE_PREFIX)}"
+    rf"(?P<backup>[0-9a-f]{{32}})_"
+    rf"(?P<correlation>{REMOTE_RESTORE_CORRELATION_RE})_"
+    rf"(?P<fence>[0-9a-f]{{16}})_"
+    rf"(?P<kind>mysql_credentials|mysql_preflight_credentials|"
+    rf"postgres_credentials|postgres_preflight_credentials|"
+    rf"mysql_sql|postgres_sql)"
+    rf"(?:_(?P<source>[0-9a-f]{{12}})_(?P<file>[0-9a-f]{{12}}))?"
+    rf"\.(?P<extension>cnf|pgpass|sql)$"
+)
+REMOTE_RESTORE_CREDENTIAL_EXTENSIONS = {
+    "mysql_credentials": "cnf",
+    "mysql_preflight_credentials": "cnf",
+    "postgres_credentials": "pgpass",
+    "postgres_preflight_credentials": "pgpass",
+}
+REMOTE_RESTORE_SQL_KINDS = {"mysql_sql", "postgres_sql"}
+_LEGACY_BACKUP_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+class RemoteRestoreCleanupError(RestoreError):
+    """Safe, classified failure proving that remote restore cleanup is incomplete."""
+
+    def __init__(self, category, *, retryable):
+        self.category = str(category)
+        self.retryable = bool(retryable)
+        self.code = (
+            "RESTORE_TRANSIENT_FAILURE"
+            if self.retryable
+            else "RESTORE_RECONCILIATION_REQUIRED"
+        )
+        if self.retryable:
+            message = (
+                "Remote database restore cleanup could not be verified because the "
+                "remote connection is temporarily unavailable. The restore will resume "
+                "automatically."
+            )
+        else:
+            message = (
+                "Remote database restore cleanup could not be proven safe. The logical "
+                "restore state was preserved and manual reconciliation is required "
+                "before retrying."
+            )
+        super().__init__(message)
 
 
 def _database_restore_permission_error(database_type):
@@ -133,6 +184,177 @@ def _restore_work_suffix(restore, backup):
     return str(backup.uuid_str)
 
 
+def _remote_identity_token(value):
+    """Return a fixed-width, non-secret token for a restore identity value."""
+    normalised = str(value or "").replace("-", "").lower()
+    if re.fullmatch(r"[0-9a-f]{32}", normalised):
+        return normalised
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:32]
+
+
+def _remote_restore_identity(restore, backup):
+    """Return the exact deterministic identity embedded in remote temp names."""
+    backup_value = getattr(backup, "uuid_str", None)
+    if backup_value is None:
+        backup_value = getattr(backup, "uuid", "")
+    return {
+        "backup": _remote_identity_token(backup_value),
+        "correlation": _remote_identity_token(
+            getattr(restore, "correlation_id", getattr(restore, "pk", "restore"))
+        ),
+        "fence": hashlib.sha256(
+            (
+                f"{getattr(restore, '_required_restore_lease_owner', '')}|"
+                f"{getattr(restore, '_required_restore_lease_token', '')}"
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        if _has_restore_fence(restore)
+        else hashlib.sha256(
+            f"unfenced|{getattr(backup, 'uuid_str', getattr(backup, 'uuid', ''))}|"
+            f"{getattr(restore, 'correlation_id', getattr(restore, 'pk', 'restore'))}".encode(
+                "utf-8"
+            )
+        ).hexdigest()[:16],
+    }
+
+
+def _remote_restore_temp_name(
+    restore,
+    backup,
+    kind,
+    *,
+    source=None,
+    filename=None,
+):
+    """Build one strict, correlation- and fence-scoped remote basename."""
+    identity = _remote_restore_identity(restore, backup)
+    if kind in REMOTE_RESTORE_CREDENTIAL_EXTENSIONS:
+        if source is not None or filename is not None:
+            raise RestoreError("remote credential temp name has an invalid scope.")
+        return (
+            f"{REMOTE_RESTORE_PREFIX}{identity['backup']}_"
+            f"{identity['correlation']}_{identity['fence']}_{kind}."
+            f"{REMOTE_RESTORE_CREDENTIAL_EXTENSIONS[kind]}"
+        )
+    if kind not in REMOTE_RESTORE_SQL_KINDS or source is None or filename is None:
+        raise RestoreError("remote SQL temp name has an invalid scope.")
+    source_token = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:12]
+    file_token = hashlib.sha256(str(filename).encode("utf-8")).hexdigest()[:12]
+    return (
+        f"{REMOTE_RESTORE_PREFIX}{identity['backup']}_"
+        f"{identity['correlation']}_{identity['fence']}_{kind}_"
+        f"{source_token}_{file_token}.sql"
+    )
+
+
+def _parse_remote_restore_temp_name(remote_name):
+    """Parse only names in the private BackupSheep remote-temp namespace."""
+    if not isinstance(remote_name, str) or remote_name != os.path.basename(remote_name):
+        return None
+    match = REMOTE_RESTORE_ARTIFACT_RE.fullmatch(remote_name)
+    if not match:
+        return None
+    values = match.groupdict()
+    kind = values["kind"]
+    extension = values["extension"]
+    if kind in REMOTE_RESTORE_CREDENTIAL_EXTENSIONS:
+        if values["source"] or values["file"]:
+            return None
+        if REMOTE_RESTORE_CREDENTIAL_EXTENSIONS[kind] != extension:
+            return None
+    elif kind in REMOTE_RESTORE_SQL_KINDS:
+        if not values["source"] or not values["file"] or extension != "sql":
+            return None
+    else:
+        return None
+    return values
+
+
+def _remote_temp_name_matches_restore(
+    remote_name,
+    restore,
+    backup,
+    *,
+    kinds=None,
+    require_current_fence=False,
+):
+    """Return parsed ownership evidence for one exact restore/backup pair."""
+    if backup is None:
+        return None
+    parsed = _parse_remote_restore_temp_name(remote_name)
+    if parsed is None:
+        return None
+    if kinds is not None and parsed["kind"] not in set(kinds):
+        return None
+    identity = _remote_restore_identity(restore, backup)
+    if (
+        parsed["backup"] != identity["backup"]
+        or parsed["correlation"] != identity["correlation"]
+    ):
+        return None
+    if require_current_fence and parsed["fence"] != identity["fence"]:
+        return None
+    return parsed
+
+
+def _legacy_remote_temp_name_matches_backup(remote_name, backup):
+    """Match only the exact private filenames emitted by pre-fence workers.
+
+    Legacy names did not carry a restore correlation.  The backup UUID and the
+    known worker suffixes are therefore intentionally part of the strict
+    parser; arbitrary dotfiles, another backup, and names with path components
+    never enter the cleanup set.
+    """
+    if backup is None or not isinstance(remote_name, str):
+        return None
+    if remote_name != os.path.basename(remote_name):
+        return None
+    backup_uuid = str(getattr(backup, "uuid_str", getattr(backup, "uuid", ""))).lower()
+    if not _LEGACY_BACKUP_UUID_RE.fullmatch(backup_uuid):
+        return None
+    suffix = rf"(?:[0-9a-f]{{16}}|{re.escape(backup_uuid)})"
+    patterns = (
+        (
+            "legacy_credentials",
+            re.compile(
+                rf"^\.backupsheep_restore_{re.escape(backup_uuid)}"
+                rf"(?:_{suffix})?\.(?P<extension>cnf|pgpass)$"
+            ),
+        ),
+        (
+            "legacy_preflight_credentials",
+            re.compile(
+                rf"^\.backupsheep_restore_preflight_{re.escape(backup_uuid)}"
+                rf"_{suffix}\.(?P<extension>cnf|pgpass)$"
+            ),
+        ),
+        (
+            "legacy_mysql_sql",
+            re.compile(
+                rf"^\.backupsheep_restore_{re.escape(backup_uuid)}_{suffix}_"
+                rf"[0-9a-f]{{12}}_[0-9a-f]{{8}}\.sql$"
+            ),
+        ),
+        (
+            "legacy_postgres_sql",
+            re.compile(
+                rf"^\.backupsheep_restore_{re.escape(backup_uuid)}_{suffix}_"
+                rf"[0-9a-f]{{12}}\.sql$"
+            ),
+        ),
+    )
+    for kind, pattern in patterns:
+        match = pattern.fullmatch(remote_name)
+        if match:
+            return {
+                "legacy": True,
+                "backup": backup_uuid,
+                "kind": kind,
+                "extension": match.groupdict().get("extension"),
+            }
+    return None
+
+
 def _safe_failure(node, backup, what, code="CLIENT_FAILED"):
     """Build a user-safe failure without retaining stderr or exception bodies."""
     _write_log(backup, f"{what}: {code}\n")
@@ -151,6 +373,92 @@ def _safe_failure(node, backup, what, code="CLIENT_FAILED"):
 def _capture_safe(code):
     """Send only a category to secured diagnostics, never an exception body."""
     capture_exception(RuntimeError(f"database restore diagnostic: {code}"))
+
+
+def _raise_remote_cleanup_failure(category, *, retryable=None):
+    """Raise a safe cleanup outcome after recording only its category."""
+    category = str(category or "SFTP_CLEANUP_FAILED")
+    if retryable is None:
+        # Residue may include credentials or SQL.  Never automatically retry
+        # while cleanup is unproven; the only idempotent success path is a
+        # NOT_FOUND response after the delete request was actually started.
+        retryable = False
+    _capture_safe(category)
+    raise RemoteRestoreCleanupError(category, retryable=retryable)
+
+
+def _open_sftp_bounded(ssh, timeout):
+    """Open SFTP with Paramiko's bounded channel-open timeout.
+
+    Paramiko's ``SSHClient.open_sftp`` delegates to ``Transport.open_session``;
+    that call uses ``Transport.channel_timeout``.  Set it only around the open,
+    then restore the transport value before any SFTP operation.  This keeps the
+    channel-open wait bounded without creating helper threads that cannot be
+    terminated safely.
+    """
+    transport = None
+    get_transport = getattr(ssh, "get_transport", None)
+    if callable(get_transport):
+        transport = get_transport()
+    sentinel = object()
+    original_timeout = getattr(transport, "channel_timeout", sentinel)
+    changed = original_timeout is not sentinel
+    if changed:
+        transport.channel_timeout = timeout
+    try:
+        return ssh.open_sftp()
+    finally:
+        if changed:
+            transport.channel_timeout = original_timeout
+
+
+def _sftp_channel(sftp, timeout):
+    """Apply the bounded operation timeout to the SFTP channel when available."""
+    channel = getattr(sftp, "get_channel", lambda: None)()
+    if channel is not None and hasattr(channel, "settimeout"):
+        channel.settimeout(timeout)
+    return channel
+
+
+def _close_ssh_and_remove_key(ssh, ssh_key_path, close_code):
+    """Release SSH/key material even when a final remote sweep raises."""
+    if ssh is not None:
+        try:
+            ssh.close()
+        except Exception:
+            _capture_safe(close_code)
+    if ssh_key_path and os.path.exists(ssh_key_path):
+        try:
+            os.remove(ssh_key_path)
+        except OSError:
+            pass
+
+
+def _has_competing_live_restore(restore, backup):
+    """Return True/False, or None when a competing-restore proof is unavailable."""
+    manager = getattr(restore.__class__, "objects", None)
+    backup_pk = getattr(backup, "pk", None)
+    status_class = getattr(restore, "Status", None)
+    if manager is None or backup_pk is None or status_class is None:
+        return None
+    active_statuses = {
+        value
+        for value in (
+            getattr(status_class, "PENDING", None),
+            getattr(status_class, "IN_PROGRESS", None),
+        )
+        if value is not None
+    }
+    if not active_statuses:
+        return None
+    try:
+        query = manager.filter(backup_id=backup_pk).exclude(pk=restore.pk)
+        return query.filter(status__in=active_statuses).exists()
+    except Exception:
+        # A failed proof is not permission to delete a legacy file.  Do not
+        # retain ORM/provider exception text in the user-facing outcome.
+        _capture_safe("SFTP_CLEANUP_COMPETING_RESTORE_UNKNOWN")
+        return None
 
 
 def _sql_literal(value):
@@ -593,15 +901,25 @@ def _ssh_run(node, backup, ssh, command, username, password, label, what, *, res
     return out_text
 
 
-def _sftp_put(ssh, local_path, remote_name, *, restore=None):
+def _sftp_put(ssh, local_path, remote_name, *, restore=None, backup=None):
     """Upload a temporary SQL file with a 0600 mode."""
     if restore is not None:
+        if not _has_restore_fence(restore):
+            raise RestoreLeaseLost("Remote restore upload requires a live lease fence.")
         _ensure_restore_fence(restore)
-    sftp = ssh.open_sftp()
+        if _remote_temp_name_matches_restore(
+            remote_name,
+            restore,
+            backup,
+            kinds=REMOTE_RESTORE_SQL_KINDS,
+            require_current_fence=True,
+        ) is None:
+            raise RestoreError("remote SQL temp name is outside the BackupSheep namespace.")
+    sftp = _open_sftp_bounded(ssh, SFTP_OPEN_TIMEOUT)
     try:
-        channel = getattr(sftp, "get_channel", lambda: None)()
-        if channel is not None and hasattr(channel, "settimeout"):
-            channel.settimeout(COMMAND_TIMEOUT)
+        _sftp_channel(sftp, COMMAND_TIMEOUT)
+        if restore is not None:
+            _ensure_restore_fence(restore)
         sftp.put(local_path, remote_name)
         sftp.chmod(remote_name, 0o600)
         if restore is not None:
@@ -610,15 +928,27 @@ def _sftp_put(ssh, local_path, remote_name, *, restore=None):
         sftp.close()
 
 
-def _sftp_write(ssh, remote_name, content, *, restore=None):
+def _sftp_write(ssh, remote_name, content, *, restore=None, backup=None):
     """Write a remote credential file with a bounded 0600 SFTP channel."""
     if restore is not None:
+        if not _has_restore_fence(restore):
+            raise RestoreLeaseLost("Remote restore credential requires a live lease fence.")
         _ensure_restore_fence(restore)
-    sftp = ssh.open_sftp()
+        if _remote_temp_name_matches_restore(
+            remote_name,
+            restore,
+            backup,
+            kinds=REMOTE_RESTORE_CREDENTIAL_EXTENSIONS,
+            require_current_fence=True,
+        ) is None:
+            raise RestoreError(
+                "remote credential temp name is outside the BackupSheep namespace."
+            )
+    sftp = _open_sftp_bounded(ssh, SFTP_OPEN_TIMEOUT)
     try:
-        channel = getattr(sftp, "get_channel", lambda: None)()
-        if channel is not None and hasattr(channel, "settimeout"):
-            channel.settimeout(COMMAND_TIMEOUT)
+        _sftp_channel(sftp, COMMAND_TIMEOUT)
+        if restore is not None:
+            _ensure_restore_fence(restore)
         with sftp.open(remote_name, "w") as output:
             output.write(content)
         sftp.chmod(remote_name, 0o600)
@@ -628,22 +958,227 @@ def _sftp_write(ssh, remote_name, content, *, restore=None):
         sftp.close()
 
 
-def _sftp_remove(ssh, remote_name, *, restore=None):
-    """Best-effort bounded cleanup of one remote temporary file."""
-    # Cleanup is deliberately not fenced: it is called from finally blocks after
-    # a worker may have lost its lease.  Callers provide worker-scoped names, so
-    # this can only remove that worker's own temporary artifact.
+def _sftp_cleanup_error_code(error):
+    """Classify an SFTP failure without retaining provider diagnostics."""
+    error_number = getattr(error, "errno", None)
+    message = str(error or "").lower()
+    if error_number == errno.ENOENT or "no such file" in message or "not found" in message:
+        return "SFTP_CLEANUP_NOT_FOUND"
+    if error_number in {errno.EACCES, errno.EPERM} or "permission denied" in message:
+        return "SFTP_CLEANUP_PERMISSION_DENIED"
+    if "authentication" in message or "auth failed" in message or "not authenticated" in message:
+        return "SFTP_CLEANUP_AUTH_FAILED"
+    if isinstance(error, TimeoutError) or "timed out" in message or "timeout" in message:
+        return "SFTP_CLEANUP_TIMEOUT"
+    if any(token in message for token in ("connection", "transport", "channel", "socket")):
+        return "SFTP_CLEANUP_TRANSPORT_FAILED"
+    return "SFTP_CLEANUP_FAILED"
+
+
+def _sftp_remove(ssh, remote_name, *, restore=None, backup=None):
+    """Remove one owned remote temp file only while the caller's fence is live."""
+    parsed = _parse_remote_restore_temp_name(remote_name)
+    legacy = _legacy_remote_temp_name_matches_backup(remote_name, backup)
+    if parsed is None and legacy is None:
+        _raise_remote_cleanup_failure("SFTP_CLEANUP_INVALID_NAME", retryable=False)
+    if restore is None or not _has_restore_fence(restore):
+        raise RestoreLeaseLost("Remote restore cleanup requires a live lease fence.")
+    if parsed is not None:
+        if backup is None or _remote_temp_name_matches_restore(
+            remote_name, restore, backup
+        ) is None:
+            _raise_remote_cleanup_failure(
+                "SFTP_CLEANUP_OWNERSHIP_MISMATCH", retryable=False
+            )
+    elif legacy is not None:
+        competing = _has_competing_live_restore(restore, backup)
+        if competing is not False:
+            _raise_remote_cleanup_failure(
+                "SFTP_CLEANUP_COMPETING_RESTORE", retryable=False
+            )
+
     try:
-        sftp = ssh.open_sftp()
-        try:
-            channel = getattr(sftp, "get_channel", lambda: None)()
-            if channel is not None and hasattr(channel, "settimeout"):
-                channel.settimeout(SFTP_CLEANUP_TIMEOUT)
-            sftp.remove(remote_name)
-        finally:
-            sftp.close()
+        _ensure_restore_fence(restore)
+    except RestoreLeaseLost:
+        raise
+    except Exception:
+        _raise_remote_cleanup_failure(
+            "SFTP_CLEANUP_FENCE_CHECK_FAILED", retryable=False
+        )
+
+    sftp = None
+    operation_error = None
+    lease_lost = None
+    classified_error = None
+    remove_started = False
+    try:
+        sftp = _open_sftp_bounded(ssh, SFTP_OPEN_TIMEOUT)
+        _sftp_channel(sftp, SFTP_CLEANUP_TIMEOUT)
+        # This is deliberately after open_sftp/channel setup and immediately
+        # before the delete.  A lease may expire while the SFTP channel opens.
+        _ensure_restore_fence(restore)
+        if legacy is not None:
+            competing = _has_competing_live_restore(restore, backup)
+            if competing is not False:
+                _raise_remote_cleanup_failure(
+                    "SFTP_CLEANUP_COMPETING_RESTORE", retryable=False
+                )
+        remove_started = True
+        sftp.remove(remote_name)
+    except RestoreLeaseLost as error:
+        lease_lost = error
+    except RemoteRestoreCleanupError as error:
+        classified_error = error
     except Exception as error:
-        _capture_safe("SFTP_CLEANUP_FAILED")
+        operation_error = error
+    finally:
+        if sftp is not None:
+            try:
+                sftp.close()
+            except Exception as error:
+                if operation_error is None and lease_lost is None and classified_error is None:
+                    operation_error = error
+
+    if lease_lost is not None:
+        raise lease_lost
+    if classified_error is not None:
+        raise classified_error
+    if operation_error is not None:
+        code = _sftp_cleanup_error_code(operation_error)
+        if code == "SFTP_CLEANUP_NOT_FOUND" and remove_started:
+            return True
+        if code == "SFTP_CLEANUP_NOT_FOUND":
+            _raise_remote_cleanup_failure(
+                "SFTP_CLEANUP_TARGET_UNAVAILABLE", retryable=False
+            )
+        _raise_remote_cleanup_failure(code)
+    return True
+
+
+def _remote_restore_artifact_inventory(ssh, restore, backup):
+    """List only strict new/legacy BackupSheep artifacts for this backup scope."""
+    if not _has_restore_fence(restore):
+        raise RestoreLeaseLost("Remote restore inventory requires a live lease fence.")
+    try:
+        _ensure_restore_fence(restore)
+    except RestoreLeaseLost:
+        raise
+    except Exception:
+        _raise_remote_cleanup_failure(
+            "SFTP_CLEANUP_FENCE_CHECK_FAILED", retryable=False
+        )
+
+    sftp = None
+    operation_error = None
+    lease_lost = None
+    names = None
+    try:
+        sftp = _open_sftp_bounded(ssh, SFTP_OPEN_TIMEOUT)
+        _sftp_channel(sftp, SFTP_CLEANUP_TIMEOUT)
+        _ensure_restore_fence(restore)
+        names = sftp.listdir(".")
+    except RestoreLeaseLost as error:
+        lease_lost = error
+    except Exception as error:
+        operation_error = error
+    finally:
+        if sftp is not None:
+            try:
+                sftp.close()
+            except Exception as error:
+                if operation_error is None and lease_lost is None:
+                    operation_error = error
+
+    if lease_lost is not None:
+        raise lease_lost
+    if operation_error is not None:
+        code = _sftp_cleanup_error_code(operation_error)
+        if code == "SFTP_CLEANUP_NOT_FOUND":
+            _raise_remote_cleanup_failure(
+                "SFTP_CLEANUP_INVENTORY_UNAVAILABLE", retryable=False
+            )
+        _raise_remote_cleanup_failure(code)
+
+    if not isinstance(names, (list, tuple)):
+        _raise_remote_cleanup_failure(
+            "SFTP_CLEANUP_MALFORMED_INVENTORY", retryable=False
+        )
+
+    inventory = []
+    for remote_name in names:
+        parsed = _remote_temp_name_matches_restore(remote_name, restore, backup)
+        if parsed is not None:
+            inventory.append((remote_name, parsed))
+            continue
+        legacy = _legacy_remote_temp_name_matches_backup(remote_name, backup)
+        if legacy is not None:
+            inventory.append((remote_name, legacy))
+    return inventory
+
+
+def _cleanup_stale_remote_restore_artifacts(
+    ssh, restore, backup, *, include_current=False
+):
+    """Delete namespaced artifacts for this exact restore correlation.
+
+    The current lease/fence owns every artifact with its fence token.  A takeover
+    can therefore remove prior-fence names after independently proving the
+    current fence is still live.  Names outside the strict namespace, names for
+    another backup, and names for another restore correlation are ignored.  A
+    successful worker may set ``include_current`` during final cleanup so a
+    transient earlier remove failure does not leave credentials or SQL behind.
+    """
+    if ssh is None:
+        return
+    if not _has_restore_fence(restore):
+        raise RestoreLeaseLost("Remote restore cleanup requires a live lease fence.")
+    _ensure_restore_fence(restore)
+    identity = _remote_restore_identity(restore, backup)
+    inventory = _remote_restore_artifact_inventory(ssh, restore, backup)
+    cleanup_failure = None
+    for remote_name, parsed in inventory:
+        if not include_current and not parsed.get("legacy") and parsed["fence"] == identity["fence"]:
+            continue
+        # Re-check the live fence immediately before each delete.  A worker
+        # takeover must never turn into an unfenced broad cleanup if the new
+        # lease expires while a long artifact list is being processed.
+        try:
+            removed = _sftp_remove(ssh, remote_name, restore=restore, backup=backup)
+            if removed is False:
+                _capture_safe("SFTP_CLEANUP_FAILED")
+                cleanup_failure = cleanup_failure or RemoteRestoreCleanupError(
+                    "SFTP_CLEANUP_FAILED", retryable=False
+                )
+        except RestoreLeaseLost:
+            raise
+        except RemoteRestoreCleanupError as error:
+            # Continue to the final inventory pass.  A timeout/lost response
+            # may have been accepted remotely; if the exact artifact is gone,
+            # cleanup is proven complete despite the failed delete response.
+            cleanup_failure = cleanup_failure or error
+
+    # Deletion responses can be lost and object stores/remote filesystems can
+    # be eventually consistent.  A successful restore is therefore not allowed
+    # to proceed until this exact backup/correlation inventory is proven empty.
+    remaining = _remote_restore_artifact_inventory(ssh, restore, backup)
+    if not include_current:
+        remaining = [
+            (remote_name, parsed)
+            for remote_name, parsed in remaining
+            if parsed.get("legacy") or parsed.get("fence") != identity["fence"]
+        ]
+    if remaining:
+        if cleanup_failure is not None:
+            raise cleanup_failure
+        if any(parsed.get("legacy") for _name, parsed in remaining):
+            _raise_remote_cleanup_failure(
+                "SFTP_CLEANUP_LEGACY_RESIDUE", retryable=False
+            )
+        _raise_remote_cleanup_failure("SFTP_CLEANUP_RESIDUE")
+    if cleanup_failure is not None:
+        # The final inventory is empty, so a lost delete response was safely
+        # reconciled and does not need another restore attempt.
+        return
 
 
 def _marker_values(restore, backup, source, target, source_digest, state):
@@ -910,6 +1445,10 @@ def _ensure_mysql_target(
 
     if not exists:
         try:
+            # The database and its ownership marker are one external
+            # mutation.  Re-check the durable fence immediately before it so
+            # an expired worker cannot create a target after a takeover.
+            _ensure_restore_fence(restore)
             _mysql_query(
                 node,
                 backup,
@@ -975,6 +1514,7 @@ def _ensure_mysql_target(
                 raise RestoreError("fork target name collision: existing MySQL database is not BackupSheep-owned.")
             # Explicit in-place authorization permits installing the exact
             # marker into an existing target, but never adopts an old marker.
+            _ensure_restore_fence(restore)
             _mysql_query(
                 node,
                 backup,
@@ -1002,6 +1542,8 @@ def _drop_mysql_owned_target(
     backup,
     auth,
     target,
+    source,
+    source_digest,
     username,
     password,
     *,
@@ -1009,6 +1551,50 @@ def _drop_mysql_owned_target(
     ssh=None,
     restore=None,
 ):
+    # This is destructive even though the name is deterministic.  The caller
+    # has already verified the exact marker.  Re-read it here as well: a
+    # target can be changed between adoption and this destructive operation.
+    # The final fence check below closes the worker-takeover window immediately
+    # before DROP.
+    if restore is None:
+        raise RestoreLeaseLost("Dropping a MySQL fork requires a live lease fence.")
+    if hasattr(restore, "assert_live_execution_fence") and not _has_restore_fence(restore):
+        raise RestoreLeaseLost("Dropping a MySQL fork requires a live lease fence.")
+
+    expected = _marker_values(
+        restore, backup, source, target, source_digest, "importing"
+    )
+    marker_fields = [
+        "marker_version",
+        "correlation_id",
+        "backup_uuid",
+        "source_database",
+        "target_database",
+        "source_digest",
+        "state",
+    ]
+    marker_text = _mysql_query(
+        node,
+        backup,
+        auth,
+        defaults_arg,
+        _mysql_marker_query(target),
+        username,
+        password,
+        "recheck MySQL fork ownership before drop",
+        ssh=ssh,
+        restore=restore,
+    )
+    marker = _parse_marker_row(marker_text, marker_fields)
+    if not marker or not _marker_matches(marker, expected) or marker.get("state") != "importing":
+        raise RestoreError(
+            "MySQL target marker changed before fork recreation; manual review is required."
+        )
+
+    # This check must remain immediately before the DROP request.  The SQL
+    # client also checks its bound fence, giving the command boundary two
+    # independent lease checks without ever permitting an unfenced drop.
+    _ensure_restore_fence(restore)
     _mysql_query(
         node,
         backup,
@@ -1023,6 +1609,177 @@ def _drop_mysql_owned_target(
     )
 
 
+def _validate_mysql_checkpoint(checkpoint, *, file_specs, source, source_digest):
+    """Validate one durable MySQL checkpoint without making provider changes."""
+    if not isinstance(checkpoint, dict):
+        raise RestoreError(
+            "restore target checkpoint is malformed; manual review is required."
+        )
+    if (
+        checkpoint.get("source") != source
+        or checkpoint.get("source_digest") != source_digest
+    ):
+        raise RestoreError(
+            "restore target checkpoint changed; manual review is required."
+        )
+    if not checkpoint.get("status"):
+        raise RestoreError(
+            "restore target checkpoint is missing its state; manual review is required."
+        )
+    status = str(checkpoint["status"])
+    if status not in {"pending", "importing", "complete"}:
+        raise RestoreError(
+            "restore target checkpoint has an unsupported state; manual review is required."
+        )
+    raw_files = checkpoint.get("files")
+    if raw_files is None:
+        files = {}
+    elif not isinstance(raw_files, dict):
+        raise RestoreError(
+            "restore file checkpoints are malformed; manual review is required."
+        )
+    else:
+        files = dict(raw_files)
+    for filename, file_state in files.items():
+        expected_file = file_specs.get(filename)
+        identity_matches = False
+        if expected_file is not None and isinstance(file_state, dict):
+            try:
+                identity_matches = (
+                    file_state.get("sha256") == expected_file.get("sha256")
+                    and int(file_state.get("bytes"))
+                    == int(expected_file.get("bytes"))
+                )
+            except (TypeError, ValueError):
+                identity_matches = False
+        if not identity_matches:
+            raise RestoreError(
+                "restore file checkpoint identity changed; manual review is required."
+            )
+        if not file_state.get("status"):
+            raise RestoreError(
+                "restore file checkpoint is missing its state; manual review is required."
+            )
+        if str(file_state["status"]) not in {"pending", "in_progress", "complete"}:
+            raise RestoreError(
+                "restore file checkpoint has an unsupported state; manual review is required."
+            )
+    return status, files
+
+
+def _mysql_target_checkpoint(restore, target):
+    """Read one MySQL checkpoint, failing closed on malformed metadata."""
+    checkpoints = _metadata(restore).get("target_checkpoints")
+    if checkpoints is None:
+        return {}
+    if not isinstance(checkpoints, dict):
+        raise RestoreError(
+            "restore target checkpoints are malformed; manual review is required."
+        )
+    checkpoint = checkpoints.get(target)
+    if checkpoint is None:
+        return {}
+    if not isinstance(checkpoint, dict):
+        raise RestoreError(
+            "restore target checkpoint is malformed; manual review is required."
+        )
+    return dict(checkpoint)
+
+
+def _reset_mysql_fork_checkpoint(
+    restore,
+    *,
+    mapping,
+    source_digests,
+    source,
+    target,
+    source_digest,
+    file_specs,
+):
+    """Reset an owned fork's replay state after discarding its partial data.
+
+    ``_checkpoint`` is intentionally monotonic for ordinary progress, so it
+    cannot be used to move an ``in_progress`` file back to ``pending``.  This
+    reset is a narrowly scoped exception: the caller has already verified the
+    exact BackupSheep marker and is about to drop/recreate the fork (or has
+    observed that the fork was newly created empty).  Validate every durable
+    identity before replacing the file states so a stale or foreign checkpoint
+    can never be converted into permission to drop a database.
+    """
+    values = _metadata(restore)
+    old_mapping = values.get("source_to_target")
+    if old_mapping is not None and old_mapping != mapping:
+        raise RestoreError(
+            "restore source-to-target mapping changed; manual review is required."
+        )
+    old_digests = values.get("source_digests")
+    if old_digests is not None and old_digests != source_digests:
+        raise RestoreError(
+            "restore source archive content changed; manual review is required."
+        )
+
+    raw_checkpoints = values.get("target_checkpoints")
+    if raw_checkpoints is None:
+        checkpoints = {}
+    elif not isinstance(raw_checkpoints, dict):
+        raise RestoreError(
+            "restore target checkpoints are malformed; manual review is required."
+        )
+    else:
+        checkpoints = dict(raw_checkpoints)
+    raw_existing = checkpoints.get(target)
+    if raw_existing is None:
+        existing = {}
+    elif not isinstance(raw_existing, dict):
+        raise RestoreError(
+            "restore target checkpoint is malformed; manual review is required."
+        )
+    else:
+        existing = dict(raw_existing)
+    if existing:
+        existing_status, _old_files = _validate_mysql_checkpoint(
+            existing,
+            file_specs=file_specs,
+            source=source,
+            source_digest=source_digest,
+        )
+        if existing_status == "complete":
+            raise RestoreError(
+                "completed restore target cannot be reopened automatically."
+            )
+
+    checkpoints[target] = {
+        "source": source,
+        "source_digest": source_digest,
+        "status": "importing",
+        "files": {
+            filename: dict(specification, status="pending")
+            for filename, specification in file_specs.items()
+        },
+    }
+    values["source_to_target"] = dict(mapping)
+    values["mapping_locked"] = True
+    values["source_digests"] = dict(source_digests)
+    values["target_checkpoints"] = checkpoints
+    restore.execution_metadata = values
+    restore.execution_phase = "database_importing"
+    restore.progress_completed = sum(
+        1
+        for checkpoint in checkpoints.values()
+        if checkpoint.get("status") == "complete"
+    )
+    restore.progress_unit = "databases"
+    _save_restore(
+        restore,
+        [
+            "execution_phase",
+            "execution_metadata",
+            "progress_completed",
+            "progress_unit",
+        ],
+    )
+
+
 def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_digests, username, password):
     """Restore MySQL/MariaDB sources into owned forks or explicit targets."""
     local_defaults_path = None
@@ -1033,25 +1790,27 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
     credential_suffix = f"_{worker_suffix}" if _has_restore_fence(restore) else ""
     if auth.use_public_key or auth.use_private_key:
         ssh, ssh_key_path = auth.get_ssh_client()
-        remote_defaults_name = f".backupsheep_restore_{backup.uuid_str}{credential_suffix}.cnf"
+        remote_defaults_name = _remote_restore_temp_name(
+            restore, backup, "mysql_credentials"
+        )
         try:
+            _cleanup_stale_remote_restore_artifacts(ssh, restore, backup)
             _sftp_write(
                 ssh,
                 remote_defaults_name,
                 _defaults_file_content(username, password, auth.host, auth.port, auth.use_ssl),
                 restore=restore,
+                backup=backup,
             )
         except Exception:
-            _sftp_remove(ssh, remote_defaults_name)
             try:
-                ssh.close()
-            except Exception as error:
-                _capture_safe("MYSQL_SSH_CLOSE_FAILED")
-            if ssh_key_path and os.path.exists(ssh_key_path):
-                try:
-                    os.remove(ssh_key_path)
-                except OSError:
-                    pass
+                _cleanup_stale_remote_restore_artifacts(
+                    ssh, restore, backup, include_current=True
+                )
+            finally:
+                _close_ssh_and_remove_key(
+                    ssh, ssh_key_path, "MYSQL_SSH_CLOSE_FAILED"
+                )
             raise
         defaults_arg = remote_defaults_name
     else:
@@ -1075,7 +1834,33 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                 defaults_arg=defaults_arg,
                 ssh=ssh,
             )
-            checkpoint = (_metadata(restore).get("target_checkpoints") or {}).get(target) or {}
+            expected_marker = _marker_values(
+                restore, backup, source, target, digest, "importing"
+            )
+            if not isinstance(marker, dict) or (
+                not _marker_matches(marker, expected_marker)
+                and not marker.get("_new")
+                and marker.get("state") != "complete"
+            ):
+                # The fork branch is destructive only when the exact marker
+                # proves ownership.  This guard is intentionally independent
+                # of _ensure_mysql_target so a stale/partial observation can
+                # never be treated as permission to replay or drop.  New
+                # targets and completion witnesses have already been checked
+                # by _ensure_mysql_target; the exact re-read in
+                # _drop_mysql_owned_target remains mandatory before DROP.
+                raise RestoreError(
+                    "the MySQL import outcome is ambiguous; exact ownership "
+                    "marker evidence is required for automatic recovery."
+                )
+            checkpoint = _mysql_target_checkpoint(restore, target)
+            if checkpoint:
+                _validate_mysql_checkpoint(
+                    checkpoint,
+                    file_specs=file_specs,
+                    source=source,
+                    source_digest=digest,
+                )
             if checkpoint.get("status") == "complete":
                 if marker.get("state") != "complete":
                     raise RestoreError("restore checkpoint and MySQL marker disagree.")
@@ -1115,35 +1900,54 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                 ):
                     raise RestoreError("interrupted in-place MySQL restore requires manual review.")
             else:
-                # A marker in importing state proves ownership.  Recreate only
-                # that owned fork so nontransactional DDL cannot be replayed
-                # onto an unknown or user-owned database.
-                if marker.get("state") == "importing" and not marker.get("_new") and not checkpoint.get("files"):
-                    _drop_mysql_owned_target(
-                        node,
-                        backup,
-                        auth,
-                        target,
-                        username,
-                        password,
-                        defaults_arg=defaults_arg,
-                        ssh=ssh,
-                        restore=restore,
+                # An exact importing marker proves ownership of this fork.
+                # MySQL/MariaDB DDL is not transactional, so every ambiguous
+                # partial fork import converges by replaying the verified
+                # archive into a fresh exact target.  This covers both sides
+                # of the durable checkpoint boundary: the worker may have
+                # persisted ``in_progress`` before the client ran, or the
+                # client may have committed before the checkpoint write.
+                #
+                # A target created above in this execution is already empty;
+                # do not drop it again.  A target adopted from a prior
+                # execution is dropped only after _ensure_mysql_target has
+                # proved the complete marker and _drop_mysql_owned_target has
+                # rechecked the live lease immediately before DROP.
+                if marker.get("state") == "importing":
+                    # Validate and persist the reset before DROP.  If the
+                    # worker dies between these two durable/external steps,
+                    # the next fenced worker sees an importing exact marker
+                    # and converges through the same safe fork restart.
+                    _reset_mysql_fork_checkpoint(
+                        restore,
+                        mapping=mapping,
+                        source_digests=source_digests,
+                        source=source,
+                        target=target,
+                        source_digest=digest,
+                        file_specs=file_specs,
                     )
-                    marker = _ensure_mysql_target(
-                        node, backup, restore, auth, source, target, digest,
-                        username, password, in_place=False,
-                        defaults_arg=defaults_arg,
-                        ssh=ssh,
-                    )
-                    checkpoint = {}
-                elif marker.get("state") == "importing" and any(
-                    state.get("status") == "in_progress"
-                    for state in checkpoint.get("files", {}).values()
-                ):
-                    raise RestoreError(
-                        "the MySQL import outcome is ambiguous; manual review is required."
-                    )
+                    if not marker.get("_new"):
+                        _drop_mysql_owned_target(
+                            node,
+                            backup,
+                            auth,
+                            target,
+                            source,
+                            digest,
+                            username,
+                            password,
+                            defaults_arg=defaults_arg,
+                            ssh=ssh,
+                            restore=restore,
+                        )
+                        marker = _ensure_mysql_target(
+                            node, backup, restore, auth, source, target, digest,
+                            username, password, in_place=False,
+                            defaults_arg=defaults_arg,
+                            ssh=ssh,
+                        )
+                    checkpoint = _mysql_target_checkpoint(restore, target)
 
             existing_files = dict(checkpoint.get("files") or {})
             if existing_files:
@@ -1211,6 +2015,7 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                     _verify_source_files(source_digests, source, sql_paths)
                 _ensure_restore_fence(restore)
                 if ssh is None:
+                    _ensure_restore_fence(restore)
                     _run_direct(
                         node,
                         backup,
@@ -1228,12 +2033,18 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                         restore=restore,
                     )
                 else:
-                    remote_sql = (
-                        f".backupsheep_restore_{backup.uuid_str}_{worker_suffix}_"
-                        f"{hashlib.sha256(source.encode()).hexdigest()[:12]}_{hashlib.sha256(filename.encode()).hexdigest()[:8]}.sql"
+                    remote_sql = _remote_restore_temp_name(
+                        restore,
+                        backup,
+                        "mysql_sql",
+                        source=source,
+                        filename=filename,
                     )
-                    _sftp_put(ssh, sql_path, remote_sql, restore=restore)
                     try:
+                        _sftp_put(
+                            ssh, sql_path, remote_sql, restore=restore, backup=backup
+                        )
+                        _ensure_restore_fence(restore)
                         _ssh_run(
                             node,
                             backup,
@@ -1248,7 +2059,10 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                             restore=restore,
                         )
                     finally:
-                        _sftp_remove(ssh, remote_sql)
+                        if remote_sql:
+                            _sftp_remove(
+                                ssh, remote_sql, restore=restore, backup=backup
+                            )
                 _checkpoint(
                     restore,
                     phase="database_importing",
@@ -1264,6 +2078,7 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                     }},
                     progress_total=len(mapping),
                 )
+            _ensure_restore_fence(restore)
             _mysql_query(
                 node, backup, auth,
                 defaults_arg,
@@ -1305,17 +2120,18 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                 os.remove(local_defaults_path)
         except OSError:
             pass
-        if ssh_key_path and os.path.exists(ssh_key_path):
+        if ssh is not None:
             try:
-                os.remove(ssh_key_path)
-            except OSError:
-                pass
-        if ssh is not None and remote_defaults_name:
-            _sftp_remove(ssh, remote_defaults_name)
-            try:
-                ssh.close()
-            except Exception as error:
-                _capture_safe("MYSQL_SSH_CLOSE_FAILED")
+                if remote_defaults_name:
+                    _cleanup_stale_remote_restore_artifacts(
+                        ssh, restore, backup, include_current=True
+                    )
+            finally:
+                _close_ssh_and_remove_key(
+                    ssh, ssh_key_path, "MYSQL_SSH_CLOSE_FAILED"
+                )
+        else:
+            _close_ssh_and_remove_key(None, ssh_key_path, "MYSQL_SSH_CLOSE_FAILED")
 
 
 def _pgpass_content(auth, username, password):
@@ -1504,9 +2320,9 @@ def _preflight_database_restore_permissions(
         ):
             if auth.use_public_key or auth.use_private_key:
                 ssh, ssh_key_path = auth.get_ssh_client()
-                remote_name = (
-                    f".backupsheep_restore_preflight_{backup.uuid_str}_"
-                    f"{worker_suffix}.cnf"
+                _cleanup_stale_remote_restore_artifacts(ssh, restore, backup)
+                remote_name = _remote_restore_temp_name(
+                    restore, backup, "mysql_preflight_credentials"
                 )
                 _sftp_write(
                     ssh,
@@ -1515,6 +2331,7 @@ def _preflight_database_restore_permissions(
                         username, password, auth.host, auth.port, auth.use_ssl
                     ),
                     restore=restore,
+                    backup=backup,
                 )
                 return _preflight_mysql_fork_permissions(
                     node,
@@ -1551,15 +2368,16 @@ def _preflight_database_restore_permissions(
             pg_env["PGCONNECT_TIMEOUT"] = str(CLIENT_CONNECT_TIMEOUT)
             if auth.use_public_key or auth.use_private_key:
                 ssh, ssh_key_path = auth.get_ssh_client()
-                remote_name = (
-                    f".backupsheep_restore_preflight_{backup.uuid_str}_"
-                    f"{worker_suffix}.pgpass"
+                _cleanup_stale_remote_restore_artifacts(ssh, restore, backup)
+                remote_name = _remote_restore_temp_name(
+                    restore, backup, "postgres_preflight_credentials"
                 )
                 _sftp_write(
                     ssh,
                     remote_name,
                     _pgpass_content(auth, username, password),
                     restore=restore,
+                    backup=backup,
                 )
                 return _preflight_postgresql_fork_permissions(
                     node,
@@ -1596,18 +2414,20 @@ def _preflight_database_restore_permissions(
             )
         return None
     finally:
-        if ssh is not None and remote_name:
-            _sftp_remove(ssh, remote_name)
         if ssh is not None:
             try:
-                ssh.close()
-            except Exception:
-                _capture_safe("DATABASE_PREFLIGHT_SSH_CLOSE_FAILED")
-        if ssh_key_path and os.path.exists(ssh_key_path):
-            try:
-                os.remove(ssh_key_path)
-            except OSError:
-                pass
+                if remote_name:
+                    _cleanup_stale_remote_restore_artifacts(
+                        ssh, restore, backup, include_current=True
+                    )
+            finally:
+                _close_ssh_and_remove_key(
+                    ssh, ssh_key_path, "DATABASE_PREFLIGHT_SSH_CLOSE_FAILED"
+                )
+        else:
+            _close_ssh_and_remove_key(
+                None, ssh_key_path, "DATABASE_PREFLIGHT_SSH_CLOSE_FAILED"
+            )
         if local_path and os.path.exists(local_path):
             try:
                 os.remove(local_path)
@@ -1854,16 +2674,18 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
     try:
         mode, _params = _restore_mode(restore)
         in_place = mode == "in_place"
-        worker_suffix = _restore_work_suffix(restore, backup)
-        credential_suffix = f"_{worker_suffix}" if _has_restore_fence(restore) else ""
         if auth.use_public_key or auth.use_private_key:
             ssh, ssh_key_path = auth.get_ssh_client()
-            remote_pgpass = f".backupsheep_restore_{backup.uuid_str}{credential_suffix}.pgpass"
+            _cleanup_stale_remote_restore_artifacts(ssh, restore, backup)
+            remote_pgpass = _remote_restore_temp_name(
+                restore, backup, "postgres_credentials"
+            )
             _sftp_write(
                 ssh,
                 remote_pgpass,
                 _pgpass_content(auth, username, password),
                 restore=restore,
+                backup=backup,
             )
         else:
             descriptor, local_pgpass = tempfile.mkstemp(
@@ -2020,29 +2842,40 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
             remote_sql = None
             try:
                 if ssh is not None:
-                    remote_sql = (
-                        f".backupsheep_restore_{backup.uuid_str}_{worker_suffix}_"
-                        f"{hashlib.sha256(source.encode()).hexdigest()[:12]}.sql"
-                    )
-                    _sftp_put(ssh, local_sql, remote_sql, restore=restore)
-                    command = _postgres_command(
-                        auth,
-                        username,
-                        target,
-                        pgpass=remote_pgpass,
-                        file_path=f'"$HOME/{remote_sql}"',
-                    )
-                    _ssh_run(
-                        node,
+                    remote_sql = _remote_restore_temp_name(
+                        restore,
                         backup,
-                        ssh,
-                        command,
-                        username,
-                        password,
-                        "PostgreSQL",
-                        f"import source database {source}",
-                        restore=restore,
+                        "postgres_sql",
+                        source=source,
+                        filename="__combined__",
                     )
+                    try:
+                        _sftp_put(
+                            ssh, local_sql, remote_sql, restore=restore, backup=backup
+                        )
+                        command = _postgres_command(
+                            auth,
+                            username,
+                            target,
+                            pgpass=remote_pgpass,
+                            file_path=f'"$HOME/{remote_sql}"',
+                        )
+                        _ssh_run(
+                            node,
+                            backup,
+                            ssh,
+                            command,
+                            username,
+                            password,
+                            "PostgreSQL",
+                            f"import source database {source}",
+                            restore=restore,
+                        )
+                    finally:
+                        if remote_sql:
+                            _sftp_remove(
+                                ssh, remote_sql, restore=restore, backup=backup
+                            )
                 else:
                     _run_direct(
                         node, backup,
@@ -2058,8 +2891,6 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                         restore=restore,
                     )
             finally:
-                if remote_sql and ssh is not None:
-                    _sftp_remove(ssh, remote_sql)
                 try:
                     os.remove(local_sql)
                 except OSError:
@@ -2091,23 +2922,23 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                 progress_total=len(mapping),
             )
     finally:
-        if ssh is not None and remote_pgpass:
-            _sftp_remove(ssh, remote_pgpass)
-        if ssh is not None:
-            try:
-                ssh.close()
-            except Exception as error:
-                _capture_safe("POSTGRES_SSH_CLOSE_FAILED")
-        if ssh_key_path and os.path.exists(ssh_key_path):
-            try:
-                os.remove(ssh_key_path)
-            except OSError:
-                pass
         if local_pgpass and os.path.exists(local_pgpass):
             try:
                 os.remove(local_pgpass)
             except OSError:
                 pass
+        if ssh is not None:
+            try:
+                if remote_pgpass:
+                    _cleanup_stale_remote_restore_artifacts(
+                        ssh, restore, backup, include_current=True
+                    )
+            finally:
+                _close_ssh_and_remove_key(
+                    ssh, ssh_key_path, "POSTGRES_SSH_CLOSE_FAILED"
+                )
+        else:
+            _close_ssh_and_remove_key(None, ssh_key_path, "POSTGRES_SSH_CLOSE_FAILED")
 
 
 def restore_database(backup, restore):

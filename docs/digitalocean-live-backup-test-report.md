@@ -1,5 +1,9 @@
 # DigitalOcean live backup validation
 
+> Historical evidence only — do not rerun this report as a playbook. A new live
+> test requires separately confirmed current login information, explicit team
+> scope, a unique ownership marker, and a fresh durable resource ledger.
+
 **Date:** 2026-08-01
 **Scope:** DigitalOcean provider backups and the BackupSheep resumable/idempotent backup path
 **Result:** PASS after the fixes listed below

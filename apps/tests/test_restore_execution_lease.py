@@ -13,6 +13,7 @@ from apps._tasks.integration.restore_lease import (
     DurableRestoreLease,
     RestoreLeaseBusy,
 )
+from apps.api.v1.backup import serializers as backup_serializers
 from apps.console.backup.models import (
     CoreCloudRestore,
     CoreDigitalOceanBackup,
@@ -167,6 +168,39 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         self.assertEqual(code, "PROVIDER_FAILED")
         self.assertFalse(retryable)
         self.assertNotIn("secret", message)
+
+    def test_ambiguous_restore_state_requires_reconciliation(self):
+        for detail in (
+            "PostgreSQL target ownership is ambiguous; no changes were retried.",
+            "restore checkpoint and PostgreSQL marker disagree.",
+            "fork target name collision: existing database is not BackupSheep-owned.",
+        ):
+            with self.subTest(detail=detail):
+                code, message, retryable = restore_tasks._restore_error_outcome(
+                    RestoreError(detail)
+                )
+
+                self.assertEqual(code, "RESTORE_RECONCILIATION_REQUIRED")
+                self.assertFalse(retryable)
+                self.assertIn("automatic destination writes were stopped", message)
+                self.assertEqual(backup_serializers._safe_error_code(code), code)
+                self.assertNotIn(detail, message)
+
+    def test_remote_cleanup_outcomes_are_safe_and_classified(self):
+        retryable = RestoreError("remote-body=secret-canary")
+        retryable.code = "RESTORE_TRANSIENT_FAILURE"
+        retryable.retryable = True
+        code, message, should_retry = restore_tasks._restore_error_outcome(retryable)
+        self.assertEqual(code, "RESTORE_TRANSIENT_FAILURE")
+        self.assertTrue(should_retry)
+        self.assertNotIn("secret-canary", message)
+
+        manual = RestoreError("remote-body=secret-canary")
+        manual.code = "RESTORE_RECONCILIATION_REQUIRED"
+        code, message, should_retry = restore_tasks._restore_error_outcome(manual)
+        self.assertEqual(code, "RESTORE_RECONCILIATION_REQUIRED")
+        self.assertFalse(should_retry)
+        self.assertNotIn("secret-canary", message)
 
     def test_cloud_failure_preserves_manual_review_phase(self):
         node, backup, restore = self._cloud_restore()

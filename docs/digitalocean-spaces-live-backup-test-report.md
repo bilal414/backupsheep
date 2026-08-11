@@ -1,5 +1,9 @@
 # DigitalOcean Spaces live backup and restore validation
 
+> Historical evidence only — do not rerun this report as a playbook. A new live
+> test requires separately confirmed current login information, explicit team
+> scope, a unique ownership marker, and a fresh durable resource ledger.
+
 **Date:** 2026-08-02
 **Scope:** DigitalOcean Spaces storage integration, SFTP file backup, PostgreSQL backup, restore, duplicate Celery delivery, and cleanup
 **Result:** PASS after the Spaces validation probe fix

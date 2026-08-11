@@ -13,6 +13,7 @@ Mutation and cleanup are separate explicit opt-ins.
 Example:
 
     AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+      AWS_E2E_RDS_CIDRS=198.51.100.7/32,2001:db8::7/128 \
       BACKUPSHEEP_E2E_RUN_ID=bs-e2e-20260810-5b4a6b63 \
       BACKUPSHEEP_E2E_LEDGER_PATH=/code/_storage/e2e-ledgers/aws.json \
       BACKUPSHEEP_E2E_APPLY=YES BACKUPSHEEP_E2E_CLEANUP=YES \
@@ -32,8 +33,7 @@ import secrets
 import sys
 import tempfile
 import time
-import traceback
-import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import boto3
 import django
 import psycopg2
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from botocore.config import Config
 
 
@@ -66,6 +66,8 @@ from apps._tasks.integration.aws_backup import idempotency_token  # noqa: E402
 from scripts.live_e2e_ledger import (  # noqa: E402
     DurableResourceLedger,
     LedgerError,
+    bounded_error,
+    provider_error_class,
     require_run_id,
 )
 
@@ -98,6 +100,8 @@ ROLE_NAME = f"{PREFIX}-role"
 OBJECT_KEY = "fixture/marker.txt"
 MARKER = f"{PREFIX}:backup-restore-marker"
 OWNERSHIP_TAG = "BackupSheepE2E"
+MAX_PROVIDER_PAGES = 1000
+MAX_PROVIDER_ITEMS = 10000
 
 
 class RestoreRecoveryError(RuntimeError):
@@ -106,6 +110,110 @@ class RestoreRecoveryError(RuntimeError):
     def __init__(self, code, message=None):
         self.code = str(code)
         super().__init__(message or self.code)
+
+
+class HarnessError(RuntimeError):
+    """A live harness safety invariant failed closed."""
+
+
+def _preflight_local_safety_gates():
+    """Reject unsafe mutation modes before constructing any AWS client."""
+    if CLEANUP and not APPLY:
+        raise HarnessError(
+            "Cleanup is a provider write and requires both "
+            "BACKUPSHEEP_E2E_APPLY=YES and BACKUPSHEEP_E2E_CLEANUP=YES."
+        )
+    if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get(
+        "AWS_SECRET_ACCESS_KEY"
+    ):
+        raise HarnessError(
+            "AWS credentials must be supplied explicitly through the process environment."
+        )
+
+
+_ALLOWED_AWS_CLIENT_SERVICES = frozenset(
+    {"backup", "dynamodb", "ec2", "iam", "rds", "s3", "sts"}
+)
+
+
+@contextmanager
+def _aws_client_guard():
+    """Allow only the AWS services this runner is explicitly designed to use."""
+    original_client = boto3.client
+
+    def guarded_client(service_name, *args, **kwargs):
+        normalized = str(service_name or "").strip().lower()
+        if normalized not in _ALLOWED_AWS_CLIENT_SERVICES:
+            raise HarnessError("The AWS E2E runner attempted an unsupported client.")
+        return original_client(service_name, *args, **kwargs)
+
+    boto3.client = guarded_client
+    try:
+        yield
+    finally:
+        boto3.client = original_client
+
+
+def _normalize_cidr_values(values, label, *, required):
+    """Return canonical, non-world-open IPv4/IPv6 CIDRs."""
+    if isinstance(values, str):
+        values = values.split(",")
+    cleaned = [str(value).strip() for value in values or []]
+    if required and not cleaned:
+        raise HarnessError(f"{label} is required and must contain explicit CIDRs.")
+    if any(not value or "/" not in value for value in cleaned):
+        raise HarnessError(f"{label} contains an invalid CIDR.")
+
+    networks = set()
+    for value in cleaned:
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError as error:
+            raise HarnessError(f"{label} contains an invalid CIDR: {value}") from error
+        if network.prefixlen == 0:
+            raise HarnessError(f"{label} must not contain a world-open CIDR.")
+        networks.add(network)
+    return tuple(
+        str(network)
+        for network in sorted(
+            networks,
+            key=lambda item: (
+                item.version,
+                int(item.network_address),
+                item.prefixlen,
+            ),
+        )
+    )
+
+
+def _validated_cidrs(raw_value, env_name):
+    """Validate an explicit comma-separated CIDR environment setting."""
+    return _normalize_cidr_values(str(raw_value or ""), env_name, required=True)
+
+
+def _security_group_permission(from_port, to_port, cidrs, description):
+    """Build an AWS security-group rule without permitting world-open access."""
+    normalized = _normalize_cidr_values(cidrs, "AWS security-group ingress", required=True)
+    permission = {
+        "IpProtocol": "tcp",
+        "FromPort": int(from_port),
+        "ToPort": int(to_port),
+    }
+    ipv4 = [
+        {"CidrIp": value, "Description": description}
+        for value in normalized
+        if ipaddress.ip_network(value).version == 4
+    ]
+    ipv6 = [
+        {"CidrIpv6": value, "Description": description}
+        for value in normalized
+        if ipaddress.ip_network(value).version == 6
+    ]
+    if ipv4:
+        permission["IpRanges"] = ipv4
+    if ipv6:
+        permission["Ipv6Ranges"] = ipv6
+    return permission
 
 
 class _ResumeComplete(Exception):
@@ -323,8 +431,21 @@ def _wait(label, callback, complete, failed=None, timeout=TIMEOUT_SECONDS):
 
 def _delete_versioned_bucket(s3, bucket):
     try:
+        key_marker = None
+        version_id_marker = None
+        seen_markers = set()
+        pages = 0
+        item_count = 0
         while True:
-            response = s3.list_object_versions(Bucket=bucket)
+            pages += 1
+            if pages > MAX_PROVIDER_PAGES:
+                raise HarnessError("S3 version pagination exceeded the bounded page limit.")
+            params = {"Bucket": bucket, "MaxKeys": 1000}
+            if key_marker is not None:
+                params["KeyMarker"] = key_marker
+            if version_id_marker is not None:
+                params["VersionIdMarker"] = version_id_marker
+            response = s3.list_object_versions(**params)
             entries = []
             entries.extend(
                 {"Key": row["Key"], "VersionId": row["VersionId"]}
@@ -334,13 +455,30 @@ def _delete_versioned_bucket(s3, bucket):
                 {"Key": row["Key"], "VersionId": row["VersionId"]}
                 for row in response.get("DeleteMarkers") or []
             )
+            item_count += len(entries)
+            if item_count > MAX_PROVIDER_ITEMS:
+                raise HarnessError("S3 version pagination exceeded the bounded item limit.")
             if not entries:
+                if response.get("IsTruncated"):
+                    raise HarnessError(
+                        "S3 returned a truncated version page without objects."
+                    )
                 break
             for offset in range(0, len(entries), 1000):
                 s3.delete_objects(
                     Bucket=bucket,
                     Delete={"Objects": entries[offset : offset + 1000], "Quiet": True},
                 )
+            if not response.get("IsTruncated"):
+                break
+            next_marker = (
+                response.get("NextKeyMarker"),
+                response.get("NextVersionIdMarker"),
+            )
+            if not next_marker[0] or next_marker in seen_markers:
+                raise HarnessError("S3 returned missing or repeated version pagination markers.")
+            seen_markers.add(next_marker)
+            key_marker, version_id_marker = next_marker
         s3.delete_bucket(Bucket=bucket)
     except Exception as error:
         if not _not_found(error):
@@ -390,6 +528,66 @@ def _delete_rds_instance(rds, identifier):
         _wait(
             f"RDS instance {identifier} deletion",
             instance_status,
+            {"deleted"},
+        )
+    except ClientError as error:
+        if not _not_found(error):
+            raise
+
+
+def _delete_rds_snapshot(rds, identifier):
+    """Delete one exact snapshot and return only after AWS proves absence."""
+    try:
+        rds.delete_db_snapshot(DBSnapshotIdentifier=identifier)
+
+        def snapshot_status():
+            try:
+                snapshots = rds.describe_db_snapshots(
+                    DBSnapshotIdentifier=identifier
+                ).get("DBSnapshots") or []
+            except ClientError as error:
+                if _not_found(error):
+                    return "deleted"
+                raise
+            if len(snapshots) != 1:
+                raise HarnessError(
+                    "AWS returned an ambiguous exact RDS snapshot read-back."
+                )
+            return str(snapshots[0].get("Status") or "visible")
+
+        _wait(
+            f"RDS snapshot {identifier} deletion",
+            snapshot_status,
+            {"deleted"},
+        )
+    except ClientError as error:
+        if not _not_found(error):
+            raise
+
+
+def _delete_recovery_point(backup_client, vault_name, recovery_point_arn):
+    """Delete one exact recovery point and wait for ResourceNotFound."""
+    try:
+        backup_client.delete_recovery_point(
+            BackupVaultName=vault_name,
+            RecoveryPointArn=recovery_point_arn,
+        )
+
+        def recovery_point_status():
+            try:
+                response = backup_client.describe_recovery_point(
+                    BackupVaultName=vault_name,
+                    RecoveryPointArn=recovery_point_arn,
+                )
+            except ClientError as error:
+                if _not_found(error):
+                    return "deleted"
+                raise
+            return str(response.get("Status") or "visible")
+
+        _wait(
+            f"AWS Backup recovery point {recovery_point_arn} deletion",
+            recovery_point_status,
             {"deleted"},
         )
     except ClientError as error:
@@ -502,20 +700,33 @@ def _backup_vault_exists(backup_client, name):
     """Use cursor pagination because Backup masks an absent vault as HTTP 403."""
     next_token = None
     seen_tokens = set()
+    pages = 0
+    item_count = 0
     while True:
+        pages += 1
+        if pages > MAX_PROVIDER_PAGES:
+            raise RuntimeError("AWS Backup vault pagination exceeded the bounded page limit")
         params = {"MaxResults": 100}
         if next_token:
             params["NextToken"] = next_token
         response = backup_client.list_backup_vaults(**params)
+        page = response.get("BackupVaultList") or []
+        if not isinstance(page, list):
+            raise RuntimeError("AWS Backup returned a malformed vault page")
+        item_count += len(page)
+        if item_count > MAX_PROVIDER_ITEMS:
+            raise RuntimeError("AWS Backup vault pagination exceeded the bounded item limit")
         if any(
             str(vault.get("BackupVaultName") or "") == name
-            for vault in (response.get("BackupVaultList") or [])
+            for vault in page
         ):
             return True
         next_token = response.get("NextToken")
         if not next_token:
+            if len(page) >= params["MaxResults"]:
+                raise RuntimeError("AWS Backup returned a full vault page without a cursor")
             return False
-        if next_token in seen_tokens:
+        if not isinstance(next_token, str) or next_token in seen_tokens:
             raise RuntimeError("AWS Backup returned a repeated vault pagination token")
         seen_tokens.add(next_token)
 
@@ -543,9 +754,9 @@ def _provider_error_code(error):
             "requestlimitexceeded",
         } or status_code == 429:
             return "PROVIDER_RATE_LIMIT"
+        if provider_code in {"requesttimeout", "requesttimeoutexception"}:
+            return "PROVIDER_TIMEOUT"
         if provider_code in {
-            "requesttimeout",
-            "requesttimeoutexception",
             "serviceunavailable",
             "serviceunavailableexception",
             "internalfailure",
@@ -553,9 +764,19 @@ def _provider_error_code(error):
         } or status_code >= 500:
             return "PROVIDER_TRANSIENT_OUTAGE"
         return "PROVIDER_FAILED"
-    if isinstance(error, (TimeoutError, OSError)):
+    if isinstance(error, TimeoutError):
+        return "PROVIDER_TIMEOUT"
+    if isinstance(error, OSError):
         return "PROVIDER_TRANSIENT_OUTAGE"
-    return "PROVIDER_FAILED"
+    if isinstance(error, BotoCoreError):
+        if "timeout" in type(error).__name__.lower():
+            return "PROVIDER_TIMEOUT"
+        return "PROVIDER_TRANSIENT_OUTAGE"
+    return provider_error_class(error)
+
+
+def _safe_error(error):
+    return f"{_provider_error_code(error)}: {bounded_error(error)}"
 
 
 def _restore_target_arn(resource_type, target_name, account_id):
@@ -716,7 +937,8 @@ def _list_restore_jobs_exact(backup_client, intent):
     matches = []
     next_token = None
     seen_tokens = set()
-    for _ in range(1000):
+    item_count = 0
+    for _ in range(MAX_PROVIDER_PAGES):
         request = {
             "RecoveryPointArn": str(intent["source_recovery_point_arn"]),
             "MaxResults": 100,
@@ -732,6 +954,9 @@ def _list_restore_jobs_exact(backup_client, intent):
         page = response["RestoreJobs"]
         if not isinstance(page, list):
             raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+        item_count += len(page)
+        if item_count > MAX_PROVIDER_ITEMS:
+            raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
         for job in page:
             if not isinstance(job, dict):
                 raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
@@ -744,6 +969,8 @@ def _list_restore_jobs_exact(backup_client, intent):
                 matches.append(job)
         next_value = response.get("NextToken")
         if next_value in (None, ""):
+            if len(page) >= request["MaxResults"]:
+                raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
             break
         if not isinstance(next_value, str) or next_value in seen_tokens or next_value == next_token:
             raise RestoreRecoveryError("PROVIDER_REPEATED_CURSOR")
@@ -1006,12 +1233,20 @@ def _record_or_verify_restore_ledger(
     if existing:
         entry = existing[0]
         ownership = entry.get("ownership") or {}
+        source_witness = str(entry.get("source_witness") or "")
+        provider_arn = str(ownership.get("provider_arn") or "")
+        provenance_matches = (
+            source_witness == expected_json
+            and provider_arn == str(intent.get("target_arn") or "")
+        ) or (
+            source_witness == expected_legacy
+            and provider_arn in {"", str(intent.get("target_arn") or "")}
+        )
         if (
             str(entry.get("name") or "") != str(name)
             or ownership.get("tag_key") != OWNERSHIP_TAG
             or ownership.get("tag_value") != PREFIX
-            or str(entry.get("source_witness") or "")
-            not in {expected_json, expected_legacy}
+            or not provenance_matches
         ):
             raise RestoreRecoveryError("PROVIDER_OWNERSHIP_MISMATCH")
         return entry
@@ -1021,6 +1256,7 @@ def _record_or_verify_restore_ledger(
         resource_id,
         name=name,
         source=expected_json,
+        immutable_id=intent["target_arn"],
     )
     return None
 
@@ -1181,18 +1417,26 @@ def _s3_owned(s3, bucket):
     return _tag_map(tags).get(OWNERSHIP_TAG) == PREFIX
 
 
-def _ddb_description_owned(dynamodb, name):
+def _ddb_description_owned(dynamodb, name, *, expected_arn=None):
     try:
         table = dynamodb.describe_table(TableName=name)["Table"]
         tags = dynamodb.list_tags_of_resource(
             ResourceArn=table["TableArn"]
         ).get("Tags") or []
-    except (ClientError, KeyError):
-        return None
+    except ClientError as error:
+        if _not_found(error):
+            return None
+        raise
+    except (KeyError, TypeError) as error:
+        raise HarnessError(
+            "AWS returned a malformed exact DynamoDB ownership read-back."
+        ) from error
+    if expected_arn is not None and str(table.get("TableArn") or "") != str(expected_arn):
+        return False
     return table if _tag_map(tags).get(OWNERSHIP_TAG) == PREFIX else False
 
 
-def _rds_description_owned(rds, identifier, *, snapshot=False):
+def _rds_description_owned(rds, identifier, *, snapshot=False, expected_arn=None):
     try:
         if snapshot:
             resource = rds.describe_db_snapshots(
@@ -1209,6 +1453,8 @@ def _rds_description_owned(rds, identifier, *, snapshot=False):
         if _not_found(error):
             return None
         raise
+    if expected_arn is not None and str(arn) != str(expected_arn):
+        return False
     return resource if _tag_map(tags).get(OWNERSHIP_TAG) == PREFIX else False
 
 
@@ -1226,12 +1472,17 @@ def _ec2_security_group_owned(ec2, identifier):
     return groups[0] if _tag_map(groups[0].get("Tags")).get(OWNERSHIP_TAG) == PREFIX else False
 
 
-def _ledger_record(ledger, kind, resource_id, *, name=None, source=""):
+def _ledger_record(
+    ledger, kind, resource_id, *, name=None, source="", immutable_id=None
+):
+    ownership = {"tag_key": OWNERSHIP_TAG, "tag_value": PREFIX}
+    if immutable_id:
+        ownership["provider_arn"] = str(immutable_id)
     ledger.record(
         kind=kind,
         resource_id=resource_id,
         name=name or resource_id,
-        ownership={"tag_key": OWNERSHIP_TAG, "tag_value": PREFIX},
+        ownership=ownership,
         source_witness=source,
     )
 
@@ -1250,6 +1501,7 @@ def _register_rds_instance(ledger, rds, identifier, *, source=""):
                 identifier,
                 name=identifier,
                 source=source,
+                immutable_id=owned.get("DBInstanceArn"),
             )
             return owned
         if time.monotonic() - started > 120:
@@ -1297,6 +1549,7 @@ def _register_rds_snapshot(ledger, rds, identifier, *, source):
                 identifier,
                 name=identifier,
                 source=source,
+                immutable_id=arn,
             )
             return snapshot
         if time.monotonic() - started > 120:
@@ -1727,8 +1980,91 @@ def _resume_existing_run(
     report["status"] = "PASS"
 
 
+def _reconcile_pending_restore_intents(
+    s3, dynamodb, backup_client, intent_store, ledger
+):
+    """Prove every pending restore intent before any provider cleanup write."""
+    unresolved = []
+    for key, intent in intent_store.pending().items():
+        restore_id = str(intent.get("restore_id") or "")
+        restore_rows = list(CoreCloudRestore.objects.filter(pk=restore_id)[:2])
+        if len(restore_rows) != 1:
+            unresolved.append(
+                f"{key}: exact local restore row is missing or duplicated"
+            )
+            continue
+        restore = restore_rows[0]
+        try:
+            _assert_restore_intent_row(restore, intent)
+            job = _list_restore_jobs_exact(
+                backup_client, intent
+            )
+        except Exception as error:
+            unresolved.append(f"{key}: {_safe_error(error)}")
+            continue
+        if job is not None:
+            unresolved.append(
+                f"{key}: exact provider restore job remains; cleanup is blocked"
+            )
+            continue
+        state = str(intent.get("mutation_state") or "prepared")
+        if state == "prepared":
+            # A complete provider read found no exact source/target job. This is
+            # the only state in which an intent may be removed without adoption.
+            intent_store.clear(key)
+            continue
+        if state == "ledgered":
+            resource_type = str(intent.get("resource_type") or "")
+            target_name = str(intent.get("target_name") or "")
+            if resource_type == "dynamodb":
+                entry = ledger.get("dynamodb_table", target_name)
+                expected_arn = str(
+                    (entry or {}).get("ownership", {}).get("provider_arn") or ""
+                )
+                observed = (
+                    _ddb_description_owned(
+                        dynamodb, target_name, expected_arn=expected_arn
+                    )
+                    if expected_arn
+                    else False
+                )
+                if observed is False or observed is None:
+                    unresolved.append(
+                        f"{key}: immutable DynamoDB restore identity could not be proven"
+                    )
+                    continue
+            elif resource_type == "s3":
+                if not _s3_bucket_exists(s3, target_name) or not _s3_owned(
+                    s3, target_name
+                ):
+                    unresolved.append(
+                        f"{key}: exact S3 restore bucket identity could not be proven"
+                    )
+                    continue
+            else:
+                unresolved.append(f"{key}: unsupported restore intent type")
+                continue
+            intent_store.clear(key)
+            continue
+        unresolved.append(
+            f"{key}: accepted or ambiguous restore outcome needs provider reconciliation"
+        )
+    return unresolved
+
+
 def main():
     report = {"prefix": PREFIX, "region": REGION, "tests": {}, "cleanup": []}
+    try:
+        _preflight_local_safety_gates()
+    except HarnessError as error:
+        report["status"] = "FAIL"
+        report["error"] = _safe_error(error)
+        report["cleanup"] = {
+            "status": "REFUSED" if CLEANUP else "NOT_REQUESTED",
+            "errors": [_safe_error(error)] if CLEANUP else [],
+        }
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return 1
     ledger = None
     intent_store = None
     created = {
@@ -1756,17 +2092,21 @@ def main():
         else secrets.token_urlsafe(24)
     )
     rds_snapshot_identifier = f"{PREFIX}-rds-snapshot"
-    rds = boto3.client("rds", region_name=REGION, config=BOTO_CONFIG)
-    ec2 = boto3.client("ec2", region_name=REGION, config=BOTO_CONFIG)
-    s3 = boto3.client("s3", region_name=REGION, config=BOTO_CONFIG)
-    dynamodb = boto3.client("dynamodb", region_name=REGION, config=BOTO_CONFIG)
-    backup_client = boto3.client("backup", region_name=REGION, config=BOTO_CONFIG)
-    iam = boto3.client("iam", region_name=REGION, config=BOTO_CONFIG)
+    with _aws_client_guard():
+        rds = boto3.client("rds", region_name=REGION, config=BOTO_CONFIG)
+        ec2 = boto3.client("ec2", region_name=REGION, config=BOTO_CONFIG)
+        s3 = boto3.client("s3", region_name=REGION, config=BOTO_CONFIG)
+        dynamodb = boto3.client("dynamodb", region_name=REGION, config=BOTO_CONFIG)
+        backup_client = boto3.client("backup", region_name=REGION, config=BOTO_CONFIG)
+        iam = boto3.client("iam", region_name=REGION, config=BOTO_CONFIG)
+    client_guard = _aws_client_guard()
+    client_guard.__enter__()
 
     try:
-        identity = boto3.client(
-            "sts", region_name=REGION, config=BOTO_CONFIG
-        ).get_caller_identity()
+        with _aws_client_guard():
+            identity = boto3.client(
+                "sts", region_name=REGION, config=BOTO_CONFIG
+            ).get_caller_identity()
         report["account"] = identity.get("Account")
         report["caller"] = str(identity.get("Arn", "")).split("/")[-1]
         ledger = DurableResourceLedger(
@@ -1805,6 +2145,14 @@ def main():
             report["status"] = "PREFLIGHT_PASS"
             report["mode"] = "read_only"
             return 0
+
+        # Validate the runner allowlist after all read-only collision checks but
+        # before the first provider write. Resume and cleanup reconciliation do
+        # not create ingress, so an obsolete runner address must not strand
+        # already-owned resources.
+        rds_cidrs = _validated_cidrs(
+            os.environ.get("AWS_E2E_RDS_CIDRS"), "AWS_E2E_RDS_CIDRS"
+        )
 
         trust_policy = {
             "Version": "2012-10-17",
@@ -1924,10 +2272,22 @@ def main():
             Tags=[{"Key": "BackupSheepE2E", "Value": PREFIX}],
         )
         created["ddb_source"] = True
-        dynamodb.get_waiter("table_exists").wait(TableName=DDB_SOURCE)
-        if not _ddb_description_owned(dynamodb, DDB_SOURCE):
+        dynamodb.get_waiter("table_exists").wait(
+            TableName=DDB_SOURCE,
+            WaiterConfig={
+                "Delay": min(POLL_SECONDS, 30),
+                "MaxAttempts": max(1, int(TIMEOUT_SECONDS / min(POLL_SECONDS, 30))),
+            },
+        )
+        ddb_source_table = _ddb_description_owned(dynamodb, DDB_SOURCE)
+        if not ddb_source_table:
             raise RuntimeError("AWS DynamoDB source ownership read-back failed.")
-        _ledger_record(ledger, "dynamodb_table", DDB_SOURCE)
+        _ledger_record(
+            ledger,
+            "dynamodb_table",
+            DDB_SOURCE,
+            immutable_id=ddb_source_table["TableArn"],
+        )
         dynamodb.put_item(
             TableName=DDB_SOURCE,
             Item={"id": {"S": "fixture"}, "marker": {"S": MARKER}},
@@ -1952,12 +2312,6 @@ def main():
         if len(subnet_ids) < 2:
             raise RuntimeError("At least two default subnets are required for RDS.")
 
-        public_ip = ipaddress.ip_address(
-            urllib.request.urlopen("https://checkip.amazonaws.com", timeout=15)
-            .read()
-            .decode()
-            .strip()
-        )
         security_group_id = ec2.create_security_group(
             GroupName=RDS_SECURITY_GROUP,
             Description=f"Disposable BackupSheep E2E security group {PREFIX}",
@@ -1982,12 +2336,12 @@ def main():
         ec2.authorize_security_group_ingress(
             GroupId=security_group_id,
             IpPermissions=[
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": 5432,
-                    "ToPort": 5432,
-                    "IpRanges": [{"CidrIp": f"{public_ip}/32", "Description": "BackupSheep E2E runner"}],
-                }
+                _security_group_permission(
+                    5432,
+                    5432,
+                    rds_cidrs,
+                    "BackupSheep E2E RDS runner",
+                )
             ],
         )
 
@@ -2276,6 +2630,7 @@ def main():
             "rds_snapshot",
             snapshot_identifier,
             source=RDS_SOURCE,
+            immutable_id=snapshot["DBSnapshotArn"],
         )
         rds_restore = CoreCloudRestore.objects.create(
             node=rds_node,
@@ -2351,8 +2706,7 @@ def main():
         pass
     except Exception as error:
         report["status"] = "FAIL"
-        report["error"] = str(error)
-        traceback.print_exc()
+        report["error"] = _safe_error(error)
     finally:
         cleanup_errors = []
         if not CLEANUP:
@@ -2363,7 +2717,26 @@ def main():
                 "errors": ["Cleanup refused because the durable AWS ledger is unavailable."],
             }
         else:
+            try:
+                pending_errors = _reconcile_pending_restore_intents(
+                    s3, dynamodb, backup_client, intent_store, ledger
+                )
+            except Exception as error:
+                pending_errors = [f"restore intent reconciliation: {_safe_error(error)}"]
+            if pending_errors:
+                report["status"] = "MANUAL_REVIEW"
+                report["cleanup"] = {
+                    "status": "MANUAL_REVIEW",
+                    "errors": pending_errors,
+                }
+                cleanup_errors.extend(pending_errors)
+
+            def cleanup_eligible(kind, identifier):
+                """Refuse every destructive cleanup after ambiguous reconciliation."""
+                return not pending_errors and ledger.cleanup_eligible(kind, identifier)
+
             def refuse(kind, identifier, reason):
+                reason = bounded_error(reason)
                 cleanup_errors.append(f"{kind} {identifier}: {reason}")
                 try:
                     ledger.mark_cleanup(
@@ -2375,10 +2748,19 @@ def main():
             # New/forked RDS instances first. Exact account/region tags and the
             # durable ID are both required; a generated name has no authority.
             for identifier in (RDS_RESTORE, RDS_SOURCE):
-                if not ledger.cleanup_eligible("rds_instance", identifier):
+                if not cleanup_eligible("rds_instance", identifier):
                     continue
                 try:
-                    owned = _rds_description_owned(rds, identifier)
+                    entry = ledger.get("rds_instance", identifier) or {}
+                    expected_arn = str(
+                        (entry.get("ownership") or {}).get("provider_arn") or ""
+                    )
+                    if not expected_arn:
+                        refuse("rds_instance", identifier, "missing immutable provider ARN")
+                        continue
+                    owned = _rds_description_owned(
+                        rds, identifier, expected_arn=expected_arn
+                    )
                     if owned is None:
                         ledger.mark_cleanup("rds_instance", identifier, state="absent")
                     elif owned is False:
@@ -2391,10 +2773,21 @@ def main():
 
             for entry in ledger.entries("rds_snapshot"):
                 identifier = str(entry["resource_id"])
-                if not ledger.cleanup_eligible("rds_snapshot", identifier):
+                if not cleanup_eligible("rds_snapshot", identifier):
                     continue
                 try:
-                    owned = _rds_description_owned(rds, identifier, snapshot=True)
+                    expected_arn = str(
+                        (entry.get("ownership") or {}).get("provider_arn") or ""
+                    )
+                    if not expected_arn:
+                        refuse("rds_snapshot", identifier, "missing immutable provider ARN")
+                        continue
+                    owned = _rds_description_owned(
+                        rds,
+                        identifier,
+                        snapshot=True,
+                        expected_arn=expected_arn,
+                    )
                     if owned is None:
                         ledger.mark_cleanup("rds_snapshot", identifier, state="absent")
                     elif owned is False or str(owned.get("DBInstanceIdentifier")) != str(
@@ -2402,16 +2795,25 @@ def main():
                     ):
                         refuse("rds_snapshot", identifier, "ownership/source mismatch")
                     else:
-                        rds.delete_db_snapshot(DBSnapshotIdentifier=identifier)
-                        ledger.mark_cleanup("rds_snapshot", identifier, state="deleted")
+                        _delete_rds_snapshot(rds, identifier)
+                        ledger.mark_cleanup("rds_snapshot", identifier, state="absent")
                 except Exception as error:
                     refuse("rds_snapshot", identifier, f"ambiguous cleanup outcome: {error}")
 
             for table in (DDB_RESTORE, DDB_SOURCE):
-                if not ledger.cleanup_eligible("dynamodb_table", table):
+                if not cleanup_eligible("dynamodb_table", table):
                     continue
                 try:
-                    owned = _ddb_description_owned(dynamodb, table)
+                    entry = ledger.get("dynamodb_table", table) or {}
+                    expected_arn = str(
+                        (entry.get("ownership") or {}).get("provider_arn") or ""
+                    )
+                    if not expected_arn:
+                        refuse("dynamodb_table", table, "missing immutable provider ARN")
+                        continue
+                    owned = _ddb_description_owned(
+                        dynamodb, table, expected_arn=expected_arn
+                    )
                     if owned is None:
                         ledger.mark_cleanup("dynamodb_table", table, state="absent")
                     elif owned is False:
@@ -2425,7 +2827,7 @@ def main():
             allowed_buckets = {S3_RESTORE, S3_SOURCE, S3_STORAGE}
             for bucket_entry in ledger.entries("s3_bucket"):
                 bucket = str(bucket_entry.get("resource_id") or "")
-                if not ledger.cleanup_eligible("s3_bucket", bucket):
+                if not cleanup_eligible("s3_bucket", bucket):
                     continue
                 if (
                     bucket not in allowed_buckets
@@ -2448,7 +2850,7 @@ def main():
             # BackupSheep jobs. Never enumerate a vault and delete arbitrary rows.
             for entry in ledger.entries("recovery_point"):
                 recovery_point_arn = str(entry["resource_id"])
-                if not ledger.cleanup_eligible("recovery_point", recovery_point_arn):
+                if not cleanup_eligible("recovery_point", recovery_point_arn):
                     continue
                 source = str(entry.get("source_witness") or "")
                 expected_source_arn = (
@@ -2473,12 +2875,13 @@ def main():
                             "source ownership mismatch",
                         )
                         continue
-                    backup_client.delete_recovery_point(
-                        BackupVaultName=BACKUP_VAULT,
-                        RecoveryPointArn=recovery_point_arn,
+                    _delete_recovery_point(
+                        backup_client,
+                        BACKUP_VAULT,
+                        recovery_point_arn,
                     )
                     ledger.mark_cleanup(
-                        "recovery_point", recovery_point_arn, state="deleted"
+                        "recovery_point", recovery_point_arn, state="absent"
                     )
                 except ClientError as error:
                     if _not_found(error):
@@ -2502,7 +2905,7 @@ def main():
             if vault_entries:
                 vault_entry = vault_entries[0]
                 vault_resource_id = str(vault_entry["resource_id"])
-                if ledger.cleanup_eligible("backup_vault", vault_resource_id):
+                if cleanup_eligible("backup_vault", vault_resource_id):
                     try:
                         description = backup_client.describe_backup_vault(
                             BackupVaultName=BACKUP_VAULT
@@ -2552,7 +2955,7 @@ def main():
                 security_group_resource_id = str(
                     security_group_entry["resource_id"]
                 )
-                if not ledger.cleanup_eligible(
+                if not cleanup_eligible(
                     "security_group", security_group_resource_id
                 ):
                     continue
@@ -2607,7 +3010,7 @@ def main():
             if subnet_entries:
                 subnet_entry = subnet_entries[0]
                 subnet_resource_id = str(subnet_entry["resource_id"])
-                if ledger.cleanup_eligible("rds_subnet_group", subnet_resource_id):
+                if cleanup_eligible("rds_subnet_group", subnet_resource_id):
                     try:
                         group = rds.describe_db_subnet_groups(
                             DBSubnetGroupName=RDS_SUBNET_GROUP
@@ -2653,7 +3056,7 @@ def main():
             if role_entries:
                 role_entry = role_entries[0]
                 role_resource_id = str(role_entry["resource_id"])
-                if ledger.cleanup_eligible("iam_role", role_resource_id):
+                if cleanup_eligible("iam_role", role_resource_id):
                     try:
                         observed = iam.get_role(RoleName=ROLE_NAME)["Role"]
                         tags = iam.list_role_tags(RoleName=ROLE_NAME).get("Tags") or []
@@ -2698,21 +3101,28 @@ def main():
                 try:
                     account, user = _recover_local_fixture()
                 except Exception as error:
-                    cleanup_errors.append(f"recover BackupSheep test account: {error}")
+                    cleanup_errors.append(
+                        f"recover BackupSheep test account: {_safe_error(error)}"
+                    )
             if account is not None and not cleanup_errors:
                 try:
                     account.delete()
                 except Exception as error:
-                    cleanup_errors.append(f"BackupSheep test account: {error}")
+                    cleanup_errors.append(
+                        f"BackupSheep test account: {_safe_error(error)}"
+                    )
             if user is not None and not cleanup_errors:
                 try:
                     user.delete()
                 except Exception as error:
-                    cleanup_errors.append(f"BackupSheep test user: {error}")
+                    cleanup_errors.append(
+                        f"BackupSheep test user: {_safe_error(error)}"
+                    )
             report["cleanup"] = {
                 "status": "PASS" if not cleanup_errors else "MANUAL_REVIEW",
                 "errors": cleanup_errors,
             }
+        client_guard.__exit__(None, None, None)
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
 
     cleanup_ok = report["cleanup"]["status"] in {"PASS", "NOT_REQUESTED"}

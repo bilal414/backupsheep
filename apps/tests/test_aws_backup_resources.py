@@ -850,6 +850,27 @@ class TestAWSRDSNativeSnapshot(BaseTestCase):
             attempt_no=1,
         )
         client = mock.MagicMock()
+        client.describe_db_instances.return_value = {
+            "DBInstances": [
+                {
+                    "DBInstanceIdentifier": "test-db",
+                    "DBInstanceArn": (
+                        "arn:aws:rds:us-east-1:123456789012:db:test-db"
+                    ),
+                    "DbiResourceId": "db-resource-test-db",
+                    "DBInstanceClass": "db.t3.micro",
+                    "DBSubnetGroup": {"DBSubnetGroupName": "test-subnet"},
+                    "VpcSecurityGroups": [
+                        {"VpcSecurityGroupId": "sg-0123456789abcdef0"}
+                    ],
+                    "MultiAZ": False,
+                    "PubliclyAccessible": False,
+                    "StorageType": "gp3",
+                    "Iops": 3000,
+                    "StorageThroughput": 125,
+                }
+            ]
+        }
         client.describe_db_snapshots.side_effect = ClientError(
             {"Error": {"Code": "DBSnapshotNotFound"}},
             "DescribeDBSnapshots",
@@ -857,19 +878,47 @@ class TestAWSRDSNativeSnapshot(BaseTestCase):
         client.create_db_snapshot.return_value = {
             "DBSnapshot": {
                 "DBSnapshotIdentifier": "rds-backup",
+                "DBInstanceIdentifier": "test-db",
+                "DbiResourceId": "db-resource-test-db",
+                "DBSnapshotArn": (
+                    "arn:aws:rds:us-east-1:123456789012:snapshot:rds-backup"
+                ),
+                "SnapshotType": "manual",
                 "AllocatedStorage": 20,
+                "Status": "creating",
+                "SnapshotCreateTime": datetime(2026, 8, 10, 12, tzinfo=timezone.utc),
             }
         }
+        client.list_tags_for_resource.return_value = {
+            "TagList": [
+                {
+                    "Key": CoreAWSRDSBackup._RDS_SNAPSHOT_OWNERSHIP_TAG_KEY,
+                    "Value": CoreAWSRDSBackup._rds_ownership_marker(
+                        identifier="rds-backup",
+                        source_id="test-db",
+                        region="us-east-1",
+                        source_node_id=node.id,
+                        source_resource_id=node.aws_rds.id,
+                    ),
+                }
+            ]
+        }
 
-        with mock.patch.object(CoreAuthAWSRDS, "get_client", return_value=client):
+        with mock.patch.object(
+            CoreAWSRDSBackup, "_rds_account_id", return_value="123456789012"
+        ), mock.patch.object(CoreAuthAWSRDS, "get_client", return_value=client):
             node.aws_rds.create_snapshot(backup)
 
         backup.refresh_from_db()
         self.assertEqual(backup.unique_id, "rds-backup")
-        client.create_db_snapshot.assert_called_once_with(
-            DBSnapshotIdentifier="rds-backup",
-            DBInstanceIdentifier="test-db",
+        request = client.create_db_snapshot.call_args.kwargs
+        self.assertEqual(request["DBSnapshotIdentifier"], "rds-backup")
+        self.assertEqual(request["DBInstanceIdentifier"], "test-db")
+        self.assertEqual(
+            request["Tags"][0]["Key"],
+            CoreAWSRDSBackup._RDS_SNAPSHOT_OWNERSHIP_TAG_KEY,
         )
+        self.assertRegex(request["Tags"][0]["Value"], r"^bs-rds-[0-9a-f]{64}$")
 
     def test_rds_snapshot_poll_normalizes_datetime_metadata(self):
         connection = factories.make_connection(self.account, self.member, code="aws_rds")
@@ -899,12 +948,25 @@ class TestAWSRDSNativeSnapshot(BaseTestCase):
             type=UtilBackup.Type.ON_DEMAND,
             attempt_no=1,
         )
+        snapshot_time = datetime.now(timezone.utc)
+        backup._rds_persist_witness(
+            backup._rds_witness(
+                identifier="rds-poll-backup",
+                source_id="test-db-poll",
+                account_id="123456789012",
+                region="us-east-1",
+                source_node_id=node.id,
+                source_resource_id=node.aws_rds.id,
+                snapshot_create_time=snapshot_time,
+            )
+        )
         client = mock.MagicMock()
         client.describe_db_snapshots.return_value = {
             "DBSnapshots": [
                 {
                     "DBSnapshotIdentifier": "rds-poll-backup",
                     "DBInstanceIdentifier": "test-db-poll",
+                    "DbiResourceId": "db-resource-test-db-poll",
                     "DBSnapshotArn": (
                         "arn:aws:rds:us-east-1:123456789012:"
                         "snapshot:rds-poll-backup"
@@ -912,7 +974,21 @@ class TestAWSRDSNativeSnapshot(BaseTestCase):
                     "SnapshotType": "manual",
                     "AllocatedStorage": 20,
                     "Status": "available",
-                    "SnapshotCreateTime": datetime.now(timezone.utc),
+                    "SnapshotCreateTime": snapshot_time,
+                }
+            ]
+        }
+        client.list_tags_for_resource.return_value = {
+            "TagList": [
+                {
+                    "Key": CoreAWSRDSBackup._RDS_SNAPSHOT_OWNERSHIP_TAG_KEY,
+                    "Value": CoreAWSRDSBackup._rds_ownership_marker(
+                        identifier="rds-poll-backup",
+                        source_id="test-db-poll",
+                        region="us-east-1",
+                        source_node_id=node.id,
+                        source_resource_id=node.aws_rds.id,
+                    ),
                 }
             ]
         }
@@ -956,18 +1032,62 @@ class TestAWSRDSNativeSnapshot(BaseTestCase):
             attempt_no=1,
         )
         client = mock.MagicMock()
+        client.describe_db_instances.return_value = {
+            "DBInstances": [
+                {
+                    "DBInstanceIdentifier": "test-db-retry",
+                    "DBInstanceArn": (
+                        "arn:aws:rds:us-east-1:123456789012:db:test-db-retry"
+                    ),
+                    "DbiResourceId": "db-resource-test-db-retry",
+                    "DBInstanceClass": "db.t3.micro",
+                    "DBSubnetGroup": {"DBSubnetGroupName": "test-subnet"},
+                    "VpcSecurityGroups": [
+                        {"VpcSecurityGroupId": "sg-0123456789abcdef0"}
+                    ],
+                    "MultiAZ": False,
+                    "PubliclyAccessible": False,
+                    "StorageType": "gp3",
+                    "Iops": 3000,
+                    "StorageThroughput": 125,
+                }
+            ]
+        }
         client.describe_db_snapshots.return_value = {
             "DBSnapshots": [
                 {
                     "DBSnapshotIdentifier": "rds-retry-backup",
+                    "DBInstanceIdentifier": "test-db-retry",
+                    "DbiResourceId": "db-resource-test-db-retry",
+                    "DBSnapshotArn": (
+                        "arn:aws:rds:us-east-1:123456789012:"
+                        "snapshot:rds-retry-backup"
+                    ),
+                    "SnapshotType": "manual",
                     "AllocatedStorage": 20,
                     "Status": "creating",
                     "SnapshotCreateTime": datetime.now(timezone.utc),
                 }
             ]
         }
+        client.list_tags_for_resource.return_value = {
+            "TagList": [
+                {
+                    "Key": CoreAWSRDSBackup._RDS_SNAPSHOT_OWNERSHIP_TAG_KEY,
+                    "Value": CoreAWSRDSBackup._rds_ownership_marker(
+                        identifier="rds-retry-backup",
+                        source_id="test-db-retry",
+                        region="us-east-1",
+                        source_node_id=node.id,
+                        source_resource_id=node.aws_rds.id,
+                    ),
+                }
+            ]
+        }
 
-        with mock.patch.object(CoreAuthAWSRDS, "get_client", return_value=client):
+        with mock.patch.object(
+            CoreAWSRDSBackup, "_rds_account_id", return_value="123456789012"
+        ), mock.patch.object(CoreAuthAWSRDS, "get_client", return_value=client):
             node.aws_rds.create_snapshot(backup)
 
         backup.refresh_from_db()

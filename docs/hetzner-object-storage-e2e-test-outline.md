@@ -14,9 +14,10 @@ server snapshot source.
    mutation.
 2. The harness creates one lower-case bucket with a random `bs-e2e-` name and
    writes only objects under its own `backupsheep-e2e/` or run-prefix path.
-3. The ownership marker contains the exact run prefix. Cleanup requires that
-   marker, or a successful create attempt plus an exact collision-free bucket
-   name when a failure occurs before the marker can be written.
+3. The ownership marker contains the exact run prefix. Cleanup requires both
+   that marker and the durable ledger witness. A crash before the marker is
+   written fails closed for manual reconciliation; the bucket name alone is
+   never deletion authority.
 4. Cleanup rejects unexpected object keys and then deletes only the exact test
    bucket. It waits for the exact bucket name to disappear before reporting
    success.

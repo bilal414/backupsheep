@@ -24,6 +24,219 @@ class LedgerError(RuntimeError):
     pass
 
 
+MAX_DIAGNOSTIC_LENGTH = 500
+
+
+def bounded_error(value, secrets=()):
+    """Return bounded diagnostic text with common credential forms redacted."""
+    text = str(value or "")
+    for secret in secrets or ():
+        secret = str(secret or "")
+        if secret:
+            text = text.replace(secret, "<redacted>")
+    text = re.sub(
+        r"(?i)(authorization|x-api-key|api[_-]?key|access[_-]?key|secret[_-]?key|token|password)\s*([:=])\s*[^\s,;]+",
+        r"\1\2<redacted>",
+        text,
+    )
+    return text[:MAX_DIAGNOSTIC_LENGTH]
+
+
+def provider_error_class(error, *, not_found_codes=()):
+    """Classify provider failures without leaking the provider exception text."""
+    explicit = str(getattr(error, "provider_code", "") or "")
+    if explicit:
+        return explicit
+    if getattr(error, "ambiguous_outcome", False) or "Ambiguous" in type(error).__name__:
+        return "PROVIDER_AMBIGUOUS"
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        data = response.get("Error") or {}
+        code = str(data.get("Code") or "").lower()
+        metadata = response.get("ResponseMetadata") or {}
+        try:
+            status = int(metadata.get("HTTPStatusCode") or 0)
+        except (TypeError, ValueError):
+            status = 0
+        normalized_not_found = {str(item).lower() for item in not_found_codes}
+        if status == 404 or code in normalized_not_found or "notfound" in code:
+            return "PROVIDER_NOT_FOUND"
+        if status in {401, 403} or code in {
+            "accessdenied",
+            "accessdeniedexception",
+            "unauthorized",
+            "invalidtoken",
+            "signaturedoesnotmatch",
+        }:
+            return "PROVIDER_AUTH_FAILED"
+        if status == 429 or code in {
+            "throttling",
+            "throttlingexception",
+            "toomanyrequestsexception",
+            "ratelimitexceeded",
+            "slowdown",
+        }:
+            return "PROVIDER_RATE_LIMIT"
+        if status >= 500 or code in {
+            "internalfailure",
+            "internalservererror",
+            "serviceunavailable",
+            "serviceunavailableexception",
+        }:
+            return "PROVIDER_TRANSIENT_OUTAGE"
+        if "timeout" in code:
+            return "PROVIDER_TIMEOUT"
+    error_name = type(error).__name__.lower()
+    if "timeout" in error_name:
+        return "PROVIDER_TIMEOUT"
+    if any(token in error_name for token in ("connection", "endpoint", "network")):
+        return "PROVIDER_TRANSIENT_OUTAGE"
+    return "PROVIDER_PERMANENT"
+
+
+class DurableMutationIntentStore:
+    """Atomic provider-scoped intents for mutations whose responses can be lost."""
+
+    def __init__(self, path, *, provider, run_id, scope, suffix=".mutation-intents.json"):
+        if not path:
+            raise LedgerError("A ledger path is required for mutation intents.")
+        self.path = Path(path).expanduser().resolve().with_name(
+            Path(path).name + str(suffix)
+        )
+        self.provider = str(provider)
+        self.run_id = require_run_id(run_id)
+        self.scope = str(scope)
+        if not self.provider or not self.scope:
+            raise LedgerError("Provider and scope are required for mutation intents.")
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.lock_path = self.path.with_name(self.path.name + ".lock")
+        with self._locked():
+            if self.path.exists():
+                self._validate(self._read_unlocked())
+            else:
+                self._write_unlocked(
+                    {
+                        "schema": 1,
+                        "provider": self.provider,
+                        "run_id": self.run_id,
+                        "scope": self.scope,
+                        "pending": {},
+                    }
+                )
+
+    def _locked(self):
+        store = self
+
+        class Lock:
+            def __enter__(self):
+                self.handle = open(store.lock_path, "a+", encoding="utf-8")
+                os.chmod(store.lock_path, 0o600)
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+                return self.handle
+
+            def __exit__(self, exc_type, exc, tb):
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+                self.handle.close()
+
+        return Lock()
+
+    def _read_unlocked(self):
+        try:
+            with open(self.path, encoding="utf-8") as source:
+                return json.load(source)
+        except (OSError, ValueError) as error:
+            raise LedgerError("The durable mutation intent state could not be read.") from error
+
+    def _validate(self, payload):
+        if not isinstance(payload, dict) or payload.get("schema") != 1:
+            raise LedgerError("The durable mutation intent state is malformed.")
+        if any(
+            payload.get(key) != value
+            for key, value in {
+                "provider": self.provider,
+                "run_id": self.run_id,
+                "scope": self.scope,
+            }.items()
+        ):
+            raise LedgerError("The durable mutation intent scope does not match.")
+        pending = payload.get("pending")
+        if not isinstance(pending, dict) or any(
+            not isinstance(key, str) or not isinstance(value, dict)
+            for key, value in pending.items()
+        ):
+            raise LedgerError("The durable mutation intent pending map is malformed.")
+        return payload
+
+    def _write_unlocked(self, payload):
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", dir=self.path.parent
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                json.dump(payload, output, indent=2, sort_keys=True)
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, self.path)
+            directory_fd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def get(self, key):
+        with self._locked():
+            payload = self._validate(self._read_unlocked())
+            value = payload["pending"].get(str(key))
+            return dict(value) if isinstance(value, dict) else None
+
+    def put(self, key, value):
+        if not isinstance(value, dict) or not value.get("marker"):
+            raise LedgerError("A mutation intent requires a deterministic marker.")
+        key = str(key)
+        with self._locked():
+            payload = self._validate(self._read_unlocked())
+            current = payload["pending"].get(key)
+            if current is not None and any(
+                current.get(field) != value.get(field)
+                for field in ("marker", "kind", "name", "operation")
+            ):
+                raise LedgerError("A mutation intent already exists with another witness.")
+            merged = dict(current or {})
+            merged.update(dict(value))
+            payload["pending"][key] = merged
+            self._write_unlocked(payload)
+        return dict(merged)
+
+    def update(self, key, **updates):
+        key = str(key)
+        with self._locked():
+            payload = self._validate(self._read_unlocked())
+            current = payload["pending"].get(key)
+            if not isinstance(current, dict):
+                raise LedgerError("Cannot update an unknown mutation intent.")
+            current = dict(current)
+            current.update(updates)
+            payload["pending"][key] = current
+            self._write_unlocked(payload)
+        return current
+
+    def clear(self, key):
+        with self._locked():
+            payload = self._validate(self._read_unlocked())
+            payload["pending"].pop(str(key), None)
+            self._write_unlocked(payload)
+
+    def pending(self):
+        with self._locked():
+            payload = self._validate(self._read_unlocked())
+            return {key: dict(value) for key, value in payload["pending"].items()}
+
+
 def require_run_id(value):
     run_id = str(value or "").strip()
     if not RUN_ID_RE.fullmatch(run_id):

@@ -90,6 +90,14 @@ def _restore_error_outcome(error):
                 "The committed backup object was not found at the storage provider.",
                 False,
             )
+        if declared_code == "RESTORE_RECONCILIATION_REQUIRED":
+            return (
+                "RESTORE_RECONCILIATION_REQUIRED",
+                "The restore state is ambiguous, so automatic destination writes "
+                "were stopped. Review the exact ownership and cleanup evidence "
+                "before retrying.",
+                False,
+            )
         if declared_code in {
             "AMBIGUOUS_PROVIDER_STATE",
             "INTEGRITY_LEDGER_CONFLICT",
@@ -125,6 +133,28 @@ def _restore_error_outcome(error):
                 "RESTORE_ARCHIVE_NOT_READY",
                 "The selected archive is not ready for download yet.",
                 True,
+            )
+        if any(
+            marker in detail
+            for marker in (
+                "ambiguous",
+                "manual review",
+                "marker does not",
+                "marker disagree",
+                "does not belong to this restore",
+                "checkpoint moved backwards",
+                "checkpoint does not match",
+                "mapping changed",
+                "name collision",
+                "ownership",
+            )
+        ):
+            return (
+                "RESTORE_RECONCILIATION_REQUIRED",
+                "The restore state is ambiguous, so automatic destination writes "
+                "were stopped. Review the exact ownership and checkpoint evidence "
+                "before retrying.",
+                False,
             )
         if any(
             marker in detail

@@ -1,5 +1,6 @@
 """Focused safety tests for logical database restore policy and resumption."""
 
+import errno
 import hashlib
 import os
 import stat
@@ -210,7 +211,7 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
                 result = RD._preflight_database_restore_permissions(
                     SimpleNamespace(),
                     _fake_backup(),
-                    _FakeRestore(),
+                    self._fenced_restore(),
                     auth,
                     "dbuser",
                     "password-do-not-persist",
@@ -250,7 +251,7 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
                 RD._preflight_database_restore_permissions(
                     SimpleNamespace(),
                     _fake_backup(),
-                    _FakeRestore(),
+                    self._fenced_restore(),
                     auth,
                     "dbuser",
                     "password-do-not-persist",
@@ -269,6 +270,7 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
         auth.use_private_key = True
         ssh = mock.Mock()
         auth.get_ssh_client = mock.Mock(return_value=(ssh, None))
+        ssh.open_sftp.return_value.listdir.return_value = []
         with mock.patch.object(RD, "_sftp_write") as write, \
              mock.patch.object(RD, "_sftp_remove") as remove, \
              mock.patch.object(RD, "_postgres_query", return_value="1\n") as query, \
@@ -276,7 +278,7 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
             result = RD._preflight_database_restore_permissions(
                 SimpleNamespace(),
                 _fake_backup(),
-                _FakeRestore(),
+                self._fenced_restore(),
                 auth,
                 "dbuser",
                 "db-password",
@@ -286,7 +288,7 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
 
         self.assertEqual(result, {"createdb": True})
         write.assert_called_once()
-        remove.assert_called_once_with(ssh, mock.ANY)
+        remove.assert_not_called()
         query.assert_called_once()
         self.assertIs(query.call_args.kwargs["ssh"], ssh)
         self.assertIsNotNone(query.call_args.kwargs["remote_pgpass"])
@@ -368,6 +370,7 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
         auth.use_public_key = True
         ssh = mock.Mock()
         auth.get_ssh_client = mock.Mock(return_value=(ssh, None))
+        ssh.open_sftp.return_value.listdir.return_value = []
         with mock.patch.object(RD, "_sftp_write") as write, \
              mock.patch.object(RD, "_sftp_remove") as remove, \
              mock.patch.object(
@@ -380,7 +383,7 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
                 RD._preflight_database_restore_permissions(
                     SimpleNamespace(),
                     _fake_backup(),
-                    _FakeRestore(),
+                    self._fenced_restore(),
                     auth,
                     "dbuser",
                     "db-password",
@@ -398,7 +401,7 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
         self.assertNotIn("CREATE DATABASE", query.call_args.args[4])
         self.assertNotIn("DROP DATABASE", query.call_args.args[4])
         write.assert_called_once()
-        remove.assert_called_once_with(ssh, mock.ANY)
+        remove.assert_not_called()
         run.assert_not_called()
         ssh.close.assert_called_once()
 
@@ -617,6 +620,557 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(query.call_count, 2)
         self.assertNotIn("CREATE DATABASE", " ".join(str(call) for call in query.call_args_list))
 
+    def _mysql_partial_fixture(
+        self,
+        *,
+        mode="fork",
+        marker_source="source_db",
+        marker_digest=None,
+        marker_state="importing",
+        checkpoint_status="importing",
+        file_status="in_progress",
+        with_checkpoint=True,
+    ):
+        """Build one exact-marker partial MySQL restore for crash tests."""
+        backup = _fake_backup()
+        auth = _fake_auth()
+        target = "bs_restore_owned"
+        sql = b"CREATE TABLE restored(id int);\n"
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        with open(sql_path, "wb") as output:
+            output.write(sql)
+        specification = {
+            "file": "source_db.sql",
+            "bytes": len(sql),
+            "sha256": hashlib.sha256(sql).hexdigest(),
+        }
+        source_digests = {"source_db": [specification]}
+        digest = RD._source_digest(source_digests, "source_db")
+        metadata = {
+            "source_to_target": {"source_db": target},
+            "source_digests": source_digests,
+        }
+        if with_checkpoint:
+            metadata["target_checkpoints"] = {
+                target: {
+                    "source": "source_db",
+                    "source_digest": digest,
+                    "status": checkpoint_status,
+                    "files": {
+                        "source_db.sql": {
+                            **specification,
+                            "status": file_status,
+                        }
+                    },
+                }
+            }
+        restore = _FakeRestore(mode=mode, metadata=metadata)
+        marker = _marker(
+            restore,
+            backup,
+            marker_source,
+            target,
+            marker_digest or digest,
+            marker_state,
+        )
+        return backup, restore, auth, sql_path, source_digests, digest, target, marker
+
+    def _run_mysql_owned_fork_resume(
+        self,
+        *,
+        restore,
+        backup,
+        auth,
+        sql_path,
+        source_digests,
+        target,
+        marker,
+    ):
+        """Run one resume and return the mocked SQL/client calls."""
+        calls = [
+            "1\n",  # exact target exists
+            marker,  # exact BackupSheep-owned importing marker
+            marker,  # ownership re-read immediately before DROP DATABASE
+            "",  # DROP DATABASE
+            "",  # target is absent after DROP
+            "",  # CREATE DATABASE plus exact importing marker
+            "",  # marker completion update
+            "1\n",  # final target exists
+            _marker(restore, backup, "source_db", target, RD._source_digest(source_digests, "source_db"), "complete"),
+        ]
+        with mock.patch.object(RD, "_write_local_defaults_file"), \
+             mock.patch.object(RD, "_mysql_query", side_effect=calls) as query, \
+             mock.patch.object(RD, "_run_direct", return_value="") as run:
+            RD._restore_mysql_family(
+                SimpleNamespace(),
+                backup,
+                restore,
+                auth,
+                OrderedDict({"source_db": [sql_path]}),
+                {"source_db": target},
+                source_digests,
+                "dbuser",
+                "password",
+            )
+        return query, run
+
+    def test_mysql_crash_after_checkpoint_before_import_restarts_owned_fork(self):
+        (
+            backup,
+            restore,
+            auth,
+            sql_path,
+            source_digests,
+            _digest,
+            target,
+            marker,
+        ) = self._mysql_partial_fixture()
+        restore.execution_phase = "database_importing_file"
+
+        query, run = self._run_mysql_owned_fork_resume(
+            restore=restore,
+            backup=backup,
+            auth=auth,
+            sql_path=sql_path,
+            source_digests=source_digests,
+            target=target,
+            marker=marker,
+        )
+
+        self.assertTrue(any("DROP DATABASE" in str(call) for call in query.call_args_list))
+        self.assertEqual(run.call_count, 1)
+        checkpoint = restore.execution_metadata["target_checkpoints"][target]
+        self.assertEqual(checkpoint["status"], "complete")
+        self.assertEqual(checkpoint["files"]["source_db.sql"]["status"], "complete")
+
+    def test_mysql_crash_after_import_before_checkpoint_restarts_owned_fork(self):
+        (
+            backup,
+            restore,
+            auth,
+            sql_path,
+            source_digests,
+            _digest,
+            target,
+            marker,
+        ) = self._mysql_partial_fixture()
+        # The durable state is identical whether the client had applied the
+        # dump before the worker died or had not started it yet.  The exact
+        # owned fork is discarded, so replay is safe in either case.
+        restore.execution_phase = "database_importing"
+
+        query, run = self._run_mysql_owned_fork_resume(
+            restore=restore,
+            backup=backup,
+            auth=auth,
+            sql_path=sql_path,
+            source_digests=source_digests,
+            target=target,
+            marker=marker,
+        )
+
+        self.assertEqual(
+            sum("DROP DATABASE" in str(call) for call in query.call_args_list),
+            1,
+        )
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(
+            restore.execution_metadata["target_checkpoints"][target]["status"],
+            "complete",
+        )
+
+    def test_mysql_worker_crash_during_partial_import_leaves_replayable_checkpoint(self):
+        (
+            backup,
+            restore,
+            auth,
+            sql_path,
+            source_digests,
+            _digest,
+            target,
+            _initial_marker,
+        ) = self._mysql_partial_fixture(with_checkpoint=False)
+
+        # First delivery creates the exact fork and durably records the file
+        # boundary, then the worker dies while the client is importing SQL.
+        with mock.patch.object(RD, "_write_local_defaults_file"), \
+             mock.patch.object(RD, "_mysql_query", side_effect=["", ""]), \
+             mock.patch.object(RD, "_run_direct", side_effect=SystemExit("worker crash")):
+            with self.assertRaises(SystemExit):
+                RD._restore_mysql_family(
+                    SimpleNamespace(),
+                    backup,
+                    restore,
+                    auth,
+                    OrderedDict({"source_db": [sql_path]}),
+                    {"source_db": target},
+                    source_digests,
+                    "dbuser",
+                    "password",
+                )
+
+        interrupted = restore.execution_metadata["target_checkpoints"][target]
+        self.assertEqual(interrupted["status"], "importing")
+        self.assertEqual(interrupted["files"]["source_db.sql"]["status"], "in_progress")
+
+        # The next delivery proves the marker, discards the disposable fork,
+        # and replays the archive from the beginning.
+        marker = _marker(
+            restore,
+            backup,
+            "source_db",
+            target,
+            RD._source_digest(source_digests, "source_db"),
+            "importing",
+        )
+        query, run = self._run_mysql_owned_fork_resume(
+            restore=restore,
+            backup=backup,
+            auth=auth,
+            sql_path=sql_path,
+            source_digests=source_digests,
+            target=target,
+            marker=marker,
+        )
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(
+            restore.execution_metadata["target_checkpoints"][target]["status"],
+            "complete",
+        )
+        self.assertTrue(any("DROP DATABASE" in str(call) for call in query.call_args_list))
+
+    def test_mariadb_partial_import_uses_the_same_owned_fork_convergence(self):
+        (
+            backup,
+            restore,
+            auth,
+            sql_path,
+            source_digests,
+            _digest,
+            target,
+            marker,
+        ) = self._mysql_partial_fixture()
+        auth.type = CoreAuthDatabase.DatabaseType.MARIADB
+
+        query, run = self._run_mysql_owned_fork_resume(
+            restore=restore,
+            backup=backup,
+            auth=auth,
+            sql_path=sql_path,
+            source_digests=source_digests,
+            target=target,
+            marker=marker,
+        )
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(
+            restore.execution_metadata["target_checkpoints"][target]["status"],
+            "complete",
+        )
+        self.assertEqual(
+            sum("DROP DATABASE" in str(call) for call in query.call_args_list),
+            1,
+        )
+
+    def test_mysql_complete_marker_is_adopted_without_reimport(self):
+        (
+            backup,
+            restore,
+            auth,
+            sql_path,
+            source_digests,
+            digest,
+            target,
+            _importing,
+        ) = self._mysql_partial_fixture(
+            marker_state="complete",
+            with_checkpoint=False,
+        )
+        complete = _marker(restore, backup, "source_db", target, digest, "complete")
+
+        with mock.patch.object(RD, "_write_local_defaults_file"), \
+             mock.patch.object(RD, "_mysql_query", side_effect=["1\n", complete]) as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            RD._restore_mysql_family(
+                SimpleNamespace(),
+                backup,
+                restore,
+                auth,
+                OrderedDict({"source_db": [sql_path]}),
+                {"source_db": target},
+                source_digests,
+                "dbuser",
+                "password",
+            )
+
+        run.assert_not_called()
+        self.assertEqual(query.call_count, 2)
+        self.assertEqual(
+            restore.execution_metadata["target_checkpoints"][target]["status"],
+            "complete",
+        )
+
+    def test_mysql_duplicate_delivery_adopts_completed_fork_without_reimport(self):
+        (
+            backup,
+            restore,
+            auth,
+            sql_path,
+            source_digests,
+            _digest,
+            target,
+            importing,
+        ) = self._mysql_partial_fixture()
+
+        # The first delivery converges the owned fork and commits its marker.
+        self._run_mysql_owned_fork_resume(
+            restore=restore,
+            backup=backup,
+            auth=auth,
+            sql_path=sql_path,
+            source_digests=source_digests,
+            target=target,
+            marker=importing,
+        )
+        complete = _marker(
+            restore,
+            backup,
+            "source_db",
+            target,
+            RD._source_digest(source_digests, "source_db"),
+            "complete",
+        )
+
+        # A duplicate delivery must adopt the exact completion witness rather
+        # than dropping or replaying the already-complete fork.
+        with mock.patch.object(RD, "_write_local_defaults_file"), \
+             mock.patch.object(RD, "_mysql_query", side_effect=["1\n", complete]) as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            RD._restore_mysql_family(
+                SimpleNamespace(),
+                backup,
+                restore,
+                auth,
+                OrderedDict({"source_db": [sql_path]}),
+                {"source_db": target},
+                source_digests,
+                "dbuser",
+                "password",
+            )
+
+        run.assert_not_called()
+        self.assertEqual(query.call_count, 2)
+        self.assertNotIn(
+            "DROP DATABASE",
+            " ".join(str(call) for call in query.call_args_list),
+        )
+
+    def test_mysql_ambiguous_checkpoint_is_manual_before_drop(self):
+        (
+            backup,
+            restore,
+            auth,
+            sql_path,
+            source_digests,
+            _digest,
+            target,
+            marker,
+        ) = self._mysql_partial_fixture()
+        restore.execution_metadata["target_checkpoints"][target]["files"][
+            "source_db.sql"
+        ]["status"] = "unknown"
+
+        with mock.patch.object(RD, "_write_local_defaults_file"), \
+             mock.patch.object(RD, "_mysql_query", side_effect=["1\n", marker]) as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaisesRegex(RestoreError, "unsupported state"):
+                RD._restore_mysql_family(
+                    SimpleNamespace(),
+                    backup,
+                    restore,
+                    auth,
+                    OrderedDict({"source_db": [sql_path]}),
+                    {"source_db": target},
+                    source_digests,
+                    "dbuser",
+                    "password",
+                )
+
+        run.assert_not_called()
+        self.assertNotIn(
+            "DROP DATABASE",
+            " ".join(str(call) for call in query.call_args_list),
+        )
+
+    def test_mysql_in_place_partial_import_remains_manual_review(self):
+        (
+            backup,
+            restore,
+            auth,
+            sql_path,
+            source_digests,
+            _digest,
+            target,
+            marker,
+        ) = self._mysql_partial_fixture(mode="in_place")
+
+        with mock.patch.object(RD, "_write_local_defaults_file"), \
+             mock.patch.object(RD, "_mysql_query", side_effect=["1\n", marker]) as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaisesRegex(RestoreError, "in-place MySQL restore"):
+                RD._restore_mysql_family(
+                    SimpleNamespace(),
+                    backup,
+                    restore,
+                    auth,
+                    OrderedDict({"source_db": [sql_path]}),
+                    {"source_db": target},
+                    source_digests,
+                    "dbuser",
+                    "password",
+                )
+
+        self.assertEqual(query.call_count, 2)
+        run.assert_not_called()
+        self.assertNotIn(
+            "DROP DATABASE",
+            " ".join(str(call) for call in query.call_args_list),
+        )
+
+    def test_mysql_marker_ownership_mismatch_blocks_drop_and_import(self):
+        (
+            backup,
+            restore,
+            auth,
+            sql_path,
+            source_digests,
+            _digest,
+            target,
+            _marker_for_restore,
+        ) = self._mysql_partial_fixture(marker_digest="e" * 64)
+        foreign_marker = _marker(
+            restore,
+            backup,
+            "different_source",
+            target,
+            "e" * 64,
+            "importing",
+        )
+
+        with mock.patch.object(RD, "_write_local_defaults_file"), \
+             mock.patch.object(RD, "_mysql_query", side_effect=["1\n", foreign_marker]) as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaisesRegex(RestoreError, "marker does not belong"):
+                RD._restore_mysql_family(
+                    SimpleNamespace(),
+                    backup,
+                    restore,
+                    auth,
+                    OrderedDict({"source_db": [sql_path]}),
+                    {"source_db": target},
+                    source_digests,
+                    "dbuser",
+                    "password",
+                )
+
+        self.assertEqual(query.call_count, 2)
+        run.assert_not_called()
+        self.assertNotIn(
+            "DROP DATABASE",
+            " ".join(str(call) for call in query.call_args_list),
+        )
+
+    def test_mysql_stale_worker_cannot_drop_owned_fork(self):
+        (
+            backup,
+            restore,
+            auth,
+            sql_path,
+            source_digests,
+            _digest,
+            target,
+            marker,
+        ) = self._mysql_partial_fixture()
+
+        with mock.patch.object(
+            RD,
+            "_ensure_restore_fence",
+            side_effect=[None, RD.RestoreLeaseLost("stale worker")],
+        ) as fence, mock.patch.object(RD, "_write_local_defaults_file"), \
+             mock.patch.object(RD, "_mysql_query", side_effect=["1\n", marker]) as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaises(RD.RestoreLeaseLost):
+                RD._restore_mysql_family(
+                    SimpleNamespace(),
+                    backup,
+                    restore,
+                    auth,
+                    OrderedDict({"source_db": [sql_path]}),
+                    {"source_db": target},
+                    source_digests,
+                    "dbuser",
+                    "password",
+                )
+
+        self.assertEqual(fence.call_count, 2)
+        self.assertEqual(query.call_count, 2)
+        run.assert_not_called()
+        self.assertNotIn(
+            "DROP DATABASE",
+            " ".join(str(call) for call in query.call_args_list),
+        )
+
+    def test_mysql_marker_change_or_disappearance_blocks_fork_drop(self):
+        for replacement_kind in ("disappeared", "completed"):
+            with self.subTest(replacement_kind=replacement_kind):
+                (
+                    backup,
+                    restore,
+                    auth,
+                    sql_path,
+                    source_digests,
+                    digest,
+                    target,
+                    importing,
+                ) = self._mysql_partial_fixture()
+                replacement = ""
+                if replacement_kind == "completed":
+                    replacement = _marker(
+                        restore,
+                        backup,
+                        "source_db",
+                        target,
+                        digest,
+                        "complete",
+                    )
+
+                with mock.patch.object(RD, "_write_local_defaults_file"), \
+                     mock.patch.object(
+                         RD,
+                         "_mysql_query",
+                         side_effect=["1\n", importing, replacement],
+                     ) as query, \
+                     mock.patch.object(RD, "_run_direct") as run:
+                    with self.assertRaisesRegex(RestoreError, "changed before fork recreation"):
+                        RD._restore_mysql_family(
+                            SimpleNamespace(),
+                            backup,
+                            restore,
+                            auth,
+                            OrderedDict({"source_db": [sql_path]}),
+                            {"source_db": target},
+                            source_digests,
+                            "dbuser",
+                            "password",
+                        )
+
+                self.assertEqual(query.call_count, 3)
+                run.assert_not_called()
+                self.assertNotIn(
+                    "DROP DATABASE",
+                    " ".join(str(call) for call in query.call_args_list),
+                )
+
     def test_mysql_interrupted_owned_fork_is_recreated_and_checkpointed(self):
         backup = _fake_backup()
         restore = _FakeRestore(
@@ -657,6 +1211,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         calls = [
             "1\n",  # existing target
             marker,  # exact owned importing marker
+            marker,  # ownership re-read immediately before DROP DATABASE
             "",  # DROP DATABASE
             "",  # target does not exist after drop
             "",  # CREATE DATABASE + marker
@@ -1019,3 +1574,410 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(ssh.calls[0][1], RD.COMMAND_TIMEOUT)
         self.assertNotIn("TOP-SECRET", ssh.calls[0][0])
         self.assertNotIn("TOP-SECRET", " ".join(str(call) for call in log.call_args_list))
+
+
+class RemoteDatabaseRestoreTempCleanupTests(BaseTestCase):
+    """Remote cleanup is exact, fenced, idempotent, and secret-safe."""
+
+    @staticmethod
+    def _restore(owner, token, correlation=None):
+        restore = _FakeRestore()
+        if correlation is not None:
+            restore.correlation_id = uuid.UUID(correlation)
+        restore._required_restore_lease_owner = owner
+        restore._required_restore_lease_token = token
+        return restore
+
+    @staticmethod
+    def _ssh(names=None, remove_error=None):
+        inventory = list(names or [])
+        sftp = mock.Mock()
+        sftp.listdir.side_effect = lambda _path: list(inventory)
+
+        def remove(remote_name):
+            if remove_error is not None:
+                raise remove_error
+            if remote_name in inventory:
+                inventory.remove(remote_name)
+
+        sftp.remove.side_effect = remove
+        ssh = mock.Mock()
+        ssh.open_sftp.return_value = sftp
+        return ssh, sftp
+
+    def test_hard_kill_residue_is_removed_only_for_exact_restore_and_old_fence(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        previous = self._restore("worker-old", "fence-old")
+        another_restore = self._restore(
+            "worker-other", "fence-other", "99999999-8888-7777-6666-555555555555"
+        )
+        another_backup = _fake_backup()
+        another_backup.uuid = uuid.UUID("bbbbbbbb-cccc-dddd-eeee-ffffffffffff")
+        another_backup.uuid_str = str(another_backup.uuid)
+
+        stale_pgpass = RD._remote_restore_temp_name(
+            previous, backup, "postgres_credentials"
+        )
+        stale_postgres_sql = RD._remote_restore_temp_name(
+            previous,
+            backup,
+            "postgres_sql",
+            source="appdb",
+            filename="__combined__",
+        )
+        stale_mysql_sql = RD._remote_restore_temp_name(
+            previous,
+            backup,
+            "mysql_sql",
+            source="appdb",
+            filename="dump.sql",
+        )
+        current_pgpass = RD._remote_restore_temp_name(
+            current, backup, "postgres_credentials"
+        )
+        current_mysql_sql = RD._remote_restore_temp_name(
+            current,
+            backup,
+            "mysql_sql",
+            source="appdb",
+            filename="dump.sql",
+        )
+        other_correlation = RD._remote_restore_temp_name(
+            another_restore, backup, "postgres_credentials"
+        )
+        other_backup = RD._remote_restore_temp_name(
+            current, another_backup, "mysql_credentials"
+        )
+        legacy_name = f".backupsheep_restore_{backup.uuid_str}_old.pgpass"
+        user_file = "customer-data.sql"
+        ssh, sftp = self._ssh(
+            [
+                stale_pgpass,
+                stale_postgres_sql,
+                stale_mysql_sql,
+                current_pgpass,
+                current_mysql_sql,
+                other_correlation,
+                other_backup,
+                legacy_name,
+                user_file,
+            ]
+        )
+
+        with mock.patch.object(
+            RD, "_has_competing_live_restore", return_value=False
+        ), mock.patch.object(RD, "_capture_safe") as capture:
+            RD._cleanup_stale_remote_restore_artifacts(ssh, current, backup)
+
+        self.assertEqual(
+            sftp.remove.call_args_list,
+            [
+                mock.call(stale_pgpass),
+                mock.call(stale_postgres_sql),
+                mock.call(stale_mysql_sql),
+            ],
+        )
+        self.assertEqual(sftp.listdir.call_args.args, (".",))
+        capture.assert_not_called()
+
+    def test_strict_legacy_names_are_removed_only_for_exact_backup(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        suffix = "0123456789abcdef"
+        legacy_names = [
+            f".backupsheep_restore_{backup.uuid_str}_{suffix}.pgpass",
+            f".backupsheep_restore_preflight_{backup.uuid_str}_{suffix}.cnf",
+            f".backupsheep_restore_{backup.uuid_str}_{suffix}_" + "a" * 12 + "_" + "b" * 8 + ".sql",
+            f".backupsheep_restore_{backup.uuid_str}_{suffix}_" + "c" * 12 + ".sql",
+        ]
+        unrelated = [
+            f".backupsheep_restore_{backup.uuid_str}_old.pgpass",
+            ".backupsheep_restore_bbbbbbbb-cccc-dddd-eeee-ffffffffffff_"
+            f"{suffix}.pgpass",
+            "customer-data.sql",
+        ]
+        ssh, sftp = self._ssh(legacy_names + unrelated)
+
+        with mock.patch.object(
+            RD, "_has_competing_live_restore", return_value=False
+        ):
+            RD._cleanup_stale_remote_restore_artifacts(
+                ssh, current, backup, include_current=True
+            )
+
+        self.assertEqual(
+            sftp.remove.call_args_list,
+            [mock.call(name) for name in legacy_names],
+        )
+        self.assertEqual(
+            RD._remote_restore_artifact_inventory(ssh, current, backup), []
+        )
+
+    def test_current_worker_artifacts_are_excluded_even_when_they_are_stale(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        current_credentials = RD._remote_restore_temp_name(
+            current, backup, "mysql_credentials"
+        )
+        current_sql = RD._remote_restore_temp_name(
+            current,
+            backup,
+            "mysql_sql",
+            source="appdb",
+            filename="dump.sql",
+        )
+        ssh, sftp = self._ssh([current_credentials, current_sql])
+
+        RD._cleanup_stale_remote_restore_artifacts(ssh, current, backup)
+
+        sftp.remove.assert_not_called()
+
+    def test_successful_worker_final_sweep_removes_current_fence_artifacts(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        current_credentials = RD._remote_restore_temp_name(
+            current, backup, "postgres_credentials"
+        )
+        current_sql = RD._remote_restore_temp_name(
+            current,
+            backup,
+            "postgres_sql",
+            source="appdb",
+            filename="__combined__",
+        )
+        another_restore = self._restore(
+            "worker-other", "fence-other", "99999999-8888-7777-6666-555555555555"
+        )
+        other_correlation = RD._remote_restore_temp_name(
+            another_restore, backup, "postgres_credentials"
+        )
+        ssh, sftp = self._ssh(
+            [current_credentials, current_sql, other_correlation, "customer-data.sql"]
+        )
+
+        RD._cleanup_stale_remote_restore_artifacts(
+            ssh, current, backup, include_current=True
+        )
+
+        self.assertEqual(
+            sftp.remove.call_args_list,
+            [mock.call(current_credentials), mock.call(current_sql)],
+        )
+        self.assertEqual(
+            RD._remote_restore_artifact_inventory(ssh, current, backup), []
+        )
+
+    def test_failed_final_sweep_requires_manual_reconciliation_and_hides_details(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        current_sql = RD._remote_restore_temp_name(
+            current,
+            backup,
+            "postgres_sql",
+            source="appdb",
+            filename="__combined__",
+        )
+        ssh, sftp = self._ssh(
+            [current_sql],
+            remove_error=TimeoutError("remote provider secret endpoint timed out"),
+        )
+
+        with mock.patch.object(RD, "_capture_safe") as capture:
+            with self.assertRaises(RD.RemoteRestoreCleanupError) as raised:
+                RD._cleanup_stale_remote_restore_artifacts(
+                    ssh, current, backup, include_current=True
+                )
+
+        self.assertEqual(raised.exception.category, "SFTP_CLEANUP_TIMEOUT")
+        self.assertEqual(raised.exception.code, "RESTORE_RECONCILIATION_REQUIRED")
+        self.assertFalse(raised.exception.retryable)
+        self.assertNotIn("provider secret endpoint", str(raised.exception))
+        capture.assert_called_once_with("SFTP_CLEANUP_TIMEOUT")
+        self.assertEqual(sftp.close.call_count, 3)
+
+    def test_legacy_cleanup_refuses_when_a_competing_restore_is_live(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        legacy_name = f".backupsheep_restore_{backup.uuid_str}.pgpass"
+        ssh, sftp = self._ssh([legacy_name])
+
+        with mock.patch.object(
+            RD, "_has_competing_live_restore", return_value=True
+        ), mock.patch.object(RD, "_capture_safe") as capture:
+            with self.assertRaises(RD.RemoteRestoreCleanupError) as raised:
+                RD._cleanup_stale_remote_restore_artifacts(
+                    ssh, current, backup, include_current=True
+                )
+
+        self.assertEqual(raised.exception.category, "SFTP_CLEANUP_COMPETING_RESTORE")
+        self.assertEqual(raised.exception.code, "RESTORE_RECONCILIATION_REQUIRED")
+        sftp.remove.assert_not_called()
+        capture.assert_called_once_with("SFTP_CLEANUP_COMPETING_RESTORE")
+
+    def test_lease_loss_after_open_is_checked_before_remove(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        name = RD._remote_restore_temp_name(current, backup, "mysql_credentials")
+        ssh, sftp = self._ssh([name])
+
+        with mock.patch.object(
+            RD,
+            "_ensure_restore_fence",
+            side_effect=[None, RD.RestoreLeaseLost("lease expired")],
+        ):
+            with self.assertRaises(RD.RestoreLeaseLost):
+                RD._sftp_remove(ssh, name, restore=current, backup=backup)
+
+        ssh.open_sftp.assert_called_once()
+        sftp.remove.assert_not_called()
+        sftp.close.assert_called_once()
+
+    def test_open_sftp_is_bounded_and_transport_timeout_is_restored(self):
+        class Transport:
+            channel_timeout = 3600
+
+        class SSH:
+            def __init__(self):
+                self.transport = Transport()
+                self.seen_timeout = None
+                self.sftp = mock.Mock()
+
+            def get_transport(self):
+                return self.transport
+
+            def open_sftp(self):
+                self.seen_timeout = self.transport.channel_timeout
+                return self.sftp
+
+        ssh = SSH()
+        self.assertIs(RD._open_sftp_bounded(ssh, 17), ssh.sftp)
+        self.assertEqual(ssh.seen_timeout, 17)
+        self.assertEqual(ssh.transport.channel_timeout, 3600)
+
+    def test_upload_rejects_a_prior_fence_filename(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        previous = self._restore("worker-previous", "fence-previous")
+        prior_name = RD._remote_restore_temp_name(
+            previous,
+            backup,
+            "postgres_sql",
+            source="appdb",
+            filename="__combined__",
+        )
+        ssh, _sftp = self._ssh()
+
+        with self.assertRaises(RestoreError):
+            RD._sftp_put(
+                ssh,
+                "/tmp/verified.sql",
+                prior_name,
+                restore=current,
+                backup=backup,
+            )
+
+        ssh.open_sftp.assert_not_called()
+
+    def test_missing_remote_file_is_idempotent(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        name = RD._remote_restore_temp_name(
+            current,
+            backup,
+            "postgres_credentials",
+        )
+        ssh, sftp = self._ssh(
+            remove_error=FileNotFoundError(errno.ENOENT, "no such file")
+        )
+        with mock.patch.object(RD, "_capture_safe") as capture:
+            self.assertTrue(
+                RD._sftp_remove(ssh, name, restore=current, backup=backup)
+            )
+        capture.assert_not_called()
+        sftp.close.assert_called_once()
+
+    def test_cleanup_failures_are_classified_without_provider_details(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        cases = (
+            (PermissionError(errno.EACCES, "permission denied"), "SFTP_CLEANUP_PERMISSION_DENIED"),
+            (RuntimeError("authentication failed for remote host"), "SFTP_CLEANUP_AUTH_FAILED"),
+            (RuntimeError("transport connection reset"), "SFTP_CLEANUP_TRANSPORT_FAILED"),
+        )
+        for error, code in cases:
+            with self.subTest(code=code):
+                ssh, sftp = self._ssh(remove_error=error)
+                name = RD._remote_restore_temp_name(
+                    current, backup, "mysql_credentials"
+                )
+                with mock.patch.object(RD, "_capture_safe") as capture:
+                    with self.assertRaises(RD.RemoteRestoreCleanupError) as raised:
+                        RD._sftp_remove(
+                            ssh, name, restore=current, backup=backup
+                        )
+                self.assertEqual(raised.exception.category, code)
+                self.assertEqual(
+                    raised.exception.code,
+                    "RESTORE_RECONCILIATION_REQUIRED",
+                )
+                self.assertFalse(raised.exception.retryable)
+                capture.assert_called_once_with(code)
+                sftp.close.assert_called_once()
+
+    def test_listing_failure_is_classified_without_deleting_anything(self):
+        backup = _fake_backup()
+        current = self._restore("worker-current", "fence-current")
+        ssh, sftp = self._ssh()
+        sftp.listdir.side_effect = PermissionError(errno.EACCES, "permission denied")
+
+        with mock.patch.object(RD, "_capture_safe") as capture:
+            with self.assertRaises(RD.RemoteRestoreCleanupError) as raised:
+                RD._cleanup_stale_remote_restore_artifacts(ssh, current, backup)
+
+        capture.assert_called_once_with("SFTP_CLEANUP_PERMISSION_DENIED")
+        self.assertEqual(raised.exception.code, "RESTORE_RECONCILIATION_REQUIRED")
+        sftp.remove.assert_not_called()
+        sftp.close.assert_called_once()
+
+    def test_stale_worker_cannot_write_a_namespaced_temp_file(self):
+        backup = _fake_backup()
+        stale = self._restore("worker-stale", "fence-stale")
+        name = RD._remote_restore_temp_name(stale, backup, "mysql_credentials")
+        ssh, _sftp = self._ssh()
+
+        with mock.patch.object(
+            RD, "_ensure_restore_fence", side_effect=RD.RestoreLeaseLost
+        ):
+            with self.assertRaises(RD.RestoreLeaseLost):
+                RD._sftp_write(
+                    ssh,
+                    name,
+                    "password=redacted\n",
+                    restore=stale,
+                    backup=backup,
+                )
+
+        ssh.open_sftp.assert_not_called()
+
+    def test_cleanup_requires_a_live_fence_before_listing_or_deleting(self):
+        backup = _fake_backup()
+        unfenced = _FakeRestore()
+        ssh, sftp = self._ssh()
+
+        with mock.patch.object(RD, "_capture_safe") as capture:
+            with self.assertRaises(RD.RestoreLeaseLost):
+                RD._cleanup_stale_remote_restore_artifacts(ssh, unfenced, backup)
+            with self.assertRaises(RD.RestoreLeaseLost):
+                RD._sftp_remove(
+                    ssh,
+                    RD._remote_restore_temp_name(
+                        self._restore("worker", "fence"), backup, "mysql_credentials"
+                    ),
+                    restore=unfenced,
+                    backup=backup,
+                )
+
+        capture.assert_not_called()
+        sftp.listdir.assert_not_called()
+        sftp.remove.assert_not_called()

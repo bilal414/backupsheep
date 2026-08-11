@@ -34,7 +34,13 @@ from apps._tasks.exceptions import (
 import humanize
 
 from apps.api.v1.utils.api_helpers import get_error, mkdir_p
-from ..backup.models import CoreDatabaseBackupStoragePoints
+from ..backup.models import (
+    CoreDatabaseBackupStoragePoints,
+    RDSDuplicateMatch,
+    RDSMalformedResponse,
+    RDSOwnershipError,
+    RestoreExecutionLeaseLostError,
+)
 from ..connection.models import CoreConnection
 from ..member.models import CoreMember
 from ..vultr import (
@@ -512,7 +518,7 @@ def _restore_exception(error, *, mutation=False):
         status = int(response.get("ResponseMetadata", {}).get("HTTPStatusCode") or 0)
         if code in {"accessdenied", "accessdeniedexception", "expiredtoken", "invalidclienttokenid", "signaturedoesnotmatch", "unauthorizedoperation", "unrecognizedclientexception"} or status in {401, 403}:
             return _RestoreProviderError("PROVIDER_AUTH_FAILED")
-        if code in {"resourcenotfoundexception", "notfound", "notfoundexception", "dbinstancenotfound", "dbsnapshotnotfound", "dbsnapshotnotfoundfault", "invalidsnapshot.notfound"} or status == 404:
+        if code in {"resourcenotfoundexception", "notfound", "notfoundexception", "dbinstancenotfound", "dbinstancenotfoundfault", "dbsnapshotnotfound", "dbsnapshotnotfoundfault", "invalidsnapshot.notfound"} or status == 404:
             return _RestoreProviderError("PROVIDER_NOT_FOUND")
         if code in {"throttling", "throttlingexception", "requestlimitexceeded", "limitexceededexception", "toomanyrequestsexception"} or status == 429:
             return _RestoreProviderError("PROVIDER_RATE_LIMIT", retryable=True)
@@ -538,7 +544,11 @@ def _restore_handle_error(restore, error, *, mutation=False, raise_terminal=True
             restore.params = params
             restore.error = _restore_message(classified.code)
             restore.status = _restore_status("IN_PROGRESS")
-            restore.save(update_fields=["params", "error", "status", "modified"])
+            fields = ["params", "error", "status", "modified"]
+            if hasattr(restore, "last_error_code"):
+                restore.last_error_code = classified.code
+                fields.append("last_error_code")
+            restore.save(update_fields=fields)
         if raise_terminal:
             return _restore_status("IN_PROGRESS")
         return _restore_status("IN_PROGRESS")
@@ -5412,6 +5422,24 @@ class CoreLightsail(UtilCloud):
 
 
 class CoreAWSRDS(UtilCloud):
+    _RDS_RESTORE_DEFAULT_KEYS = (
+        "db_instance_class",
+        "db_subnet_group_name",
+        "multi_az",
+        "publicly_accessible",
+        "vpc_security_group_ids",
+        "storage_type",
+        "iops",
+        "storage_throughput",
+    )
+    _RDS_RESTORE_STORAGE_TYPES = frozenset(
+        {"standard", "gp2", "gp3", "io1", "io2"}
+    )
+    _RDS_RESTORE_RECONCILIATION_DEFAULT_SECONDS = 15 * 60
+    _RDS_RESTORE_RECONCILIATION_MAX_SECONDS = 60 * 60
+    _RDS_RESTORE_RECONCILIATION_MIN_OBSERVATIONS = 3
+    _RDS_RESTORE_RECONCILIATION_MAX_OBSERVATIONS = 20
+
     node = models.OneToOneField(
         "CoreNode", related_name="aws_rds", on_delete=models.CASCADE
     )
@@ -5442,43 +5470,10 @@ class CoreAWSRDS(UtilCloud):
             return False
 
     def create_snapshot(self, backup):
-        client = self.node.connection.auth_aws_rds.get_client()
-        try:
-            existing_response = client.describe_db_snapshots(
-                DBSnapshotIdentifier=backup.uuid_str,
-            )
-            existing_snapshots = (
-                existing_response.get("DBSnapshots", [])
-                if isinstance(existing_response, dict)
-                else []
-            )
-        except ClientError as error:
-            code = error.response.get("Error", {}).get("Code")
-            if code not in {"DBSnapshotNotFoundFault", "DBSnapshotNotFound"}:
-                raise
-            existing_snapshots = []
-        if existing_snapshots:
-            # RDS includes datetime values in snapshot responses. Normalize
-            # the provider payload before persisting it in JSONField; this
-            # path is used when a worker retries after AWS accepted a snapshot
-            # request but the first response was not persisted.
-            from django.core.serializers.json import DjangoJSONEncoder
-            import json
-
-            existing = json.loads(
-                json.dumps(existing_snapshots[0], cls=DjangoJSONEncoder)
-            )
-            backup.unique_id = existing.get("DBSnapshotIdentifier", backup.uuid_str)
-            backup.size_gigabytes = existing.get("AllocatedStorage")
-            backup.metadata = existing
-            backup.save()
-            return
-        snapshot = client.create_db_snapshot(
-            DBSnapshotIdentifier=backup.uuid_str, DBInstanceIdentifier=self.unique_id
-        )
-        backup.unique_id = snapshot["DBSnapshot"]["DBSnapshotIdentifier"]
-        backup.size_gigabytes = snapshot["DBSnapshot"]["AllocatedStorage"]
-        backup.save()
+        # Keep every entry point on the fenced backup-row protocol. The legacy
+        # adapter implementation could call AWS before persisting the immutable
+        # source restore witness.
+        return backup.create_snapshot(task_id=backup.celery_task_id or None)
 
     @staticmethod
     def _restore_identifier(restore):
@@ -5488,11 +5483,169 @@ class CoreAWSRDS(UtilCloud):
         return identifier[:63].rstrip("-")
 
     @staticmethod
-    def _restore_instance_with_tags(client, instance):
+    def _rds_partition(region):
+        region = str(region or "")
+        if region.startswith("cn-"):
+            return "aws-cn"
+        if region.startswith("us-gov-"):
+            return "aws-us-gov"
+        if region.startswith("us-iso-b-"):
+            return "aws-iso-b"
+        if region.startswith("us-iso-"):
+            return "aws-iso"
+        if region.startswith("us-isof-"):
+            return "aws-iso-f"
+        return "aws"
+
+    @classmethod
+    def _rds_target_arn(cls, identifier, *, account_id, region):
+        return (
+            f"arn:{cls._rds_partition(region)}:rds:{region}:"
+            f"{account_id}:db:{identifier}"
+        )
+
+    @staticmethod
+    def _rds_instance_arn_identity(arn):
+        match = re.fullmatch(
+            r"arn:(?P<partition>[^:]+):rds:(?P<region>[^:]+):"
+            r"(?P<account>[0-9]{12}):db:(?P<identifier>[^:]+)",
+            str(arn or ""),
+        )
+        if not match:
+            return None
+        return {
+            "partition": match.group("partition"),
+            "region": match.group("region"),
+            "account_id": match.group("account"),
+            "target_identifier": match.group("identifier"),
+        }
+
+    @staticmethod
+    def _rds_target_provider_identifier(value):
+        value = str(value or "").strip()
+        if (
+            not value
+            or len(value) > 255
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", value)
+        ):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        return value
+
+    def _rds_durable_restore_witness(
+        self, backup, client=None, *, verify_snapshot=False
+    ):
+        try:
+            witness = backup.validated_rds_restore_witness(
+                self.node.connection.auth_aws_rds,
+                node_id=self.node_id,
+                source_resource_id=self.pk,
+                source_id=self.unique_id,
+                snapshot_id=backup.unique_id,
+            )
+            if verify_snapshot and witness is not None:
+                owned = backup.validate_rds_snapshot_for_restore(
+                    self.node.connection.auth_aws_rds,
+                    client,
+                    node_id=self.node_id,
+                    source_resource_id=self.pk,
+                    source_id=self.unique_id,
+                    snapshot_id=backup.unique_id,
+                    witness=witness,
+                )
+                if witness.get("source_restore_configuration") is not None and not owned:
+                    raise _RestoreProviderError("PROVIDER_NOT_FOUND")
+            return witness
+        except _RestoreProviderError:
+            raise
+        except RDSDuplicateMatch as error:
+            raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH") from error
+        except RDSMalformedResponse as error:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from error
+        except RDSOwnershipError as error:
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH") from error
+        except Exception as error:
+            raise _restore_exception(error, mutation=False) from error
+
+    def _rds_restore_target_identity(self, backup, identifier, witness=None):
+        witness = witness if witness is not None else self._rds_durable_restore_witness(backup)
+        if witness is None:
+            auth = self.node.connection.auth_aws_rds
+            try:
+                account_id = backup._rds_account_id(auth)
+                region = backup._rds_region(auth)
+            except RDSOwnershipError as error:
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH") from error
+            except Exception as error:
+                raise _restore_exception(error, mutation=False) from error
+            source_dbi_resource_id = None
+        else:
+            account_id = str(witness.get("account_id") or "")
+            region = str(witness.get("region") or "")
+            source_dbi_resource_id = witness.get("source_dbi_resource_id")
+        if not re.fullmatch(r"[0-9]{12}", account_id) or not re.fullmatch(
+            r"[a-z0-9]+(?:-[a-z0-9]+)*-[0-9]", region
+        ):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        identity = {
+            "target_identifier": str(identifier),
+            "target_arn": self._rds_target_arn(
+                identifier, account_id=account_id, region=region
+            ),
+            "account_id": account_id,
+            "region": region,
+            "source_snapshot_identifier": str(backup.unique_id),
+            "source_db_instance_identifier": str(self.unique_id),
+        }
+        if source_dbi_resource_id:
+            identity["source_dbi_resource_id"] = str(source_dbi_resource_id)
+        return identity
+
+    @classmethod
+    def _rds_verify_target_identity(cls, instance, expected):
+        if not isinstance(instance, dict) or not isinstance(expected, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        identifier = str(instance.get("DBInstanceIdentifier") or "")
+        if identifier != str(expected.get("target_identifier") or ""):
+            raise _RestoreProviderError(
+                "PROVIDER_OWNERSHIP_MISMATCH"
+            )
+        arn = str(instance.get("DBInstanceArn") or "")
+        if arn != str(expected.get("target_arn") or ""):
+            raise _RestoreProviderError(
+                "PROVIDER_OWNERSHIP_MISMATCH"
+            )
+        arn_identity = cls._rds_instance_arn_identity(arn)
+        if (
+            not arn_identity
+            or arn_identity["target_identifier"] != identifier
+            or arn_identity["account_id"] != str(expected.get("account_id") or "")
+            or arn_identity["region"] != str(expected.get("region") or "")
+            or arn_identity["partition"]
+            != cls._rds_partition(str(expected.get("region") or ""))
+        ):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        source_snapshot = instance.get("DBSnapshotIdentifier")
+        if source_snapshot not in (None, "") and str(source_snapshot) != str(
+            expected.get("source_snapshot_identifier") or ""
+        ):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+
+        verified = dict(expected)
+        target_dbi_resource_id = instance.get("DbiResourceId")
+        if target_dbi_resource_id not in (None, ""):
+            target_dbi_resource_id = cls._rds_target_provider_identifier(
+                target_dbi_resource_id
+            )
+            previous = expected.get("target_dbi_resource_id")
+            if previous and str(previous) != target_dbi_resource_id:
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+            verified["target_dbi_resource_id"] = target_dbi_resource_id
+        return verified
+
+    def _restore_instance_with_tags(self, client, instance, *, expected_identity):
         """Read the current RDS ownership tags for one exact restore target."""
 
-        if not isinstance(instance, dict):
-            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        self._rds_verify_target_identity(instance, expected_identity)
         arn = str(instance.get("DBInstanceArn") or "")
         if not arn:
             raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
@@ -5513,11 +5666,710 @@ class CoreAWSRDS(UtilCloud):
 
     @staticmethod
     def _restore_rds_tags_owned(instance, marker, source_id):
-        tags = _restore_tags(instance.get("TagList") or [])
+        raw_tags = instance.get("TagList")
+        if not isinstance(raw_tags, list):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        tags = {}
+        for item in raw_tags:
+            if not isinstance(item, dict) or item.get("Key") is None:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            key = str(item["Key"])
+            value = str(item.get("Value", ""))
+            if key in tags and tags[key] != value:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            tags[key] = value
         return (
             tags.get("BackupSheepRestore") == str(marker)
             and tags.get("BackupSheepSource") == str(source_id)
         )
+
+    @classmethod
+    def _validate_rds_restore_default(cls, key, value):
+        """Validate one RDS restore setting before it reaches boto3.
+
+        The restore API has provider-side defaults for several of these fields.
+        Those defaults can silently move a restore to another subnet or make it
+        public, so an invalid inherited value must stop the operation rather
+        than be omitted and delegated to AWS.
+        """
+
+        if key == "db_instance_class":
+            if (
+                not isinstance(value, str)
+                or len(value) > 64
+                or not re.fullmatch(r"db\.[a-z0-9-]+\.[a-z0-9-]+", value)
+            ):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            return value
+        if key == "db_subnet_group_name":
+            if (
+                not isinstance(value, str)
+                or len(value) > 255
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9.-]*", value)
+                or value.endswith(("-", "."))
+                or ".." in value
+            ):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            return value
+        if key in {"multi_az", "publicly_accessible"}:
+            if type(value) is not bool:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            return value
+        if key == "vpc_security_group_ids":
+            if not isinstance(value, (list, tuple)) or not value:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            normalized = []
+            for item in value:
+                if not isinstance(item, str) or not re.fullmatch(
+                    r"sg-(?:[0-9a-f]{8}|[0-9a-f]{17})", item
+                ):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                normalized.append(item)
+            if len(normalized) != len(set(normalized)):
+                raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+            return sorted(normalized)
+        if key == "storage_type":
+            if (
+                not isinstance(value, str)
+                or value.strip().lower() not in cls._RDS_RESTORE_STORAGE_TYPES
+            ):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            return value.strip().lower()
+        if key == "iops":
+            if value is None:
+                return None
+            if type(value) is not int or value < 1000:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            return value
+        if key == "storage_throughput":
+            if value is None:
+                return None
+            if type(value) is not int or not 125 <= value <= 1000:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            return value
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+
+    @classmethod
+    def _validate_rds_restore_combination(cls, params):
+        storage_type = params.get("storage_type")
+        iops = params.get("iops")
+        storage_throughput = params.get("storage_throughput")
+        if storage_type in {"io1", "io2"} and iops is None:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if storage_type != "gp3" and storage_throughput is not None:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+
+    @classmethod
+    def _rds_restore_payload_defaults(
+        cls, payload, *, source_id, snapshot_id=None, require_identifier=False
+    ):
+        """Extract validated restore settings from an RDS payload.
+
+        Both ``DescribeDBInstances`` and persisted snapshot metadata are
+        accepted.  The identity check is intentionally strict: metadata from a
+        different source must never be used to fill a restore request.
+        """
+
+        if not isinstance(payload, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+
+        source_identifier = payload.get("DBInstanceIdentifier")
+        if require_identifier and source_identifier is None:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if source_identifier is not None and not isinstance(source_identifier, str):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if source_identifier is not None and str(source_identifier) != str(source_id):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        if snapshot_id is not None:
+            snapshot_identifier = payload.get("DBSnapshotIdentifier")
+            if snapshot_identifier is not None and not isinstance(snapshot_identifier, str):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            if snapshot_identifier is not None and str(snapshot_identifier) != str(snapshot_id):
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+
+        defaults = {}
+
+        aliases = {
+            "db_instance_class": ("DBInstanceClass", "db_instance_class"),
+            "multi_az": ("MultiAZ", "multi_az"),
+            "publicly_accessible": (
+                "PubliclyAccessible",
+                "publicly_accessible",
+            ),
+            "storage_type": ("StorageType", "storage_type"),
+            "iops": ("Iops", "iops"),
+            "storage_throughput": (
+                "StorageThroughput",
+                "storage_throughput",
+            ),
+        }
+        for key, names in aliases.items():
+            present = [name for name in names if name in payload]
+            if not present:
+                continue
+            value = payload[present[0]]
+            if len(present) > 1 and payload[present[0]] != payload[present[1]]:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            defaults[key] = cls._validate_rds_restore_default(key, value)
+
+        subnet_group = payload.get("DBSubnetGroup", None)
+        has_subnet_group = "DBSubnetGroup" in payload
+        direct_subnet = payload.get("DBSubnetGroupName", None)
+        has_direct_subnet = "DBSubnetGroupName" in payload
+        if has_subnet_group:
+            if not isinstance(subnet_group, dict):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            nested_subnet = subnet_group.get("DBSubnetGroupName")
+            if nested_subnet is None:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            if has_direct_subnet and direct_subnet != nested_subnet:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            direct_subnet = nested_subnet
+            has_direct_subnet = True
+        if has_direct_subnet:
+            defaults["db_subnet_group_name"] = cls._validate_rds_restore_default(
+                "db_subnet_group_name", direct_subnet
+            )
+
+        security_groups = payload.get("VpcSecurityGroups", None)
+        has_security_groups = "VpcSecurityGroups" in payload
+        direct_security_groups = payload.get("VpcSecurityGroupIds", None)
+        has_direct_security_groups = "VpcSecurityGroupIds" in payload
+        if has_security_groups:
+            if not isinstance(security_groups, list):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            nested_ids = []
+            for group in security_groups:
+                if not isinstance(group, dict) or "VpcSecurityGroupId" not in group:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                nested_ids.append(group["VpcSecurityGroupId"])
+            if has_direct_security_groups and direct_security_groups != nested_ids:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            direct_security_groups = nested_ids
+            has_direct_security_groups = True
+        if has_direct_security_groups:
+            defaults["vpc_security_group_ids"] = cls._validate_rds_restore_default(
+                "vpc_security_group_ids", direct_security_groups
+            )
+
+        defaults.setdefault("iops", None)
+        defaults.setdefault("storage_throughput", None)
+        return defaults
+
+    def _rds_durable_restore_defaults(
+        self, backup, client=None, *, verify_snapshot=False
+    ):
+        witness = self._rds_durable_restore_witness(
+            backup, client, verify_snapshot=verify_snapshot
+        )
+        if witness is None:
+            return None
+        configuration = witness.get("source_restore_configuration")
+        return dict(configuration) if configuration is not None else None
+
+    def _resolve_rds_restore_params(self, client, backup, params):
+        """Resolve and validate every omitted native restore setting.
+
+        The immutable backup-time witness is authoritative. Legacy backups with
+        no witness may use one exact live source lookup, but mutable snapshot
+        metadata is never trusted. The returned values are persisted before the
+        mutation so every retry replays the same request.
+        """
+
+        resolved = dict(params)
+        explicit = {}
+        for key in self._RDS_RESTORE_DEFAULT_KEYS:
+            if key in resolved and (
+                resolved[key] is not None
+                or key in {"iops", "storage_throughput"}
+            ):
+                explicit[key] = self._validate_rds_restore_default(
+                    key, resolved[key]
+                )
+                resolved[key] = explicit[key]
+
+        missing = [
+            key for key in self._RDS_RESTORE_DEFAULT_KEYS if key not in explicit
+        ]
+        source_id = str(self.unique_id or "").strip()
+        if (
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,62}", source_id)
+            or source_id.endswith("-")
+            or "--" in source_id
+        ):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        witness_defaults = self._rds_durable_restore_defaults(
+            backup, client, verify_snapshot=True
+        )
+
+        if witness_defaults is not None:
+            for key in missing:
+                if key not in witness_defaults:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                resolved[key] = self._validate_rds_restore_default(
+                    key, witness_defaults[key]
+                )
+            self._validate_rds_restore_combination(resolved)
+            return resolved
+        if not missing:
+            # A pre-v2 backup still needs exact provider-side snapshot ownership
+            # proof before explicit settings may be sent to AWS.
+            try:
+                owned = backup.validate_legacy_rds_snapshot_for_restore(
+                    self.node.connection.auth_aws_rds,
+                    client,
+                    node_id=self.node_id,
+                    source_resource_id=self.pk,
+                    source_id=source_id,
+                    snapshot_id=backup.unique_id,
+                )
+            except RDSDuplicateMatch as error:
+                raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH") from error
+            except RDSMalformedResponse as error:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from error
+            except RDSOwnershipError as error:
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH") from error
+            except Exception as error:
+                raise _restore_exception(error, mutation=False) from error
+            if not owned:
+                raise _RestoreProviderError("PROVIDER_NOT_FOUND")
+            self._validate_rds_restore_combination(resolved)
+            return resolved
+
+        # Compatibility path for backups created before witness version 2. It
+        # is intentionally unavailable once the exact source has been deleted.
+        try:
+            owned = backup.validate_legacy_rds_snapshot_for_restore(
+                self.node.connection.auth_aws_rds,
+                client,
+                node_id=self.node_id,
+                source_resource_id=self.pk,
+                source_id=source_id,
+                snapshot_id=backup.unique_id,
+            )
+        except RDSDuplicateMatch as error:
+            raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH") from error
+        except RDSMalformedResponse as error:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from error
+        except RDSOwnershipError as error:
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH") from error
+        except Exception as error:
+            raise _restore_exception(error, mutation=False) from error
+        if not owned:
+            raise _RestoreProviderError("PROVIDER_NOT_FOUND")
+        try:
+            response = client.describe_db_instances(DBInstanceIdentifier=source_id)
+        except ClientError as error:
+            classified = _restore_exception(error)
+            raise classified
+        if not isinstance(response, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        instances = response.get("DBInstances")
+        if not isinstance(instances, list):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if len(instances) > 1:
+            raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+        if not instances:
+            raise _RestoreProviderError("PROVIDER_NOT_FOUND")
+        source_defaults = self._rds_restore_payload_defaults(
+            instances[0], source_id=source_id, require_identifier=True
+        )
+
+        for key in missing:
+            if key not in source_defaults:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            resolved[key] = source_defaults[key]
+        self._validate_rds_restore_combination(resolved)
+        return resolved
+
+    @classmethod
+    def _rds_target_identity_for_restore(cls, params, expected):
+        stored = params.get("_bs_rds_target_identity")
+        if stored is None:
+            return dict(expected)
+        if not isinstance(stored, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        allowed = set(expected) | {"target_dbi_resource_id"}
+        if set(stored) - allowed:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        for key, value in expected.items():
+            if stored.get(key) != value:
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        verified = dict(expected)
+        if stored.get("target_dbi_resource_id"):
+            verified["target_dbi_resource_id"] = cls._rds_target_provider_identifier(
+                stored["target_dbi_resource_id"]
+            )
+        return verified
+
+    @classmethod
+    def _rds_restore_reconciliation_seconds(cls):
+        try:
+            value = int(
+                getattr(
+                    settings,
+                    "RDS_RESTORE_VISIBILITY_WINDOW_SECONDS",
+                    cls._RDS_RESTORE_RECONCILIATION_DEFAULT_SECONDS,
+                )
+            )
+        except (TypeError, ValueError):
+            value = cls._RDS_RESTORE_RECONCILIATION_DEFAULT_SECONDS
+        return min(
+            cls._RDS_RESTORE_RECONCILIATION_MAX_SECONDS,
+            max(60, value),
+        )
+
+    @classmethod
+    def _rds_restore_reconciliation_observations(cls):
+        try:
+            value = int(
+                getattr(
+                    settings,
+                    "RDS_RESTORE_VISIBILITY_MIN_OBSERVATIONS",
+                    cls._RDS_RESTORE_RECONCILIATION_MIN_OBSERVATIONS,
+                )
+            )
+        except (TypeError, ValueError):
+            value = cls._RDS_RESTORE_RECONCILIATION_MIN_OBSERVATIONS
+        return min(
+            cls._RDS_RESTORE_RECONCILIATION_MAX_OBSERVATIONS,
+            max(cls._RDS_RESTORE_RECONCILIATION_MIN_OBSERVATIONS, value),
+        )
+
+    @staticmethod
+    def _rds_restore_timestamp(value, *, field):
+        if isinstance(value, datetime.datetime):
+            parsed = value
+        elif isinstance(value, str) and value.strip():
+            raw = value.strip()
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            try:
+                parsed = datetime.datetime.fromisoformat(raw)
+            except (TypeError, ValueError) as error:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from error
+        else:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return parsed.astimezone(datetime.timezone.utc)
+
+    @staticmethod
+    def _rds_restore_reconciliation_state(restore):
+        params = _restore_params(restore)
+        value = params.get("_bs_restore_reconciliation")
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        return dict(value)
+
+    def _rds_begin_restore_reconciliation(self, restore):
+        """Commit a bounded target-visibility witness before RestoreDB... ."""
+        params = _restore_params(restore)
+        reconciliation = self._rds_restore_reconciliation_state(restore)
+        if not reconciliation.get("mutation_started_at"):
+            now = timezone.now()
+            reconciliation = {
+                "mutation_started_at": now.isoformat(),
+                "visibility_deadline_at": (
+                    now
+                    + datetime.timedelta(
+                        seconds=self._rds_restore_reconciliation_seconds()
+                    )
+                ).isoformat(),
+                "minimum_observations": self._rds_restore_reconciliation_observations(),
+                "visibility_observations": 0,
+                "zero_match_observations": 0,
+                "missing_tag_observations": 0,
+                "resolved_at": None,
+            }
+        params["_bs_restore_reconciliation"] = reconciliation
+        params["_bs_create_outcome_unknown"] = True
+        params["_bs_last_error_category"] = "unknown_outcome"
+        restore.params = params
+        # Once RDS has returned the exact target identifier, the request is
+        # durably adopted and the remaining witness is ownership/tag
+        # reconciliation during normal polling.  Keep CREATE_UNKNOWN only for
+        # a request whose target id was not persisted before the worker lost
+        # its response.
+        restore.operation_phase = _restore_phase(
+            "POLLING" if restore.resource_id else "CREATE_UNKNOWN"
+        )
+        restore.save(update_fields=["params", "operation_phase", "modified"])
+        return reconciliation
+
+    def _rds_restore_observe(self, restore, *, kind, provider_error_code):
+        """Record one read-only missing-target/tag observation.
+
+        The provider error code is retained inside the reconciliation witness;
+        the public restore status only becomes manual review after the durable
+        visibility deadline and minimum observation count are both exhausted.
+        """
+        if kind not in {"zero_match", "missing_tag"}:
+            raise ValueError("Unsupported RDS restore observation.")
+        params = _restore_params(restore)
+        reconciliation = self._rds_restore_reconciliation_state(restore)
+        if not reconciliation.get("mutation_started_at"):
+            self._rds_begin_restore_reconciliation(restore)
+            params = _restore_params(restore)
+            reconciliation = self._rds_restore_reconciliation_state(restore)
+        now = timezone.now()
+        deadline = self._rds_restore_timestamp(
+            reconciliation.get("visibility_deadline_at"),
+            field="restore visibility deadline",
+        )
+        started = self._rds_restore_timestamp(
+            reconciliation.get("mutation_started_at"),
+            field="restore mutation timestamp",
+        )
+        if deadline < started or deadline - started > datetime.timedelta(
+            seconds=self._RDS_RESTORE_RECONCILIATION_MAX_SECONDS
+        ):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        try:
+            minimum = int(reconciliation.get("minimum_observations"))
+            observations = int(reconciliation.get("visibility_observations", 0))
+            zero_matches = int(reconciliation.get("zero_match_observations", 0))
+            missing_tags = int(reconciliation.get("missing_tag_observations", 0))
+        except (TypeError, ValueError) as error:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from error
+        if not (
+            self._RDS_RESTORE_RECONCILIATION_MIN_OBSERVATIONS
+            <= minimum
+            <= self._RDS_RESTORE_RECONCILIATION_MAX_OBSERVATIONS
+        ) or min(observations, zero_matches, missing_tags) < 0:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        observations += 1
+        if kind == "zero_match":
+            zero_matches += 1
+        else:
+            missing_tags += 1
+        exhausted = now >= deadline and observations >= minimum
+        reconciliation.update(
+            {
+                "visibility_observations": observations,
+                "zero_match_observations": zero_matches,
+                "missing_tag_observations": missing_tags,
+                "last_observation": kind,
+                "last_observed_at": now.isoformat(),
+                "last_provider_error_code": str(provider_error_code)[:64],
+            }
+        )
+        params["_bs_restore_reconciliation"] = reconciliation
+        params["_bs_last_provider_error_code"] = str(provider_error_code)[:64]
+        if exhausted:
+            params["_bs_last_error_code"] = "PROVIDER_RECONCILIATION_REQUIRED"
+            params["_bs_last_error_category"] = "manual_review"
+            restore.params = params
+            restore.last_error_code = "PROVIDER_RECONCILIATION_REQUIRED"
+            restore.error = _restore_message("PROVIDER_RECONCILIATION_REQUIRED")
+            restore.status = _restore_status("FAILED")
+            restore.operation_phase = _restore_phase("MANUAL_REVIEW")
+            restore.next_retry_at = None
+        else:
+            params["_bs_last_error_code"] = str(provider_error_code)[:64]
+            params["_bs_last_error_category"] = "reconciliation_wait"
+            restore.params = params
+            restore.last_error_code = str(provider_error_code)[:64]
+            restore.error = _restore_message(provider_error_code)
+            restore.status = _restore_status("IN_PROGRESS")
+            restore.operation_phase = _restore_phase("RECONCILING")
+            restore.next_retry_at = now + datetime.timedelta(seconds=60)
+        restore.save(
+            update_fields=[
+                "params",
+                "last_error_code",
+                "error",
+                "status",
+                "operation_phase",
+                "next_retry_at",
+                "modified",
+            ]
+        )
+        return restore.status
+
+    def _rds_restore_resolve_reconciliation(self, restore):
+        params = _restore_params(restore)
+        reconciliation = self._rds_restore_reconciliation_state(restore)
+        if reconciliation:
+            reconciliation["resolved_at"] = timezone.now().isoformat()
+            params["_bs_restore_reconciliation"] = reconciliation
+        params["_bs_create_outcome_unknown"] = False
+        params["_bs_last_error_category"] = ""
+        params["_bs_last_provider_error_code"] = ""
+        restore.params = params
+        restore.last_error_code = ""
+        restore.error = ""
+        restore.next_retry_at = None
+        restore.save(
+            update_fields=[
+                "params",
+                "last_error_code",
+                "error",
+                "next_retry_at",
+                "modified",
+            ]
+        )
+
+    def _rds_reconcile_restore_target(
+        self,
+        client,
+        backup,
+        restore,
+        marker,
+        expected_identity,
+        *,
+        collision=False,
+    ):
+        """Adopt one exact tagged target or keep a bounded lost-response wait."""
+        try:
+            response = client.describe_db_instances(
+                DBInstanceIdentifier=expected_identity["target_identifier"]
+            )
+            instances = response.get("DBInstances") if isinstance(response, dict) else None
+            if not isinstance(instances, list):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            if len(instances) > 1:
+                raise _RestoreProviderError("PROVIDER_DUPLICATE_MATCH")
+            if not instances:
+                return self._rds_restore_observe(
+                    restore, kind="zero_match", provider_error_code="PROVIDER_NOT_FOUND"
+                )
+            existing = self._restore_instance_with_tags(
+                client, instances[0], expected_identity=expected_identity
+            )
+            verified = self._rds_verify_target_identity(
+                existing, expected_identity
+            )
+            if self._restore_tags_pending(existing, marker):
+                return self._rds_restore_observe(
+                    restore,
+                    kind="missing_tag",
+                    provider_error_code="PROVIDER_OWNERSHIP_MISMATCH",
+                )
+            if not self._restore_rds_tags_owned(
+                existing, marker, backup.unique_id
+            ):
+                return _restore_safe_failure(
+                    restore,
+                    "PROVIDER_RECONCILIATION_REQUIRED"
+                    if collision
+                    else "PROVIDER_OWNERSHIP_MISMATCH",
+                    manual_review=True,
+                )
+            _restore_adopt(
+                restore,
+                expected_identity["target_identifier"],
+                provider_status=existing.get("DBInstanceStatus"),
+                params_update={"_bs_rds_target_identity": verified},
+            )
+            self._rds_restore_resolve_reconciliation(restore)
+            return _restore_status("IN_PROGRESS")
+        except RestoreExecutionLeaseLostError:
+            raise
+        except _RestoreProviderError as error:
+            if error.code == "PROVIDER_NOT_FOUND":
+                return self._rds_restore_observe(
+                    restore, kind="zero_match", provider_error_code=error.code
+                )
+            if error.retryable:
+                return _restore_handle_error(
+                    restore, error, mutation=False, raise_terminal=False
+                )
+            return _restore_safe_failure(
+                restore,
+                "PROVIDER_RECONCILIATION_REQUIRED"
+                if collision
+                else error.code,
+                manual_review=True,
+            )
+        except ClientError as error:
+            classified = _restore_exception(error, mutation=False)
+            if classified.code == "PROVIDER_NOT_FOUND":
+                return self._rds_restore_observe(
+                    restore,
+                    kind="zero_match",
+                    provider_error_code=classified.code,
+                )
+            return _restore_handle_error(
+                restore, classified, mutation=False, raise_terminal=False
+            )
+        except Exception as error:
+            classified = _restore_exception(error, mutation=False)
+            if classified.retryable:
+                return _restore_handle_error(
+                    restore, classified, mutation=False, raise_terminal=False
+                )
+            return _restore_safe_failure(
+                restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+            )
+
+    def _rds_reconcile_already_exists(
+        self, client, backup, restore, marker, expected_identity
+    ):
+        """Reconcile DBInstanceAlreadyExists without ever adopting blindly."""
+
+        if _restore_unknown(restore):
+            # AWS has already told us that the identifier is occupied.  A
+            # follow-up 404/empty inventory is eventual consistency, not proof
+            # that the restore failed; use the same bounded target witness as a
+            # lost response retry.
+            return self._rds_reconcile_restore_target(
+                client,
+                backup,
+                restore,
+                marker,
+                expected_identity,
+                collision=True,
+            )
+
+        try:
+            response = client.describe_db_instances(
+                DBInstanceIdentifier=expected_identity["target_identifier"]
+            )
+            instances = response.get("DBInstances") if isinstance(response, dict) else None
+            if not isinstance(instances, list) or len(instances) != 1:
+                return _restore_safe_failure(
+                    restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+                )
+            existing = self._restore_instance_with_tags(
+                client, instances[0], expected_identity=expected_identity
+            )
+            verified = self._rds_verify_target_identity(
+                existing, expected_identity
+            )
+            if not self._restore_rds_tags_owned(
+                existing, marker, backup.unique_id
+            ):
+                return _restore_safe_failure(
+                    restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+                )
+            _restore_adopt(
+                restore,
+                expected_identity["target_identifier"],
+                provider_status=existing.get("DBInstanceStatus"),
+                params_update={"_bs_rds_target_identity": verified},
+            )
+            return _restore_status("IN_PROGRESS")
+        except RestoreExecutionLeaseLostError:
+            raise
+        except _RestoreProviderError:
+            # DBInstanceAlreadyExists is itself a collision signal. Even when
+            # the follow-up object is malformed or foreign, report the durable
+            # collision/reconciliation state rather than a generic provider
+            # failure or an ownership-based adoption decision.
+            return _restore_safe_failure(
+                restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+            )
+        except Exception:
+            # The original create response proves a collision, but a failed or
+            # inconsistent follow-up lookup cannot prove which resource owns the
+            # identifier. Keep the result terminal/manual-review and never retry
+            # the mutation blindly.
+            return _restore_safe_failure(
+                restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+            )
 
     def _restore_snapshot_rds(self, backup, restore):
         client = self.node.connection.auth_aws_rds.get_client()
@@ -5526,16 +6378,37 @@ class CoreAWSRDS(UtilCloud):
             _restore_safe_failure(restore, "PROVIDER_MALFORMED_RESPONSE")
             raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
         params = _restore_params(restore)
-        marker, params = _prepare_cloud_restore(
-            restore,
-            provider="aws_rds",
-            source_id=backup.unique_id,
-            target_kind="db_instance",
-            target_name=identifier,
-        )
-        if restore.resource_id:
-            return
         try:
+            witness = self._rds_durable_restore_witness(backup)
+            expected_identity = self._rds_restore_target_identity(
+                backup, identifier, witness=witness
+            )
+            expected_identity = self._rds_target_identity_for_restore(
+                params, expected_identity
+            )
+            params["_bs_rds_target_identity"] = expected_identity
+            if not restore.resource_id and not _restore_unknown(restore):
+                params = self._resolve_rds_restore_params(client, backup, params)
+                # _prepare_cloud_restore persists the complete immutable request
+                # identity immediately before any provider mutation.
+                params["_bs_rds_target_identity"] = expected_identity
+                restore.params = params
+            elif not restore.resource_id:
+                # Unknown-outcome retries remain reconciliation-only, but a v2
+                # backup witness must still match the current restore scope.
+                self._rds_durable_restore_defaults(
+                    backup, client, verify_snapshot=True
+                )
+                restore.params = params
+            marker, params = _prepare_cloud_restore(
+                restore,
+                provider="aws_rds",
+                source_id=backup.unique_id,
+                target_kind="db_instance",
+                target_name=identifier,
+            )
+            if restore.resource_id:
+                return
             existing = None
             try:
                 response = client.describe_db_instances(DBInstanceIdentifier=identifier)
@@ -5550,29 +6423,48 @@ class CoreAWSRDS(UtilCloud):
                 if classified.code != "PROVIDER_NOT_FOUND":
                     raise classified
             if existing:
-                existing = self._restore_instance_with_tags(client, existing)
+                existing = self._restore_instance_with_tags(
+                    client, existing, expected_identity=expected_identity
+                )
+                verified_identity = self._rds_verify_target_identity(
+                    existing, expected_identity
+                )
                 if self._restore_tags_pending(existing, marker) and _restore_unknown(
                     restore
                 ):
-                    return _restore_handle_error(
+                    return self._rds_restore_observe(
                         restore,
-                        _RestoreProviderError(
-                            "PROVIDER_TRANSIENT_OUTAGE",
-                            retryable=True,
-                            unknown_outcome=True,
-                        ),
-                        mutation=False,
+                        kind="missing_tag",
+                        provider_error_code="PROVIDER_OWNERSHIP_MISMATCH",
                     )
                 if not self._restore_rds_tags_owned(
                     existing, marker, backup.unique_id
                 ):
                     return _restore_safe_failure(restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
                 if _restore_unknown(restore):
-                    _restore_adopt(restore, identifier, provider_status=existing.get("DBInstanceStatus"))
+                    _restore_adopt(
+                        restore,
+                        identifier,
+                        provider_status=existing.get("DBInstanceStatus"),
+                        params_update={
+                            "_bs_rds_target_identity": verified_identity
+                        },
+                    )
+                    self._rds_restore_resolve_reconciliation(restore)
                     return
-                return _restore_safe_failure(restore, "PROVIDER_FAILED", manual_review=True)
+                return _restore_safe_failure(
+                    restore,
+                    "PROVIDER_RECONCILIATION_REQUIRED",
+                    manual_review=True,
+                )
             if _restore_unknown(restore):
-                return _restore_safe_failure(restore, "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True)
+                return self._rds_reconcile_restore_target(
+                    client,
+                    backup,
+                    restore,
+                    marker,
+                    expected_identity,
+                )
 
             request = {
                 "DBInstanceIdentifier": identifier,
@@ -5589,30 +6481,52 @@ class CoreAWSRDS(UtilCloud):
                 ("publicly_accessible", "PubliclyAccessible"),
                 ("vpc_security_group_ids", "VpcSecurityGroupIds"),
                 ("storage_type", "StorageType"),
+                ("iops", "Iops"),
+                ("storage_throughput", "StorageThroughput"),
             ):
                 if params.get(key) is not None:
                     request[provider_key] = params[key]
-            _restore_begin_mutation(restore)
-            response = client.restore_db_instance_from_db_snapshot(**request)
+            # Persist the bounded target-reconciliation witness before the
+            # non-idempotent restore request.  A timeout or worker crash after
+            # this point must never issue another restore blindly.
+            self._rds_begin_restore_reconciliation(restore)
+            # Re-read the renewable fenced lease after the durable mutation
+            # witness is committed and immediately before calling AWS.
+            restore.assert_live_execution_fence()
+            try:
+                response = client.restore_db_instance_from_db_snapshot(**request)
+            except ClientError as error:
+                code = str(
+                    (error.response or {}).get("Error", {}).get("Code") or ""
+                ).lower()
+                if code in {
+                    "dbinstancealreadyexists",
+                    "dbinstancealreadyexistsfault",
+                }:
+                    return self._rds_reconcile_already_exists(
+                        client,
+                        backup,
+                        restore,
+                        marker,
+                        expected_identity,
+                    )
+                raise
             created = response.get("DBInstance") if isinstance(response, dict) else None
             if not isinstance(created, dict):
+                self._rds_begin_restore_reconciliation(restore)
                 _restore_unknown_outcome(
                     restore, code="PROVIDER_MALFORMED_RESPONSE"
                 )
                 return _restore_status("IN_PROGRESS")
-            if (
-                str(created.get("DBInstanceIdentifier") or "") != identifier
-            ):
-                return _restore_safe_failure(
-                    restore,
-                    "PROVIDER_OWNERSHIP_MISMATCH",
-                    manual_review=True,
-                )
+            verified_identity = self._rds_verify_target_identity(
+                created, expected_identity
+            )
+            marker_verified = bool(created.get("TagList"))
             # RDS commonly omits DBSnapshotIdentifier and returns an empty
             # TagList in the immediate create response even when it accepted the
-            # requested tags. Persist the exact resource id, then require both
-            # ownership tags on every reconciliation/poll before completion.
-            if created.get("TagList") and not self._restore_rds_tags_owned(
+            # requested tags. Persist the exact resource id, but mark ownership
+            # tags unverified until a later describe/list-tags reconciliation.
+            if marker_verified and not self._restore_rds_tags_owned(
                 created, marker, backup.unique_id
             ):
                 return _restore_safe_failure(
@@ -5620,7 +6534,22 @@ class CoreAWSRDS(UtilCloud):
                     "PROVIDER_OWNERSHIP_MISMATCH",
                     manual_review=True,
                 )
-            _restore_adopt(restore, identifier, provider_status="creating")
+            _restore_adopt(
+                restore,
+                identifier,
+                provider_status="creating",
+                params_update={"_bs_rds_target_identity": verified_identity},
+                marker_verified=marker_verified,
+            )
+            if marker_verified:
+                self._rds_restore_resolve_reconciliation(restore)
+            else:
+                # The target id is safe to persist, but the immediate RDS
+                # response did not prove ownership. Keep the create witness
+                # unresolved until list-tags returns the exact marker.
+                self._rds_begin_restore_reconciliation(restore)
+        except RestoreExecutionLeaseLostError:
+            raise
         except Exception as error:
             if isinstance(error, _RestoreProviderError):
                 if error.retryable:
@@ -5636,13 +6565,62 @@ class CoreAWSRDS(UtilCloud):
         if not restore.resource_id:
             return _restore_status("IN_PROGRESS")
         try:
-            response = client.describe_db_instances(DBInstanceIdentifier=restore.resource_id)
+            backup = restore.backup
+            params = _restore_params(restore)
+            reconciliation = self._rds_restore_reconciliation_state(restore)
+            reconciliation_pending = bool(
+                _restore_unknown(restore)
+                and reconciliation.get("mutation_started_at")
+                and not reconciliation.get("resolved_at")
+            )
+            expected_identity = self._rds_restore_target_identity(
+                backup, restore.resource_id
+            )
+            expected_identity = self._rds_target_identity_for_restore(
+                params, expected_identity
+            )
+            try:
+                response = client.describe_db_instances(
+                    DBInstanceIdentifier=restore.resource_id
+                )
+            except ClientError as error:
+                classified = _restore_exception(error, mutation=False)
+                if classified.code == "PROVIDER_NOT_FOUND" and reconciliation_pending:
+                    return self._rds_restore_observe(
+                        restore,
+                        kind="zero_match",
+                        provider_error_code=classified.code,
+                    )
+                raise classified
             instances = response.get("DBInstances") if isinstance(response, dict) else None
-            if not isinstance(instances, list) or len(instances) != 1:
+            if not isinstance(instances, list):
+                return _restore_safe_failure(
+                    restore, "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+                )
+            if len(instances) == 0:
+                if reconciliation_pending:
+                    return self._rds_restore_observe(
+                        restore,
+                        kind="zero_match",
+                        provider_error_code="PROVIDER_NOT_FOUND",
+                    )
                 return _restore_safe_failure(restore, "PROVIDER_NOT_FOUND")
-            instance = self._restore_instance_with_tags(client, instances[0])
+            if len(instances) > 1:
+                return _restore_safe_failure(
+                    restore, "PROVIDER_DUPLICATE_MATCH", manual_review=True
+                )
+            instance = self._restore_instance_with_tags(
+                client, instances[0], expected_identity=expected_identity
+            )
+            self._rds_verify_target_identity(instance, expected_identity)
             marker = _restore_marker_value(restore)
             if self._restore_tags_pending(instance, marker):
+                if reconciliation_pending:
+                    return self._rds_restore_observe(
+                        restore,
+                        kind="missing_tag",
+                        provider_error_code="PROVIDER_OWNERSHIP_MISMATCH",
+                    )
                 return _restore_handle_error(
                     restore,
                     _RestoreProviderError(
@@ -5651,9 +6629,7 @@ class CoreAWSRDS(UtilCloud):
                     mutation=False,
                     raise_terminal=False,
                 )
-            source_id = (
-                _restore_params(restore).get("_backupsheep_restore") or {}
-            ).get("source_id")
+            source_id = expected_identity["source_snapshot_identifier"]
             if not self._restore_rds_tags_owned(instance, marker, source_id):
                 return _restore_safe_failure(
                     restore,
@@ -5666,6 +6642,8 @@ class CoreAWSRDS(UtilCloud):
                 return _restore_status("FAILED")
             status = instance.get("DBInstanceStatus")
             if status == "available":
+                if reconciliation_pending:
+                    self._rds_restore_resolve_reconciliation(restore)
                 restore.operation_phase = _restore_phase("COMPLETE")
                 restore.save(update_fields=["operation_phase", "modified"])
                 return _restore_status("COMPLETE")
@@ -5676,79 +6654,13 @@ class CoreAWSRDS(UtilCloud):
             return _restore_status("IN_PROGRESS")
         except Exception as error:
             classified = _restore_exception(error, mutation=False)
-            if classified.code == "PROVIDER_NOT_FOUND" and not (_restore_params(restore).get("_bs_marker_required")):
-                return _restore_status("IN_PROGRESS")
             return _restore_handle_error(restore, error, mutation=False, raise_terminal=False)
 
     def restore_snapshot(self, backup, restore):
         return self._restore_snapshot_rds(backup, restore)
-        import re
-
-        client = self.node.connection.auth_aws_rds.get_client()
-
-        # RDS identifiers must be 1-63 chars, start with a letter, contain
-        # only letters/digits/hyphens with no consecutive or trailing hyphens
-        identifier = re.sub(r"[^a-zA-Z0-9-]", "-", restore.name)
-        identifier = re.sub(r"-+", "-", identifier)
-        identifier = re.sub(r"^[^a-zA-Z]+", "", identifier)
-        identifier = identifier[:63].rstrip("-")
-        if not identifier:
-            raise Exception(
-                f"Unable to build a valid RDS instance identifier from '{restore.name}'. "
-                "The name must contain at least one letter."
-            )
-
-        request = {
-            "DBInstanceIdentifier": identifier,
-            "DBSnapshotIdentifier": backup.unique_id,
-        }
-        params = restore.params or {}
-        if params.get("db_instance_class"):
-            request["DBInstanceClass"] = params["db_instance_class"]
-        if params.get("db_subnet_group_name"):
-            request["DBSubnetGroupName"] = params["db_subnet_group_name"]
-        if params.get("multi_az") is not None:
-            request["MultiAZ"] = params["multi_az"]
-        if params.get("publicly_accessible") is not None:
-            request["PubliclyAccessible"] = params["publicly_accessible"]
-        if params.get("vpc_security_group_ids"):
-            request["VpcSecurityGroupIds"] = params["vpc_security_group_ids"]
-        if params.get("storage_type"):
-            request["StorageType"] = params["storage_type"]
-
-        try:
-            client.restore_db_instance_from_db_snapshot(**request)
-        except ClientError as e:
-            raise Exception(
-                f"Unable to restore RDS snapshot {backup.unique_id}: {get_error(e)}"
-            )
-
-        restore.resource_id = identifier
-        restore.save()
 
     def check_restore(self, restore):
         return self._check_restore_rds(restore)
-        from apps.console.backup.models import CoreCloudRestore
-
-        client = self.node.connection.auth_aws_rds.get_client()
-        try:
-            response = client.describe_db_instances(
-                DBInstanceIdentifier=restore.resource_id
-            )
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") == "DBInstanceNotFound":
-                # the new instance can take a moment to appear after restore starts
-                return CoreCloudRestore.Status.IN_PROGRESS
-            raise
-
-        db_instance = response.get("DBInstances")[0]
-        status = db_instance.get("DBInstanceStatus")
-
-        if status == "available":
-            return CoreCloudRestore.Status.COMPLETE
-        elif status in ("failed", "incompatible-restore", "incompatible-network", "incompatible-parameters"):
-            return CoreCloudRestore.Status.FAILED
-        return CoreCloudRestore.Status.IN_PROGRESS
 
 
 class CoreVultrDatabase(UtilCloud):

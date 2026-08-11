@@ -4,6 +4,7 @@
 .env.*
 *.env
 !.env_sample
+_docs/
 
 # Local Python virtualenvs (host-built, ~1GB, platform-specific)
 .venv

@@ -1,5 +1,9 @@
 # AWS Lightsail live backup test report
 
+> Historical evidence only — do not rerun this report. AWS Lightsail is outside
+> the current mutation and cleanup scope and must remain untouched, even when
+> credentials for other AWS services are available.
+
 Date: 2026-08-02<br>
 Region: `us-east-1` / `us-east-1a`<br>
 Scope: the AWS account represented by the locally supplied admin key, using only

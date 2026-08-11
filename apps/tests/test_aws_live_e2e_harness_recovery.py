@@ -173,7 +173,7 @@ class AWSLiveE2EHarnessRecoveryTests(TestCase):
                     start_callback=start,
                 )
 
-            self.assertEqual(first.exception.code, "PROVIDER_TRANSIENT_OUTAGE")
+            self.assertEqual(first.exception.code, "PROVIDER_TIMEOUT")
             self.assertEqual(start.call_count, 1)
             self.assertEqual(store.get(key)["mutation_state"], "outcome_unknown")
 

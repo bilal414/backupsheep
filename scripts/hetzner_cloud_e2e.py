@@ -42,6 +42,7 @@ import json
 import os
 import sys
 import time
+from urllib.parse import urlsplit
 
 import django
 import requests
@@ -52,7 +53,10 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "backupsheep.settings")
 
 from scripts.live_e2e_ledger import (  # noqa: E402
+    DurableMutationIntentStore,
     DurableResourceLedger,
+    bounded_error,
+    provider_error_class,
     require_run_id,
 )
 
@@ -64,9 +68,23 @@ class HarnessError(RuntimeError):
 class ProviderNotFound(HarnessError):
     """The requested provider resource no longer exists."""
 
+    provider_code = "PROVIDER_NOT_FOUND"
+
+
+class ProviderHTTPError(HarnessError):
+    """A bounded, classified Hetzner HTTP failure."""
+
+    def __init__(self, code, message):
+        self.provider_code = str(code)
+        super().__init__(message)
+
+
+MAX_PROVIDER_PAGES = 1000
+MAX_PROVIDER_ITEMS = 10000
+
 
 def _redact(value, secrets_to_redact):
-    text = str(value)
+    text = bounded_error(value, secrets_to_redact)
     for secret in secrets_to_redact:
         if secret:
             text = text.replace(secret, "<redacted>")
@@ -77,9 +95,28 @@ def _api_host():
     configured = os.environ.get("HETZNER_E2E_API") or os.environ.get(
         "HETZNER_API", "https://api.hetzner.cloud"
     )
-    configured = configured.rstrip("/")
-    if configured.endswith("/v1"):
-        return configured[:-3]
+    try:
+        parsed = urlsplit(configured)
+        port = parsed.port
+    except (TypeError, ValueError) as error:
+        raise HarnessError(
+            "HETZNER_E2E_API must be exactly https://api.hetzner.cloud"
+        ) from error
+    if (
+        configured != "https://api.hetzner.cloud"
+        or parsed.scheme != "https"
+        or parsed.netloc != "api.hetzner.cloud"
+        or parsed.hostname != "api.hetzner.cloud"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise HarnessError(
+            "HETZNER_E2E_API must be exactly https://api.hetzner.cloud"
+        )
     return configured
 
 
@@ -118,6 +155,13 @@ class HetznerHarness:
             provider="hetzner_cloud",
             run_id=self.prefix,
             scope=scope,
+        )
+        self.intents = DurableMutationIntentStore(
+            os.environ.get("BACKUPSHEEP_E2E_LEDGER_PATH"),
+            provider="hetzner_cloud",
+            run_id=self.prefix,
+            scope=scope,
+            suffix=".cloud-intents.json",
         )
         self.created = {
             "source_server_id": None,
@@ -170,7 +214,14 @@ class HetznerHarness:
         return {self.LABEL_KEY: self.prefix}
 
     def _safe_error(self, error):
-        return _redact(error, (self.token, os.environ.get("HCLOUD_TOKEN")))
+        return f"{provider_error_class(error)}: {_redact(error, (self.token, os.environ.get('HCLOUD_TOKEN')))}"
+
+    def _preflight_cleanup(self):
+        if self.cleanup_enabled and not self.apply:
+            raise HarnessError(
+                "Cleanup is a provider write and requires both "
+                "BACKUPSHEEP_E2E_APPLY=YES and BACKUPSHEEP_E2E_CLEANUP=YES"
+            )
 
     def request(self, method, path, *, expected=(200,), **kwargs):
         try:
@@ -181,8 +232,14 @@ class HetznerHarness:
                 **kwargs,
             )
         except requests.RequestException as error:
-            raise HarnessError(
-                f"Hetzner {method} {path} request failed: {self._safe_error(error)}"
+            code = (
+                "PROVIDER_TIMEOUT"
+                if isinstance(error, requests.Timeout)
+                else "PROVIDER_TRANSIENT_OUTAGE"
+            )
+            raise ProviderHTTPError(
+                code,
+                f"Hetzner {method} {path} request failed: {self._safe_error(error)}",
             ) from error
 
         if response.status_code == 404:
@@ -192,9 +249,18 @@ class HetznerHarness:
                 detail = response.json().get("error", {}).get("message", "")
             except ValueError:
                 detail = ""
-            suffix = f": {detail}" if detail else ""
-            raise HarnessError(
-                f"Hetzner {method} {path} returned HTTP {response.status_code}{suffix}"
+            suffix = f": {bounded_error(detail, (self.token,))}" if detail else ""
+            if response.status_code in {401, 403}:
+                code = "PROVIDER_AUTH_FAILED"
+            elif response.status_code == 429:
+                code = "PROVIDER_RATE_LIMIT"
+            elif response.status_code >= 500:
+                code = "PROVIDER_TRANSIENT_OUTAGE"
+            else:
+                code = "PROVIDER_PERMANENT"
+            raise ProviderHTTPError(
+                code,
+                f"Hetzner {method} {path} returned HTTP {response.status_code}{suffix}",
             )
         if not response.content:
             return {}
@@ -211,18 +277,41 @@ class HetznerHarness:
         page = 1
         seen_pages = set()
         base_params = dict(params or {})
-        while True:
+        for _ in range(MAX_PROVIDER_PAGES):
+            if page in seen_pages:
+                raise HarnessError("Hetzner returned a repeated pagination page")
+            seen_pages.add(page)
             query = {**base_params, "page": page, "per_page": 50}
             payload = self.request("GET", f"/{resource}", params=query)
-            items.extend(payload.get(resource) or [])
-            pagination = (payload.get("meta") or {}).get("pagination") or {}
+            page_items = payload.get(resource)
+            if not isinstance(page_items, list):
+                raise HarnessError("Hetzner returned a malformed collection page")
+            items.extend(page_items)
+            if len(items) > MAX_PROVIDER_ITEMS:
+                raise HarnessError("Hetzner pagination exceeded the bounded item limit")
+            meta = payload.get("meta")
+            pagination = meta.get("pagination") if isinstance(meta, dict) else None
+            if not isinstance(pagination, dict):
+                if len(page_items) >= 50:
+                    raise HarnessError(
+                        "Hetzner returned a full page without pagination metadata"
+                    )
+                return items
             next_page = pagination.get("next_page")
             if not next_page:
+                if len(page_items) >= 50:
+                    raise HarnessError(
+                        "Hetzner returned a full page without a terminal pagination witness"
+                    )
                 return items
-            page = int(next_page)
-            if page in seen_pages or page < 1:
-                raise HarnessError("Hetzner returned a repeated or invalid pagination page")
-            seen_pages.add(page)
+            try:
+                next_page = int(next_page)
+            except (TypeError, ValueError) as error:
+                raise HarnessError("Hetzner returned an invalid pagination page") from error
+            if next_page <= page:
+                raise HarnessError("Hetzner returned a non-progressing pagination page")
+            page = next_page
+        raise HarnessError("Hetzner pagination exceeded the bounded page limit")
 
     def get_resource(self, resource, identifier):
         try:
@@ -284,6 +373,7 @@ class HetznerHarness:
 
     def preflight_capabilities(self):
         """Validate all selected create inputs using read-only API calls."""
+        self._preflight_cleanup()
         server_types = self.collection("server_types")
         locations = self.collection("locations")
         images = self.collection("images", {"type": "system"})
@@ -340,7 +430,87 @@ class HetznerHarness:
             "architecture": server_architecture or selected_image.get("architecture"),
         }
 
+    def _server_ledger_entry(self, name, role):
+        matches = [
+            entry
+            for entry in self.ledger.entries("server")
+            if str(entry.get("name") or "") == str(name)
+            and str(entry.get("source_witness") or "") == str(role)
+        ]
+        if len(matches) > 1:
+            raise HarnessError("Multiple exact server ledger entries exist for this role")
+        return matches[0] if matches else None
+
+    def _reconcile_pending_intents(self):
+        """Adopt exact accepted servers or prove a prepared intent has no resource."""
+        errors = []
+        selector = f"{self.LABEL_KEY}=={self.prefix}"
+        for key, intent in self.intents.pending().items():
+            if intent.get("kind") != "server":
+                errors.append(f"{key}: unsupported pending intent kind")
+                continue
+            name = str(intent.get("name") or "")
+            role = str(intent.get("role") or "")
+            matches = [
+                item
+                for item in self.collection("servers", {"label_selector": selector})
+                if item.get("name") == name
+                and (item.get("labels") or {}).get(self.LABEL_KEY) == self.prefix
+            ]
+            provider_id = str(intent.get("provider_id") or "")
+            if provider_id:
+                matches = [item for item in matches if str(item.get("id")) == provider_id]
+            if len(matches) > 1:
+                errors.append(f"{key}: multiple exact pending server matches")
+                continue
+            if len(matches) == 1:
+                observed = matches[0]
+                identifier = str(observed.get("id") or "")
+                if not identifier or observed.get("name") != name:
+                    errors.append(f"{key}: pending server identity mismatch")
+                    continue
+                self.ledger.record(
+                    kind="server",
+                    resource_id=identifier,
+                    name=name,
+                    ownership={"label_key": self.LABEL_KEY, "label_value": self.prefix},
+                    source_witness=role,
+                )
+                self.intents.update(key, provider_id=identifier, mutation_state="ledgered")
+                self.intents.clear(key)
+                self.created[f"{role}_server_id"] = identifier
+                continue
+            if str(intent.get("mutation_state") or "prepared") == "prepared":
+                self.intents.clear(key)
+                continue
+            errors.append(
+                f"{key}: accepted or ambiguous server create has no exact provider match"
+            )
+        return errors
+
     def create_server(self, name, role):
+        entry = self._server_ledger_entry(name, role)
+        if entry and self.ledger.cleanup_eligible("server", entry.get("resource_id")):
+            observed = self.get_resource("servers", entry.get("resource_id"))
+            if not observed:
+                raise HarnessError("Ledgered Hetzner server is absent; manual review required")
+            if (
+                str(observed.get("id")) != str(entry.get("resource_id"))
+                or observed.get("name") != name
+                or (observed.get("labels") or {}).get(self.LABEL_KEY) != self.prefix
+            ):
+                raise HarnessError("Ledgered Hetzner server ownership read-back failed")
+            self.created[f"{role}_server_id"] = str(entry["resource_id"])
+            return observed
+        pending_key = f"server:{role}"
+        pending = self.intents.get(pending_key)
+        if pending:
+            errors = self._reconcile_pending_intents()
+            if errors:
+                raise HarnessError("; ".join(errors))
+            entry = self._server_ledger_entry(name, role)
+            if entry:
+                return self.create_server(name, role)
         payload = {
             "name": name,
             "server_type": self.server_type,
@@ -349,11 +519,41 @@ class HetznerHarness:
             "start_after_create": True,
             "labels": self.labels,
         }
-        response = self.request("POST", "/servers", expected=(201,), json=payload)
+        self.intents.put(
+            pending_key,
+            {
+                "marker": name,
+                "kind": "server",
+                "name": name,
+                "role": role,
+                "operation": "create_server",
+                "mutation_state": "request_started",
+                "payload_sha256": hashlib.sha256(
+                    json.dumps(payload, sort_keys=True).encode()
+                ).hexdigest(),
+            },
+        )
+        try:
+            response = self.request("POST", "/servers", expected=(201,), json=payload)
+        except Exception as error:
+            self.intents.update(
+                pending_key,
+                mutation_state="outcome_unknown",
+                last_error_code=provider_error_class(error),
+            )
+            raise
         server = response.get("server") or {}
         identifier = server.get("id")
         if identifier is None:
+            self.intents.update(
+                pending_key,
+                mutation_state="outcome_unknown",
+                last_error_code="PROVIDER_MALFORMED_RESPONSE",
+            )
             raise HarnessError(f"Hetzner server create returned no server ID for {role}")
+        self.intents.update(
+            pending_key, provider_id=str(identifier), mutation_state="accepted"
+        )
         started = time.monotonic()
         while True:
             observed = self.get_resource("servers", identifier)
@@ -378,6 +578,8 @@ class HetznerHarness:
             ownership={"label_key": self.LABEL_KEY, "label_value": self.prefix},
             source_witness=role,
         )
+        self.intents.update(pending_key, mutation_state="ledgered")
+        self.intents.clear(pending_key)
         self.created[f"{role}_server_id"] = str(identifier)
         return observed
 
@@ -802,6 +1004,24 @@ class HetznerHarness:
                 "provider_resources_considered": {},
             }
             return
+        if not self.apply:
+            self.report["cleanup"] = {
+                "status": "REFUSED",
+                "errors": [
+                    "Cleanup is a provider write and requires both "
+                    "BACKUPSHEEP_E2E_APPLY=YES and BACKUPSHEEP_E2E_CLEANUP=YES"
+                ],
+                "provider_resources_considered": {},
+            }
+            return
+        pending_errors = self._reconcile_pending_intents()
+        if pending_errors:
+            self.report["cleanup"] = {
+                "status": "MANUAL_REVIEW",
+                "errors": [bounded_error(error) for error in pending_errors],
+                "provider_resources_considered": {},
+            }
+            return
         # Delete the restore target first, then the source server, then its image.
         self._delete_owned_server(
             self.created["restore_server_id"], self.restore_name, cleanup_errors
@@ -843,20 +1063,19 @@ class HetznerHarness:
         }
 
     def run(self):
+        cleanup_done = False
         try:
-            if (
-                self.cleanup_enabled
-                and not self.apply
-                and any(
-                    self.ledger.cleanup_eligible(
-                        entry.get("kind"), entry.get("resource_id")
-                    )
-                    for entry in self.ledger.entries()
-                )
-            ):
-                self.report["status"] = "PASS"
+            self._preflight_cleanup()
+            if self.cleanup_enabled:
                 self.report["mode"] = "cleanup_only"
-                return 0
+                self.cleanup()
+                cleanup_done = True
+                self.report["status"] = (
+                    "PASS"
+                    if self.report["cleanup"]["status"] == "PASS"
+                    else "MANUAL_REVIEW"
+                )
+                return 0 if self.report["status"] == "PASS" else 2
             self.baseline()
             self.preflight_capabilities()
             if not self.apply:
@@ -870,7 +1089,8 @@ class HetznerHarness:
             self.report["status"] = "FAIL"
             self.report["error"] = self._safe_error(error)
         finally:
-            self.cleanup()
+            if not cleanup_done:
+                self.cleanup()
             print(json.dumps(self.report, indent=2, sort_keys=True, default=str))
         cleanup_ok = self.report["cleanup"]["status"] in {"PASS", "NOT_REQUESTED"}
         return 0 if self.report.get("status") == "PASS" and cleanup_ok else 1

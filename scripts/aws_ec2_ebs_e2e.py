@@ -18,6 +18,8 @@ read repository credential files.  It is intended to run inside the app image,
 for example:
 
     AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+      AWS_E2E_WEB_CIDRS=198.51.100.7/32,2001:db8::7/128 \
+      AWS_E2E_SSH_CIDRS=198.51.100.7/32,2001:db8::7/128 \
       BACKUPSHEEP_E2E_RUN_ID=bs-e2e-20260810-5b4a6b63 \
       BACKUPSHEEP_E2E_LEDGER_PATH=/code/_storage/e2e-ledgers/aws-ec2.json \
       BACKUPSHEEP_E2E_APPLY=YES \
@@ -39,9 +41,9 @@ import shlex
 import sys
 import tempfile
 import time
-import traceback
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,6 +83,8 @@ from apps.console.utils.models import UtilBackup  # noqa: E402
 from scripts.live_e2e_ledger import (  # noqa: E402
     DurableResourceLedger,
     LedgerError,
+    bounded_error,
+    provider_error_class,
     require_run_id,
 )
 
@@ -106,6 +110,8 @@ PARENT_TAG = "BackupSheepE2EParent"
 RESTORE_TAG = "BackupSheepRestore"
 SOURCE_TAG = "BackupSheepSource"
 UBUNTU_OWNER = "099720109477"
+MAX_PROVIDER_PAGES = 1000
+MAX_PROVIDER_ITEMS = 10000
 
 
 class HarnessError(RuntimeError):
@@ -114,6 +120,121 @@ class HarnessError(RuntimeError):
 
 class AmbiguousMutation(HarnessError):
     """A provider mutation may have been accepted but its response was lost."""
+
+
+_ALLOWED_AWS_CLIENT_SERVICES = frozenset({"ec2", "sts"})
+
+
+@contextmanager
+def _aws_client_guard():
+    """Allow only EC2 and STS clients in this native-resource runner."""
+    original_client = boto3.client
+
+    def guarded_client(service_name, *args, **kwargs):
+        normalized = str(service_name or "").strip().lower()
+        if normalized not in _ALLOWED_AWS_CLIENT_SERVICES:
+            raise HarnessError("The AWS EC2/EBS runner attempted an unsupported client.")
+        return original_client(service_name, *args, **kwargs)
+
+    boto3.client = guarded_client
+    try:
+        yield
+    finally:
+        boto3.client = original_client
+
+
+def _normalize_cidr_values(values, label, *, required):
+    """Return canonical, non-world-open IPv4/IPv6 CIDRs."""
+    if isinstance(values, str):
+        values = values.split(",")
+    cleaned = [str(value).strip() for value in values or []]
+    if required and not cleaned:
+        raise HarnessError(f"{label} is required and must contain explicit CIDRs.")
+    if any(not value or "/" not in value for value in cleaned):
+        raise HarnessError(f"{label} contains an invalid CIDR.")
+
+    networks = set()
+    for value in cleaned:
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError as error:
+            raise HarnessError(f"{label} contains an invalid CIDR: {value}") from error
+        if network.prefixlen == 0:
+            raise HarnessError(f"{label} must not contain a world-open CIDR.")
+        networks.add(network)
+    return tuple(
+        str(network)
+        for network in sorted(
+            networks,
+            key=lambda item: (
+                item.version,
+                int(item.network_address),
+                item.prefixlen,
+            ),
+        )
+    )
+
+
+def _validated_cidrs(raw_value, env_name):
+    """Validate an explicit comma-separated CIDR environment setting."""
+    return _normalize_cidr_values(str(raw_value or ""), env_name, required=True)
+
+
+def _security_group_permission(from_port, to_port, cidrs, description):
+    """Build an AWS security-group rule without permitting world-open access."""
+    normalized = _normalize_cidr_values(cidrs, "AWS security-group ingress", required=True)
+    permission = {
+        "IpProtocol": "tcp",
+        "FromPort": int(from_port),
+        "ToPort": int(to_port),
+    }
+    ipv4 = [
+        {"CidrIp": value, "Description": description}
+        for value in normalized
+        if ipaddress.ip_network(value).version == 4
+    ]
+    ipv6 = [
+        {"CidrIpv6": value, "Description": description}
+        for value in normalized
+        if ipaddress.ip_network(value).version == 6
+    ]
+    if ipv4:
+        permission["IpRanges"] = ipv4
+    if ipv6:
+        permission["Ipv6Ranges"] = ipv6
+    return permission
+
+
+def _security_group_rule_cidrs(group, from_port, to_port):
+    """Read one TCP rule and fail closed on malformed or world-open CIDRs."""
+    observed = set()
+    for permission in (group or {}).get("IpPermissions") or []:
+        if not isinstance(permission, dict):
+            continue
+        if (
+            permission.get("IpProtocol") != "tcp"
+            or permission.get("FromPort") != int(from_port)
+            or permission.get("ToPort") != int(to_port)
+        ):
+            continue
+        values = [
+            item.get("CidrIp")
+            for item in permission.get("IpRanges") or []
+            if isinstance(item, dict) and item.get("CidrIp")
+        ]
+        values.extend(
+            item.get("CidrIpv6")
+            for item in permission.get("Ipv6Ranges") or []
+            if isinstance(item, dict) and item.get("CidrIpv6")
+        )
+        observed.update(
+            _normalize_cidr_values(
+                values,
+                "AWS security-group read-back",
+                required=False,
+            )
+        )
+    return observed
 
 
 class MutationIntentStore:
@@ -214,6 +335,18 @@ class MutationIntentStore:
             payload["pending"][str(key)] = dict(value)
             self._write(payload)
 
+    def update(self, key, **updates):
+        with self._locked():
+            payload = self._validate(self._read())
+            current = payload["pending"].get(str(key))
+            if not isinstance(current, dict):
+                raise LedgerError("Cannot update an unknown mutation intent.")
+            current = dict(current)
+            current.update(updates)
+            payload["pending"][str(key)] = current
+            self._write(payload)
+        return current
+
     def clear(self, key):
         with self._locked():
             payload = self._validate(self._read())
@@ -238,7 +371,7 @@ def _now():
 
 def _safe_error(error):
     """Return bounded diagnostic text without dumping request configuration."""
-    return str(error or "")[:500]
+    return f"{provider_error_class(error)}: {bounded_error(error)}"
 
 
 def _tag_map(tags):
@@ -306,7 +439,14 @@ def _flatten_instances(response):
         page = reservation.get("Instances")
         if not isinstance(page, list):
             raise HarnessError("EC2 returned a malformed instance collection.")
-        instances.extend(page)
+        owner_id = str(reservation.get("OwnerId") or "")
+        for instance in page:
+            if not isinstance(instance, dict):
+                raise HarnessError("EC2 returned a malformed instance identity.")
+            instance = dict(instance)
+            if owner_id:
+                instance["OwnerId"] = owner_id
+            instances.append(instance)
     return instances
 
 
@@ -315,7 +455,7 @@ def _paged(method, key, **params):
     items = []
     token = None
     seen = set()
-    for _ in range(1000):
+    for _ in range(MAX_PROVIDER_PAGES):
         request = dict(params)
         request["MaxResults"] = min(int(request.get("MaxResults", 100)), 1000)
         if token:
@@ -324,14 +464,20 @@ def _paged(method, key, **params):
         if not isinstance(response, dict) or not isinstance(response.get(key), list):
             raise HarnessError("EC2 returned a malformed paginated response.")
         items.extend(response[key])
+        if len(items) > MAX_PROVIDER_ITEMS:
+            raise HarnessError("EC2 pagination exceeded the bounded item limit.")
         next_token = response.get("NextToken")
         if not next_token:
+            if len(response[key]) >= request["MaxResults"]:
+                raise HarnessError(
+                    "EC2 returned a full page without pagination metadata."
+                )
             return items
         if not isinstance(next_token, str) or next_token in seen or next_token == token:
             raise HarnessError("EC2 returned a repeated pagination cursor.")
         seen.add(next_token)
         token = next_token
-    raise HarnessError("EC2 pagination exceeded the bounded reconciliation limit.")
+    raise HarnessError("EC2 pagination exceeded the bounded page limit.")
 
 
 def _describe_instance(ec2, instance_id):
@@ -549,7 +695,7 @@ def _wait(label, callback, complete, failed=(), timeout=TIMEOUT_SECONDS):
         time.sleep(POLL_SECONDS)
 
 
-def _mutation(intents, key, marker, operation, callback):
+def _mutation(intents, key, marker, operation, callback, *, details=None):
     """Persist intent before a mutation and refuse a blind second attempt."""
     pending = intents.get(key)
     if pending:
@@ -562,11 +708,20 @@ def _mutation(intents, key, marker, operation, callback):
             "marker": str(marker),
             "operation": str(operation),
             "created_at": _now(),
+            "mutation_state": "request_started",
+            **dict(details or {}),
         },
     )
     try:
-        return callback()
+        result = callback()
+        intents.update(key, mutation_state="accepted")
+        return result
     except Exception as error:
+        intents.update(
+            key,
+            mutation_state="outcome_unknown",
+            last_error_code=provider_error_class(error),
+        )
         raise AmbiguousMutation(
             f"{operation} outcome is unknown for {marker}; no retry was issued: {_safe_error(error)}"
         ) from error
@@ -972,6 +1127,21 @@ def _ensure_tagged_resource(
     return resource_id, resource
 
 
+def _intent_resource_kind(key):
+    """Map a durable tag intent to the ledger kind it must reconcile."""
+    key = str(key)
+    if key.startswith("ami_child_tags_"):
+        return "ami_snapshot"
+    return {
+        "ami_tags": "ami",
+        "ami_restore_tags": "ami_restore_instance",
+        "ami_restore_root_volume_tags": "ami_restore_root_volume",
+        "ebs_snapshot_tags": "ebs_snapshot",
+        "ebs_restore_tags": "ebs_restore_volume",
+        "source_root_volume_tags": "source_root_volume",
+    }.get(key, "")
+
+
 def _ensure_tags(ec2, intents, *, resource_ids, key, tags, readback):
     expected = _tag_map(tags)
     observed = readback()
@@ -984,6 +1154,11 @@ def _ensure_tags(ec2, intents, *, resource_ids, key, tags, readback):
         key,
         "tag resources",
         lambda: ec2.create_tags(Resources=[str(item) for item in resource_ids], Tags=tags),
+        details={
+            "resource_ids": [str(item) for item in resource_ids],
+            "resource_kind": _intent_resource_kind(key),
+            "expected_tags": expected,
+        },
     )
     observed = readback()
     if any(observed.get(name) != value for name, value in expected.items()):
@@ -1264,73 +1439,70 @@ def _ensure_security_group(ec2, ledger, intents, prefix, vpc_id):
     )
 
 
-def _ensure_web_ingress(ec2, intents, security_group_id, prefix):
+def _ensure_web_ingress(ec2, intents, security_group_id, prefix, cidrs=None):
+    cidrs = (
+        _validated_cidrs(
+            os.environ.get("AWS_E2E_WEB_CIDRS"), "AWS_E2E_WEB_CIDRS"
+        )
+        if cidrs is None
+        else _normalize_cidr_values(cidrs, "AWS_E2E_WEB_CIDRS", required=True)
+    )
     group = ec2.describe_security_groups(GroupIds=[security_group_id])["SecurityGroups"][0]
-    for permission in group.get("IpPermissions") or []:
-        if (
-            permission.get("IpProtocol") == "tcp"
-            and permission.get("FromPort") == 80
-            and permission.get("ToPort") == 80
-            and any(item.get("CidrIp") == "0.0.0.0/0" for item in permission.get("IpRanges") or [])
-        ):
-            return
+    desired = set(cidrs)
+    observed = _security_group_rule_cidrs(group, 80, 80)
+    missing = sorted(desired - observed)
+    if not missing:
+        intents.clear("security_group_ingress")
+        return
+    permission = _security_group_permission(
+        80,
+        80,
+        missing,
+        "BackupSheep E2E website runner",
+    )
     _mutation(
         intents,
         "security_group_ingress",
-        f"{prefix}:tcp-80",
+        f"{prefix}:tcp-80:{','.join(cidrs)}",
         "authorize web ingress",
         lambda: ec2.authorize_security_group_ingress(
             GroupId=security_group_id,
-            IpPermissions=[
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": 80,
-                    "ToPort": 80,
-                    "IpRanges": [
-                        {"CidrIp": "0.0.0.0/0", "Description": "BackupSheep E2E website"}
-                    ],
-                }
-            ],
+            IpPermissions=[permission],
         ),
+        details={
+            "resource_id": str(security_group_id),
+            "resource_kind": "security_group",
+            "port": 80,
+            "cidrs": sorted(desired),
+        },
     )
     refreshed = ec2.describe_security_groups(GroupIds=[security_group_id])["SecurityGroups"][0]
-    if not any(
-        permission.get("IpProtocol") == "tcp"
-        and permission.get("FromPort") == 80
-        and permission.get("ToPort") == 80
-        and any(item.get("CidrIp") == "0.0.0.0/0" for item in permission.get("IpRanges") or [])
-        for permission in refreshed.get("IpPermissions") or []
-    ):
+    if not desired.issubset(_security_group_rule_cidrs(refreshed, 80, 80)):
         raise AmbiguousMutation("Web ingress read-back failed.")
     intents.clear("security_group_ingress")
 
 
-def _ensure_ssh_ingress(ec2, intents, security_group_id, prefix):
-    configured = str(os.environ.get("AWS_E2E_SSH_CIDRS") or "").strip()
-    if not configured:
-        raise HarnessError(
-            "AWS_E2E_SSH_CIDRS is required and must include explicit runner CIDRs."
+def _ensure_ssh_ingress(ec2, intents, security_group_id, prefix, cidrs=None):
+    cidrs = (
+        _validated_cidrs(
+            os.environ.get("AWS_E2E_SSH_CIDRS"), "AWS_E2E_SSH_CIDRS"
         )
-    cidrs = []
-    for value in configured.split(","):
-        network = ipaddress.ip_network(value.strip(), strict=False)
-        if network.version != 4:
-            raise HarnessError("AWS E2E SSH ingress currently requires IPv4 CIDRs.")
-        cidrs.append(str(network))
-    cidrs = sorted(set(cidrs))
+        if cidrs is None
+        else _normalize_cidr_values(cidrs, "AWS_E2E_SSH_CIDRS", required=True)
+    )
     group = ec2.describe_security_groups(GroupIds=[security_group_id])["SecurityGroups"][0]
-    observed = {
-        item.get("CidrIp")
-        for permission in (group.get("IpPermissions") or [])
-        if permission.get("IpProtocol") == "tcp"
-        and permission.get("FromPort") == 22
-        and permission.get("ToPort") == 22
-        for item in (permission.get("IpRanges") or [])
-    }
-    missing = [cidr for cidr in cidrs if cidr not in observed]
+    desired = set(cidrs)
+    observed = _security_group_rule_cidrs(group, 22, 22)
+    missing = sorted(desired - observed)
     if not missing:
         intents.clear("security_group_ssh_ingress")
         return
+    permission = _security_group_permission(
+        22,
+        22,
+        missing,
+        "BackupSheep E2E SSH runner",
+    )
     _mutation(
         intents,
         "security_group_ssh_ingress",
@@ -1338,34 +1510,17 @@ def _ensure_ssh_ingress(ec2, intents, security_group_id, prefix):
         "authorize SSH ingress",
         lambda: ec2.authorize_security_group_ingress(
             GroupId=security_group_id,
-            IpPermissions=[
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": 22,
-                    "ToPort": 22,
-                    "IpRanges": [
-                        {
-                            "CidrIp": cidr,
-                            "Description": "BackupSheep E2E SSH runner",
-                        }
-                        for cidr in missing
-                    ],
-                }
-            ],
+            IpPermissions=[permission],
         ),
+        details={
+            "resource_id": str(security_group_id),
+            "resource_kind": "security_group",
+            "port": 22,
+            "cidrs": sorted(desired),
+        },
     )
-    refreshed = ec2.describe_security_groups(GroupIds=[security_group_id])[
-        "SecurityGroups"
-    ][0]
-    refreshed_cidrs = {
-        item.get("CidrIp")
-        for permission in (refreshed.get("IpPermissions") or [])
-        if permission.get("IpProtocol") == "tcp"
-        and permission.get("FromPort") == 22
-        and permission.get("ToPort") == 22
-        for item in (permission.get("IpRanges") or [])
-    }
-    if any(cidr not in refreshed_cidrs for cidr in cidrs):
+    refreshed = ec2.describe_security_groups(GroupIds=[security_group_id])["SecurityGroups"][0]
+    if not desired.issubset(_security_group_rule_cidrs(refreshed, 22, 22)):
         raise AmbiguousMutation("SSH ingress read-back failed.")
     intents.clear("security_group_ssh_ingress")
 
@@ -1560,6 +1715,108 @@ def _tag_native_resource(ec2, intents, resource_id, key, tags, readback):
     )
 
 
+def _restore_request_witness(restore, backup, node, *, target_kind, target_name):
+    """Return the immutable local request witness for an EC2 restore."""
+    params = restore.params if isinstance(restore.params, dict) else {}
+    witness = params.get("_backupsheep_restore")
+    expected_source = str(backup.unique_id or "")
+    if (
+        not isinstance(witness, dict)
+        or str(restore.backup_id) != str(backup.id)
+        or str(restore.node_id) != str(node.id)
+        or str(witness.get("provider") or "") != "aws_ec2"
+        or str(witness.get("source_id") or "") != expected_source
+        or str(witness.get("target_kind") or "") != target_kind
+        or str(witness.get("target_name") or "") != str(target_name)
+        or not str(restore.restore_marker or "")
+        or str(witness.get("marker") or "") != str(restore.restore_marker)
+    ):
+        raise HarnessError("EC2 restore request/source witness is not exact.")
+    return witness
+
+
+def _prove_restore_instance_target(
+    resource, resource_id, restore, *, source_id, account_id, region
+):
+    """Prove identity and request compatibility before an instance tag write."""
+    if not isinstance(resource, dict) or str(resource.get("InstanceId")) != str(resource_id):
+        return False
+    if str(resource.get("ImageId") or "") != str(source_id):
+        return False
+    state = str((resource.get("State") or {}).get("Name") or "")
+    if state in {"shutting-down", "terminated"} or state not in {
+        "pending",
+        "running",
+        "stopped",
+        "stopping",
+        "starting",
+    }:
+        return False
+    owner = str(resource.get("OwnerId") or "")
+    if owner and owner != str(account_id):
+        return False
+    placement = str((resource.get("Placement") or {}).get("AvailabilityZone") or "")
+    if placement and not placement.startswith(f"{region}"):
+        return False
+    params = restore.params if isinstance(restore.params, dict) else {}
+    requested_type = str(params.get("instance_type") or "")
+    if requested_type and str(resource.get("InstanceType") or "") != requested_type:
+        return False
+    tags = _tag_map(resource.get("Tags"))
+    if tags.get("Name") and tags.get("Name") != str(restore.name):
+        return False
+    if tags.get(RESTORE_TAG) and tags.get(RESTORE_TAG) != str(restore.restore_marker):
+        return False
+    if tags.get(SOURCE_TAG) and tags.get(SOURCE_TAG) != str(source_id):
+        return False
+    return True
+
+
+def _prove_restore_volume_target(
+    resource,
+    resource_id,
+    restore,
+    *,
+    source_id=None,
+    expected_source_tag=None,
+    parent_instance_id=None,
+    expected_availability_zone=None,
+    account_id=None,
+    region=None,
+):
+    """Prove identity, source/attachment, state, and region before volume tags."""
+    if not isinstance(resource, dict) or str(resource.get("VolumeId")) != str(resource_id):
+        return False
+    if source_id is not None and str(resource.get("SnapshotId") or "") != str(source_id):
+        return False
+    state = str(resource.get("State") or "")
+    if state not in {"creating", "available", "in-use"}:
+        return False
+    availability_zone = str(resource.get("AvailabilityZone") or "")
+    if expected_availability_zone and availability_zone != str(expected_availability_zone):
+        return False
+    if region and availability_zone and not availability_zone.startswith(f"{region}"):
+        return False
+    owner = str(resource.get("OwnerId") or "")
+    if account_id and owner and owner != str(account_id):
+        return False
+    if parent_instance_id:
+        attachments = resource.get("Attachments") or []
+        if not any(
+            isinstance(item, dict)
+            and str(item.get("InstanceId") or "") == str(parent_instance_id)
+            for item in attachments
+        ):
+            return False
+    tags = _tag_map(resource.get("Tags"))
+    if tags.get(RESTORE_TAG) and tags.get(RESTORE_TAG) != str(restore.restore_marker):
+        return False
+    expected_tag = source_id if expected_source_tag is None else expected_source_tag
+    if expected_tag is not None and tags.get(SOURCE_TAG) and tags.get(SOURCE_TAG) != str(expected_tag):
+        return False
+    return True
+
+
 def _run_backup_and_restore(
     *,
     ec2,
@@ -1670,7 +1927,25 @@ def _run_backup_and_restore(
         raise HarnessError("AMI restore completed without an instance ID.")
     restore_marker = str(ami_restore.restore_marker)
     restored = _describe_instance(ec2, restored_instance_id)
-    if restored is None or not _owned_tags(
+    _restore_request_witness(
+        ami_restore,
+        ami_backup,
+        source_node,
+        target_kind="instance",
+        target_name=ami_restore.name,
+    )
+    if not _prove_restore_instance_target(
+        restored,
+        restored_instance_id,
+        ami_restore,
+        source_id=ami_id,
+        account_id=account_id,
+        region=REGION,
+    ):
+        raise HarnessError(
+            "Refused to tag AMI restore instance: exact provider target proof failed."
+        )
+    if not _owned_tags(
         restored,
         prefix,
         "restore-instance",
@@ -1701,6 +1976,22 @@ def _run_backup_and_restore(
     restored_root_id = _source_volume_id(restored)
     if not restored_root_id:
         raise HarnessError("AMI restore root EBS volume ID was not returned.")
+    restored_root_candidate = _describe_volume(ec2, restored_root_id)
+    if not _prove_restore_volume_target(
+        restored_root_candidate,
+        restored_root_id,
+        ami_restore,
+        expected_source_tag=ami_id,
+        parent_instance_id=restored_instance_id,
+        expected_availability_zone=str(
+            (restored.get("Placement") or {}).get("AvailabilityZone") or ""
+        ),
+        account_id=account_id,
+        region=REGION,
+    ):
+        raise HarnessError(
+            "Refused to tag AMI restore root volume: exact provider target proof failed."
+        )
     _tag_native_resource(
         ec2,
         intents,
@@ -1825,7 +2116,29 @@ def _run_backup_and_restore(
         raise HarnessError("EBS restore completed without a volume ID.")
     volume_restore_marker = str(volume_restore.restore_marker)
     restored_volume = _describe_volume(ec2, restored_volume_id)
-    if restored_volume is None or not _owned_tags(
+    _restore_request_witness(
+        volume_restore,
+        volume_backup,
+        volume_node,
+        target_kind="volume",
+        target_name=volume_restore.name,
+    )
+    expected_volume_zone = str(
+        (volume_restore.params or {}).get("availability_zone") or source_az
+    )
+    if not _prove_restore_volume_target(
+        restored_volume,
+        restored_volume_id,
+        volume_restore,
+        source_id=snapshot_id,
+        expected_availability_zone=expected_volume_zone,
+        account_id=account_id,
+        region=REGION,
+    ):
+        raise HarnessError(
+            "Refused to tag EBS restore volume: exact provider target proof failed."
+        )
+    if not _owned_tags(
         restored_volume,
         prefix,
         "restore-volume",
@@ -1908,11 +2221,48 @@ def _cleanup_resource(ledger, kind, resource_id, readback, owns, delete, report)
             ledger.mark_cleanup(kind, resource_id, state="manual_review", error=message)
             report.append({"kind": kind, "resource_id": resource_id, "state": "manual_review", "error": message})
     except Exception as error:
-        remaining = None
         try:
             remaining = readback(resource_id)
-        except Exception:
-            remaining = None
+        except ClientError as readback_error:
+            if _not_found(readback_error):
+                ledger.mark_cleanup(kind, resource_id, state="absent")
+                report.append(
+                    {"kind": kind, "resource_id": resource_id, "state": "absent"}
+                )
+                return
+            message = (
+                "ambiguous cleanup outcome and provider read-back failed: "
+                f"{_safe_error(readback_error)}"
+            )
+            ledger.mark_cleanup(
+                kind, resource_id, state="manual_review", error=message
+            )
+            report.append(
+                {
+                    "kind": kind,
+                    "resource_id": resource_id,
+                    "state": "manual_review",
+                    "error": message,
+                }
+            )
+            return
+        except Exception as readback_error:
+            message = (
+                "ambiguous cleanup outcome and provider read-back failed: "
+                f"{_safe_error(readback_error)}"
+            )
+            ledger.mark_cleanup(
+                kind, resource_id, state="manual_review", error=message
+            )
+            report.append(
+                {
+                    "kind": kind,
+                    "resource_id": resource_id,
+                    "state": "manual_review",
+                    "error": message,
+                }
+            )
+            return
         if remaining is None or (
             kind.endswith("instance")
             and str((remaining.get("State") or {}).get("Name") or "") == "terminated"
@@ -1937,8 +2287,231 @@ def _has_ledgered_root_volume(ledger, instance_kind, instance_id):
     )
 
 
+def _reconcile_pending_intents(ec2, ledger, intents, prefix, account_id):
+    """Reconcile every durable EC2 intent before any cleanup mutation."""
+    results = []
+    role_by_kind = {
+        "security_group": "security-group",
+        "key_pair": "ssh-key",
+        "source_instance": "source-instance",
+        "source_data_volume": "source-data-volume",
+    }
+    kind_by_role = {value: key for key, value in role_by_kind.items()}
+    pending = intents.pending()
+    for key, intent in pending.items():
+        resource_kind = str(intent.get("resource_kind") or "")
+        resource_ids = [str(item) for item in intent.get("resource_ids") or []]
+        if intent.get("resource_id"):
+            resource_ids = [str(intent["resource_id"])]
+
+        if resource_ids and resource_kind and not intent.get("port"):
+            unresolved = False
+            for resource_id in resource_ids:
+                entry = ledger.get(resource_kind, resource_id)
+                if entry is None:
+                    unresolved = True
+                    break
+                if resource_kind.endswith("instance"):
+                    resource = _describe_instance(ec2, resource_id)
+                elif resource_kind in {
+                    "source_root_volume",
+                    "source_data_volume",
+                    "ami_restore_root_volume",
+                    "ebs_restore_volume",
+                }:
+                    resource = _describe_volume(ec2, resource_id)
+                elif resource_kind in {"ami", "ami_snapshot", "ebs_snapshot"}:
+                    resource = (
+                        _describe_image(ec2, resource_id, account_id)
+                        if resource_kind == "ami"
+                        else _describe_snapshot(ec2, resource_id, account_id)
+                    )
+                else:
+                    resource = None
+                if resource is None:
+                    ledger.mark_cleanup(resource_kind, resource_id, state="absent")
+                    continue
+                expected_tags = intent.get("expected_tags") or {}
+                if not _entry_matches(resource, entry) or any(
+                    _tag_map(resource.get("Tags")).get(name) != str(value)
+                    for name, value in expected_tags.items()
+                ):
+                    unresolved = True
+                    break
+            if unresolved:
+                results.append(
+                    {
+                        "kind": "intent",
+                        "resource_id": key,
+                        "state": "manual_review",
+                        "error": "pending intent identity could not be proven",
+                    }
+                )
+                continue
+            intents.clear(key)
+            results.append({"kind": "intent", "resource_id": key, "state": "reconciled"})
+            continue
+
+        if resource_kind == "security_group" and intent.get("port"):
+            resource_id = str(intent.get("resource_id") or "")
+            entry = ledger.get("security_group", resource_id)
+            if not entry:
+                results.append(
+                    {
+                        "kind": "intent",
+                        "resource_id": key,
+                        "state": "manual_review",
+                        "error": "ingress intent has no exact security-group ledger witness",
+                    }
+                )
+                continue
+            groups = ec2.describe_security_groups(GroupIds=[resource_id]).get(
+                "SecurityGroups"
+            ) or []
+            if len(groups) != 1 or not _entry_matches(groups[0], entry):
+                results.append(
+                    {
+                        "kind": "intent",
+                        "resource_id": key,
+                        "state": "manual_review",
+                        "error": "ingress target ownership could not be proven",
+                    }
+                )
+                continue
+            observed = _security_group_rule_cidrs(
+                groups[0], int(intent.get("port")), int(intent.get("port"))
+            )
+            if not set(intent.get("cidrs") or []).issubset(observed):
+                results.append(
+                    {
+                        "kind": "intent",
+                        "resource_id": key,
+                        "state": "manual_review",
+                        "error": "ingress mutation outcome is unknown",
+                    }
+                )
+                continue
+            intents.clear(key)
+            results.append({"kind": "intent", "resource_id": key, "state": "reconciled"})
+            continue
+
+        kind = kind_by_role.get(str(intent.get("operation") or ""))
+        marker = str(intent.get("marker") or "")
+        if kind and marker:
+            if kind == "security_group":
+                rows = ec2.describe_security_groups(
+                    Filters=[
+                        {"Name": f"tag:{OWNERSHIP_TAG}", "Values": [prefix]},
+                        {"Name": f"tag:{ROLE_TAG}", "Values": [role_by_kind[kind]]},
+                    ]
+                ).get("SecurityGroups") or []
+                candidates = [
+                    row for row in rows if _tag_map(row.get("Tags")).get("Name") == marker
+                ]
+            elif kind == "key_pair":
+                candidates = [
+                    row
+                    for row in ec2.describe_key_pairs(
+                        Filters=[
+                            {"Name": f"tag:{OWNERSHIP_TAG}", "Values": [prefix]},
+                            {"Name": f"tag:{ROLE_TAG}", "Values": [role_by_kind[kind]]},
+                        ]
+                    ).get("KeyPairs")
+                    or []
+                    if row.get("KeyName") == marker
+                ]
+            elif kind == "source_instance":
+                candidates = [
+                    row for row in _candidate_instances(ec2, prefix, role_by_kind[kind])
+                    if _tag_map(row.get("Tags")).get("Name") == marker
+                ]
+            else:
+                candidates = [
+                    row for row in _candidate_volumes(ec2, prefix, role_by_kind[kind])
+                    if _tag_map(row.get("Tags")).get("Name") == marker
+                ]
+            if len(candidates) > 1:
+                results.append(
+                    {
+                        "kind": "intent",
+                        "resource_id": key,
+                        "state": "manual_review",
+                        "error": "multiple exact pending resource matches",
+                    }
+                )
+                continue
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                resource_id = str(
+                    candidate.get("GroupId")
+                    or candidate.get("KeyPairId")
+                    or candidate.get("InstanceId")
+                    or candidate.get("VolumeId")
+                    or ""
+                )
+                if kind == "security_group":
+                    observed = ec2.describe_security_groups(GroupIds=[resource_id]).get(
+                        "SecurityGroups"
+                    ) or []
+                    exact = observed[0] if len(observed) == 1 else None
+                elif kind == "key_pair":
+                    exact = _describe_key_pair(ec2, resource_id)
+                elif kind == "source_instance":
+                    exact = _describe_instance(ec2, resource_id)
+                else:
+                    exact = _describe_volume(ec2, resource_id)
+                if exact is None or not _owned_tags(
+                    exact, prefix, role_by_kind[kind]
+                ):
+                    results.append(
+                        {
+                            "kind": "intent",
+                            "resource_id": key,
+                            "state": "manual_review",
+                            "error": "pending resource ownership mismatch",
+                        }
+                    )
+                    continue
+                _record(
+                    ledger,
+                    kind=kind,
+                    resource_id=resource_id,
+                    name=marker,
+                    prefix=prefix,
+                    role=role_by_kind[kind],
+                    source=str(exact.get("VpcId") or ""),
+                )
+                intents.clear(key)
+                results.append(
+                    {"kind": "intent", "resource_id": key, "state": "adopted"}
+                )
+                continue
+
+        if str(intent.get("mutation_state") or "prepared") == "prepared":
+            intents.clear(key)
+            results.append(
+                {"kind": "intent", "resource_id": key, "state": "reconciled_no_resource"}
+            )
+        else:
+            results.append(
+                {
+                    "kind": "intent",
+                    "resource_id": key,
+                    "state": "manual_review",
+                    "error": "accepted or ambiguous mutation has no exact provider identity",
+                }
+            )
+    return results
+
+
 def _cleanup(ec2, ledger, intents, prefix, account_id):
     results = []
+    intent_results = _reconcile_pending_intents(
+        ec2, ledger, intents, prefix, account_id
+    )
+    results.extend(intent_results)
+    if any(item.get("state") == "manual_review" for item in intent_results):
+        return results
     # Restores and their child volumes leave the account first.
     for kind in ("ami_restore_instance", "ebs_restore_volume", "source_instance"):
         for entry in ledger.entries(kind):
@@ -2055,8 +2628,6 @@ def _cleanup(ec2, ledger, intents, prefix, account_id):
             ),
             results,
         )
-    if not any(item.get("state") == "manual_review" for item in results):
-        intents.clear_all()
     return results
 
 
@@ -2121,6 +2692,7 @@ def main():
     report = {"region": REGION, "tests": {}, "cleanup": []}
     ledger = None
     intents = None
+    client_guard = None
     try:
         prefix = require_run_id(os.environ.get("BACKUPSHEEP_E2E_RUN_ID"))
         ledger_path = os.environ.get("BACKUPSHEEP_E2E_LEDGER_PATH")
@@ -2133,6 +2705,8 @@ def main():
         if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get("AWS_SECRET_ACCESS_KEY"):
             raise HarnessError("AWS credentials must be supplied through the process environment.")
 
+        client_guard = _aws_client_guard()
+        client_guard.__enter__()
         sts = boto3.client("sts", region_name=REGION, config=AWS_CONFIG)
         identity = sts.get_caller_identity()
         account_id = str(identity.get("Account") or "")
@@ -2176,11 +2750,24 @@ def main():
         vpc_id, subnet_id, availability_zone, ami = _preflight(
             ec2, account_id, prefix, report
         )
+        # Read-only preflight and cleanup do not create ingress. Requiring
+        # obsolete runner CIDRs in those modes can strand owned resources after
+        # an IP change, so validate them only on the creation path.
+        web_cidrs = _validated_cidrs(
+            os.environ.get("AWS_E2E_WEB_CIDRS"), "AWS_E2E_WEB_CIDRS"
+        )
+        ssh_cidrs = _validated_cidrs(
+            os.environ.get("AWS_E2E_SSH_CIDRS"), "AWS_E2E_SSH_CIDRS"
+        )
         security_group_id, _security_group = _ensure_security_group(
             ec2, ledger, intents, prefix, vpc_id
         )
-        _ensure_web_ingress(ec2, intents, security_group_id, prefix)
-        _ensure_ssh_ingress(ec2, intents, security_group_id, prefix)
+        _ensure_web_ingress(
+            ec2, intents, security_group_id, prefix, web_cidrs
+        )
+        _ensure_ssh_ingress(
+            ec2, intents, security_group_id, prefix, ssh_cidrs
+        )
         key_pair_id, key_pair = _ensure_ssh_key_pair(
             ec2, ledger, intents, prefix
         )
@@ -2303,8 +2890,10 @@ def main():
     except Exception as error:
         report["status"] = "FAIL"
         report["error"] = _safe_error(error)
-        traceback.print_exc()
         return 1, report
+    finally:
+        if client_guard is not None:
+            client_guard.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

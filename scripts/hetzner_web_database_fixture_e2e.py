@@ -60,6 +60,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
 
@@ -69,8 +70,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.live_e2e_ledger import (  # noqa: E402
+    DurableMutationIntentStore,
     DurableResourceLedger,
     LedgerError,
+    bounded_error,
+    provider_error_class,
     require_run_id,
 )
 
@@ -107,6 +111,8 @@ PUBLIC_KEY_TYPES = {
     "ecdsa-sha2-nistp384",
     "ecdsa-sha2-nistp521",
 }
+MAX_PROVIDER_PAGES = 1000
+MAX_PROVIDER_ITEMS = 10000
 
 
 class HarnessError(RuntimeError):
@@ -116,9 +122,19 @@ class HarnessError(RuntimeError):
 class AmbiguousMutation(HarnessError):
     """A provider mutation may have succeeded but its response was lost."""
 
+    provider_code = "PROVIDER_AMBIGUOUS"
+
+
+class ProviderHTTPError(HarnessError):
+    """A bounded, classified Hetzner HTTP failure."""
+
+    def __init__(self, code, message):
+        self.provider_code = str(code)
+        super().__init__(message)
+
 
 def _redact(value, secrets):
-    text = str(value)
+    text = bounded_error(value, secrets)
     for secret in secrets:
         if secret:
             text = text.replace(str(secret), "<redacted>")
@@ -136,11 +152,28 @@ def _bounded_int(name, default, minimum, maximum):
 
 def _api_host():
     configured = os.environ.get("HETZNER_E2E_API", "https://api.hetzner.cloud")
-    configured = configured.rstrip("/")
-    if configured.endswith("/v1"):
-        configured = configured[:-3]
-    if not configured.startswith(("https://", "http://")):
-        raise HarnessError("HETZNER_E2E_API must be an HTTP(S) URL")
+    try:
+        parsed = urlsplit(configured)
+        port = parsed.port
+    except (TypeError, ValueError) as error:
+        raise HarnessError(
+            "HETZNER_E2E_API must be exactly https://api.hetzner.cloud"
+        ) from error
+    if (
+        configured != "https://api.hetzner.cloud"
+        or parsed.scheme != "https"
+        or parsed.netloc != "api.hetzner.cloud"
+        or parsed.hostname != "api.hetzner.cloud"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise HarnessError(
+            "HETZNER_E2E_API must be exactly https://api.hetzner.cloud"
+        )
     return configured
 
 
@@ -636,6 +669,13 @@ class HetznerFixtureHarness:
             run_id=self.run_id,
             scope=scope,
         )
+        self.intents = DurableMutationIntentStore(
+            ledger_path,
+            provider="hetzner_cloud_fixture",
+            run_id=self.run_id,
+            scope=scope,
+            suffix=".fixture-intents.json",
+        )
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -676,7 +716,14 @@ class HetznerFixtureHarness:
         }
 
     def _safe_error(self, error):
-        return _redact(error, self._secrets)
+        return f"{provider_error_class(error)}: {_redact(error, self._secrets)}"
+
+    def _preflight_cleanup(self):
+        if self.cleanup_requested and not self.apply:
+            raise HarnessError(
+                "Cleanup is a provider write and requires both "
+                "BACKUPSHEEP_E2E_APPLY=YES and BACKUPSHEEP_E2E_CLEANUP=YES"
+            )
 
     def request(
         self,
@@ -702,8 +749,11 @@ class HetznerFixtureHarness:
                 raise AmbiguousMutation(
                     f"Hetzner {method} {path} response was lost; no mutation retry was issued: {detail}"
                 ) from error
-            raise HarnessError(
-                f"Hetzner {method} {path} request failed: {detail}"
+            raise ProviderHTTPError(
+                "PROVIDER_TIMEOUT"
+                if isinstance(error, requests.Timeout)
+                else "PROVIDER_TRANSIENT_OUTAGE",
+                f"Hetzner {method} {path} request failed: {detail}",
             ) from error
         if response.status_code == 404 and allow_404:
             return None
@@ -714,8 +764,17 @@ class HetznerFixtureHarness:
                 detail = ""
             detail = _redact(detail, self._secrets)
             suffix = f": {detail}" if detail else ""
-            raise HarnessError(
-                f"Hetzner {method} {path} returned HTTP {response.status_code}{suffix}"
+            if response.status_code in {401, 403}:
+                code = "PROVIDER_AUTH_FAILED"
+            elif response.status_code == 429:
+                code = "PROVIDER_RATE_LIMIT"
+            elif response.status_code >= 500:
+                code = "PROVIDER_TRANSIENT_OUTAGE"
+            else:
+                code = "PROVIDER_PERMANENT"
+            raise ProviderHTTPError(
+                code,
+                f"Hetzner {method} {path} returned HTTP {response.status_code}{suffix}",
             )
         if not response.content:
             return {}
@@ -732,7 +791,7 @@ class HetznerFixtureHarness:
         page = 1
         seen_pages = set()
         base = dict(params or {})
-        while True:
+        for _ in range(MAX_PROVIDER_PAGES):
             if page in seen_pages:
                 raise HarnessError(f"Hetzner returned a repeated {resource} pagination page")
             seen_pages.add(page)
@@ -741,17 +800,37 @@ class HetznerFixtureHarness:
                 f"/{resource}",
                 params={**base, "page": page, "per_page": 50},
             )
-            values.extend(payload.get(resource) or [])
-            pagination = (payload.get("meta") or {}).get("pagination") or {}
+            page_values = payload.get(resource)
+            if not isinstance(page_values, list):
+                raise HarnessError(f"Hetzner returned a malformed {resource} page")
+            values.extend(page_values)
+            if len(values) > MAX_PROVIDER_ITEMS:
+                raise HarnessError(f"Hetzner {resource} pagination exceeded the bounded item limit")
+            meta = payload.get("meta")
+            pagination = meta.get("pagination") if isinstance(meta, dict) else None
+            if not isinstance(pagination, dict):
+                if len(page_values) >= 50:
+                    raise HarnessError(
+                        f"Hetzner returned a full {resource} page without pagination metadata"
+                    )
+                return values
             next_page = pagination.get("next_page")
             if next_page in (None, "", 0):
+                if len(page_values) >= 50:
+                    raise HarnessError(
+                        f"Hetzner returned a full {resource} page without a terminal pagination witness"
+                    )
                 return values
             try:
-                page = int(next_page)
+                next_page = int(next_page)
             except (TypeError, ValueError) as error:
                 raise HarnessError(f"Hetzner returned an invalid {resource} page") from error
-            if page < 1:
+            if next_page <= page:
+                raise HarnessError(f"Hetzner returned a non-progressing {resource} page")
+            if next_page < 1:
                 raise HarnessError(f"Hetzner returned an invalid {resource} page")
+            page = next_page
+        raise HarnessError(f"Hetzner {resource} pagination exceeded the bounded page limit")
 
     @staticmethod
     def _resource_key(kind):
@@ -853,6 +932,7 @@ class HetznerFixtureHarness:
         }
 
     def preflight_capabilities(self):
+        self._preflight_cleanup()
         server_types = self.collection("server_types")
         locations = self.collection("locations")
         images = self.collection("images", {"type": "system"})
@@ -953,23 +1033,132 @@ class HetznerFixtureHarness:
             and labels.get(SOURCE_LABEL) == str(expected_key_id)
         )
 
+    def _reconcile_pending_intents(self):
+        """Adopt exact accepted creates or prove a prepared intent has no resource."""
+        errors = []
+        selectors = {
+            "ssh_key": f"{RUN_LABEL}=={self.run_id}",
+            "server": f"{RUN_LABEL}=={self.run_id}",
+        }
+        for key, intent in self.intents.pending().items():
+            kind = str(intent.get("kind") or "")
+            name = str(intent.get("name") or "")
+            if kind not in selectors or not name:
+                errors.append(f"{key}: malformed pending fixture intent")
+                continue
+            provider_id = str(intent.get("provider_id") or "")
+            if provider_id:
+                matches = [self._get_resource_once(kind, provider_id)]
+                matches = [item for item in matches if item is not None]
+            else:
+                resource_name, _ = self._resource_key(kind)
+                matches = [
+                    item
+                    for item in self.collection(
+                        resource_name, {"label_selector": selectors[kind]}
+                    )
+                    if item.get("name") == name
+                    and (item.get("labels") or {}).get(RUN_LABEL) == self.run_id
+                    and (item.get("labels") or {}).get(ROLE_LABEL)
+                    == (KEY_ROLE if kind == "ssh_key" else SERVER_ROLE)
+                ]
+            if len(matches) > 1:
+                errors.append(f"{key}: multiple exact pending {kind} matches")
+                continue
+            if len(matches) == 1:
+                observed = matches[0]
+                identifier = str(observed.get("id") or "")
+                ownership = intent.get("ownership") or {}
+                source_witness = str(intent.get("source_witness") or "")
+                if kind == "ssh_key":
+                    owned = self._verify_key(
+                        observed, identifier, ownership, source_witness
+                    )
+                else:
+                    key_id = str(intent.get("ssh_key_id") or "")
+                    key_resource = self._get_resource_once("ssh_key", key_id)
+                    key_labels = (key_resource or {}).get("labels") or {}
+                    if (
+                        not key_resource
+                        or str(key_resource.get("id")) != key_id
+                        or key_labels.get(RUN_LABEL) != self.run_id
+                        or key_labels.get(ROLE_LABEL) != KEY_ROLE
+                    ):
+                        owned = False
+                    else:
+                        self.active["ssh_key"] = key_id
+                        owned = self._verify_server(
+                            observed, identifier, ownership, source_witness
+                        )
+                if not owned or not identifier:
+                    errors.append(f"{key}: pending {kind} ownership mismatch")
+                    continue
+                self.ledger.record(
+                    kind=kind,
+                    resource_id=identifier,
+                    name=name,
+                    ownership=ownership,
+                    source_witness=source_witness,
+                )
+                self.intents.update(key, provider_id=identifier, mutation_state="ledgered")
+                self.intents.clear(key)
+                self.active[kind] = identifier
+                continue
+            if str(intent.get("mutation_state") or "prepared") == "prepared":
+                self.intents.clear(key)
+                continue
+            errors.append(
+                f"{key}: accepted or ambiguous {kind} create has no exact provider match"
+            )
+        return errors
+
     def create_ssh_key(self):
         payload = {
             "name": self.ssh_key_name,
             "public_key": self.public_key,
             "labels": self.labels_for_key,
         }
-        response = self.request(
-            "POST",
-            "/ssh_keys",
-            expected=(201,),
-            mutation=True,
-            json=payload,
+        pending_key = "create:ssh_key"
+        self.intents.put(
+            pending_key,
+            {
+                "marker": self.ssh_key_name,
+                "kind": "ssh_key",
+                "name": self.ssh_key_name,
+                "operation": "create_ssh_key",
+                "ownership": self._key_ownership(self.public_key),
+                "source_witness": f"public-key-sha256:{hashlib.sha256(self.public_key.encode()).hexdigest()}",
+                "mutation_state": "request_started",
+                "payload_sha256": hashlib.sha256(
+                    json.dumps(payload, sort_keys=True).encode()
+                ).hexdigest(),
+            },
         )
+        try:
+            response = self.request(
+                "POST",
+                "/ssh_keys",
+                expected=(201,),
+                mutation=True,
+                json=payload,
+            )
+        except Exception as error:
+            self.intents.update(
+                pending_key,
+                mutation_state="outcome_unknown",
+                last_error_code=provider_error_class(error),
+            )
+            raise
         returned = response.get("ssh_key") or {}
         identifier = str(returned.get("id") or "")
         if not PROVIDER_ID_RE.fullmatch(identifier):
+            self.intents.update(
+                pending_key,
+                mutation_state="outcome_unknown",
+                last_error_code="PROVIDER_MALFORMED_RESPONSE",
+            )
             raise AmbiguousMutation("Hetzner SSH key create returned no usable ID; no retry issued")
+        self.intents.update(pending_key, provider_id=identifier, mutation_state="accepted")
         observed = self._wait_readback("ssh_key", identifier)
         ownership = self._key_ownership(self.public_key)
         if not self._verify_key(
@@ -986,6 +1175,8 @@ class HetznerFixtureHarness:
             ownership=ownership,
             source_witness=f"public-key-sha256:{ownership['public_key_sha256']}",
         )
+        self.intents.update(pending_key, mutation_state="ledgered")
+        self.intents.clear(pending_key)
         self.active["ssh_key"] = identifier
         self.report["resources"] = {"ssh_key_id": identifier}
         return observed
@@ -1003,17 +1194,49 @@ class HetznerFixtureHarness:
             "labels": self.labels_for_server(ssh_key_id),
             "user_data": self.user_data,
         }
-        response = self.request(
-            "POST",
-            "/servers",
-            expected=(201,),
-            mutation=True,
-            json=payload,
+        pending_key = "create:server"
+        ownership = self._server_ownership(ssh_key_id)
+        self.intents.put(
+            pending_key,
+            {
+                "marker": self.server_name,
+                "kind": "server",
+                "name": self.server_name,
+                "operation": "create_server",
+                "ssh_key_id": str(ssh_key_id),
+                "ownership": ownership,
+                "source_witness": f"ssh-key:{ssh_key_id}",
+                "mutation_state": "request_started",
+                "payload_sha256": hashlib.sha256(
+                    json.dumps(payload, sort_keys=True).encode()
+                ).hexdigest(),
+            },
         )
+        try:
+            response = self.request(
+                "POST",
+                "/servers",
+                expected=(201,),
+                mutation=True,
+                json=payload,
+            )
+        except Exception as error:
+            self.intents.update(
+                pending_key,
+                mutation_state="outcome_unknown",
+                last_error_code=provider_error_class(error),
+            )
+            raise
         returned = response.get("server") or {}
         identifier = str(returned.get("id") or "")
         if not PROVIDER_ID_RE.fullmatch(identifier):
+            self.intents.update(
+                pending_key,
+                mutation_state="outcome_unknown",
+                last_error_code="PROVIDER_MALFORMED_RESPONSE",
+            )
             raise AmbiguousMutation("Hetzner server create returned no usable ID; no retry issued")
+        self.intents.update(pending_key, provider_id=identifier, mutation_state="accepted")
         observed = self._wait_readback("server", identifier)
         ownership = self._server_ownership(ssh_key_id)
         if not self._verify_server(observed, identifier, ownership, f"ssh-key:{ssh_key_id}"):
@@ -1025,6 +1248,8 @@ class HetznerFixtureHarness:
             ownership=ownership,
             source_witness=f"ssh-key:{ssh_key_id}",
         )
+        self.intents.update(pending_key, mutation_state="ledgered")
+        self.intents.clear(pending_key)
         self.active["server"] = identifier
         self.report.setdefault("resources", {})["server_id"] = identifier
         return observed
@@ -1276,6 +1501,24 @@ class HetznerFixtureHarness:
                 "considered": [],
             }
             return
+        if not self.apply:
+            self.report["cleanup"] = {
+                "status": "REFUSED",
+                "errors": [
+                    "Cleanup is a provider write and requires both "
+                    "BACKUPSHEEP_E2E_APPLY=YES and BACKUPSHEEP_E2E_CLEANUP=YES"
+                ],
+                "considered": [],
+            }
+            return
+        pending_errors = self._reconcile_pending_intents()
+        if pending_errors:
+            self.report["cleanup"] = {
+                "status": "MANUAL_REVIEW",
+                "errors": [bounded_error(error, self._secrets) for error in pending_errors],
+                "considered": [],
+            }
+            return
         errors = []
         entries = self.ledger.entries()
         server_entries = [
@@ -1294,11 +1537,11 @@ class HetznerFixtureHarness:
             {"kind": entry.get("kind"), "resource_id": entry.get("resource_id")}
             for entry in server_entries + key_entries
         ]
-        server_clear = not server_entries
+        server_clear = bool(server_entries)
         for entry in server_entries:
             try:
                 result = self._delete_entry(entry)
-                server_clear = result in {
+                server_clear = server_clear and result in {
                     "deleted",
                     "absent",
                     "deleted-after-ambiguous-response",
@@ -1306,7 +1549,17 @@ class HetznerFixtureHarness:
             except Exception as error:
                 server_clear = False
                 errors.append(self._safe_error(error))
-        if key_entries and not server_clear:
+        if key_entries and not server_entries:
+            errors.append("refused SSH key deletion because no ledgered server witness exists")
+            for entry in key_entries:
+                identifier = str(entry.get("resource_id") or "")
+                self.ledger.mark_cleanup(
+                    "ssh_key",
+                    identifier,
+                    state="manual_review",
+                    error="no ledgered server witness",
+                )
+        elif key_entries and not server_clear:
             errors.append("refused SSH key deletion because the ledgered server is not confirmed absent")
             for entry in key_entries:
                 identifier = str(entry.get("resource_id") or "")
@@ -1317,16 +1570,6 @@ class HetznerFixtureHarness:
                         state="manual_review",
                         error="ledgered server was not confirmed absent",
                     )
-        elif not server_entries and key_entries:
-            errors.append("refused SSH key deletion because no ledgered server witness exists")
-            for entry in key_entries:
-                identifier = str(entry.get("resource_id") or "")
-                self.ledger.mark_cleanup(
-                    "ssh_key",
-                    identifier,
-                    state="manual_review",
-                    error="no ledgered server witness",
-                )
         else:
             for entry in key_entries:
                 try:
@@ -1341,6 +1584,7 @@ class HetznerFixtureHarness:
 
     def run(self):
         if self.cleanup_requested and not self.apply:
+            self.cleanup()
             self.report["status"] = "FAIL"
             self.report["error"] = (
                 "Cleanup is a provider write and requires both "
@@ -1358,6 +1602,9 @@ class HetznerFixtureHarness:
                     else "CLEANUP_MANUAL_REVIEW"
                 )
                 return 0 if self.report["status"] == "CLEANUP_PASS" else 2
+            pending_errors = self._reconcile_pending_intents()
+            if pending_errors:
+                raise HarnessError("; ".join(pending_errors))
             self.baseline()
             self.preflight_capabilities()
             if not self.apply:

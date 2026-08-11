@@ -4,7 +4,7 @@ import re
 import subprocess
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from email.utils import parsedate_to_datetime
 
 import dropbox
@@ -150,9 +150,15 @@ class RDSMalformedResponse(RuntimeError):
     """RDS returned a response that cannot be safely reconciled."""
 
 
+class RDSOwnershipTagPending(RuntimeError):
+    """A just-created RDS snapshot is visible before its ownership tag."""
+
+
 _PROVIDER_AUTH_HTTP_CODES = {401, 403}
 _PROVIDER_TRANSIENT_HTTP_CODES = {408, 425, 500, 502, 503, 504}
 _PROVIDER_NOT_FOUND_ERROR_CODES = {
+    "dbinstancenotfound",
+    "dbinstancenotfoundfault",
     "dbsnapshotnotfound",
     "dbsnapshotnotfoundfault",
     "invalidamiid.notfound",
@@ -450,6 +456,8 @@ def _rds_error_code(error):
 
 def _rds_not_found(error):
     return _rds_error_code(error) in {
+        "dbinstancenotfound",
+        "dbinstancenotfoundfault",
         "dbsnapshotnotfound",
         "dbsnapshotnotfoundfault",
         "resourcenotfoundexception",
@@ -8022,11 +8030,627 @@ class CoreAWSRDSBackup(UtilBackup):
 
     _RDS_PROVIDER = "aws_rds"
     _RDS_SNAPSHOT_TYPE = "manual"
+    # Version 2 relied on name/ARN/source identity.  RDS ARNs are name based,
+    # so that protocol cannot distinguish a deleted snapshot from a later
+    # snapshot with the same identifier.  Version 3 adds a request-bound tag,
+    # the provider incarnation time, and an explicit provisional/committed
+    # state.  Keep v2 readable only through the explicit legacy compatibility
+    # path below; never upgrade it from present-day provider data.
+    _RDS_WITNESS_VERSION = 3
+    _RDS_LEGACY_WITNESS_VERSION = 2
+    _RDS_PROVISIONAL_WITNESS_STATE = "provisional"
+    _RDS_COMMITTED_WITNESS_STATE = "committed"
+    _RDS_SNAPSHOT_OWNERSHIP_TAG_KEY = "BackupSheepOwnership"
+    _RDS_CREATE_LEASE_DEFAULT_SECONDS = 300
+    _RDS_CREATE_LEASE_MAX_SECONDS = 900
+    _RDS_CREATE_VISIBILITY_DEFAULT_SECONDS = 15 * 60
+    _RDS_CREATE_VISIBILITY_MAX_SECONDS = 60 * 60
+    _RDS_CREATE_VISIBILITY_MIN_OBSERVATIONS = 3
+    _RDS_CREATE_VISIBILITY_MAX_OBSERVATIONS = 20
+    _RDS_DELETE_REDISPATCH_GRACE_DEFAULT_SECONDS = 60
+    _RDS_DELETE_REDISPATCH_GRACE_MAX_SECONDS = 10 * 60
+    _RDS_DELETE_MAX_ATTEMPTS_DEFAULT = 2
+    _RDS_DELETE_MAX_ATTEMPTS_LIMIT = 5
+    _RDS_LIST_MAX_PAGES_DEFAULT = 100
+    _RDS_LIST_MAX_PAGES_LIMIT = 1000
+    _RDS_LIST_MAX_ITEMS_DEFAULT = 10000
+    _RDS_LIST_MAX_ITEMS_LIMIT = 100000
+    _RDS_RESTORE_CONFIGURATION_KEYS = (
+        "db_instance_class",
+        "db_subnet_group_name",
+        "multi_az",
+        "publicly_accessible",
+        "vpc_security_group_ids",
+        "storage_type",
+        "iops",
+        "storage_throughput",
+    )
+    _RDS_STORAGE_TYPES = frozenset({"standard", "gp2", "gp3", "io1", "io2"})
+    _RDS_WITNESS_KEYS = frozenset(
+        {
+            "snapshot_identifier",
+            "source_db_instance_identifier",
+            "account_id",
+            "region",
+            "snapshot_type",
+            "snapshot_arn",
+            "source_node_id",
+            "source_resource_id",
+            "source_dbi_resource_id",
+            "source_db_instance_arn",
+            "witness_version",
+            "witness_state",
+            "ownership_marker",
+            "snapshot_create_time",
+            "original_snapshot_create_time",
+            "source_restore_configuration",
+            "source_restore_configuration_sha256",
+        }
+    )
+
+    @staticmethod
+    def _rds_identifier(value, *, maximum_length):
+        value = str(value or "")
+        if (
+            len(value) > maximum_length
+            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", value)
+            or value.endswith("-")
+            or "--" in value
+        ):
+            raise RDSOwnershipError("The RDS identifier is invalid.")
+        return value
+
+    @staticmethod
+    def _rds_partition(region):
+        region = str(region or "")
+        if region.startswith("cn-"):
+            return "aws-cn"
+        if region.startswith("us-gov-"):
+            return "aws-us-gov"
+        if region.startswith("us-iso-b-"):
+            return "aws-iso-b"
+        if region.startswith("us-iso-"):
+            return "aws-iso"
+        if region.startswith("us-isof-"):
+            return "aws-iso-f"
+        return "aws"
+
+    @classmethod
+    def _rds_snapshot_arn(cls, identifier, *, account_id, region):
+        return (
+            f"arn:{cls._rds_partition(region)}:rds:{region}:"
+            f"{account_id}:snapshot:{identifier}"
+        )
+
+    @staticmethod
+    def _rds_instance_arn_identity(arn):
+        match = re.fullmatch(
+            r"arn:(?P<partition>[^:]+):rds:(?P<region>[^:]+):"
+            r"(?P<account>[0-9]{12}):db:(?P<identifier>[^:]+)",
+            str(arn or ""),
+        )
+        if not match:
+            return None
+        return {
+            "partition": match.group("partition"),
+            "region": match.group("region"),
+            "account_id": match.group("account"),
+            "source_db_instance_identifier": match.group("identifier"),
+        }
+
+    @staticmethod
+    def _rds_provider_identifier(value, *, field):
+        value = str(value or "").strip()
+        if (
+            not value
+            or len(value) > 255
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", value)
+        ):
+            raise RDSMalformedResponse(f"The RDS {field} is invalid.")
+        return value
+
+    @classmethod
+    def _rds_validate_restore_configuration(cls, configuration):
+        """Return one canonical, provider-safe RDS restore configuration."""
+
+        if not isinstance(configuration, dict) or set(configuration) != set(
+            cls._RDS_RESTORE_CONFIGURATION_KEYS
+        ):
+            raise RDSMalformedResponse(
+                "The RDS source restore configuration is incomplete."
+            )
+
+        db_class = configuration.get("db_instance_class")
+        if (
+            not isinstance(db_class, str)
+            or len(db_class) > 64
+            or not re.fullmatch(r"db\.[a-z0-9-]+\.[a-z0-9-]+", db_class)
+        ):
+            raise RDSMalformedResponse("The RDS instance class is invalid.")
+
+        subnet_group = configuration.get("db_subnet_group_name")
+        if (
+            not isinstance(subnet_group, str)
+            or len(subnet_group) > 255
+            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9.-]*", subnet_group)
+            or subnet_group.endswith(("-", "."))
+            or ".." in subnet_group
+        ):
+            raise RDSMalformedResponse("The RDS subnet group is invalid.")
+
+        security_groups = configuration.get("vpc_security_group_ids")
+        if not isinstance(security_groups, (list, tuple)) or not security_groups:
+            raise RDSMalformedResponse("The RDS security-group list is invalid.")
+        normalized_security_groups = []
+        for group_id in security_groups:
+            if not isinstance(group_id, str) or not re.fullmatch(
+                r"sg-(?:[0-9a-f]{8}|[0-9a-f]{17})", group_id
+            ):
+                raise RDSMalformedResponse("An RDS security-group id is invalid.")
+            normalized_security_groups.append(group_id)
+        if len(normalized_security_groups) != len(set(normalized_security_groups)):
+            raise RDSMalformedResponse("The RDS security-group list is ambiguous.")
+
+        multi_az = configuration.get("multi_az")
+        publicly_accessible = configuration.get("publicly_accessible")
+        if type(multi_az) is not bool or type(publicly_accessible) is not bool:
+            raise RDSMalformedResponse("The RDS network flags are invalid.")
+
+        storage_type = configuration.get("storage_type")
+        if (
+            not isinstance(storage_type, str)
+            or storage_type not in cls._RDS_STORAGE_TYPES
+        ):
+            raise RDSMalformedResponse("The RDS storage type is invalid.")
+
+        iops = configuration.get("iops")
+        if type(iops) is int and iops == 0:
+            iops = None
+        if iops is not None and (type(iops) is not int or iops < 1000):
+            raise RDSMalformedResponse("The RDS provisioned IOPS value is invalid.")
+        storage_throughput = configuration.get("storage_throughput")
+        if type(storage_throughput) is int and storage_throughput == 0:
+            storage_throughput = None
+        if storage_throughput is not None and (
+            type(storage_throughput) is not int
+            or not 125 <= storage_throughput <= 1000
+        ):
+            raise RDSMalformedResponse("The RDS storage throughput is invalid.")
+        if storage_type in {"io1", "io2"} and iops is None:
+            raise RDSMalformedResponse(
+                "The RDS storage type requires a provisioned IOPS witness."
+            )
+        if storage_type != "gp3" and storage_throughput is not None:
+            raise RDSMalformedResponse(
+                "The RDS storage throughput does not match the storage type."
+            )
+
+        return {
+            "db_instance_class": db_class,
+            "db_subnet_group_name": subnet_group,
+            "multi_az": multi_az,
+            "publicly_accessible": publicly_accessible,
+            "vpc_security_group_ids": sorted(normalized_security_groups),
+            "storage_type": storage_type,
+            "iops": iops,
+            "storage_throughput": storage_throughput,
+        }
+
+    @classmethod
+    def _rds_source_restore_configuration(cls, instance, *, source_id):
+        """Extract only immutable restore inputs from one exact source instance."""
+
+        if not isinstance(instance, dict):
+            raise RDSMalformedResponse("RDS returned an invalid source instance.")
+        provider_source_id = instance.get("DBInstanceIdentifier")
+        if not isinstance(provider_source_id, str):
+            raise RDSMalformedResponse("RDS omitted the source instance identity.")
+        if provider_source_id != source_id:
+            raise RDSOwnershipError("RDS returned a different source instance.")
+
+        subnet_group = instance.get("DBSubnetGroup")
+        if not isinstance(subnet_group, dict):
+            raise RDSMalformedResponse("RDS omitted the source subnet group.")
+        security_groups = instance.get("VpcSecurityGroups")
+        if not isinstance(security_groups, list):
+            raise RDSMalformedResponse("RDS omitted the source security groups.")
+        security_group_ids = []
+        for group in security_groups:
+            if not isinstance(group, dict) or "VpcSecurityGroupId" not in group:
+                raise RDSMalformedResponse(
+                    "RDS returned an invalid source security group."
+                )
+            security_group_ids.append(group["VpcSecurityGroupId"])
+
+        return cls._rds_validate_restore_configuration(
+            {
+                "db_instance_class": instance.get("DBInstanceClass"),
+                "db_subnet_group_name": subnet_group.get("DBSubnetGroupName"),
+                "multi_az": instance.get("MultiAZ"),
+                "publicly_accessible": instance.get("PubliclyAccessible"),
+                "vpc_security_group_ids": security_group_ids,
+                "storage_type": instance.get("StorageType"),
+                "iops": instance.get("Iops"),
+                "storage_throughput": instance.get("StorageThroughput"),
+            }
+        )
+
+    @classmethod
+    def _rds_source_provider_evidence(
+        cls, instance, *, source_id, account_id, region
+    ):
+        """Extract immutable provider identity needed after source deletion."""
+        if not isinstance(instance, dict):
+            raise RDSMalformedResponse("RDS returned an invalid source instance.")
+        provider_source_id = instance.get("DBInstanceIdentifier")
+        if provider_source_id != source_id:
+            raise RDSOwnershipError("RDS returned a different source instance.")
+
+        # DbiResourceId is the provider identity that survives a database
+        # identifier being deleted and later reused. New v2 witnesses require it.
+        source_dbi_resource_id = cls._rds_provider_identifier(
+            instance.get("DbiResourceId"), field="source DbiResourceId"
+        )
+        evidence = {"source_dbi_resource_id": source_dbi_resource_id}
+
+        source_arn = instance.get("DBInstanceArn")
+        if source_arn not in (None, ""):
+            identity = cls._rds_instance_arn_identity(source_arn)
+            if identity is None:
+                raise RDSMalformedResponse("RDS returned an invalid source ARN.")
+            if (
+                identity["source_db_instance_identifier"] != source_id
+                or identity["account_id"] != str(account_id)
+                or identity["region"] != str(region)
+                or identity["partition"] != cls._rds_partition(region)
+            ):
+                raise RDSOwnershipError("RDS source ARN ownership did not match.")
+            evidence["source_db_instance_arn"] = str(source_arn)
+        return evidence
+
+    @classmethod
+    def _rds_describe_source_restore_configuration(
+        cls, client, *, source_id, account_id, region
+    ):
+        response = client.describe_db_instances(DBInstanceIdentifier=source_id)
+        if not isinstance(response, dict):
+            raise RDSMalformedResponse("RDS returned an invalid source response.")
+        instances = response.get("DBInstances")
+        if not isinstance(instances, list):
+            raise RDSMalformedResponse("RDS omitted the source instance collection.")
+        if len(instances) > 1:
+            raise RDSDuplicateMatch("RDS returned multiple exact source instances.")
+        if not instances:
+            raise RDSMalformedResponse("RDS did not return the exact source instance.")
+        instance = instances[0]
+        return (
+            cls._rds_source_restore_configuration(instance, source_id=source_id),
+            cls._rds_source_provider_evidence(
+                instance,
+                source_id=source_id,
+                account_id=account_id,
+                region=region,
+            ),
+        )
+
+    @staticmethod
+    def _rds_canonical_snapshot_time(value, *, field="SnapshotCreateTime"):
+        """Normalize one AWS snapshot incarnation timestamp.
+
+        ``SnapshotCreateTime`` is returned by RDS as a timezone-aware datetime,
+        but JSON round trips and mocks commonly turn it into an ISO string.  A
+        single UTC representation lets reconciliation compare the provider's
+        incarnation exactly instead of comparing display-formatted values.
+        """
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str) and value.strip():
+            raw = value.strip()
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(raw)
+            except (TypeError, ValueError) as error:
+                raise RDSMalformedResponse(
+                    f"RDS returned an invalid {field}."
+                ) from error
+        else:
+            raise RDSMalformedResponse(f"RDS omitted {field}.")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime_timezone.utc)
+        else:
+            parsed = parsed.astimezone(datetime_timezone.utc)
+        return parsed.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    @classmethod
+    def _rds_ownership_marker(
+        cls,
+        *,
+        identifier,
+        source_id,
+        region,
+        source_node_id=None,
+        source_resource_id=None,
+    ):
+        """Build a stable tag value from request identity, never user text."""
+        payload = json.dumps(
+            {
+                "provider": cls._RDS_PROVIDER,
+                "operation": "manual_snapshot",
+                "snapshot_identifier": str(identifier or ""),
+                "source_db_instance_identifier": str(source_id or ""),
+                "region": str(region or ""),
+                "source_node_id": str(source_node_id or ""),
+                "source_resource_id": str(source_resource_id or ""),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return "bs-rds-" + hashlib.sha256(payload).hexdigest()
+
+    @classmethod
+    def _rds_validate_ownership_marker(cls, marker):
+        marker = str(marker or "")
+        if not re.fullmatch(r"bs-rds-[0-9a-f]{64}", marker):
+            raise RDSMalformedResponse("The RDS ownership marker is invalid.")
+        return marker
+
+    @staticmethod
+    def _rds_witness_digest(witness):
+        payload = {
+            key: value
+            for key, value in witness.items()
+            if key != "source_restore_configuration_sha256"
+        }
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def _rds_canonical_witness(cls, witness):
+        if not isinstance(witness, dict) or not witness:
+            raise RDSMalformedResponse("The durable RDS witness is invalid.")
+        if set(witness) - cls._RDS_WITNESS_KEYS:
+            raise RDSMalformedResponse(
+                "The durable RDS witness contains unsupported fields."
+            )
+        required = {
+            "snapshot_identifier",
+            "source_db_instance_identifier",
+            "account_id",
+            "region",
+            "snapshot_type",
+        }
+        if not required.issubset(witness):
+            raise RDSMalformedResponse("The durable RDS witness is incomplete.")
+        if witness.get("snapshot_type") != cls._RDS_SNAPSHOT_TYPE:
+            raise RDSOwnershipError("The durable RDS snapshot type changed.")
+
+        version = witness.get("witness_version")
+        if version in (None, cls._RDS_LEGACY_WITNESS_VERSION):
+            # This is the intentionally narrow legacy path.  It preserves the
+            # old record exactly and carries no present-day marker/time data.
+            if set(witness) - {
+                "snapshot_identifier",
+                "source_db_instance_identifier",
+                "account_id",
+                "region",
+                "snapshot_type",
+                "snapshot_arn",
+                "source_node_id",
+                "source_resource_id",
+                "source_dbi_resource_id",
+                "source_db_instance_arn",
+                "witness_version",
+                "source_restore_configuration",
+                "source_restore_configuration_sha256",
+            }:
+                raise RDSMalformedResponse(
+                    "The legacy RDS witness contains current-version fields."
+                )
+            try:
+                canonical = cls._rds_witness(
+                    identifier=witness.get("snapshot_identifier"),
+                    source_id=witness.get("source_db_instance_identifier"),
+                    account_id=witness.get("account_id"),
+                    region=witness.get("region"),
+                    source_node_id=witness.get("source_node_id"),
+                    source_resource_id=witness.get("source_resource_id"),
+                    snapshot_arn=witness.get("snapshot_arn"),
+                    source_dbi_resource_id=witness.get("source_dbi_resource_id"),
+                    source_db_instance_arn=witness.get("source_db_instance_arn"),
+                    source_restore_configuration=witness.get(
+                        "source_restore_configuration"
+                    ),
+                    witness_version=cls._RDS_LEGACY_WITNESS_VERSION,
+                )
+            except (RDSMalformedResponse, RDSOwnershipError):
+                raise
+            if canonical != witness:
+                raise RDSMalformedResponse("The legacy RDS witness is invalid.")
+            return canonical
+
+        if version != cls._RDS_WITNESS_VERSION:
+            raise RDSMalformedResponse("The RDS witness version is unsupported.")
+
+        witness_state = witness.get("witness_state")
+        if witness_state not in {
+            cls._RDS_PROVISIONAL_WITNESS_STATE,
+            cls._RDS_COMMITTED_WITNESS_STATE,
+        }:
+            raise RDSMalformedResponse("The RDS witness state is invalid.")
+        ownership_marker = cls._rds_validate_ownership_marker(
+            witness.get("ownership_marker")
+        )
+        snapshot_create_time = witness.get("snapshot_create_time")
+        original_snapshot_create_time = witness.get(
+            "original_snapshot_create_time"
+        )
+        if witness_state == cls._RDS_COMMITTED_WITNESS_STATE:
+            if snapshot_create_time in (None, ""):
+                raise RDSMalformedResponse(
+                    "The committed RDS witness is missing SnapshotCreateTime."
+                )
+        elif snapshot_create_time not in (None, ""):
+            # A timestamp is the commit boundary.  It must never be stored in a
+            # witness still labelled provisional.
+            raise RDSMalformedResponse(
+                "The provisional RDS witness contains SnapshotCreateTime."
+            )
+        if snapshot_create_time not in (None, ""):
+            snapshot_create_time = cls._rds_canonical_snapshot_time(
+                snapshot_create_time
+            )
+        if original_snapshot_create_time not in (None, ""):
+            original_snapshot_create_time = cls._rds_canonical_snapshot_time(
+                original_snapshot_create_time,
+                field="OriginalSnapshotCreateTime",
+            )
+
+        configuration = witness.get("source_restore_configuration")
+        if configuration is not None:
+            # A version-2 witness must be independently usable after the source
+            # DB identifier has been deleted or reused.  The snapshot ARN and
+            # source DbiResourceId are therefore mandatory, not optional JSON
+            # decorations that can be silently reconstructed on read.
+            if (
+                not witness.get("snapshot_arn")
+                or not witness.get("source_dbi_resource_id")
+            ):
+                raise RDSMalformedResponse(
+                    "The version-2 RDS witness is missing provider identity evidence."
+                )
+        canonical = cls._rds_witness(
+            identifier=witness.get("snapshot_identifier"),
+            source_id=witness.get("source_db_instance_identifier"),
+            account_id=witness.get("account_id"),
+            region=witness.get("region"),
+            source_node_id=witness.get("source_node_id"),
+            source_resource_id=witness.get("source_resource_id"),
+            snapshot_arn=witness.get("snapshot_arn"),
+            source_dbi_resource_id=witness.get("source_dbi_resource_id"),
+            source_db_instance_arn=witness.get("source_db_instance_arn"),
+            source_restore_configuration=configuration,
+            ownership_marker=ownership_marker,
+            snapshot_create_time=snapshot_create_time,
+            original_snapshot_create_time=original_snapshot_create_time,
+            witness_state=witness_state,
+            witness_version=cls._RDS_WITNESS_VERSION,
+        )
+        if canonical != witness:
+            raise RDSMalformedResponse("The durable RDS witness digest is invalid.")
+        return canonical
+
+    @classmethod
+    def _rds_merge_witness(cls, existing, incoming):
+        incoming = cls._rds_canonical_witness(incoming)
+        if existing is None:
+            return incoming
+        existing = cls._rds_canonical_witness(existing)
+
+        existing_version = existing.get("witness_version")
+        incoming_version = incoming.get("witness_version")
+        if existing_version != incoming_version:
+            # A v2 row may not be upgraded by reading mutable provider data.  A
+            # repair/migration must explicitly replace it with a new request.
+            raise RDSOwnershipError("The legacy RDS witness cannot be upgraded.")
+        if existing_version == cls._RDS_LEGACY_WITNESS_VERSION:
+            if existing != incoming:
+                raise RDSOwnershipError("The legacy RDS request identity changed.")
+            return existing
+
+        for key in (
+            "snapshot_identifier",
+            "source_db_instance_identifier",
+            "region",
+            "snapshot_type",
+            "snapshot_arn",
+            "source_dbi_resource_id",
+            "source_db_instance_arn",
+            "ownership_marker",
+        ):
+            if (
+                key in existing
+                and key in incoming
+                and existing[key] != incoming[key]
+            ):
+                raise RDSOwnershipError("The durable RDS request identity changed.")
+        for key in ("source_node_id", "source_resource_id"):
+            if key in existing and key in incoming and existing[key] != incoming[key]:
+                raise RDSOwnershipError("The durable RDS node identity changed.")
+
+        existing_account = existing["account_id"]
+        incoming_account = incoming["account_id"]
+        if (
+            existing_account != "pending"
+            and incoming_account != "pending"
+            and existing_account != incoming_account
+        ):
+            raise RDSOwnershipError("The durable RDS account identity changed.")
+
+        existing_configuration = existing.get("source_restore_configuration")
+        incoming_configuration = incoming.get("source_restore_configuration")
+        if (
+            existing_configuration is not None
+            and incoming_configuration is not None
+            and incoming_configuration != existing_configuration
+        ):
+            raise RDSOwnershipError("The durable RDS source configuration changed.")
+
+        existing_time = existing.get("snapshot_create_time")
+        incoming_time = incoming.get("snapshot_create_time")
+        if existing_time and incoming_time and existing_time != incoming_time:
+            raise RDSOwnershipError("The RDS snapshot incarnation changed.")
+        existing_original_time = existing.get("original_snapshot_create_time")
+        incoming_original_time = incoming.get("original_snapshot_create_time")
+        if (
+            existing_original_time
+            and incoming_original_time
+            and existing_original_time != incoming_original_time
+        ):
+            raise RDSOwnershipError("The RDS original snapshot incarnation changed.")
+
+        account_id = (
+            existing_account if existing_account != "pending" else incoming_account
+        )
+        snapshot_time = existing_time or incoming_time
+        witness_state = (
+            cls._RDS_COMMITTED_WITNESS_STATE
+            if snapshot_time
+            else cls._RDS_PROVISIONAL_WITNESS_STATE
+        )
+        return cls._rds_witness(
+            identifier=existing["snapshot_identifier"],
+            source_id=existing["source_db_instance_identifier"],
+            account_id=account_id,
+            region=existing["region"],
+            source_node_id=existing.get("source_node_id")
+            or incoming.get("source_node_id"),
+            source_resource_id=existing.get("source_resource_id")
+            or incoming.get("source_resource_id"),
+            snapshot_arn=existing.get("snapshot_arn")
+            or incoming.get("snapshot_arn"),
+            source_dbi_resource_id=existing.get("source_dbi_resource_id")
+            or incoming.get("source_dbi_resource_id"),
+            source_db_instance_arn=existing.get("source_db_instance_arn")
+            or incoming.get("source_db_instance_arn"),
+            source_restore_configuration=existing_configuration
+            or incoming_configuration,
+            ownership_marker=existing["ownership_marker"],
+            snapshot_create_time=snapshot_time,
+            original_snapshot_create_time=(
+                existing_original_time or incoming_original_time
+            ),
+            witness_state=witness_state,
+            witness_version=cls._RDS_WITNESS_VERSION,
+        )
 
     @staticmethod
     def _rds_region(auth):
         region = str(getattr(getattr(auth, "region", None), "code", "") or "")
-        if not region:
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*-[0-9]", region):
             raise RDSOwnershipError("The RDS connection has no region identity.")
         return region
 
@@ -8054,43 +8678,735 @@ class CoreAWSRDSBackup(UtilBackup):
         return account_id
 
     @classmethod
-    def _rds_witness(cls, *, identifier, source_id, account_id, region):
+    def _rds_witness(
+        cls,
+        *,
+        identifier,
+        source_id,
+        account_id,
+        region,
+        source_node_id=None,
+        source_resource_id=None,
+        snapshot_arn=None,
+        source_dbi_resource_id=None,
+        source_db_instance_arn=None,
+        source_restore_configuration=None,
+        ownership_marker=None,
+        snapshot_create_time=None,
+        original_snapshot_create_time=None,
+        witness_state=None,
+        witness_version=None,
+    ):
+        if witness_version is None:
+            witness_version = cls._RDS_WITNESS_VERSION
+        try:
+            witness_version = int(witness_version)
+        except (TypeError, ValueError) as error:
+            raise RDSMalformedResponse("The RDS witness version is invalid.") from error
         values = {
-            "snapshot_identifier": str(identifier or ""),
-            "source_db_instance_identifier": str(source_id or ""),
+            "snapshot_identifier": cls._rds_identifier(
+                identifier, maximum_length=255
+            ),
+            "source_db_instance_identifier": cls._rds_identifier(
+                source_id, maximum_length=63
+            ),
             "account_id": str(account_id or ""),
             "region": str(region or ""),
             "snapshot_type": cls._RDS_SNAPSHOT_TYPE,
         }
-        if not values["snapshot_identifier"] or not values["source_db_instance_identifier"]:
-            raise RDSOwnershipError("The RDS request identity is incomplete.")
+        if values["account_id"] != "pending" and not re.fullmatch(
+            r"[0-9]{12}", values["account_id"]
+        ):
+            raise RDSOwnershipError("The RDS account identity is invalid.")
+        if not re.fullmatch(
+            r"[a-z0-9]+(?:-[a-z0-9]+)*-[0-9]", values["region"]
+        ):
+            raise RDSOwnershipError("The RDS region identity is invalid.")
+
+        if snapshot_arn is not None:
+            snapshot_arn = str(snapshot_arn)
+            expected_snapshot_arn = cls._rds_snapshot_arn(
+                values["snapshot_identifier"],
+                account_id=values["account_id"],
+                region=values["region"],
+            )
+            snapshot_identity = _rds_snapshot_arn_identity(
+                {"DBSnapshotArn": snapshot_arn}
+            )
+            if (
+                snapshot_arn != expected_snapshot_arn
+                or not snapshot_identity
+                or snapshot_identity["partition"]
+                != cls._rds_partition(values["region"])
+            ):
+                raise RDSOwnershipError("The RDS snapshot ARN identity is invalid.")
+            values["snapshot_arn"] = snapshot_arn
+
+        if source_dbi_resource_id is not None:
+            values["source_dbi_resource_id"] = cls._rds_provider_identifier(
+                source_dbi_resource_id, field="source DbiResourceId"
+            )
+
+        if source_db_instance_arn is not None:
+            source_db_instance_arn = str(source_db_instance_arn)
+            source_identity = cls._rds_instance_arn_identity(source_db_instance_arn)
+            if (
+                not source_identity
+                or source_identity["source_db_instance_identifier"]
+                != values["source_db_instance_identifier"]
+                or source_identity["account_id"] != values["account_id"]
+                or source_identity["region"] != values["region"]
+                or source_identity["partition"]
+                != cls._rds_partition(values["region"])
+            ):
+                raise RDSOwnershipError(
+                    "The RDS source instance ARN identity is invalid."
+                )
+            values["source_db_instance_arn"] = source_db_instance_arn
+
+        if source_node_id is not None or source_resource_id is not None:
+            try:
+                source_node_id = int(source_node_id)
+                source_resource_id = int(source_resource_id)
+            except (TypeError, ValueError) as error:
+                raise RDSOwnershipError(
+                    "The RDS node identity is invalid."
+                ) from error
+            if source_node_id <= 0 or source_resource_id <= 0:
+                raise RDSOwnershipError("The RDS node identity is invalid.")
+            values["source_node_id"] = source_node_id
+            values["source_resource_id"] = source_resource_id
+
+        if witness_version == cls._RDS_LEGACY_WITNESS_VERSION:
+            if any(
+                value not in (None, "")
+                for value in (
+                    ownership_marker,
+                    snapshot_create_time,
+                    original_snapshot_create_time,
+                    witness_state,
+                )
+            ):
+                raise RDSMalformedResponse(
+                    "Legacy RDS witnesses cannot contain v3 incarnation data."
+                )
+            values["witness_version"] = cls._RDS_LEGACY_WITNESS_VERSION
+            if source_restore_configuration is not None:
+                if (
+                    values["account_id"] == "pending"
+                    or "source_node_id" not in values
+                    or "source_resource_id" not in values
+                ):
+                    raise RDSOwnershipError(
+                        "The legacy RDS restore witness identity is incomplete."
+                    )
+                values["source_restore_configuration"] = (
+                    cls._rds_validate_restore_configuration(
+                        source_restore_configuration
+                    )
+                )
+                values["source_restore_configuration_sha256"] = (
+                    cls._rds_witness_digest(values)
+                )
+            return values
+
+        if witness_version != cls._RDS_WITNESS_VERSION:
+            raise RDSMalformedResponse("The RDS witness version is unsupported.")
+        if ownership_marker in (None, ""):
+            ownership_marker = cls._rds_ownership_marker(
+                identifier=values["snapshot_identifier"],
+                source_id=values["source_db_instance_identifier"],
+                region=values["region"],
+                source_node_id=values.get("source_node_id"),
+                source_resource_id=values.get("source_resource_id"),
+            )
+        values["ownership_marker"] = cls._rds_validate_ownership_marker(
+            ownership_marker
+        )
+        if witness_state is None:
+            witness_state = (
+                cls._RDS_COMMITTED_WITNESS_STATE
+                if snapshot_create_time not in (None, "")
+                else cls._RDS_PROVISIONAL_WITNESS_STATE
+            )
+        if witness_state not in {
+            cls._RDS_PROVISIONAL_WITNESS_STATE,
+            cls._RDS_COMMITTED_WITNESS_STATE,
+        }:
+            raise RDSMalformedResponse("The RDS witness state is invalid.")
+        if snapshot_create_time not in (None, ""):
+            snapshot_create_time = cls._rds_canonical_snapshot_time(
+                snapshot_create_time
+            )
+        if original_snapshot_create_time not in (None, ""):
+            original_snapshot_create_time = cls._rds_canonical_snapshot_time(
+                original_snapshot_create_time,
+                field="OriginalSnapshotCreateTime",
+            )
+        if witness_state == cls._RDS_COMMITTED_WITNESS_STATE and not snapshot_create_time:
+            raise RDSMalformedResponse(
+                "A committed RDS witness requires SnapshotCreateTime."
+            )
+        if witness_state == cls._RDS_PROVISIONAL_WITNESS_STATE and snapshot_create_time:
+            raise RDSMalformedResponse(
+                "A provisional RDS witness cannot contain SnapshotCreateTime."
+            )
+        values["witness_version"] = cls._RDS_WITNESS_VERSION
+        values["witness_state"] = witness_state
+        if snapshot_create_time:
+            values["snapshot_create_time"] = snapshot_create_time
+        if original_snapshot_create_time:
+            values["original_snapshot_create_time"] = original_snapshot_create_time
+
+        if source_restore_configuration is not None:
+            if (
+                values["account_id"] == "pending"
+                or "source_node_id" not in values
+                or "source_resource_id" not in values
+                or "source_dbi_resource_id" not in values
+            ):
+                raise RDSOwnershipError(
+                    "The RDS restore witness identity is incomplete."
+                )
+            values.setdefault(
+                "snapshot_arn",
+                cls._rds_snapshot_arn(
+                    values["snapshot_identifier"],
+                    account_id=values["account_id"],
+                    region=values["region"],
+                ),
+            )
+            values["witness_version"] = cls._RDS_WITNESS_VERSION
+            values["source_restore_configuration"] = (
+                cls._rds_validate_restore_configuration(
+                    source_restore_configuration
+                )
+            )
+            values["source_restore_configuration_sha256"] = (
+                cls._rds_witness_digest(values)
+            )
         return values
 
     def _rds_execution_metadata(self):
         state = self.get_execution_state(create=False)
-        metadata = dict(state.provider_metadata or {}) if state is not None else {}
+        raw_metadata = state.provider_metadata if state is not None else {}
+        if raw_metadata in (None, {}):
+            metadata = {}
+        elif isinstance(raw_metadata, dict):
+            metadata = dict(raw_metadata)
+        else:
+            raise RDSMalformedResponse(
+                "The durable RDS provider metadata is invalid."
+            )
         request = metadata.get("rds_request")
-        return state, dict(request or {}) if isinstance(request, dict) else {}
+        if request is None:
+            return state, {}
+        if not isinstance(request, dict):
+            raise RDSMalformedResponse("The durable RDS request witness is invalid.")
+        return state, dict(request)
 
     def _rds_persist_witness(self, witness, *, lease_owner=None, lease_token=None):
-        state = self.record_provider_reference(
-            idempotency_key=witness["snapshot_identifier"],
-            provider_status="reconciliation_required",
-            metadata={"rds_request": dict(witness)},
+        incoming = self._rds_canonical_witness(dict(witness))
+        with transaction.atomic():
+            fresh = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(fresh)
+            if lease_token is not None and not state.lease_matches(
+                lease_owner, lease_token, require_live=False
+            ):
+                raise RDSLeaseLost("The RDS worker lost its execution lease.")
+            raw_provider_metadata = state.provider_metadata
+            if raw_provider_metadata in (None, {}):
+                provider_metadata = {}
+            elif isinstance(raw_provider_metadata, dict):
+                provider_metadata = dict(raw_provider_metadata)
+            else:
+                raise RDSMalformedResponse(
+                    "The durable RDS provider metadata is invalid."
+                )
+            existing = provider_metadata.get("rds_request")
+            if existing is not None and not isinstance(existing, dict):
+                raise RDSMalformedResponse(
+                    "The durable RDS request witness is invalid."
+                )
+            persisted = self._rds_merge_witness(existing, incoming)
+            state.provider_idempotency_key = persisted["snapshot_identifier"]
+            state.provider_status = "reconciliation_required"
+            provider_metadata["rds_request"] = persisted
+            state.provider_metadata = provider_metadata
+            state.save(
+                update_fields=[
+                    "provider_idempotency_key",
+                    "provider_status",
+                    "provider_metadata",
+                    "modified",
+                ]
+            )
+            return state
+
+    @staticmethod
+    def _rds_bounded_setting(name, default, *, minimum, maximum):
+        try:
+            value = int(getattr(settings, name, default))
+        except (TypeError, ValueError):
+            value = int(default)
+        return min(int(maximum), max(int(minimum), value))
+
+    @classmethod
+    def _rds_create_visibility_seconds(cls):
+        return cls._rds_bounded_setting(
+            "RDS_CREATE_VISIBILITY_WINDOW_SECONDS",
+            cls._RDS_CREATE_VISIBILITY_DEFAULT_SECONDS,
+            minimum=60,
+            maximum=cls._RDS_CREATE_VISIBILITY_MAX_SECONDS,
+        )
+
+    @classmethod
+    def _rds_create_visibility_min_observations(cls):
+        return cls._rds_bounded_setting(
+            "RDS_CREATE_VISIBILITY_MIN_OBSERVATIONS",
+            cls._RDS_CREATE_VISIBILITY_MIN_OBSERVATIONS,
+            minimum=cls._RDS_CREATE_VISIBILITY_MIN_OBSERVATIONS,
+            maximum=cls._RDS_CREATE_VISIBILITY_MAX_OBSERVATIONS,
+        )
+
+    @classmethod
+    def _rds_parse_durable_timestamp(cls, value, *, field):
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str) and value.strip():
+            raw = value.strip()
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(raw)
+            except (TypeError, ValueError) as error:
+                raise RDSMalformedResponse(
+                    f"The durable RDS {field} is invalid."
+                ) from error
+        else:
+            raise RDSMalformedResponse(f"The durable RDS {field} is missing.")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime_timezone.utc)
+        return parsed.astimezone(datetime_timezone.utc)
+
+    def _rds_create_reconciliation_state(self):
+        state = self.get_execution_state(create=False)
+        metadata = dict(state.provider_metadata or {}) if state is not None else {}
+        value = metadata.get("rds_create_reconciliation")
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise RDSMalformedResponse(
+                "The durable RDS create reconciliation state is invalid."
+            )
+        return dict(value)
+
+    def _rds_create_reconciliation_pending(self):
+        state = self._rds_create_reconciliation_state()
+        return bool(state.get("mutation_started_at") and not state.get("resolved_at"))
+
+    def _rds_checkpoint_create_mutation(self, owner, token):
+        """Commit the no-second-create boundary immediately before AWS."""
+
+        now = timezone.now()
+        with transaction.atomic():
+            fresh = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(fresh, create=False)
+            if state is None or not state.lease_matches(
+                owner,
+                token,
+                phase="create",
+                now=now,
+                require_live=True,
+            ):
+                raise RDSLeaseLost("The RDS worker lost its execution lease.")
+            metadata = dict(state.provider_metadata or {})
+            reconciliation = metadata.get("rds_create_reconciliation") or {}
+            if not isinstance(reconciliation, dict):
+                raise RDSMalformedResponse(
+                    "The durable RDS create reconciliation state is invalid."
+                )
+            reconciliation = dict(reconciliation)
+            if not reconciliation.get("mutation_started_at"):
+                reconciliation.update(
+                    {
+                        "mutation_started_at": now.isoformat(),
+                        "visibility_deadline_at": (
+                            now
+                            + timedelta(seconds=self._rds_create_visibility_seconds())
+                        ).isoformat(),
+                        "minimum_observations": (
+                            self._rds_create_visibility_min_observations()
+                        ),
+                        "visibility_observations": 0,
+                        "zero_match_observations": 0,
+                        "missing_tag_observations": 0,
+                    }
+                )
+            reconciliation.update(
+                {
+                    "mutation_intent_committed": True,
+                    "outcome_unknown": True,
+                    "resolved_at": None,
+                }
+            )
+            metadata["rds_create_reconciliation"] = reconciliation
+            state.provider_metadata = metadata
+            state.provider_status = "create_requested"
+            state.reconciliation_state = state.ReconciliationState.REQUIRED
+            state.reconciliation_reason = "rds_create_mutation_started"
+            state.save(
+                update_fields=[
+                    "provider_metadata",
+                    "provider_status",
+                    "reconciliation_state",
+                    "reconciliation_reason",
+                    "modified",
+                ]
+            )
+            return dict(reconciliation)
+
+    def _rds_checkpoint_create_outcome(
+        self, owner, token, *, category, error_code
+    ):
+        now = timezone.now()
+        with transaction.atomic():
+            fresh = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(fresh, create=False)
+            if state is None or not state.lease_matches(
+                owner,
+                token,
+                phase="create",
+                now=now,
+                require_live=True,
+            ):
+                raise RDSLeaseLost("The RDS worker lost its execution lease.")
+            metadata = dict(state.provider_metadata or {})
+            reconciliation = metadata.get("rds_create_reconciliation")
+            if not isinstance(reconciliation, dict) or not reconciliation.get(
+                "mutation_started_at"
+            ):
+                raise RDSMalformedResponse(
+                    "The durable RDS create mutation checkpoint is missing."
+                )
+            reconciliation = dict(reconciliation)
+            reconciliation.update(
+                {
+                    "outcome_unknown": True,
+                    "last_provider_category": str(category)[:64],
+                    "last_error_code": str(error_code)[:64],
+                    "last_error_at": now.isoformat(),
+                }
+            )
+            metadata["rds_create_reconciliation"] = reconciliation
+            state.provider_metadata = metadata
+            state.save(update_fields=["provider_metadata", "modified"])
+            return dict(reconciliation)
+
+    def _rds_resolve_create_reconciliation(
+        self, *, lease_owner=None, lease_token=None
+    ):
+        now = timezone.now()
+        with transaction.atomic():
+            fresh = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(fresh, create=False)
+            if state is None:
+                return
+            if lease_token is not None and not state.lease_matches(
+                lease_owner, lease_token, now=now, require_live=True
+            ):
+                raise RDSLeaseLost("The RDS worker lost its execution lease.")
+            metadata = dict(state.provider_metadata or {})
+            reconciliation = metadata.get("rds_create_reconciliation")
+            if not isinstance(reconciliation, dict):
+                return
+            reconciliation = dict(reconciliation)
+            reconciliation["outcome_unknown"] = False
+            reconciliation["resolved_at"] = now.isoformat()
+            metadata["rds_create_reconciliation"] = reconciliation
+            state.provider_metadata = metadata
+            state.save(update_fields=["provider_metadata", "modified"])
+
+    def _rds_record_create_visibility_observation(
+        self,
+        *,
+        kind,
+        error_code,
+        provider_status,
+        lease_owner=None,
+        lease_token=None,
+    ):
+        """Record one bounded read-only reconciliation observation.
+
+        The deadline is anchored to the durable pre-mutation checkpoint and is
+        never extended by polling. Both the deadline and the minimum observation
+        count must be exhausted before the backup fails closed for review.
+        """
+
+        if kind not in {"zero_match", "missing_tag"}:
+            raise ValueError("Unsupported RDS visibility observation.")
+        now = timezone.now()
+        with transaction.atomic():
+            fresh = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(fresh, create=False)
+            if state is None:
+                return None
+            if lease_token is not None and not state.lease_matches(
+                lease_owner,
+                lease_token,
+                phase="create",
+                now=now,
+                require_live=True,
+            ):
+                raise RDSLeaseLost("The RDS worker lost its execution lease.")
+            metadata = dict(state.provider_metadata or {})
+            reconciliation = metadata.get("rds_create_reconciliation")
+            if reconciliation is None:
+                return None
+            if not isinstance(reconciliation, dict):
+                raise RDSMalformedResponse(
+                    "The durable RDS create reconciliation state is invalid."
+                )
+            reconciliation = dict(reconciliation)
+            if reconciliation.get("resolved_at"):
+                return None
+            started_at = self._rds_parse_durable_timestamp(
+                reconciliation.get("mutation_started_at"),
+                field="create mutation timestamp",
+            )
+            deadline_at = self._rds_parse_durable_timestamp(
+                reconciliation.get("visibility_deadline_at"),
+                field="create visibility deadline",
+            )
+            if (
+                deadline_at < started_at
+                or deadline_at - started_at
+                > timedelta(seconds=self._RDS_CREATE_VISIBILITY_MAX_SECONDS)
+            ):
+                raise RDSMalformedResponse(
+                    "The durable RDS create visibility window is invalid."
+                )
+            try:
+                minimum_observations = int(
+                    reconciliation.get("minimum_observations")
+                )
+                observations = int(
+                    reconciliation.get("visibility_observations", 0)
+                )
+                zero_matches = int(
+                    reconciliation.get("zero_match_observations", 0)
+                )
+                missing_tags = int(
+                    reconciliation.get("missing_tag_observations", 0)
+                )
+            except (TypeError, ValueError) as error:
+                raise RDSMalformedResponse(
+                    "The durable RDS create observation counters are invalid."
+                ) from error
+            if (
+                not self._RDS_CREATE_VISIBILITY_MIN_OBSERVATIONS
+                <= minimum_observations
+                <= self._RDS_CREATE_VISIBILITY_MAX_OBSERVATIONS
+                or min(observations, zero_matches, missing_tags) < 0
+            ):
+                raise RDSMalformedResponse(
+                    "The durable RDS create observation counters are invalid."
+                )
+            observations += 1
+            if kind == "zero_match":
+                zero_matches += 1
+            else:
+                missing_tags += 1
+            exhausted = now >= deadline_at and observations >= minimum_observations
+            reconciliation.update(
+                {
+                    "outcome_unknown": True,
+                    "visibility_observations": observations,
+                    "zero_match_observations": zero_matches,
+                    "missing_tag_observations": missing_tags,
+                    "last_observation": kind,
+                    "last_observed_at": now.isoformat(),
+                    "last_error_code": str(error_code)[:64],
+                    "last_provider_category": str(provider_status)[:64],
+                }
+            )
+            if kind == "zero_match" and not reconciliation.get(
+                "first_zero_match_at"
+            ):
+                reconciliation["first_zero_match_at"] = now.isoformat()
+            if kind == "zero_match":
+                reconciliation["last_zero_match_at"] = now.isoformat()
+            if kind == "missing_tag" and not reconciliation.get(
+                "first_missing_tag_at"
+            ):
+                reconciliation["first_missing_tag_at"] = now.isoformat()
+            if kind == "missing_tag":
+                reconciliation["last_missing_tag_at"] = now.isoformat()
+            metadata["rds_create_reconciliation"] = reconciliation
+            state.provider_metadata = metadata
+            state.provider_status = str(provider_status)[:64]
+            state.last_error_code = str(error_code)[:64]
+            state.last_error_message = self.EXECUTION_ERROR_MESSAGES.get(
+                state.last_error_code,
+                "The provider operation requires reconciliation.",
+            )
+            state.last_error_at = now
+            state.reconciliation_state = (
+                state.ReconciliationState.MANUAL_REVIEW
+                if exhausted
+                else state.ReconciliationState.REQUIRED
+            )
+            state.reconciliation_reason = (
+                "rds_create_visibility_exhausted"
+                if exhausted
+                else "rds_create_visibility_wait"
+            )
+            state.next_retry_at = None if exhausted else now + timedelta(seconds=60)
+            reconciliation_metadata = dict(state.reconciliation_metadata or {})
+            reconciliation_metadata["rds_create_visibility"] = {
+                "deadline_at": deadline_at.isoformat(),
+                "minimum_observations": minimum_observations,
+                "observation_count": observations,
+                "last_observation": kind,
+            }
+            state.reconciliation_metadata = reconciliation_metadata
+            fresh.status = (
+                UtilBackup.Status.FAILED
+                if exhausted
+                # A provider error/absence is not the same public state as a
+                # provider snapshot that is actively creating.  RETRYING is
+                # still an active backup status (and is picked up by the
+                # durable recovery sweep), while keeping ``IN_PROGRESS`` for
+                # an actually visible provider operation.
+                else UtilBackup.Status.RETRYING
+            )
+            state.save(
+                update_fields=[
+                    "provider_metadata",
+                    "provider_status",
+                    "last_error_code",
+                    "last_error_message",
+                    "last_error_at",
+                    "reconciliation_state",
+                    "reconciliation_reason",
+                    "reconciliation_metadata",
+                    "next_retry_at",
+                    "modified",
+                ]
+            )
+            fresh.save(update_fields=["status", "modified"])
+        self.status = fresh.status
+        return fresh.status
+
+    def _rds_reconcile_create_request(
+        self,
+        client,
+        witness,
+        *,
+        lease_owner,
+        lease_token,
+    ):
+        """Reconcile a request whose CreateDBSnapshot result was lost.
+
+        Once ``_rds_checkpoint_create_mutation`` commits, this method is the
+        only path a later worker may take until AWS exposes one exact owned
+        snapshot or the bounded visibility window is exhausted.  In
+        particular, a zero-result/404 response is an observation, never a
+        license to issue a second create request.
+        """
+        if not self._rds_create_reconciliation_pending():
+            return "not_pending"
+        try:
+            snapshots = self._rds_list_snapshots(
+                client, witness["snapshot_identifier"]
+            )
+        except ClientError as error:
+            if not _rds_not_found(error):
+                raise
+            result = self._rds_record_create_visibility_observation(
+                kind="zero_match",
+                error_code="PROVIDER_NOT_FOUND",
+                provider_status="not_found",
+                lease_owner=lease_owner,
+                lease_token=lease_token,
+            )
+            return "exhausted" if result == UtilBackup.Status.FAILED else "pending"
+
+        try:
+            snapshot = self._rds_find_owned_snapshot(
+                snapshots,
+                witness,
+                client=client,
+                allow_missing_provisional_tag=True,
+            )
+        except RDSOwnershipTagPending:
+            result = self._rds_record_create_visibility_observation(
+                kind="missing_tag",
+                error_code="PROVIDER_OWNERSHIP_MISMATCH",
+                provider_status="ownership_tag_pending",
+                lease_owner=lease_owner,
+                lease_token=lease_token,
+            )
+            return "exhausted" if result == UtilBackup.Status.FAILED else "pending"
+
+        if snapshot is None:
+            result = self._rds_record_create_visibility_observation(
+                kind="zero_match",
+                error_code="PROVIDER_NOT_FOUND",
+                provider_status="not_found",
+                lease_owner=lease_owner,
+                lease_token=lease_token,
+            )
+            return "exhausted" if result == UtilBackup.Status.FAILED else "pending"
+
+        # _rds_find_owned_snapshot has already fetched and validated the tag
+        # list.  Passing tags_verified avoids a second read, while the adopt
+        # method still validates name/source/ARN/time before persisting it.
+        self._rds_adopt_snapshot(
+            snapshot,
+            witness,
+            client=client,
+            tags_verified=True,
             lease_owner=lease_owner,
             lease_token=lease_token,
         )
-        if state is None:
-            raise RDSLeaseLost("The RDS worker lost its execution lease.")
-        return state
+        return "adopted"
 
-    @staticmethod
-    def _rds_list_snapshots(client, identifier):
-        """Iterate every RDS response page, guarding repeated markers."""
+    @classmethod
+    def _rds_list_snapshots(cls, client, identifier):
+        """Iterate exact RDS cursor pages with finite page/item bounds."""
+        try:
+            max_pages = int(
+                getattr(
+                    settings,
+                    "RDS_SNAPSHOT_LIST_MAX_PAGES",
+                    cls._RDS_LIST_MAX_PAGES_DEFAULT,
+                )
+            )
+        except (TypeError, ValueError):
+            max_pages = cls._RDS_LIST_MAX_PAGES_DEFAULT
+        max_pages = min(cls._RDS_LIST_MAX_PAGES_LIMIT, max(1, max_pages))
+        try:
+            max_items = int(
+                getattr(
+                    settings,
+                    "RDS_SNAPSHOT_LIST_MAX_ITEMS",
+                    cls._RDS_LIST_MAX_ITEMS_DEFAULT,
+                )
+            )
+        except (TypeError, ValueError):
+            max_items = cls._RDS_LIST_MAX_ITEMS_DEFAULT
+        max_items = min(cls._RDS_LIST_MAX_ITEMS_LIMIT, max(1, max_items))
         marker = None
         seen_markers = set()
         snapshots = []
+        page_count = 0
         while True:
+            page_count += 1
+            if page_count > max_pages:
+                raise RDSMalformedResponse(
+                    "RDS snapshot pagination exceeded the page bound."
+                )
             params = {"DBSnapshotIdentifier": identifier}
             if marker:
                 params["Marker"] = marker
@@ -8103,6 +9419,10 @@ class CoreAWSRDSBackup(UtilBackup):
             if not isinstance(page, list):
                 raise RDSMalformedResponse("RDS returned an invalid snapshot page.")
             snapshots.extend(page)
+            if len(snapshots) > max_items:
+                raise RDSMalformedResponse(
+                    "RDS snapshot pagination exceeded the item bound."
+                )
             next_marker = str(response.get("Marker") or "")
             if not next_marker:
                 return snapshots
@@ -8127,6 +9447,49 @@ class CoreAWSRDSBackup(UtilBackup):
         arn_identity = _rds_snapshot_arn_identity(snapshot)
         if not arn_identity:
             return False
+        if (
+            arn_identity["partition"] != cls._rds_partition(witness["region"])
+            or arn_identity["snapshot_identifier"]
+            != witness["snapshot_identifier"]
+            or arn_identity["account_id"] != witness["account_id"]
+            or arn_identity["region"] != witness["region"]
+        ):
+            return False
+        if "snapshot_arn" in witness and str(snapshot.get("DBSnapshotArn") or "") != str(
+            witness["snapshot_arn"]
+        ):
+            return False
+        if "source_dbi_resource_id" in witness and str(
+            snapshot.get("DbiResourceId") or ""
+        ) != str(witness["source_dbi_resource_id"]):
+            return False
+        if witness.get("witness_version") == cls._RDS_WITNESS_VERSION:
+            actual_create_time = None
+            if snapshot.get("SnapshotCreateTime") not in (None, ""):
+                try:
+                    actual_create_time = cls._rds_canonical_snapshot_time(
+                        snapshot.get("SnapshotCreateTime")
+                    )
+                except RDSMalformedResponse:
+                    return False
+            expected_create_time = witness.get("snapshot_create_time")
+            if expected_create_time and actual_create_time != expected_create_time:
+                return False
+            if witness.get("witness_state") == cls._RDS_COMMITTED_WITNESS_STATE and (
+                not expected_create_time or not actual_create_time
+            ):
+                return False
+            expected_original_time = witness.get("original_snapshot_create_time")
+            if expected_original_time:
+                try:
+                    actual_original_time = cls._rds_canonical_snapshot_time(
+                        snapshot.get("OriginalSnapshotCreateTime"),
+                        field="OriginalSnapshotCreateTime",
+                    )
+                except RDSMalformedResponse:
+                    return False
+                if actual_original_time != expected_original_time:
+                    return False
         return (
             arn_identity["snapshot_identifier"] == witness["snapshot_identifier"]
             and arn_identity["account_id"] == witness["account_id"]
@@ -8134,7 +9497,38 @@ class CoreAWSRDSBackup(UtilBackup):
         )
 
     @classmethod
-    def _rds_find_owned_snapshot(cls, snapshots, witness):
+    def _rds_snapshot_tags(cls, client, snapshot):
+        """Fetch and validate RDS tags; describe output alone is not ownership."""
+        if not isinstance(snapshot, dict):
+            raise RDSMalformedResponse("RDS returned an invalid snapshot object.")
+        resource_name = str(snapshot.get("DBSnapshotArn") or "")
+        if not resource_name:
+            raise RDSMalformedResponse("RDS omitted the snapshot ARN for tag lookup.")
+        response = client.list_tags_for_resource(ResourceName=resource_name)
+        if not isinstance(response, dict) or not isinstance(
+            response.get("TagList"), list
+        ):
+            raise RDSMalformedResponse("RDS returned an invalid snapshot tag list.")
+        tags = {}
+        for item in response["TagList"]:
+            if not isinstance(item, dict) or item.get("Key") in (None, ""):
+                raise RDSMalformedResponse("RDS returned an invalid snapshot tag.")
+            key = str(item["Key"])
+            value = str(item.get("Value") or "")
+            if key in tags and tags[key] != value:
+                raise RDSMalformedResponse("RDS returned duplicate snapshot tags.")
+            tags[key] = value
+        return list(response["TagList"]), tags
+
+    @classmethod
+    def _rds_find_owned_snapshot(
+        cls,
+        snapshots,
+        witness,
+        *,
+        client=None,
+        allow_missing_provisional_tag=False,
+    ):
         exact = [
             snapshot
             for snapshot in snapshots
@@ -8148,51 +9542,333 @@ class CoreAWSRDSBackup(UtilBackup):
                     "RDS returned a snapshot outside the requested identity."
                 )
             return None
+        if witness.get("witness_version") == cls._RDS_WITNESS_VERSION:
+            if client is None:
+                raise RDSMalformedResponse(
+                    "RDS snapshot ownership requires a tag lookup client."
+                )
+            tagged = []
+            for snapshot in exact:
+                tag_list, tags = cls._rds_snapshot_tags(client, snapshot)
+                actual_marker = tags.get(cls._RDS_SNAPSHOT_OWNERSHIP_TAG_KEY)
+                expected_marker = witness.get("ownership_marker")
+                if actual_marker in (None, ""):
+                    if (
+                        allow_missing_provisional_tag
+                        and witness.get("witness_state")
+                        == cls._RDS_PROVISIONAL_WITNESS_STATE
+                    ):
+                        raise RDSOwnershipTagPending(
+                            "The RDS ownership tag is not visible yet."
+                        )
+                    raise RDSOwnershipError(
+                        "RDS snapshot ownership tag verification failed."
+                    )
+                if actual_marker != expected_marker:
+                    raise RDSOwnershipError(
+                        "RDS snapshot ownership tag verification failed."
+                    )
+                enriched = dict(snapshot)
+                enriched["TagList"] = tag_list
+                tagged.append(enriched)
+            exact = tagged
         if any(not cls._rds_snapshot_owned(snapshot, witness) for snapshot in exact):
             raise RDSOwnershipError("RDS snapshot ownership verification failed.")
         if len(exact) > 1:
             raise RDSDuplicateMatch("Multiple exact RDS snapshots matched the request.")
-        return exact[0]
+        snapshot = exact[0]
+        return snapshot
 
     def _rds_current_witness(self, auth, *, identifier=None, lease_owner=None, lease_token=None):
         state, stored = self._rds_execution_metadata()
         expected_identifier = str(identifier or self.unique_id or self.uuid_str)
         region = self._rds_region(auth)
         source_id = str(self.aws_rds.unique_id or "")
-        if stored:
-            if stored.get("snapshot_identifier") not in (None, expected_identifier):
-                raise RDSOwnershipError("The durable RDS request identity changed.")
-            if stored.get("source_db_instance_identifier") not in (None, source_id):
-                raise RDSOwnershipError("The durable RDS source identity changed.")
-            stored_region = str(stored.get("region") or "")
-            if stored_region and stored_region != region:
-                raise RDSOwnershipError("The durable RDS region identity changed.")
-        account_id = str(stored.get("account_id") or "")
-        if account_id == "pending":
-            account_id = ""
-        if not account_id:
-            account_id = self._rds_account_id(auth)
-        witness = self._rds_witness(
-            identifier=expected_identifier,
-            source_id=source_id,
-            account_id=account_id,
-            region=region,
-        )
-        if (
-            not stored
-            or any(str(stored.get(key) or "") != str(value) for key, value in witness.items())
-        ):
-            self._rds_persist_witness(
-                witness, lease_owner=lease_owner, lease_token=lease_token
+        account_id = self._rds_account_id(auth)
+        if not stored:
+            raise RDSMalformedResponse(
+                "The RDS backup has no current-version provider witness."
             )
-        return witness
+        stored = self._rds_canonical_witness(stored)
+        if stored.get("witness_version") != self._RDS_WITNESS_VERSION:
+            raise RDSMalformedResponse(
+                "Legacy RDS backups require explicit compatibility handling."
+            )
+        if stored["snapshot_identifier"] != expected_identifier:
+            raise RDSOwnershipError("The durable RDS request identity changed.")
+        if stored["source_db_instance_identifier"] != source_id:
+            raise RDSOwnershipError("The durable RDS source identity changed.")
+        if stored["region"] != region:
+            raise RDSOwnershipError("The durable RDS region identity changed.")
+        if stored["account_id"] not in {"pending", account_id}:
+            raise RDSOwnershipError("The durable RDS account identity changed.")
+        if "source_node_id" in stored and stored["source_node_id"] != self.aws_rds.node_id:
+            raise RDSOwnershipError("The durable RDS node identity changed.")
+        if (
+            "source_resource_id" in stored
+            and stored["source_resource_id"] != self.aws_rds_id
+        ):
+            raise RDSOwnershipError("The durable RDS resource identity changed.")
+        return dict(stored)
+
+    def validated_rds_restore_witness(
+        self,
+        auth,
+        *,
+        node_id,
+        source_resource_id,
+        source_id,
+        snapshot_id,
+    ):
+        """Return the immutable backup-time witness after identity proof.
+
+        A missing witness identifies a legacy backup and returns ``None`` so the
+        restore adapter can use its exact-source compatibility lookup. A present
+        but incomplete, modified, or differently scoped witness always fails
+        closed.
+        """
+
+        _state, stored = self._rds_execution_metadata()
+        if not stored:
+            return None
+        stored = self._rds_canonical_witness(stored)
+        if stored.get("witness_version") != self._RDS_WITNESS_VERSION:
+            # Legacy rows remain an explicit compatibility path.  They do not
+            # contain enough historical evidence to distinguish a same-name
+            # snapshot incarnation, so they are never upgraded for restore.
+            return None
+        if stored.get("witness_state") != self._RDS_COMMITTED_WITNESS_STATE:
+            raise RDSMalformedResponse(
+                "The RDS restore witness is provisional and cannot be restored."
+            )
+        expected = {
+            "snapshot_identifier": str(snapshot_id or ""),
+            "source_db_instance_identifier": str(source_id or ""),
+            "region": self._rds_region(auth),
+            "account_id": self._rds_account_id(auth),
+        }
+        for key, value in expected.items():
+            if stored.get(key) != value:
+                raise RDSOwnershipError(
+                    "The durable RDS restore witness identity changed."
+                )
+        try:
+            expected_resource_id = int(source_resource_id)
+            expected_node_id = int(node_id)
+        except (TypeError, ValueError) as error:
+            raise RDSMalformedResponse(
+                "The RDS restore node identity is invalid."
+            ) from error
+        if self.aws_rds_id != expected_resource_id or self.aws_rds.node_id != expected_node_id:
+            raise RDSOwnershipError("The RDS backup node identity changed.")
+
+        configuration = stored.get("source_restore_configuration")
+        if configuration is not None and (
+            stored.get("source_node_id") != expected_node_id
+            or stored.get("source_resource_id") != expected_resource_id
+        ):
+            raise RDSOwnershipError("The durable RDS restore node identity changed.")
+        return dict(stored)
+
+    def validated_rds_restore_configuration(
+        self,
+        auth,
+        *,
+        node_id,
+        source_resource_id,
+        source_id,
+        snapshot_id,
+    ):
+        """Return the immutable backup-time configuration after identity proof."""
+
+        stored = self.validated_rds_restore_witness(
+            auth,
+            node_id=node_id,
+            source_resource_id=source_resource_id,
+            source_id=source_id,
+            snapshot_id=snapshot_id,
+        )
+        if stored is None:
+            return None
+        configuration = stored.get("source_restore_configuration")
+        if configuration is None:
+            if stored.get("account_id") == "pending":
+                raise RDSMalformedResponse(
+                    "The durable RDS restore witness is incomplete."
+                )
+            return None
+        return dict(configuration)
+
+    def validate_rds_snapshot_for_restore(
+        self,
+        auth,
+        client,
+        *,
+        node_id,
+        source_resource_id,
+        source_id,
+        snapshot_id,
+        witness=None,
+    ):
+        """Re-describe a v2 snapshot and prove its immutable source identity."""
+
+        witness = witness or self.validated_rds_restore_witness(
+            auth,
+            node_id=node_id,
+            source_resource_id=source_resource_id,
+            source_id=source_id,
+            snapshot_id=snapshot_id,
+        )
+        if witness is None or witness.get("source_restore_configuration") is None:
+            return None
+        if witness.get("witness_version") != self._RDS_WITNESS_VERSION:
+            return None
+        if witness.get("witness_state") != self._RDS_COMMITTED_WITNESS_STATE:
+            raise RDSMalformedResponse(
+                "The provisional RDS witness cannot be used for restore."
+            )
+        snapshots = self._rds_list_snapshots(
+            client, witness["snapshot_identifier"]
+        )
+        return (
+            self._rds_find_owned_snapshot(snapshots, witness, client=client)
+            is not None
+        )
+
+    def validate_legacy_rds_snapshot_for_restore(
+        self,
+        auth,
+        client,
+        *,
+        node_id,
+        source_resource_id,
+        source_id,
+        snapshot_id,
+    ):
+        """Handle a pre-v3 backup without inventing a witness.
+
+        Legacy backups have no immutable backup-time marker or incarnation time.
+        They therefore cannot be safely adopted, restored, or deleted after a
+        same-name provider recreation. Keep the method as an explicit
+        compatibility boundary and fail closed instead of retrofitting mutable
+        present-day values as historical evidence.
+        """
+        raise RDSMalformedResponse(
+            "Legacy RDS snapshots require an explicit re-registration before restore."
+        )
+
+    def _rds_snapshot_witness(self, witness, snapshot):
+        """Pin provider incarnation data and promote provisional to committed."""
+        if witness.get("witness_version") != self._RDS_WITNESS_VERSION:
+            raise RDSMalformedResponse(
+                "Only current-version RDS snapshots can be adopted."
+            )
+        create_time = None
+        if snapshot.get("SnapshotCreateTime") not in (None, ""):
+            create_time = self._rds_canonical_snapshot_time(
+                snapshot.get("SnapshotCreateTime")
+            )
+        expected_time = witness.get("snapshot_create_time")
+        if expected_time and create_time != expected_time:
+            raise RDSOwnershipError("The RDS snapshot incarnation changed.")
+        status = str(snapshot.get("Status") or "").lower()
+        if status == "available" and not create_time:
+            raise RDSMalformedResponse(
+                "RDS marked the snapshot available without SnapshotCreateTime."
+            )
+        original_time = None
+        if snapshot.get("OriginalSnapshotCreateTime") not in (None, ""):
+            original_time = self._rds_canonical_snapshot_time(
+                snapshot.get("OriginalSnapshotCreateTime"),
+                field="OriginalSnapshotCreateTime",
+            )
+        if witness.get("original_snapshot_create_time") and (
+            original_time != witness["original_snapshot_create_time"]
+        ):
+            raise RDSOwnershipError("The RDS original snapshot incarnation changed.")
+        return self._rds_witness(
+            identifier=witness["snapshot_identifier"],
+            source_id=witness["source_db_instance_identifier"],
+            account_id=witness["account_id"],
+            region=witness["region"],
+            source_node_id=witness.get("source_node_id"),
+            source_resource_id=witness.get("source_resource_id"),
+            snapshot_arn=witness.get("snapshot_arn")
+            or snapshot.get("DBSnapshotArn"),
+            source_dbi_resource_id=witness.get("source_dbi_resource_id"),
+            source_db_instance_arn=witness.get("source_db_instance_arn"),
+            source_restore_configuration=witness.get(
+                "source_restore_configuration"
+            ),
+            ownership_marker=witness["ownership_marker"],
+            snapshot_create_time=create_time,
+            original_snapshot_create_time=(
+                witness.get("original_snapshot_create_time") or original_time
+            ),
+            witness_state=(
+                self._RDS_COMMITTED_WITNESS_STATE
+                if create_time
+                else self._RDS_PROVISIONAL_WITNESS_STATE
+            ),
+            witness_version=self._RDS_WITNESS_VERSION,
+        )
 
     def _rds_adopt_snapshot(
-        self, snapshot, witness, *, lease_owner=None, lease_token=None
+        self,
+        snapshot,
+        witness,
+        *,
+        client=None,
+        lease_owner=None,
+        lease_token=None,
+        tags_verified=False,
+        allow_missing_provisional_tag=False,
     ):
+        if witness.get("witness_version") == self._RDS_WITNESS_VERSION:
+            if client is None:
+                raise RDSMalformedResponse(
+                    "RDS snapshot adoption requires a tag lookup client."
+                )
+            if not tags_verified:
+                tag_list, tags = self._rds_snapshot_tags(client, snapshot)
+                actual_marker = tags.get(self._RDS_SNAPSHOT_OWNERSHIP_TAG_KEY)
+                expected_marker = witness.get("ownership_marker")
+                if actual_marker in (None, ""):
+                    if (
+                        allow_missing_provisional_tag
+                        and witness.get("witness_state")
+                        == self._RDS_PROVISIONAL_WITNESS_STATE
+                    ):
+                        raise RDSOwnershipTagPending(
+                            "The RDS ownership tag is not visible yet."
+                        )
+                    raise RDSOwnershipError(
+                        "RDS snapshot ownership tag verification failed."
+                    )
+                if actual_marker != expected_marker:
+                    raise RDSOwnershipError(
+                        "RDS snapshot ownership tag verification failed."
+                    )
+                snapshot = dict(snapshot)
+                snapshot["TagList"] = tag_list
         if not self._rds_snapshot_owned(snapshot, witness):
             raise RDSOwnershipError("RDS snapshot ownership verification failed.")
+        adopted_witness = self._rds_snapshot_witness(witness, snapshot)
+        self._rds_persist_witness(
+            adopted_witness, lease_owner=lease_owner, lease_token=lease_token
+        )
         normalized = _rds_json(snapshot)
+        # Django's JSON encoder intentionally emits milliseconds for datetimes;
+        # do not let that presentation round trip truncate the exact provider
+        # incarnation pinned in the durable witness.
+        if adopted_witness.get("snapshot_create_time"):
+            normalized["SnapshotCreateTime"] = adopted_witness[
+                "snapshot_create_time"
+            ]
+        if adopted_witness.get("original_snapshot_create_time"):
+            normalized["OriginalSnapshotCreateTime"] = adopted_witness[
+                "original_snapshot_create_time"
+            ]
         with transaction.atomic():
             fresh = self.__class__.objects.select_for_update().get(pk=self.pk)
             state = self._locked_execution_state(fresh)
@@ -8200,8 +9876,8 @@ class CoreAWSRDSBackup(UtilBackup):
                 lease_owner, lease_token, now=timezone.now(), require_live=True
             ):
                 raise RDSLeaseLost("The RDS worker lost its execution lease.")
-            fresh.unique_id = witness["snapshot_identifier"]
-            fresh.region = witness["region"]
+            fresh.unique_id = adopted_witness["snapshot_identifier"]
+            fresh.region = adopted_witness["region"]
             fresh.size_gigabytes = normalized.get("AllocatedStorage")
             fresh.metadata = normalized
             fresh.save(
@@ -8214,18 +9890,23 @@ class CoreAWSRDSBackup(UtilBackup):
                 ]
             )
         self.unique_id = witness["snapshot_identifier"]
-        self.region = witness["region"]
+        self.region = adopted_witness["region"]
         self.size_gigabytes = normalized.get("AllocatedStorage")
         self.metadata = normalized
         state = self.record_provider_reference(
-            idempotency_key=witness["snapshot_identifier"],
-            resource_id=witness["snapshot_identifier"],
+            idempotency_key=adopted_witness["ownership_marker"],
+            resource_id=adopted_witness["snapshot_identifier"],
             provider_status=str(normalized.get("Status") or "creating"),
             metadata={
-                "rds_request": dict(witness),
                 "rds_snapshot": {
-                    "snapshot_identifier": witness["snapshot_identifier"],
+                    "snapshot_identifier": adopted_witness[
+                        "snapshot_identifier"
+                    ],
                     "status": str(normalized.get("Status") or "creating"),
+                    "snapshot_create_time": adopted_witness.get(
+                        "snapshot_create_time"
+                    ),
+                    "ownership_marker": adopted_witness["ownership_marker"],
                 },
             },
             lease_owner=lease_owner,
@@ -8233,13 +9914,37 @@ class CoreAWSRDSBackup(UtilBackup):
         )
         if state is None:
             raise RDSLeaseLost("The RDS worker lost its execution lease.")
-        self.set_reconciliation_state(
-            reconciliation_state=CoreBackupExecution.ReconciliationState.RESOLVED,
-            reason="rds_snapshot_adopted",
-            metadata={"snapshot_identifier": witness["snapshot_identifier"]},
-            lease_owner=lease_owner,
-            lease_token=lease_token,
-        )
+        if adopted_witness.get("witness_state") == self._RDS_COMMITTED_WITNESS_STATE:
+            self.set_reconciliation_state(
+                reconciliation_state=CoreBackupExecution.ReconciliationState.RESOLVED,
+                reason="rds_snapshot_adopted",
+                metadata={
+                    "snapshot_identifier": adopted_witness["snapshot_identifier"],
+                    "snapshot_create_time": adopted_witness.get(
+                        "snapshot_create_time"
+                    ),
+                },
+                lease_owner=lease_owner,
+                lease_token=lease_token,
+            )
+            self._rds_resolve_create_reconciliation(
+                lease_owner=lease_owner, lease_token=lease_token
+            )
+        else:
+            # RDS can return a creating snapshot before it exposes
+            # SnapshotCreateTime.  Persist the provisional provider pointer,
+            # but do not claim that the create witness is committed until a
+            # later poll pins the provider incarnation timestamp.
+            self.set_reconciliation_state(
+                reconciliation_state=CoreBackupExecution.ReconciliationState.REQUIRED,
+                reason="rds_snapshot_provisional",
+                metadata={
+                    "snapshot_identifier": adopted_witness["snapshot_identifier"],
+                    "snapshot_create_time": None,
+                },
+                lease_owner=lease_owner,
+                lease_token=lease_token,
+            )
         return self
 
     def _rds_create_lease(self, task_id=None):
@@ -8248,19 +9953,61 @@ class CoreAWSRDSBackup(UtilBackup):
             "create",
             "provider_create",
         }:
-            if task_id and state.lease_owner != str(task_id):
-                return None
-            return state.lease_owner, str(state.lease_token), False
+            # A live lease is exclusive even when the delivery carries the
+            # same Celery id (or no id at all).  Reusing its token would allow
+            # two concurrent callers to cross the provider mutation boundary.
+            return None
         owner = str(task_id or "rds-create-" + uuid.uuid4().hex)
         state = self.claim_execution(
             lease_owner=owner,
             phase="create",
-            lease_seconds=max(1, int(getattr(settings, "BACKUP_CREATE_LEASE_SECONDS", 3600))),
+            lease_seconds=self._rds_create_lease_seconds(),
             respect_retry_at=False,
         )
         if state is None:
             return None
         return owner, str(state.lease_token), True
+
+    @classmethod
+    def _rds_create_lease_seconds(cls):
+        """Keep abrupt-worker recovery bounded to a short RDS-specific lease."""
+        try:
+            configured = int(
+                getattr(
+                    settings,
+                    "RDS_CREATE_LEASE_SECONDS",
+                    cls._RDS_CREATE_LEASE_DEFAULT_SECONDS,
+                )
+            )
+        except (TypeError, ValueError):
+            configured = cls._RDS_CREATE_LEASE_DEFAULT_SECONDS
+        return min(
+            cls._RDS_CREATE_LEASE_MAX_SECONDS,
+            max(1, configured),
+        )
+
+    def _rds_assert_live_create_lease(self, owner, token):
+        """Renew and fence the create lease at the AWS mutation boundary."""
+
+        now = timezone.now()
+        lease_seconds = self._rds_create_lease_seconds()
+        with transaction.atomic():
+            fresh = self.__class__.objects.select_for_update().get(pk=self.pk)
+            state = self._locked_execution_state(fresh, create=False)
+            if state is None or not state.lease_matches(
+                owner,
+                token,
+                phase="create",
+                now=now,
+                require_live=True,
+            ):
+                raise RDSLeaseLost("The RDS worker lost its execution lease.")
+            state.heartbeat_at = now
+            state.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            state.save(
+                update_fields=["heartbeat_at", "lease_expires_at", "modified"]
+            )
+            return state
 
     def _rds_release_create(self, owner, token):
         self.release_execution(
@@ -8278,17 +10025,17 @@ class CoreAWSRDSBackup(UtilBackup):
         except (TypeError, ValueError):
             status_code = None
         if provider_code in {"dbsnapshotalreadyexists", "dbsnapshotalreadyexist"}:
-            return "already_exists", "PROVIDER_CREATE_OUTCOME_UNKNOWN", UtilBackup.Status.IN_PROGRESS, _provider_retry_at(headers)
+            return "already_exists", "PROVIDER_CREATE_OUTCOME_UNKNOWN", UtilBackup.Status.RETRYING, _provider_retry_at(headers)
         if provider_code in _PROVIDER_AUTH_ERROR_CODES or status_code in _PROVIDER_AUTH_HTTP_CODES:
             return "auth_failed", "PROVIDER_AUTH_FAILED", UtilBackup.Status.FAILED, None
         if provider_code in _PROVIDER_RATE_LIMIT_ERROR_CODES or status_code == 429:
-            return "rate_limited", "PROVIDER_RATE_LIMIT", UtilBackup.Status.IN_PROGRESS, _provider_retry_at(headers)
+            return "rate_limited", "PROVIDER_RATE_LIMIT", UtilBackup.Status.RETRYING, _provider_retry_at(headers)
         if provider_code in _PROVIDER_TRANSIENT_ERROR_CODES or status_code in _PROVIDER_TRANSIENT_HTTP_CODES or status_code and status_code >= 500:
-            return "transient_outage", "PROVIDER_TRANSIENT_OUTAGE", UtilBackup.Status.IN_PROGRESS, _provider_retry_at(headers)
+            return "transient_outage", "PROVIDER_TRANSIENT_OUTAGE", UtilBackup.Status.RETRYING, _provider_retry_at(headers)
         if isinstance(error, (requests.exceptions.Timeout, TimeoutError)):
-            return "timeout", "PROVIDER_TIMEOUT", UtilBackup.Status.IN_PROGRESS, _provider_retry_at()
+            return "timeout", "PROVIDER_TIMEOUT", UtilBackup.Status.RETRYING, _provider_retry_at()
         if isinstance(error, requests.exceptions.ConnectionError):
-            return "transient_outage", "PROVIDER_TRANSIENT_OUTAGE", UtilBackup.Status.IN_PROGRESS, _provider_retry_at()
+            return "transient_outage", "PROVIDER_TRANSIENT_OUTAGE", UtilBackup.Status.RETRYING, _provider_retry_at()
         if provider_code in _PROVIDER_NOT_FOUND_ERROR_CODES or status_code == 404:
             return "not_found", "PROVIDER_NOT_FOUND", UtilBackup.Status.FAILED, None
         return "provider_failed", "PROVIDER_FAILED", UtilBackup.Status.FAILED, None
@@ -8362,6 +10109,36 @@ class CoreAWSRDSBackup(UtilBackup):
         owner, token, release_on_success = lease
         completed = False
         client = None
+        mutation_started = False
+
+        def mark_unknown(category, error_code, retry_at):
+            """Persist the provider category before exposing an unknown result."""
+            self._rds_checkpoint_create_outcome(
+                owner,
+                token,
+                category=category,
+                error_code=error_code,
+            )
+            self._rds_record_fenced_outcome(
+                owner=owner,
+                token=token,
+                category=category,
+                error_code="PROVIDER_CREATE_OUTCOME_UNKNOWN",
+                retry_at=retry_at,
+                operation="create",
+            )
+            self.set_reconciliation_state(
+                reconciliation_state=CoreBackupExecution.ReconciliationState.REQUIRED,
+                reason="rds_create_outcome_unknown",
+                metadata={
+                    "provider": self._RDS_PROVIDER,
+                    "provider_error_category": str(category)[:64],
+                    "provider_error_code": str(error_code)[:64],
+                },
+                lease_owner=owner,
+                lease_token=token,
+            )
+
         try:
             auth = self.aws_rds.node.connection.auth_aws_rds
             client = auth.get_client()
@@ -8374,19 +10151,81 @@ class CoreAWSRDSBackup(UtilBackup):
                 source_id=self.aws_rds.unique_id,
                 account_id="pending",
                 region=region,
+                source_node_id=self.aws_rds.node_id,
+                source_resource_id=self.aws_rds_id,
+                witness_state=self._RDS_PROVISIONAL_WITNESS_STATE,
             )
             self._rds_persist_witness(provisional, lease_owner=owner, lease_token=token)
-            account_id = self._rds_account_id(auth)
+            _state, stored = self._rds_execution_metadata()
+            stored = self._rds_canonical_witness(stored)
+            account_id = stored["account_id"]
+            if account_id == "pending":
+                account_id = self._rds_account_id(auth)
+            if stored["account_id"] not in {"pending", account_id}:
+                raise RDSOwnershipError(
+                    "The durable RDS account identity changed."
+                )
+            source_restore_configuration = stored.get(
+                "source_restore_configuration"
+            )
+            source_provider_evidence = {
+                key: stored[key]
+                for key in (
+                    "source_dbi_resource_id",
+                    "source_db_instance_arn",
+                )
+                if key in stored
+            }
+            if source_restore_configuration is None:
+                source_restore_configuration, source_provider_evidence = (
+                    self._rds_describe_source_restore_configuration(
+                        client,
+                        source_id=str(self.aws_rds.unique_id),
+                        account_id=account_id,
+                        region=region,
+                    )
+                )
             witness = self._rds_witness(
                 identifier=identifier,
                 source_id=self.aws_rds.unique_id,
                 account_id=account_id,
                 region=region,
+                source_node_id=self.aws_rds.node_id,
+                source_resource_id=self.aws_rds_id,
+                source_dbi_resource_id=source_provider_evidence.get(
+                    "source_dbi_resource_id"
+                ),
+                source_db_instance_arn=source_provider_evidence.get(
+                    "source_db_instance_arn"
+                ),
+                source_restore_configuration=source_restore_configuration,
+                ownership_marker=provisional["ownership_marker"],
+                witness_state=self._RDS_PROVISIONAL_WITNESS_STATE,
             )
-            self._rds_persist_witness(witness, lease_owner=owner, lease_token=token)
+            state = self._rds_persist_witness(
+                witness, lease_owner=owner, lease_token=token
+            )
+            witness = dict(state.provider_metadata["rds_request"])
+
+            # A worker may have died after AWS accepted the request.  Reconcile
+            # the durable mutation intent before doing any new create lookup or
+            # request.  This path is read-only and bounded by the original
+            # checkpoint deadline.
+            reconciliation_result = self._rds_reconcile_create_request(
+                client,
+                witness,
+                lease_owner=owner,
+                lease_token=token,
+            )
+            if reconciliation_result != "not_pending":
+                completed = True
+                return self
+
             try:
                 existing = self._rds_find_owned_snapshot(
-                    self._rds_list_snapshots(client, identifier), witness
+                    self._rds_list_snapshots(client, identifier),
+                    witness,
+                    client=client,
                 )
             except Exception as error:
                 if not _rds_not_found(error):
@@ -8394,13 +10233,30 @@ class CoreAWSRDSBackup(UtilBackup):
                 existing = None
             if existing is not None:
                 self._rds_adopt_snapshot(
-                    existing, witness, lease_owner=owner, lease_token=token
+                    existing,
+                    witness,
+                    client=client,
+                    tags_verified=True,
+                    lease_owner=owner,
+                    lease_token=token,
                 )
                 completed = True
                 return self
+            # This is deliberately the final durable check before the only
+            # non-idempotent RDS create request.  A worker paused during source
+            # discovery must not call AWS after another worker takes over.
+            self._rds_assert_live_create_lease(owner, token)
+            self._rds_checkpoint_create_mutation(owner, token)
+            mutation_started = True
             response = client.create_db_snapshot(
                 DBSnapshotIdentifier=identifier,
                 DBInstanceIdentifier=self.aws_rds.unique_id,
+                Tags=[
+                    {
+                        "Key": self._RDS_SNAPSHOT_OWNERSHIP_TAG_KEY,
+                        "Value": witness["ownership_marker"],
+                    }
+                ],
             )
             if not isinstance(response, dict) or not isinstance(
                 response.get("DBSnapshot"), dict
@@ -8410,11 +10266,47 @@ class CoreAWSRDSBackup(UtilBackup):
             if not self._rds_snapshot_owned(snapshot, witness):
                 raise RDSOwnershipError("RDS create response ownership failed.")
             self._rds_adopt_snapshot(
-                snapshot, witness, lease_owner=owner, lease_token=token
+                snapshot,
+                witness,
+                client=client,
+                allow_missing_provisional_tag=True,
+                lease_owner=owner,
+                lease_token=token,
+            )
+            completed = True
+            return self
+        except RDSOwnershipTagPending:
+            if not mutation_started:
+                self._rds_terminal_create_failure(
+                    "PROVIDER_OWNERSHIP_MISMATCH",
+                    owner=owner,
+                    token=token,
+                    reason="rds_ownership_tag_missing",
+                )
+                completed = True
+                return self
+            result = self._rds_record_create_visibility_observation(
+                kind="missing_tag",
+                error_code="PROVIDER_OWNERSHIP_MISMATCH",
+                provider_status="ownership_tag_pending",
+                lease_owner=owner,
+                lease_token=token,
             )
             completed = True
             return self
         except (RDSDuplicateMatch, RDSOwnershipError, RDSMalformedResponse) as error:
+            # A malformed response after the provider mutation boundary is an
+            # unknown outcome, not proof that the create failed. Ownership and
+            # duplicate evidence remain terminal/manual because they identify a
+            # conflicting provider object.
+            if mutation_started and isinstance(error, RDSMalformedResponse):
+                mark_unknown(
+                    "malformed_response",
+                    "PROVIDER_MALFORMED_RESPONSE",
+                    None,
+                )
+                self._rds_release_create(owner, token)
+                raise
             code = (
                 "PROVIDER_DUPLICATE_MATCH"
                 if isinstance(error, RDSDuplicateMatch)
@@ -8431,6 +10323,14 @@ class CoreAWSRDSBackup(UtilBackup):
             return False
         except Exception as error:
             category, code, result, retry_at = self._rds_exception_outcome(error)
+            if mutation_started:
+                # Any exception after the provider call can conceal an accepted
+                # RDS request, including a provider 404/rate-limit response.
+                # Preserve that provider category separately from the durable
+                # reconciliation intent and never issue a blind second create.
+                mark_unknown(category, code, retry_at)
+                self._rds_release_create(owner, token)
+                raise
             if result == UtilBackup.Status.FAILED:
                 self._rds_record_fenced_outcome(
                     owner=owner,
@@ -8447,29 +10347,32 @@ class CoreAWSRDSBackup(UtilBackup):
                         owner, token, phase="create", now=timezone.now(), require_live=True
                     ):
                         raise RDSLeaseLost("The RDS worker lost its execution lease.")
-                    fresh.status = UtilBackup.Status.FAILED
+                    fresh.status = result
                     fresh.save(update_fields=["status", "modified"])
                 completed = True
                 return self
-            # A timeout, throttle, or outage after the provider request may mean
-            # AWS accepted it. Keep the witness and lease, and force reconciliation
-            # before any future create attempt.
+            # A provider retryable failure before the mutation boundary is not an
+            # unknown create. Keep its category and use RETRYING so the recovery
+            # sweep can retry without presenting a provider error as IN_PROGRESS.
             self._rds_record_fenced_outcome(
                 owner=owner,
                 token=token,
                 category=category,
-                error_code="PROVIDER_CREATE_OUTCOME_UNKNOWN",
+                error_code=code,
                 retry_at=retry_at,
                 operation="create",
             )
-            self.set_reconciliation_state(
-                reconciliation_state=CoreBackupExecution.ReconciliationState.REQUIRED,
-                reason="rds_create_outcome_unknown",
-                metadata={"provider": self._RDS_PROVIDER},
-                lease_owner=owner,
-                lease_token=token,
-            )
-            raise
+            with transaction.atomic():
+                fresh = self.__class__.objects.select_for_update().get(pk=self.pk)
+                state = self._locked_execution_state(fresh, create=False)
+                if state is None or not state.lease_matches(
+                    owner, token, phase="create", now=timezone.now(), require_live=True
+                ):
+                    raise RDSLeaseLost("The RDS worker lost its execution lease.")
+                fresh.status = result
+                fresh.save(update_fields=["status", "modified"])
+            completed = True
+            return self
         finally:
             if release_on_success and completed:
                 self._rds_release_create(owner, token)
@@ -8488,12 +10391,19 @@ class CoreAWSRDSBackup(UtilBackup):
             auth = self.aws_rds.node.connection.auth_aws_rds
             client = auth.get_client()
             witness = self._rds_current_witness(auth)
+            reconciliation_pending = self._rds_create_reconciliation_pending()
             try:
                 snapshots = self._rds_list_snapshots(
                     client, witness["snapshot_identifier"]
                 )
             except ClientError as error:
                 if _rds_not_found(error):
+                    if reconciliation_pending:
+                        return self._rds_record_create_visibility_observation(
+                            kind="zero_match",
+                            error_code="PROVIDER_NOT_FOUND",
+                            provider_status="not_found",
+                        )
                     return _provider_failed(
                         self,
                         provider=self._RDS_PROVIDER,
@@ -8501,17 +10411,40 @@ class CoreAWSRDSBackup(UtilBackup):
                         code="PROVIDER_NOT_FOUND",
                     )
                 raise
-            snapshot = self._rds_find_owned_snapshot(snapshots, witness)
+            try:
+                snapshot = self._rds_find_owned_snapshot(
+                    snapshots,
+                    witness,
+                    client=client,
+                    allow_missing_provisional_tag=reconciliation_pending,
+                )
+            except RDSOwnershipTagPending:
+                if not reconciliation_pending:
+                    raise RDSOwnershipError(
+                        "RDS snapshot ownership tag verification failed."
+                    )
+                return self._rds_record_create_visibility_observation(
+                    kind="missing_tag",
+                    error_code="PROVIDER_OWNERSHIP_MISMATCH",
+                    provider_status="ownership_tag_pending",
+                )
             if snapshot is None:
+                if reconciliation_pending:
+                    return self._rds_record_create_visibility_observation(
+                        kind="zero_match",
+                        error_code="PROVIDER_NOT_FOUND",
+                        provider_status="not_found",
+                    )
                 return _provider_failed(
                     self,
                     provider=self._RDS_PROVIDER,
                     state="not_found",
                     code="PROVIDER_NOT_FOUND",
                 )
-            normalized = _rds_json(snapshot)
-            self._rds_adopt_snapshot(normalized, witness)
-            state = str(normalized.get("Status") or "").lower()
+            self._rds_adopt_snapshot(
+                snapshot, witness, client=client, tags_verified=True
+            )
+            state = str(snapshot.get("Status") or "").lower()
             if state == "available":
                 self.status = UtilBackup.Status.COMPLETE
                 self.save(update_fields=["status", "modified"])
@@ -8553,9 +10486,24 @@ class CoreAWSRDSBackup(UtilBackup):
                 code="PROVIDER_MALFORMED_RESPONSE",
             )
         except Exception as error:
-            return _provider_exception_outcome(
-                self, error, provider="aws_rds"
+            category, code, result, retry_at = self._rds_exception_outcome(error)
+            _record_provider_outcome(
+                self,
+                provider=self._RDS_PROVIDER,
+                category=category,
+                operation="poll",
+                provider_status=category,
+                error_code=code,
+                retry_at=retry_at,
+                resource_id=self.unique_id,
             )
+            self.status = result
+            self.save(update_fields=["status", "modified"])
+            if result == UtilBackup.Status.FAILED:
+                return result
+            # RETRYING is deliberately distinct from a provider snapshot that
+            # is actually in an IN_PROGRESS lifecycle state.
+            return result
 
     def delete_requested(self):
         self.status = self.Status.DELETE_REQUESTED
@@ -8564,6 +10512,91 @@ class CoreAWSRDSBackup(UtilBackup):
     @property
     def node(self):
         return self.aws_rds.node
+
+    @classmethod
+    def _rds_delete_redispatch_grace_seconds(cls):
+        return cls._rds_bounded_setting(
+            "RDS_DELETE_REDISPATCH_GRACE_SECONDS",
+            cls._RDS_DELETE_REDISPATCH_GRACE_DEFAULT_SECONDS,
+            minimum=1,
+            maximum=cls._RDS_DELETE_REDISPATCH_GRACE_MAX_SECONDS,
+        )
+
+    @classmethod
+    def _rds_delete_max_attempts(cls):
+        return cls._rds_bounded_setting(
+            "RDS_DELETE_MAX_ATTEMPTS",
+            cls._RDS_DELETE_MAX_ATTEMPTS_DEFAULT,
+            minimum=1,
+            maximum=cls._RDS_DELETE_MAX_ATTEMPTS_LIMIT,
+        )
+
+    def _rds_confirm_delete_absence(self, client, witness):
+        """Return True only after a post-delete provider read proves absence."""
+        try:
+            snapshots = self._rds_list_snapshots(
+                client, witness["snapshot_identifier"]
+            )
+        except ClientError as error:
+            if _rds_not_found(error):
+                return True
+            raise
+        if not snapshots:
+            return True
+        # A visible object must still pass the complete ownership check.  A
+        # foreign replacement is a terminal safety failure, never "absence".
+        snapshot = self._rds_find_owned_snapshot(
+            snapshots, witness, client=client
+        )
+        return snapshot is None
+
+    def _rds_mark_delete_pending(self, owner, token, *, provider_status):
+        self._rds_checkpoint_delete(
+            owner,
+            token,
+            {
+                "provider_status": str(provider_status or "pending")[:64],
+                "phase": "delete_wait",
+            },
+        )
+        self._rds_set_delete_status(
+            owner, token, UtilBackup.Status.DELETE_IN_PROGRESS
+        )
+        self._rds_record_fenced_outcome(
+            owner=owner,
+            token=token,
+            category="reconciliation_required",
+            error_code="PROVIDER_RECONCILIATION_REQUIRED",
+            operation="delete",
+            provider_status=provider_status,
+        )
+        self.set_reconciliation_state(
+            reconciliation_state=CoreBackupExecution.ReconciliationState.REQUIRED,
+            reason="rds_delete_visibility_pending",
+            metadata={"provider": self._RDS_PROVIDER},
+            lease_owner=owner,
+            lease_token=token,
+        )
+        return False
+
+    def _rds_mark_delete_manual_review(self, owner, token, *, reason):
+        self._rds_record_fenced_outcome(
+            owner=owner,
+            token=token,
+            category="manual_review",
+            error_code="PROVIDER_RECONCILIATION_REQUIRED",
+            operation="delete",
+            provider_status=reason,
+        )
+        self.set_reconciliation_state(
+            reconciliation_state=CoreBackupExecution.ReconciliationState.MANUAL_REVIEW,
+            reason=reason,
+            metadata={"provider": self._RDS_PROVIDER},
+            lease_owner=owner,
+            lease_token=token,
+        )
+        self._rds_set_delete_status(owner, token, UtilBackup.Status.DELETE_FAILED)
+        return False
 
     def soft_delete(self):
         msg = (
@@ -8587,9 +10620,20 @@ class CoreAWSRDSBackup(UtilBackup):
             if identity and identity != witness:
                 raise RDSOwnershipError("The durable RDS deletion identity changed.")
             if delete_state.get("delete_completed"):
-                self._rds_set_delete_status(owner, token, UtilBackup.Status.DELETE_COMPLETED)
-                completed = True
-                return True
+                # A worker can die after the durable completion checkpoint but
+                # before the local status commit. Reconfirm absence instead of
+                # trusting a flag that could have been persisted too early by an
+                # older worker.
+                if self._rds_confirm_delete_absence(client, witness):
+                    self._rds_set_delete_status(
+                        owner, token, UtilBackup.Status.DELETE_COMPLETED
+                    )
+                    completed = True
+                    return True
+                self._rds_checkpoint_delete(
+                    owner, token, {"delete_completed": False, "phase": "delete_requested"}
+                )
+                delete_state = self._rds_delete_state()
             delete_started = bool(delete_state.get("delete_started"))
             try:
                 snapshots = self._rds_list_snapshots(client, witness["snapshot_identifier"])
@@ -8622,29 +10666,60 @@ class CoreAWSRDSBackup(UtilBackup):
                 )
                 completed = True
                 return True
-            snapshot = self._rds_find_owned_snapshot(snapshots, witness)
+            snapshot = self._rds_find_owned_snapshot(
+                snapshots, witness, client=client
+            )
             if snapshot is None:
                 raise RDSOwnershipError("RDS deletion target was not found in the full listing.")
-            if delete_started:
-                # The request may already have been accepted. Never issue a second
-                # delete while the exact owned object remains visible.
-                self._rds_set_delete_status(owner, token, UtilBackup.Status.DELETE_IN_PROGRESS)
-                self._rds_record_fenced_outcome(
-                    owner=owner,
-                    token=token,
-                    category="reconciliation_required",
-                    error_code="PROVIDER_CREATE_OUTCOME_UNKNOWN",
-                    operation="delete",
+            request_sent_at = delete_state.get("delete_request_sent_at")
+            request_recent = False
+            if request_sent_at:
+                try:
+                    request_recent = (
+                        timezone.now()
+                        - self._rds_parse_durable_timestamp(
+                            request_sent_at, field="delete request timestamp"
+                        )
+                        < timedelta(seconds=self._rds_delete_redispatch_grace_seconds())
+                    )
+                except RDSMalformedResponse:
+                    raise
+            if delete_started and request_recent:
+                # A recent request may have been accepted while the target is
+                # still visible. Wait for the provider's asynchronous delete
+                # instead of issuing a duplicate immediately.
+                return self._rds_mark_delete_pending(
+                    owner,
+                    token,
                     provider_status=str(snapshot.get("Status") or "present"),
                 )
-                self.set_reconciliation_state(
-                    reconciliation_state=CoreBackupExecution.ReconciliationState.REQUIRED,
-                    reason="rds_delete_outcome_unknown",
-                    metadata={"provider": self._RDS_PROVIDER},
-                    lease_owner=owner,
-                    lease_token=token,
+            response_received = bool(delete_state.get("delete_response_received_at"))
+            provider_status = str(snapshot.get("Status") or "").lower()
+            if delete_started and (response_received or provider_status == "deleting"):
+                # A confirmed SDK response or the provider's own deleting
+                # lifecycle is proof that the delete request is already in
+                # flight. Never redispatch against that visible snapshot.
+                return self._rds_mark_delete_pending(
+                    owner,
+                    token,
+                    provider_status=provider_status or "delete_requested",
                 )
-                return False
+            if delete_started and provider_status != "available":
+                # Only an exact available snapshot can be safely considered a
+                # crash-before-request candidate. Other states require polling.
+                return self._rds_mark_delete_pending(
+                    owner,
+                    token,
+                    provider_status=provider_status or "unknown",
+                )
+            attempts = int(delete_state.get("delete_attempts", 0) or 0) + 1
+            if attempts > self._rds_delete_max_attempts():
+                return self._rds_mark_delete_manual_review(
+                    owner,
+                    token,
+                    reason="rds_delete_max_attempts_exhausted",
+                )
+            now = timezone.now()
             self._rds_checkpoint_delete(
                 owner,
                 token,
@@ -8659,9 +10734,20 @@ class CoreAWSRDSBackup(UtilBackup):
                         "snapshot_type": witness["snapshot_type"],
                     },
                     "delete_started": True,
+                    "delete_attempts": attempts,
+                    # This is the no-second-delete boundary.  It is durable
+                    # before the SDK call so a crash between checkpoint and
+                    # request can be redispatched after the bounded grace.
+                    "delete_intent_at": delete_state.get(
+                        "delete_intent_at"
+                    )
+                    or now.isoformat(),
+                    "delete_request_sent_at": now.isoformat(),
+                    "delete_completed": False,
                     "phase": "delete_requested",
                 },
             )
+            delete_call_not_found = False
             try:
                 client.delete_db_snapshot(
                     DBSnapshotIdentifier=witness["snapshot_identifier"]
@@ -8669,19 +10755,41 @@ class CoreAWSRDSBackup(UtilBackup):
             except Exception as error:
                 if not _rds_not_found(error):
                     raise
-                # A 404 after the exact proof and delete_started checkpoint is a
-                # successful lost-response adoption, not a new deletion attempt.
+                delete_call_not_found = True
                 self._rds_checkpoint_delete(
                     owner,
                     token,
-                    {"delete_completed": True, "phase": "complete"},
+                    {
+                        "delete_response_received_at": timezone.now().isoformat(),
+                        "delete_response_category": "not_found",
+                    },
                 )
             else:
                 self._rds_checkpoint_delete(
                     owner,
                     token,
-                    {"delete_completed": True, "phase": "complete"},
+                    {
+                        "delete_response_received_at": timezone.now().isoformat(),
+                        "delete_response_category": "accepted",
+                    },
                 )
+            # A successful/404 delete response is not itself completion. The
+            # post-request inventory read is the completion witness.
+            if not self._rds_confirm_delete_absence(client, witness):
+                return self._rds_mark_delete_pending(
+                    owner,
+                    token,
+                    provider_status=(
+                        "not_found_response_pending"
+                        if delete_call_not_found
+                        else "delete_requested"
+                    ),
+                )
+            self._rds_checkpoint_delete(
+                owner,
+                token,
+                {"delete_completed": True, "phase": "complete"},
+            )
             self._rds_set_delete_status(owner, token, UtilBackup.Status.DELETE_COMPLETED)
             self._rds_record_fenced_outcome(
                 owner=owner,
@@ -8731,10 +10839,11 @@ class CoreAWSRDSBackup(UtilBackup):
                 retry_at=retry_at,
                 operation="delete",
             )
-            if result == UtilBackup.Status.IN_PROGRESS:
+            delete_started = bool(self._rds_delete_state().get("delete_started"))
+            if delete_started and result == UtilBackup.Status.RETRYING:
                 self.set_reconciliation_state(
                     reconciliation_state=CoreBackupExecution.ReconciliationState.REQUIRED,
-                    reason="rds_delete_outcome_unknown",
+                    reason="rds_delete_provider_retry",
                     metadata={"provider": self._RDS_PROVIDER},
                     lease_owner=owner,
                     lease_token=token,
@@ -8743,7 +10852,7 @@ class CoreAWSRDSBackup(UtilBackup):
                 owner,
                 token,
                 UtilBackup.Status.DELETE_IN_PROGRESS
-                if result == UtilBackup.Status.IN_PROGRESS
+                if delete_started and result == UtilBackup.Status.RETRYING
                 else UtilBackup.Status.DELETE_FAILED,
             )
             return False
@@ -9050,6 +11159,29 @@ class BaseRestoreExecution(TimeStampedModel):
         self._required_restore_lease_owner = str(owner or "")
         self._required_restore_lease_token = str(token or "")
         return self
+
+    def assert_live_execution_fence(self):
+        """Re-read and verify the renewable restore lease at a mutation boundary."""
+        required_owner = getattr(self, "_required_restore_lease_owner", "")
+        required_token = getattr(self, "_required_restore_lease_token", "")
+        if self.pk is None or not required_owner or not required_token:
+            raise RestoreExecutionLeaseLostError(
+                "Restore execution lease ownership was not bound."
+            )
+        with transaction.atomic():
+            current = self.__class__.objects.select_for_update().only(
+                "lease_owner", "lease_token", "lease_expires_at"
+            ).get(pk=self.pk)
+            if (
+                current.lease_owner != required_owner
+                or str(current.lease_token or "") != required_token
+                or not current.lease_expires_at
+                or current.lease_expires_at <= timezone.now()
+            ):
+                raise RestoreExecutionLeaseLostError(
+                    "Restore execution lease ownership was lost."
+                )
+            return current
 
     def save(self, *args, **kwargs):
         required_owner = getattr(self, "_required_restore_lease_owner", "")

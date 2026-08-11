@@ -179,6 +179,7 @@ _PUBLIC_ERROR_CODES = set(UtilBackup.EXECUTION_ERROR_MESSAGES) | {
     "RESTORE_ARCHIVE_NOT_READY",
     "RESTORE_FAILED",
     "RESTORE_INTEGRITY_FAILED",
+    "RESTORE_RECONCILIATION_REQUIRED",
     "RESTORE_RETRIES_EXHAUSTED",
     "RESTORE_SOURCE_UNAVAILABLE",
     "RESTORE_TARGET_REJECTED",
@@ -228,6 +229,10 @@ _PUBLIC_ERROR_MESSAGES = {
         "restore. Grant PostgreSQL CREATEDB or MySQL/MariaDB CREATE and DROP globally "
         "or with a matching target/database grant, "
         "or choose an explicit in-place restore target. No target was changed."
+    ),
+    "RESTORE_RECONCILIATION_REQUIRED": (
+        "The restore state is ambiguous, so automatic destination writes were "
+        "stopped. Review the exact ownership and checkpoint evidence before retrying."
     ),
 }
 
