@@ -1004,7 +1004,7 @@ class TestAWSRDSNativeSnapshot(BaseTestCase):
         backup.refresh_from_db()
         self.assertIsInstance(backup.metadata["SnapshotCreateTime"], str)
 
-    def test_rds_snapshot_retry_reuses_existing_snapshot_with_datetime_metadata(self):
+    def test_rds_snapshot_retry_reuses_existing_snapshot_provisionally(self):
         connection = factories.make_connection(self.account, self.member, code="aws_rds")
         key = self.account.get_encryption_key()
         CoreAuthAWSRDS.objects.create(
@@ -1092,7 +1092,15 @@ class TestAWSRDSNativeSnapshot(BaseTestCase):
 
         backup.refresh_from_db()
         self.assertEqual(backup.unique_id, "rds-retry-backup")
-        self.assertIsInstance(backup.metadata["SnapshotCreateTime"], str)
+        self.assertNotIn("SnapshotCreateTime", backup.metadata or {})
+        witness = backup.get_execution_state(create=False).provider_metadata[
+            "rds_request"
+        ]
+        self.assertEqual(
+            witness["witness_state"],
+            CoreAWSRDSBackup._RDS_PROVISIONAL_WITNESS_STATE,
+        )
+        self.assertNotIn("snapshot_create_time", witness)
         client.create_db_snapshot.assert_not_called()
 
     def test_rds_restore_redelivery_with_resource_id_only_resumes_polling(self):

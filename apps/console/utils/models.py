@@ -275,6 +275,27 @@ class UtilBackup(TimeStampedModel):
     class Meta:
         abstract = True
 
+    def set_provider_metadata(self, provider_metadata):
+        """Replace provider metadata without dropping poll recovery control.
+
+        ``_backup_control`` is a BackupSheep-owned envelope used by the cloud
+        poller for the current task id, lease token, and successor ETA. Provider
+        responses are not allowed to replace that envelope, even when an adapter
+        intentionally replaces the rest of the metadata with its latest
+        response. The caller still owns the surrounding transaction/lease and
+        must persist the returned value through the normal fenced ``save`` path.
+        """
+        if not isinstance(provider_metadata, dict):
+            raise TypeError("provider_metadata must be a dictionary")
+        updated = dict(provider_metadata)
+        current = getattr(self, "metadata", None)
+        control = current.get("_backup_control") if isinstance(current, dict) else None
+        if isinstance(control, dict):
+            # Provider payloads cannot smuggle or overwrite the control envelope.
+            updated["_backup_control"] = dict(control)
+        self.metadata = updated
+        return updated
+
     def bind_execution_fence(self, owner, token):
         """Require subsequent instance saves to own this exact live lease."""
         self._required_backup_lease_owner = str(owner or "")

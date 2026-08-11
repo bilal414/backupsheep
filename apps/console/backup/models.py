@@ -581,7 +581,7 @@ def _poll_ovh_snapshot(backup, snapshots, *, provider, ready_state, source_id):
     if state == ready_state:
         backup.unique_id = snapshot.get("id") or backup.unique_id
         backup.size_gigabytes = snapshot.get("size")
-        backup.metadata = snapshot
+        backup.set_provider_metadata(snapshot)
         backup.status = UtilBackup.Status.COMPLETE
         backup.save()
         _record_provider_outcome(
@@ -1961,7 +1961,7 @@ class CoreUpCloudBackup(UtilBackup):
                     if storage["state"] == "online":
                         self.size_gigabytes = storage["size"]
                         self.status = UtilBackup.Status.COMPLETE
-                        self.metadata = storage
+                        self.set_provider_metadata(storage)
                         self.save()
                         _record_provider_outcome(
                             self,
@@ -2134,11 +2134,11 @@ class CoreOracleBackup(UtilBackup):
                         if request.data.lifecycle_state == BootVolumeBackup.LIFECYCLE_STATE_AVAILABLE:
                             self.size_gigabytes = request.data.size_in_gbs
                             self.status = UtilBackup.Status.COMPLETE
-                            self.metadata = {
+                            self.set_provider_metadata({
                                 "_bs_name": request.data.display_name,
                                 "_bs_size": request.data.size_in_gbs,
                                 "_bs_vol_type": "boot",
-                            }
+                            })
                             self.save()
                             _record_provider_outcome(
                                 self,
@@ -2186,11 +2186,11 @@ class CoreOracleBackup(UtilBackup):
                         if request.data.lifecycle_state == VolumeBackup.LIFECYCLE_STATE_AVAILABLE:
                             self.size_gigabytes = request.data.size_in_gbs
                             self.status = UtilBackup.Status.COMPLETE
-                            self.metadata = {
+                            self.set_provider_metadata({
                                 "_bs_name": request.data.display_name,
                                 "_bs_size": request.data.size_in_gbs,
                                 "_bs_vol_type": "block",
-                            }
+                            })
                             self.save()
                             _record_provider_outcome(
                                 self,
@@ -3213,7 +3213,7 @@ class CoreGoogleCloudBackup(UtilBackup):
                     state = str(image.get("status") or "").upper()
                     if state == "READY":
                         self.size_gigabytes = int(image.get("totalStorageBytes", 0))/(1000**3)
-                        self.metadata = image
+                        self.set_provider_metadata(image)
                         self.status = UtilBackup.Status.COMPLETE
                         self.save()
                         _record_provider_outcome(
@@ -3273,7 +3273,7 @@ class CoreGoogleCloudBackup(UtilBackup):
                     state = str(disk.get("status") or "").upper()
                     if state == "READY":
                         self.size_gigabytes = int(disk.get("storageBytes", 0))/(1000**3)
-                        self.metadata = disk
+                        self.set_provider_metadata(disk)
                         self.status = UtilBackup.Status.COMPLETE
                         self.save()
                         _record_provider_outcome(
@@ -7756,7 +7756,7 @@ class CoreLightsailBackup(UtilBackup):
                             code="PROVIDER_OWNERSHIP_MISMATCH",
                         )
                     self.size_gigabytes = snapshot.get("sizeInGb")
-                    self.metadata = snapshot
+                    self.set_provider_metadata(snapshot)
                     state = str(snapshot.get("state") or "").lower()
                     if state == "available":
                         self.status = UtilBackup.Status.COMPLETE
@@ -7812,7 +7812,7 @@ class CoreLightsailBackup(UtilBackup):
                     state = str(snapshot.get("state") or "").lower()
                     if state == "available":
                         self.size_gigabytes = snapshot["sizeInGb"]
-                        self.metadata = snapshot
+                        self.set_provider_metadata(snapshot)
                         self.status = UtilBackup.Status.COMPLETE
                         self.save()
                         _record_provider_outcome(
@@ -7861,7 +7861,7 @@ class CoreLightsailBackup(UtilBackup):
                     state = str(snapshot.get("state") or "").lower()
                     if state == "completed":
                         self.size_gigabytes = snapshot["sizeInGb"]
-                        self.metadata = snapshot
+                        self.set_provider_metadata(snapshot)
                         self.status = UtilBackup.Status.COMPLETE
                         self.save()
                         _record_provider_outcome(
@@ -8040,6 +8040,7 @@ class CoreAWSRDSBackup(UtilBackup):
     _RDS_LEGACY_WITNESS_VERSION = 2
     _RDS_PROVISIONAL_WITNESS_STATE = "provisional"
     _RDS_COMMITTED_WITNESS_STATE = "committed"
+    _RDS_STABLE_SNAPSHOT_STATES = frozenset({"available"})
     _RDS_SNAPSHOT_OWNERSHIP_TAG_KEY = "BackupSheepOwnership"
     _RDS_CREATE_LEASE_DEFAULT_SECONDS = 300
     _RDS_CREATE_LEASE_MAX_SECONDS = 900
@@ -9758,26 +9759,42 @@ class CoreAWSRDSBackup(UtilBackup):
         )
 
     def _rds_snapshot_witness(self, witness, snapshot):
-        """Pin provider incarnation data and promote provisional to committed."""
+        """Pin incarnation data only after an exact stable snapshot observation.
+
+        RDS may include ``SnapshotCreateTime`` in the response to
+        ``CreateDBSnapshot`` while the snapshot is still ``creating``. That
+        value is not a safe incarnation witness: a later exact ``Describe``
+        can expose the stable timestamp for the same owned snapshot with a
+        different value. Keep the request-bound marker/ARN/source witness
+        provisional until the provider reports ``available``. Once committed,
+        retain strict timestamp matching for every later observation.
+        """
         if witness.get("witness_version") != self._RDS_WITNESS_VERSION:
             raise RDSMalformedResponse(
                 "Only current-version RDS snapshots can be adopted."
             )
+        status = str(snapshot.get("Status") or "").lower()
+        committed = (
+            witness.get("witness_state") == self._RDS_COMMITTED_WITNESS_STATE
+        )
+        stable_observation = status in self._RDS_STABLE_SNAPSHOT_STATES
         create_time = None
-        if snapshot.get("SnapshotCreateTime") not in (None, ""):
-            create_time = self._rds_canonical_snapshot_time(
-                snapshot.get("SnapshotCreateTime")
-            )
+        if committed or stable_observation:
+            if snapshot.get("SnapshotCreateTime") not in (None, ""):
+                create_time = self._rds_canonical_snapshot_time(
+                    snapshot.get("SnapshotCreateTime")
+                )
         expected_time = witness.get("snapshot_create_time")
         if expected_time and create_time != expected_time:
             raise RDSOwnershipError("The RDS snapshot incarnation changed.")
-        status = str(snapshot.get("Status") or "").lower()
-        if status == "available" and not create_time:
+        if stable_observation and not create_time:
             raise RDSMalformedResponse(
                 "RDS marked the snapshot available without SnapshotCreateTime."
             )
         original_time = None
-        if snapshot.get("OriginalSnapshotCreateTime") not in (None, ""):
+        if (committed or stable_observation) and snapshot.get(
+            "OriginalSnapshotCreateTime"
+        ) not in (None, ""):
             original_time = self._rds_canonical_snapshot_time(
                 snapshot.get("OriginalSnapshotCreateTime"),
                 field="OriginalSnapshotCreateTime",
@@ -9861,7 +9878,17 @@ class CoreAWSRDSBackup(UtilBackup):
         # Django's JSON encoder intentionally emits milliseconds for datetimes;
         # do not let that presentation round trip truncate the exact provider
         # incarnation pinned in the durable witness.
-        if adopted_witness.get("snapshot_create_time"):
+        if (
+            adopted_witness.get("witness_state")
+            == self._RDS_PROVISIONAL_WITNESS_STATE
+        ):
+            # RDS can expose a mutable create timestamp while the snapshot is
+            # still creating. Keep the backup row request-bound and provisional
+            # until an exact-owned available observation supplies the stable
+            # incarnation values.
+            normalized.pop("SnapshotCreateTime", None)
+            normalized.pop("OriginalSnapshotCreateTime", None)
+        elif adopted_witness.get("snapshot_create_time"):
             normalized["SnapshotCreateTime"] = adopted_witness[
                 "snapshot_create_time"
             ]
@@ -9879,7 +9906,7 @@ class CoreAWSRDSBackup(UtilBackup):
             fresh.unique_id = adopted_witness["snapshot_identifier"]
             fresh.region = adopted_witness["region"]
             fresh.size_gigabytes = normalized.get("AllocatedStorage")
-            fresh.metadata = normalized
+            fresh.set_provider_metadata(normalized)
             fresh.save(
                 update_fields=[
                     "unique_id",
@@ -9892,7 +9919,7 @@ class CoreAWSRDSBackup(UtilBackup):
         self.unique_id = witness["snapshot_identifier"]
         self.region = adopted_witness["region"]
         self.size_gigabytes = normalized.get("AllocatedStorage")
-        self.metadata = normalized
+        self.set_provider_metadata(normalized)
         state = self.record_provider_reference(
             idempotency_key=adopted_witness["ownership_marker"],
             resource_id=adopted_witness["snapshot_identifier"],
@@ -11040,10 +11067,10 @@ class CoreVultrDatabaseBackup(UtilBackup):
             self.provider_error_class = ""
             self.provider_http_status = None
             self.provider_backup_id = provider_backup_id(record) or self.provider_backup_id
-            self.metadata = {
+            self.set_provider_metadata({
                 "source_database_id": self.vultr_database.unique_id,
                 "provider_backup": record,
-            }
+            })
             if state in {"complete", "completed", "available", "succeeded", "success"}:
                 self.provider_status = "complete"
                 self.status = self.Status.COMPLETE
@@ -11082,11 +11109,11 @@ class CoreVultrDatabaseBackup(UtilBackup):
             self.provider_status = error.category
             self.provider_error_class = error.category
             self.provider_http_status = error.status_code
-            self.metadata = {
+            self.set_provider_metadata({
                 "source_database_id": self.vultr_database.unique_id,
                 "error": error.category,
                 "status_code": error.status_code,
-            }
+            })
             self.status = (
                 self.Status.IN_PROGRESS
                 if error.category in {"rate_limited", "transient_outage"}

@@ -1021,7 +1021,7 @@ def _backup_record_create_failure(
     safe_metadata.update({"_bs_provider": witness.get("provider"), "_bs_marker": witness.get("marker")})
     safe_metadata["_bs_last_error_code"] = classified.code
     safe_metadata["_bs_reconciliation"] = metadata
-    backup.metadata = safe_metadata
+    backup.set_provider_metadata(safe_metadata)
     backup.save(update_fields=["status", "metadata", "modified"])
     return classified
 
@@ -1117,7 +1117,7 @@ def _backup_adopt_provider_resource(
         if size is not None:
             backup.size_gigabytes = size
             update_fields.insert(1, "size_gigabytes")
-    backup.metadata = safe_record
+    backup.set_provider_metadata(safe_record)
     backup.save(update_fields=list(dict.fromkeys(update_fields)))
     from apps.console.backup.models import CoreBackupExecution
 
@@ -4053,7 +4053,7 @@ class CoreAWS(UtilCloud):
                 )
                 metadata["_aws_backup"] = aws_backup
                 backup.unique_id = job_id
-                backup.metadata = metadata
+                backup.set_provider_metadata(metadata)
                 backup.save(update_fields=["unique_id", "metadata", "modified"])
                 return
 
@@ -4886,7 +4886,7 @@ class CoreLightsail(UtilCloud):
                 if existing:
                     backup.unique_id = existing.get("name", backup.uuid_str)
                     backup.size_gigabytes = existing.get("sizeInGb")
-                    backup.metadata = existing
+                    backup.set_provider_metadata(existing)
                     backup.save()
                     return
 
@@ -4918,7 +4918,7 @@ class CoreLightsail(UtilCloud):
                 if existing:
                     backup.unique_id = backup.uuid_str
                     backup.size_gigabytes = existing.get("sizeInGb")
-                    backup.metadata = existing
+                    backup.set_provider_metadata(existing)
                     backup.save()
                     return
                 response = client.create_instance_snapshot(
@@ -4946,7 +4946,7 @@ class CoreLightsail(UtilCloud):
                 if existing:
                     backup.unique_id = backup.uuid_str
                     backup.size_gigabytes = existing.get("sizeInGb")
-                    backup.metadata = existing
+                    backup.set_provider_metadata(existing)
                     backup.save()
                     return
                 response = client.create_disk_snapshot(
@@ -6763,13 +6763,13 @@ class CoreVultrDatabase(UtilCloud):
         backup.provider_marker = marker
         backup.unique_id = provider_id or marker
         backup.provider_state = provider_backup_state(record)
-        backup.metadata = {
+        backup.set_provider_metadata({
             "source_database_id": self.unique_id,
             "engine": self.engine,
             "region": self.region,
             "plan": self.plan,
             "provider_backup": safe_vultr_database_record(record),
-        }
+        })
         backup.save()
 
     def restore_snapshot(self, backup, restore):
@@ -7077,11 +7077,11 @@ class CoreVultr(UtilCloud):
                 self.node, backup, "PROVIDER_AUTH_FAILED", cause=error
             )
         source_key = "instance_id" if self.node.type == CoreNode.Type.CLOUD else "block_id"
-        backup.metadata = record_snapshot_ownership(
+        backup.set_provider_metadata(record_snapshot_ownership(
             backup.metadata,
             source_id=self.unique_id,
             source_key=source_key,
-        )
+        ))
         # Commit the source identity before the provider mutation.  If the
         # worker dies after Vultr accepts the request, the next delivery can
         # safely adopt a completed snapshot whose response omits instance_id.
@@ -7145,11 +7145,11 @@ class CoreVultr(UtilCloud):
                             self.node, backup, "PROVIDER_OWNERSHIP_MISMATCH"
                         )
                     backup.unique_id = existing.get("id")
-                    backup.metadata = record_snapshot_ownership(
+                    backup.set_provider_metadata(record_snapshot_ownership(
                         _safe_vultr_record(existing),
                         source_id=self.unique_id,
                         source_key=source_key,
-                    )
+                    ))
                     if source_key == "block_id":
                         backup.size_gigabytes = round(
                             int(existing.get("size", 0)) / (1000 ** 3), 2
@@ -7176,20 +7176,20 @@ class CoreVultr(UtilCloud):
                     )
                 except requests.Timeout as error:
                     capture_exception(error)
-                    backup.metadata = {
+                    backup.set_provider_metadata({
                         **(backup.metadata or {}),
                         "vultr_create_outcome_unknown": True,
-                    }
+                    })
                     backup.save(update_fields=["metadata", "modified"])
                     _raise_vultr_backup_failure(
                         self.node, backup, "PROVIDER_TIMEOUT", cause=error
                     )
                 except requests.RequestException as error:
                     capture_exception(error)
-                    backup.metadata = {
+                    backup.set_provider_metadata({
                         **(backup.metadata or {}),
                         "vultr_create_outcome_unknown": True,
-                    }
+                    })
                     backup.save(update_fields=["metadata", "modified"])
                     _raise_vultr_backup_failure(
                         self.node, backup, "PROVIDER_TRANSIENT_OUTAGE", cause=error
@@ -7205,20 +7205,20 @@ class CoreVultr(UtilCloud):
                                 raise ValueError("missing snapshot id")
                         except (TypeError, ValueError, KeyError) as error:
                             capture_exception(error)
-                            backup.metadata = {
+                            backup.set_provider_metadata({
                                 **(backup.metadata or {}),
                                 "vultr_create_outcome_unknown": True,
-                            }
+                            })
                             backup.save(update_fields=["metadata", "modified"])
                             _raise_vultr_backup_failure(
                                 self.node, backup, "PROVIDER_MALFORMED_RESPONSE", cause=error
                             )
                         backup.unique_id = str(snapshot["id"])
-                        backup.metadata = record_snapshot_ownership(
+                        backup.set_provider_metadata(record_snapshot_ownership(
                             _safe_vultr_record(snapshot),
                             source_id=self.unique_id,
                             source_key=source_key,
-                        )
+                        ))
                         backup.save()
                         return
 
@@ -7233,10 +7233,10 @@ class CoreVultr(UtilCloud):
                     else:
                         code = "PROVIDER_REQUEST_FAILED"
                     if code == "PROVIDER_TRANSIENT_OUTAGE":
-                        backup.metadata = {
+                        backup.set_provider_metadata({
                             **(backup.metadata or {}),
                             "vultr_create_outcome_unknown": True,
-                        }
+                        })
                         backup.save(update_fields=["metadata", "modified"])
                     _raise_vultr_backup_failure(self.node, backup, code)
                 finally:
@@ -7945,11 +7945,11 @@ class CoreOracle(UtilCloud):
                         "size_in_gbs",
                         getattr(existing, "size_in_gigabytes", None),
                     )
-                    backup.metadata = {
+                    backup.set_provider_metadata({
                         "display_name": existing.display_name,
                         "lifecycle_state": existing.lifecycle_state,
                         "id": existing.id,
-                    }
+                    })
                     backup.save()
 
                 if (self.metadata or {}).get("_bs_vol_type") == "boot":
@@ -8363,7 +8363,7 @@ class CoreGoogleCloud(UtilCloud):
                     backup.size_gigabytes = int(
                         image.get("totalStorageBytes", 0)
                     ) / (1000 ** 3)
-                    backup.metadata = image
+                    backup.set_provider_metadata(image)
                     backup.save()
                     return
 
@@ -8396,7 +8396,7 @@ class CoreGoogleCloud(UtilCloud):
                         image = result.json()
                         backup.unique_id = image.get("id") or image.get("name") or backup.uuid_str
                         backup.size_gigabytes = int(image.get("totalStorageBytes", 0))/(1000**3)
-                        backup.metadata = image
+                        backup.set_provider_metadata(image)
                         backup.save()
                     else:
                         raise NodeBackupFailedError(
@@ -8443,7 +8443,7 @@ class CoreGoogleCloud(UtilCloud):
                     backup.size_gigabytes = int(
                         snapshot.get("storageBytes", 0)
                     ) / (1000 ** 3)
-                    backup.metadata = snapshot
+                    backup.set_provider_metadata(snapshot)
                     backup.save()
                     return
                 result = client.get(
@@ -8476,7 +8476,7 @@ class CoreGoogleCloud(UtilCloud):
                         snapshot = result.json()
                         backup.unique_id = snapshot.get("id") or snapshot.get("name") or backup.uuid_str
                         backup.size_gigabytes = int(snapshot.get("storageBytes", 0)) / (1000 ** 3)
-                        backup.metadata = snapshot
+                        backup.set_provider_metadata(snapshot)
                         backup.save()
                     else:
                         raise NodeBackupFailedError(

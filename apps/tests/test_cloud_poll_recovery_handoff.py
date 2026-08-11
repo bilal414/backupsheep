@@ -38,6 +38,34 @@ class CloudPollRecoveryHandoffTests(BaseTestCase):
     def _recovery_id(backup):
         return f"recover-poll-{backup.__class__.__name__}-{backup.pk}"
 
+    def test_provider_metadata_replacement_preserves_control_envelope(self):
+        _node, backup = self._backup()
+        control = {
+            "poll_task_id": "poll-task-1",
+            "poll_lease_token": "lease-token-1",
+            "poll_next_run_at": time.time() + 120,
+        }
+        backup.metadata = {
+            "_backup_control": control,
+            "provider_before": "old",
+        }
+        backup.save(update_fields=["metadata", "modified"])
+
+        backup.set_provider_metadata(
+            {
+                "provider_after": "new",
+                # A provider response must never be able to replace the
+                # BackupSheep-owned recovery envelope.
+                "_backup_control": {"poll_task_id": "provider-value"},
+            }
+        )
+        backup.save(update_fields=["metadata", "modified"])
+
+        backup.refresh_from_db()
+        self.assertEqual(backup.metadata["_backup_control"], control)
+        self.assertEqual(backup.metadata["provider_after"], "new")
+        self.assertNotIn("provider_before", backup.metadata)
+
     def test_recovery_reservation_is_consumed_by_exact_poll_delivery(self):
         node, backup = self._backup()
         recovery_id = self._recovery_id(backup)

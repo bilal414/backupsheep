@@ -1,8 +1,9 @@
 """Crash/reconciliation tests for native AWS RDS snapshots."""
 
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from unittest import mock
-import uuid
 
 from botocore.exceptions import ClientError
 from django.test import override_settings
@@ -469,6 +470,117 @@ class AWSRDSReliabilityTests(BaseTestCase):
         self.assertFalse(result)
         self.client.create_db_snapshot.assert_not_called()
 
+    def test_in_progress_rds_poll_preserves_control_and_schedules_successor(self):
+        self._persist_full_witness(snapshot_create_time=None)
+        self.client.describe_db_snapshots.return_value = {
+            "DBSnapshots": [
+                self._snapshot(
+                    status="creating",
+                    snapshot_create_time="2026-08-11T01:03:34.012Z",
+                )
+            ]
+        }
+
+        with self._clients(), mock.patch.object(
+            helper_tasks.poll_cloud_backup, "apply_async"
+        ) as successor:
+            helper_tasks.poll_cloud_backup.apply(
+                args=[self.rds.node_id, self.backup.id, time.time(), 120, 86400],
+                task_id="rds-poll-control-task",
+            )
+
+        successor.assert_called_once()
+        self.backup.refresh_from_db()
+        control = self.backup.metadata["_backup_control"]
+        state = self.backup.get_execution_state(create=False)
+        self.assertEqual(control["poll_task_id"], "rds-poll-control-task")
+        self.assertEqual(control["poll_lease_token"], str(state.lease_token))
+        self.assertIn("poll_next_run_at", control)
+        self.assertGreater(float(control["poll_next_run_at"]), time.time())
+        self.assertGreaterEqual(successor.call_args.kwargs["countdown"], 1)
+
+    def test_rds_create_timestamp_is_provisional_until_available(self):
+        self.client.describe_db_snapshots.return_value = {"DBSnapshots": []}
+        self.client.create_db_snapshot.return_value = {
+            "DBSnapshot": self._snapshot(
+                status="creating",
+                snapshot_create_time="2026-08-11T01:03:34.012Z",
+            )
+        }
+
+        with self._clients():
+            self.backup.create_snapshot(task_id="rds-timestamp-create")
+
+        state = self.backup.get_execution_state(create=False)
+        provisional = state.provider_metadata["rds_request"]
+        self.assertEqual(
+            provisional["witness_state"],
+            CoreAWSRDSBackup._RDS_PROVISIONAL_WITNESS_STATE,
+        )
+        self.assertNotIn("snapshot_create_time", provisional)
+        self.assertNotIn("original_snapshot_create_time", provisional)
+        self.assertEqual(
+            provisional["snapshot_arn"],
+            "arn:aws:rds:us-east-1:123456789012:snapshot:rds-reliability-backup",
+        )
+        self.assertEqual(
+            provisional["source_db_instance_identifier"], "source-db"
+        )
+        self.assertEqual(
+            provisional["source_dbi_resource_id"], "db-resource-source-db"
+        )
+        provisional_marker = provisional["ownership_marker"]
+        self.backup.refresh_from_db()
+        self.assertNotIn("SnapshotCreateTime", self.backup.metadata or {})
+        self.assertNotIn("OriginalSnapshotCreateTime", self.backup.metadata or {})
+
+        stable_time = "2026-08-11T01:03:38.195Z"
+        self.client.describe_db_snapshots.return_value = {
+            "DBSnapshots": [
+                self._snapshot(status="available", snapshot_create_time=stable_time)
+            ]
+        }
+        with self._clients():
+            result = self.backup.poll_status()
+
+        self.assertEqual(result, UtilBackup.Status.COMPLETE)
+        state = self.backup.get_execution_state(create=False)
+        committed = state.provider_metadata["rds_request"]
+        self.assertEqual(
+            committed["witness_state"],
+            CoreAWSRDSBackup._RDS_COMMITTED_WITNESS_STATE,
+        )
+        self.assertEqual(
+            committed["snapshot_create_time"],
+            "2026-08-11T01:03:38.195000Z",
+        )
+        self.assertEqual(committed["ownership_marker"], provisional_marker)
+        self.assertEqual(committed["snapshot_arn"], provisional["snapshot_arn"])
+        self.assertEqual(
+            committed["source_db_instance_identifier"],
+            provisional["source_db_instance_identifier"],
+        )
+
+    def test_committed_rds_witness_rejects_replacement_after_stable_timestamp(self):
+        self._persist_full_witness(
+            snapshot_create_time="2026-08-11T01:03:38.195Z"
+        )
+        self.client.describe_db_snapshots.return_value = {
+            "DBSnapshots": [
+                self._snapshot(
+                    status="available",
+                    snapshot_create_time="2026-08-11T01:03:38.196Z",
+                )
+            ]
+        }
+
+        with self._clients():
+            result = self.backup.poll_status()
+
+        self.assertEqual(result, UtilBackup.Status.FAILED)
+        state = self.backup.get_execution_state(create=False)
+        self.assertEqual(state.last_error_code, "PROVIDER_OWNERSHIP_MISMATCH")
+
     def test_snapshot_substitution_or_recreation_fails_v2_ownership_proof(self):
         self._persist_full_witness()
         for label, changes in (
@@ -549,7 +661,14 @@ class AWSRDSReliabilityTests(BaseTestCase):
     def test_lost_create_response_is_adopted_without_duplicate_create(self):
         self.client.describe_db_snapshots.side_effect = [
             {"DBSnapshots": []},
-            {"DBSnapshots": [self._snapshot()]},
+            {
+                "DBSnapshots": [
+                    self._snapshot(
+                        status="available",
+                        snapshot_create_time="2026-08-11T01:03:38.195Z",
+                    )
+                ]
+            },
         ]
         self.client.create_db_snapshot.side_effect = TimeoutError("lost response")
 
@@ -590,7 +709,8 @@ class AWSRDSReliabilityTests(BaseTestCase):
         )
         self.assertEqual(final_witness["witness_state"], "committed")
         self.assertEqual(
-            final_witness["snapshot_create_time"], "2026-08-10T12:00:00.000000Z"
+            final_witness["snapshot_create_time"],
+            "2026-08-11T01:03:38.195000Z",
         )
         self.assertEqual(self.client.describe_db_instances.call_count, 1)
         self.assertEqual(

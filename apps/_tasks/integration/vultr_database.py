@@ -188,7 +188,7 @@ def backup_vultr_database(
     except Exception as error:
         capture_exception(error)
         code, message, retryable = _safe_vultr_restore_error(error)
-        backup.metadata = {"error_code": code}
+        backup.set_provider_metadata({"error_code": code})
         backup.status = (
             UtilBackup.Status.RETRYING if retryable else UtilBackup.Status.FAILED
         )
@@ -230,7 +230,7 @@ def poll_vultr_database_backup(self, backup_id):
         backup.status = UtilBackup.Status.FAILED
         backup.provider_error_class = "provider_error"
         backup.provider_status = "provider_error"
-        backup.metadata = {"error_code": code}
+        backup.set_provider_metadata({"error_code": code})
         backup.save(update_fields=["status", "provider_error_class", "provider_status", "metadata", "modified"])
         backup.record_execution_error(code=code, message=message)
         return
