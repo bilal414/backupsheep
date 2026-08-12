@@ -12472,6 +12472,107 @@ class CoreCloudRestore(BaseRestoreExecution):
     def node_type_object(self):
         return self.node._integration_object()
 
+    @property
+    def verification_resume_mode(self):
+        """Return the safe operator-resume mode, or an empty string.
+
+        Most manual resumes require a committed provider pointer and can only
+        poll that exact target. UpCloud volume clones have one additional safe
+        recovery path: its clone API may accept the request before the worker
+        persists the returned UUID. In that crash window, allow the UI to
+        enqueue the read-only ``check_restore`` reconciliation pass only when
+        every durable source-bound identity field is internally consistent.
+        """
+        if not (
+            self.status == self.Status.FAILED
+            and self.operation_phase == self.OperationPhase.MANUAL_REVIEW
+        ):
+            return ""
+        if str(self.resource_id or self.provider_job_id or "").strip():
+            return "provider_pointer"
+
+        try:
+            node = self.node
+            if (
+                node.type != node.Type.VOLUME
+                or node.connection.integration.code != "upcloud"
+            ):
+                return ""
+            params = self.params if isinstance(self.params, dict) else {}
+            identity = params.get("_bs_upcloud_restore")
+            generic = params.get("_backupsheep_restore")
+            if not isinstance(identity, dict) or not isinstance(generic, dict):
+                return ""
+            if params.get("_bs_create_outcome_unknown") is not True:
+                return ""
+            if params.get("_bs_marker_required") is not True:
+                return ""
+
+            backup = self.backup
+            source_id = str(getattr(backup, "unique_id", "") or "").strip()
+            source_origin_id = str(
+                getattr(self.node_type_object, "unique_id", "") or ""
+            ).strip()
+            if not source_id or not source_origin_id:
+                return ""
+
+            digest = hashlib.sha256(
+                f"upcloud:v1:{self.pk}:{self.correlation_id}:{source_id}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()[:24]
+            marker = f"backupsheep-upcloud-{self.pk}-{digest}"[:128]
+            expected_identity = {
+                "source_id": source_id,
+                "source_origin_id": source_origin_id,
+                "target_type": "normal",
+                "marker": marker,
+                "marker_digest": digest,
+                "marker_source_bound": True,
+            }
+            if any(identity.get(key) != value for key, value in expected_identity.items()):
+                return ""
+            expected_generic = {
+                "provider": "upcloud",
+                "source_id": source_id,
+                "target_kind": "storage",
+                "target_name": marker,
+                "marker": marker,
+            }
+            if any(
+                str(generic.get(key) or "") != value
+                for key, value in expected_generic.items()
+            ):
+                return ""
+            if str(params.get("_bs_provider_name") or "") != marker:
+                return ""
+            if str(self.restore_marker or "") != marker:
+                return ""
+            if not re.fullmatch(r"[0-9a-f]{64}", str(self.request_fingerprint or "")):
+                return ""
+
+            source_zone = str(identity.get("source_zone") or "")
+            target_zone = str(identity.get("target_zone") or "")
+            source_tier = str(identity.get("source_tier") or "").casefold()
+            target_tier = str(identity.get("target_tier") or "").casefold()
+            source_encrypted = str(identity.get("source_encrypted") or "").casefold()
+            target_encrypted = str(identity.get("target_encrypted") or "").casefold()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", source_zone):
+                return ""
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", target_zone):
+                return ""
+            if source_tier not in {"standard", "maxiops"} or target_tier != source_tier:
+                return ""
+            if source_encrypted not in {"yes", "no"} or target_encrypted != source_encrypted:
+                return ""
+        except (AttributeError, ObjectDoesNotExist, TypeError, ValueError):
+            return ""
+        return "provider_reconciliation"
+
+    @property
+    def can_resume_verification(self):
+        return bool(self.verification_resume_mode)
+
     def poll_status(self):
         """Single restore status check, used by the poll_cloud_restore task.
 

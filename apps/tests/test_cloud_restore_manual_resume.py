@@ -1,5 +1,6 @@
 """Contract tests for safe, read-only native cloud restore resumption."""
 
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -16,6 +17,8 @@ from apps.api.v1.node.views import CoreNodeView
 from apps.console.backup.models import CoreCloudRestore
 from apps.console.connection.models import CoreIntegration
 from apps.console.log.models import CoreLog
+from apps.console.node.models import CoreNode, CoreUpCloud
+from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 
 
@@ -70,6 +73,84 @@ class ManualCloudRestoreResumeApiTests(TransactionTestCase):
         force_authenticate(request, user=user or self.user)
         view = CoreNodeView.as_view({"post": "resume_restore"})
         return view(request, pk=node.id)
+
+    def _pointerless_upcloud_restore(self):
+        CoreIntegration.objects.get_or_create(
+            code="upcloud",
+            defaults={
+                "name": "UpCloud",
+                "type": CoreIntegration.Type.CLOUD,
+            },
+        )
+        connection = factories.make_connection(
+            self.account, self.member, code="upcloud"
+        )
+        node = CoreNode.objects.create(
+            connection=connection,
+            type=CoreNode.Type.VOLUME,
+            name="upcloud-volume",
+            added_by=self.member,
+        )
+        integration = CoreUpCloud.objects.create(
+            node=node,
+            name="upcloud-volume",
+            unique_id="upcloud-source-volume",
+        )
+        backup = integration.backups.create(
+            uuid="upcloud-backup-marker",
+            unique_id="upcloud-backup-storage",
+            status=UtilBackup.Status.COMPLETE,
+            type=UtilBackup.Type.ON_DEMAND,
+            attempt_no=1,
+        )
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="upcloud-restored-volume",
+            status=CoreCloudRestore.Status.FAILED,
+            operation_phase=CoreCloudRestore.OperationPhase.MANUAL_REVIEW,
+            execution_phase="manual_review",
+            error="safe old error",
+            last_error_code="PROVIDER_OWNERSHIP_MISMATCH",
+            request_fingerprint="b" * 64,
+            params={},
+        )
+        digest = hashlib.sha256(
+            (
+                f"upcloud:v1:{restore.pk}:{restore.correlation_id}:"
+                f"{backup.unique_id}"
+            ).encode("utf-8")
+        ).hexdigest()[:24]
+        marker = f"backupsheep-upcloud-{restore.pk}-{digest}"
+        restore.restore_marker = marker
+        restore.params = {
+            "_bs_provider_name": marker,
+            "_bs_marker_required": True,
+            "_bs_create_outcome_unknown": True,
+            "_backupsheep_restore": {
+                "provider": "upcloud",
+                "source_id": backup.unique_id,
+                "target_kind": "storage",
+                "target_name": marker,
+                "marker": marker,
+            },
+            "_bs_upcloud_restore": {
+                "source_id": backup.unique_id,
+                "source_origin_id": integration.unique_id,
+                "target_type": "normal",
+                "marker": marker,
+                "marker_digest": digest,
+                "marker_source_bound": True,
+                "source_zone": "us-chi1",
+                "target_zone": "us-chi1",
+                "source_tier": "standard",
+                "target_tier": "standard",
+                "source_encrypted": "yes",
+                "target_encrypted": "yes",
+            },
+        }
+        restore.save(update_fields=["restore_marker", "params", "modified"])
+        return node, integration, restore
 
     def test_resume_preserves_provider_witness_and_dispatches_only_poll(self):
         restore = self._restore()
@@ -136,6 +217,61 @@ class ManualCloudRestoreResumeApiTests(TransactionTestCase):
         )
         self.assertEqual(log.data["restore_id"], restore.id)
         self.assertNotIn("provider-target-91", log.data)
+
+    def test_pointerless_upcloud_unknown_outcome_dispatches_only_reconciliation_poll(self):
+        node, integration, restore = self._pointerless_upcloud_restore()
+        self.assertTrue(restore.can_resume_verification)
+        self.assertEqual(
+            restore.verification_resume_mode, "provider_reconciliation"
+        )
+
+        with mock.patch(
+            "apps._tasks.integration.restore.poll_cloud_restore.apply_async"
+        ) as poll, mock.patch.object(
+            integration, "restore_snapshot"
+        ) as provider_create:
+            response = self._post(node, restore.id)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertFalse(response.data["can_resume_verification"])
+        provider_create.assert_not_called()
+        poll.assert_called_once_with(
+            task_id=f"cloud-restore-resume-{restore.id}-1",
+            args=[node.id, restore.id],
+        )
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertEqual(
+            restore.operation_phase, CoreCloudRestore.OperationPhase.RECONCILING
+        )
+        self.assertEqual(restore.execution_phase, "provider_reconciling")
+        self.assertEqual(
+            restore.execution_metadata["manual_resume_history"][0]["mode"],
+            "provider_reconciliation",
+        )
+
+    def test_pointerless_upcloud_resume_fails_closed_on_identity_drift(self):
+        node, integration, restore = self._pointerless_upcloud_restore()
+        params = dict(restore.params)
+        identity = dict(params["_bs_upcloud_restore"])
+        identity["target_tier"] = "maxiops"
+        params["_bs_upcloud_restore"] = identity
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+
+        with mock.patch(
+            "apps._tasks.integration.restore.poll_cloud_restore.apply_async"
+        ) as poll, mock.patch.object(
+            integration, "restore_snapshot"
+        ) as provider_create:
+            response = self._post(node, restore.id)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "restore_provider_pointer_missing")
+        poll.assert_not_called()
+        provider_create.assert_not_called()
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, CoreCloudRestore.Status.FAILED)
 
     def test_active_repeat_is_idempotent_and_does_not_enqueue_again(self):
         restore = self._restore()
@@ -357,6 +493,7 @@ class ManualCloudRestoreResumeTemplateTests(SimpleTestCase):
             self.source,
         )
         self.assertIn("String(item.resource_id || item.provider_job_id || '').trim()", self.source)
+        self.assertIn("item.can_resume_verification === true", self.source)
 
     def test_duplicate_name_polling_stays_on_the_tracked_restore_id(self):
         polling_block = self.source.split(

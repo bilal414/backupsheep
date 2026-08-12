@@ -985,13 +985,14 @@ class CoreNodeView(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def resume_restore(self, request, pk=None):
-        """Resume read-only provider verification for one existing target.
+        """Resume read-only provider verification for one durable request.
 
         This action is deliberately separate from ``restore_backup``.  It may
-        only move a failed/manual-review row with an already persisted provider
-        pointer back to polling; it never invokes a provider create/restore
-        endpoint.  The row lock and durable manual-resume sequence make two
-        operator clicks converge on one Celery delivery.
+        only move a failed/manual-review row with either an already persisted
+        provider pointer or a strictly verified UpCloud volume unknown-outcome
+        identity back to polling/reconciliation. It never invokes a provider
+        create/restore endpoint. The row lock and durable manual-resume sequence
+        make two operator clicks converge on one Celery delivery.
         """
         from apps._tasks.integration.restore import poll_cloud_restore
         from apps.console.backup.models import CoreCloudRestore
@@ -1092,14 +1093,15 @@ class CoreNodeView(viewsets.ModelViewSet):
                         status=status.HTTP_409_CONFLICT,
                     )
 
-                provider_pointer = str(
-                    restore.resource_id or restore.provider_job_id or ""
-                ).strip()
-                if not provider_pointer:
+                resume_mode = restore.verification_resume_mode
+                if not resume_mode:
                     return Response(
                         {
                             "code": "restore_provider_pointer_missing",
-                            "detail": "This failed restore has no provider target to verify safely.",
+                            "detail": (
+                                "This failed restore has no provider target or exact "
+                                "unknown-outcome identity to verify safely."
+                            ),
                         },
                         status=status.HTTP_409_CONFLICT,
                     )
@@ -1131,6 +1133,7 @@ class CoreNodeView(viewsets.ModelViewSet):
                     {
                         "sequence": resume_sequence,
                         "requested_at": resumed_at,
+                        "mode": resume_mode,
                     }
                 )
                 metadata["manual_resume_count"] = resume_sequence
@@ -1155,8 +1158,14 @@ class CoreNodeView(viewsets.ModelViewSet):
                 restore.execution_metadata = metadata
                 restore.params = params
                 restore.status = CoreCloudRestore.Status.IN_PROGRESS
-                restore.operation_phase = CoreCloudRestore.OperationPhase.POLLING
-                restore.execution_phase = "provider_polling"
+                if resume_mode == "provider_reconciliation":
+                    restore.operation_phase = (
+                        CoreCloudRestore.OperationPhase.RECONCILING
+                    )
+                    restore.execution_phase = "provider_reconciling"
+                else:
+                    restore.operation_phase = CoreCloudRestore.OperationPhase.POLLING
+                    restore.execution_phase = "provider_polling"
                 restore.error = None
                 restore.last_error_code = ""
                 restore.next_retry_at = None
@@ -1195,6 +1204,7 @@ class CoreNodeView(viewsets.ModelViewSet):
                         "node_id": node.id,
                         "node_name": node.name,
                         "resume_sequence": resume_sequence,
+                        "resume_mode": resume_mode,
                     },
                 )
                 queued = True

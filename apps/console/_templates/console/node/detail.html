@@ -3143,7 +3143,8 @@
                     const status = String(item.status || execution.status || '').toLowerCase();
                     const phase = String(item.operation_phase || execution.phase || '').toLowerCase();
                     const pointer = String(item.resource_id || item.provider_job_id || '').trim();
-                    return Boolean(pointer) &&
+                    const safeResume = item.can_resume_verification === true || Boolean(pointer);
+                    return safeResume &&
                         (status === '4' || status === 'failed') &&
                         phase === 'manual_review';
                 },
