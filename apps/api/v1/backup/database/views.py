@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 from datetime import timedelta
+from functools import partial
 
 import arrow
 import boto3
@@ -10,6 +11,7 @@ from botocore.config import Config
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.timezone import get_current_timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -38,8 +40,14 @@ from apps.api.v1.backup.mixins import VisibleNodeBackupMixin
 from apps.api.v1.backup.database.permissions import (
     CoreDatabaseBackupViewPermissions,
 )
-from apps.api.v1.backup.database.serializers import CoreDatabaseBackupSerializer, CoreDatabaseBackupStoragePointsSerializer, \
-    CoreDatabaseRestoreSerializer
+from apps.api.v1.backup.database.serializers import (
+    CoreDatabaseBackupSerializer,
+    CoreDatabaseBackupStoragePointsSerializer,
+    CoreDatabaseRestoreSerializer,
+    _DATABASE_RESTORE_MANUAL_RESUME_HISTORY_LIMIT,
+    _DATABASE_RESTORE_MANUAL_RESUME_MAX_COUNT,
+    database_restore_verification_resume_mode,
+)
 from apps.api.v1.utils.api_filters import DateRangeFilter
 from apps.api.v1.utils.api_helpers import get_start_end_of_previous_day
 from apps.console.backup.models import (
@@ -335,10 +343,299 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    @action(detail=True, methods=["post"])
+    def resume_restore(self, request, pk=None):
+        """Resume verification for one proven existing logical fork.
+
+        This action never starts a new restore request.  The locked durable row
+        is the idempotency boundary: once it is active, every repeated request
+        is a no-op and the restore worker reuses the original target mapping
+        and checkpoints to reconcile the provider-side marker.
+        """
+        from apps._tasks.integration.restore import restore_database_backup
+
+        backup = self.get_object()
+        raw_restore_id = request.data.get("restore_id")
+        if isinstance(raw_restore_id, bool):
+            raw_restore_id = None
+        try:
+            restore_id = int(raw_restore_id)
+        except (TypeError, ValueError, OverflowError):
+            restore_id = 0
+        if restore_id < 1:
+            return Response(
+                {
+                    "code": "restore_id_required",
+                    "detail": "A valid restore_id is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        queued = False
+        resume_sequence = None
+        restore = None
+        task_id = None
+        try:
+            with transaction.atomic():
+                restore = (
+                    CoreDatabaseRestore.objects.select_for_update()
+                    .filter(pk=restore_id, backup=backup)
+                    .first()
+                )
+                if restore is None:
+                    return Response(
+                        {
+                            "code": "restore_not_found",
+                            "detail": "The restore was not found for this backup.",
+                        },
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                if restore.status == CoreDatabaseRestore.Status.IN_PROGRESS:
+                    response_data = dict(CoreDatabaseRestoreSerializer(restore).data)
+                    response_data.update(
+                        {
+                            "idempotent_replay": True,
+                            "manual_resume_enqueued": False,
+                            "code": "restore_resume_already_active",
+                        }
+                    )
+                    return Response(response_data, status=status.HTTP_200_OK)
+
+                if restore.status == CoreDatabaseRestore.Status.COMPLETE:
+                    return Response(
+                        {
+                            "code": "restore_already_complete",
+                            "detail": "The restore is already complete and was not changed.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                if restore.status != CoreDatabaseRestore.Status.FAILED:
+                    return Response(
+                        {
+                            "code": "restore_not_failed",
+                            "detail": "Only failed logical restores can be resumed.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                resume_mode = database_restore_verification_resume_mode(restore)
+                if not resume_mode:
+                    return Response(
+                        {
+                            "code": "restore_resume_not_safe",
+                            "detail": (
+                                "This failed restore does not contain the exact durable "
+                                "fork mapping and checkpoint evidence required for safe verification."
+                            ),
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                metadata = dict(restore.execution_metadata or {})
+                raw_count = metadata.get("manual_resume_count", 0)
+                if isinstance(raw_count, bool) or (
+                    raw_count not in (None, "")
+                    and not isinstance(raw_count, (int, str))
+                ):
+                    return Response(
+                        {
+                            "code": "restore_resume_state_invalid",
+                            "detail": "The restore's bounded resume history is invalid.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if raw_count in (None, ""):
+                    previous_count = 0
+                elif isinstance(raw_count, str) and not raw_count.isdecimal():
+                    return Response(
+                        {
+                            "code": "restore_resume_state_invalid",
+                            "detail": "The restore's bounded resume history is invalid.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                else:
+                    try:
+                        previous_count = int(raw_count)
+                    except (TypeError, ValueError, OverflowError):
+                        return Response(
+                            {
+                                "code": "restore_resume_state_invalid",
+                                "detail": "The restore's bounded resume history is invalid.",
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                if previous_count < 0:
+                    return Response(
+                        {
+                            "code": "restore_resume_state_invalid",
+                            "detail": "The restore's bounded resume history is invalid.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if previous_count >= _DATABASE_RESTORE_MANUAL_RESUME_MAX_COUNT:
+                    return Response(
+                        {
+                            "code": "restore_manual_resume_limit_reached",
+                            "detail": "This restore has reached its safe manual-resume limit.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                resume_sequence = previous_count + 1
+                task_id = f"database-restore-resume-{restore.id}-{resume_sequence}"
+                resumed_at = timezone.now().isoformat()
+                history = metadata.get("manual_resume_history")
+                if history is None:
+                    history = []
+                elif not isinstance(history, list) or any(
+                    not isinstance(item, dict) for item in history
+                ):
+                    return Response(
+                        {
+                            "code": "restore_resume_state_invalid",
+                            "detail": "The restore's bounded resume history is invalid.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                history.append(
+                    {
+                        "sequence": resume_sequence,
+                        "requested_at": resumed_at,
+                        "mode": resume_mode,
+                        "task_id": task_id,
+                    }
+                )
+                metadata["manual_resume_count"] = resume_sequence
+                metadata["manual_resume_at"] = resumed_at
+                metadata["manual_resume_task_id"] = task_id
+                metadata["manual_resume_history"] = history[
+                    -_DATABASE_RESTORE_MANUAL_RESUME_HISTORY_LIMIT:
+                ]
+                metadata.pop("failed_notification_enqueued_at", None)
+                if restore.celery_task_id and not metadata.get("root_celery_task_id"):
+                    metadata["root_celery_task_id"] = restore.celery_task_id
+
+                # Only presentation/error rollups are cleared.  The fork mode,
+                # target mapping, archive identity, and checkpoints are copied
+                # unchanged and remain authoritative to the restore engine.
+                params = dict(restore.params or {})
+                params.pop("_bs_last_error_code", None)
+                params.pop("_bs_last_error_category", None)
+                restore.params = params
+                restore.execution_metadata = metadata
+                restore.status = CoreDatabaseRestore.Status.IN_PROGRESS
+                restore.execution_phase = "database_reconciling"
+                restore.error = None
+                restore.last_error_code = ""
+                restore.next_retry_at = None
+                restore.lease_owner = ""
+                restore.lease_token = None
+                restore.lease_expires_at = None
+                restore.heartbeat_at = None
+                restore.save(
+                    update_fields=[
+                        "params",
+                        "execution_metadata",
+                        "status",
+                        "execution_phase",
+                        "error",
+                        "last_error_code",
+                        "next_retry_at",
+                        "lease_owner",
+                        "lease_token",
+                        "lease_expires_at",
+                        "heartbeat_at",
+                        "modified",
+                    ]
+                )
+                _log_activity(
+                    request,
+                    CoreLog.Type.RESTORE,
+                    {
+                        "message": "Logical restore verification resumed.",
+                        "action": "database_restore_resume_verification",
+                        "actor_email": request.user.email,
+                        "restore_id": restore.id,
+                        "restore_name": restore.name,
+                        "backup_id": backup.id,
+                        "backup_name": backup.name,
+                        "resume_sequence": resume_sequence,
+                        "resume_mode": resume_mode,
+                    },
+                )
+                queued = True
+                transaction.on_commit(
+                    partial(
+                        restore_database_backup.apply_async,
+                        task_id=task_id,
+                        kwargs={
+                            "node_id": backup.database.node.id,
+                            "backup_id": backup.id,
+                            "restore_id": restore.id,
+                        },
+                    )
+                )
+        except Exception:
+            # The durable transition is intentionally retained if the broker
+            # acknowledgement is lost.  The normal restore recovery scheduler
+            # will redeliver this same row; no provider/database request is
+            # issued by this error path.
+            if queued and resume_sequence is not None:
+                durable = (
+                    CoreDatabaseRestore.objects.filter(
+                        pk=restore_id,
+                        backup=backup,
+                        execution_metadata__manual_resume_count=resume_sequence,
+                    )
+                    .first()
+                )
+                if durable is not None:
+                    response_data = dict(CoreDatabaseRestoreSerializer(durable).data)
+                    terminal = durable.status in {
+                        CoreDatabaseRestore.Status.COMPLETE,
+                        CoreDatabaseRestore.Status.FAILED,
+                    }
+                    response_data.update(
+                        {
+                            "idempotent_replay": False,
+                            "manual_resume_enqueued": False,
+                            "resume_sequence": resume_sequence,
+                            "code": (
+                                "restore_resume_reconciled"
+                                if terminal
+                                else "restore_resume_saved_for_recovery"
+                            ),
+                        }
+                    )
+                    return Response(
+                        response_data,
+                        status=(
+                            status.HTTP_200_OK
+                            if terminal
+                            else status.HTTP_202_ACCEPTED
+                        ),
+                    )
+            raise RestoreCreateError(
+                "The restore resume request could not be accepted. Please retry safely."
+            )
+
+        response_data = dict(CoreDatabaseRestoreSerializer(restore).data)
+        response_data.update(
+            {
+                "idempotent_replay": False,
+                "manual_resume_enqueued": True,
+                "resume_sequence": resume_sequence,
+            }
+        )
+        return Response(response_data, status=status.HTTP_202_ACCEPTED)
+
     @action(detail=True, methods=["get"])
     def restores(self, request, pk=None):
         backup = self.get_object()
-        restores = backup.restores.order_by("-created")
+        restores = backup.restores.select_related("backup").order_by("-created")
         return Response(CoreDatabaseRestoreSerializer(restores, many=True).data)
 
     @action(detail=True)

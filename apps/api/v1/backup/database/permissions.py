@@ -8,6 +8,7 @@ class CoreDatabaseBackupViewPermissions(MemberGroupPermissions):
         "download_transfer_log": "backup_download",
         "download_dir_tree": "backup_download",
         "destroy": "backup_delete",
+        "resume_restore": "backup_create",
     }
 
     def has_object_permission(self, request, view, obj):

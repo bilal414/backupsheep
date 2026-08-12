@@ -1290,6 +1290,14 @@
                                                 <p x-show="!restoreExecutionView(restoreItem) && restoreItem.status === 4"
                                                    class="mt-1 text-xs font-medium text-red-600"
                                                    x-text="safeLegacyRestoreError(restoreItem)"></p>
+                                                {% if object.type == 4 and not is_vultr_managed_database %}
+                                                    <button x-show="databaseRestoreCanResume(restoreItem)" type="button"
+                                                            @click="resumeDatabaseRestore(restoreItem)"
+                                                            :disabled="restoreResumeSubmitting"
+                                                            class="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-orange-200 bg-orange-50 px-2.5 py-1 text-xs font-semibold text-orange-700 transition hover:bg-orange-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-600 disabled:cursor-not-allowed disabled:opacity-60">
+                                                        Resume verification
+                                                    </button>
+                                                {% endif %}
                                             </div>
                                             <span class="inline-flex flex-none items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset"
                                                   :class="restoreStatusToneClass(restoreItem)"
@@ -2713,6 +2721,8 @@
                 restoreExecutionStatus: null,
                 restoreStarted: false,
                 restoreList: [],
+                restoreTrackedId: null,
+                restoreResumeSubmitting: false,
                 restorePollHandle: null,
                 nativeRestore: {
                     backupId: null,
@@ -2838,6 +2848,14 @@
                     if (item && item.status === 4) return 'bg-red-50 text-red-700 ring-red-600/20';
                     return 'bg-amber-50 text-amber-700 ring-amber-600/20';
                 },
+                databaseRestoreCanResume(item) {
+                    return Boolean(
+                        item &&
+                        typeof item === 'object' &&
+                        !Array.isArray(item) &&
+                        item.can_resume_verification === true
+                    );
+                },
                 toggleBackups() {
                     this.list_all_backups = !this.list_all_backups;
                     let url = new URL(window.location.href);
@@ -2934,6 +2952,8 @@
                     this.restoreExecutionStatus = null;
                     this.restoreStarted = false;
                     this.restoreList = [];
+                    this.restoreTrackedId = null;
+                    this.restoreResumeSubmitting = false;
                     this.getBackupStoragePoints(backupID).then(() => {
                         /**
                          * Pre-select the storage point when there is exactly one completed upload.
@@ -2958,6 +2978,8 @@
                     this.restoreExecutionStatus = null;
                     this.restoreStarted = false;
                     this.restoreList = [];
+                    this.restoreTrackedId = null;
+                    this.restoreResumeSubmitting = false;
                 },
                 nativeRestoreSlug(value, fallback = 'resource') {
                     const slug = String(value || '')
@@ -3426,6 +3448,82 @@
                         this.nativeRestoreResumeSubmitting = false;
                     }
                 },
+                async resumeDatabaseRestore(item) {
+                    if (!this.databaseRestoreCanResume(item) || this.restoreResumeSubmitting) return;
+                    const restoreId = Number(item.id);
+                    if (!Number.isSafeInteger(restoreId) || restoreId < 1) {
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            error: true,
+                            heading: 'Verification not resumed',
+                            details: 'This restore could not be identified safely.',
+                        });
+                        return;
+                    }
+                    this.clearRestorePoll();
+                    this.restoreResumeSubmitting = true;
+                    this.restoreTrackedId = restoreId;
+                    this.restoreStarted = true;
+                    this.restoreStatus = item;
+                    this.restoreExecutionStatus = this.executionStatusView(item);
+                    try {
+                        const url = `/api/v1/backups/database/${encodeURIComponent(this.backup.id)}/resume_restore/`;
+                        const response = await fetch(url, {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json',
+                            },
+                            method: 'POST',
+                            body: JSON.stringify({restore_id: restoreId}),
+                        });
+                        let payload = null;
+                        try { payload = await response.json(); } catch (_) { /* safe fallback below */ }
+                        if (response.status !== 200 && response.status !== 202) {
+                            throw new Error(payload && typeof payload.detail === 'string'
+                                ? payload.detail
+                                : 'Restore verification could not be resumed.');
+                        }
+                        this.restoreStatus = payload && typeof payload === 'object' && !Array.isArray(payload)
+                            ? payload
+                            : item;
+                        this.restoreExecutionStatus = this.executionStatusView(this.restoreStatus);
+                        await this.getBackupRestores(false);
+                        this.startRestorePolling();
+                        Alpine.store('notifications').items.push({
+                            show: true,
+                            success: true,
+                            heading: 'Verification resumed',
+                            details: 'The existing fork target is being checked. No second restore was created.',
+                        });
+                    } catch (error) {
+                        await this.getBackupRestores(false);
+                        const recovered = this.restoreList.find(
+                            restoreItem => Number(restoreItem && restoreItem.id) === restoreId
+                        );
+                        if (recovered && !this.databaseRestoreCanResume(recovered)) {
+                            this.restoreStatus = recovered;
+                            this.restoreExecutionStatus = this.executionStatusView(recovered);
+                            if (this.restoreExecutionStatus && this.restoreExecutionStatus.shouldPoll) {
+                                this.startRestorePolling();
+                            }
+                            Alpine.store('notifications').items.push({
+                                show: true,
+                                success: true,
+                                heading: 'Verification request recovered',
+                                details: 'The existing restore record is being tracked.',
+                            });
+                        } else {
+                            Alpine.store('notifications').items.push({
+                                show: true,
+                                error: true,
+                                heading: 'Verification not resumed',
+                                details: error.message || 'Restore verification could not be resumed.',
+                            });
+                        }
+                    } finally {
+                        this.restoreResumeSubmitting = false;
+                    }
+                },
                 clearRestorePoll() {
                     if (this.restorePollHandle) {
                         clearInterval(this.restorePollHandle);
@@ -3472,6 +3570,12 @@
                             : [];
                         this.restoreList = restoreItems;
                         this.restoreStatus = restoreItems.length > 0 ? restoreItems[0] : null;
+                        if (this.restoreTrackedId !== null) {
+                            const tracked = restoreItems.find(
+                                item => Number(item && item.id) === Number(this.restoreTrackedId)
+                            );
+                            if (tracked) this.restoreStatus = tracked;
+                        }
                         this.restoreExecutionStatus = this.executionStatusView(this.restoreStatus);
                         if (this.restoreStatus) {
                             /**
@@ -3531,6 +3635,9 @@
                         }
                     }).then((json) => {
                         this.restoreStatus = json && typeof json === 'object' && !Array.isArray(json) ? json : null;
+                        this.restoreTrackedId = this.restoreStatus && Number.isSafeInteger(Number(this.restoreStatus.id))
+                            ? Number(this.restoreStatus.id)
+                            : null;
                         this.restoreExecutionStatus = this.executionStatusView(this.restoreStatus);
                         this.restoreStarted = true;
                         this.getBackupRestores(false);
