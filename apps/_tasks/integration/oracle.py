@@ -2175,19 +2175,29 @@ class OracleRestoreAdapter:
         )
         source_details = resource.get("source_details")
         source_details = source_details if isinstance(source_details, dict) else {}
-        provider_source = resource.get("image_id") or next(
-            (
-                source_details.get(key)
-                for key in (
-                    "image_id",
-                    "boot_volume_backup_id",
-                    "volume_backup_id",
-                    "id",
-                )
-                if source_details.get(key)
-            ),
-            None,
-        )
+        # Instances are restored from an image, but restored boot/block volumes
+        # can also expose the *original* image_id alongside source_details for
+        # the exact volume backup.  Binding a volume restore to that image would
+        # reject a correctly created target (or, worse, prove the wrong source).
+        # Select the provider source according to the target type.
+        if witness.target_type == "instance":
+            provider_source = resource.get("image_id") or source_details.get(
+                "image_id"
+            )
+        else:
+            source_keys = (
+                ("boot_volume_backup_id", "id")
+                if witness.target_type == "boot_volume"
+                else ("volume_backup_id", "id")
+            )
+            provider_source = next(
+                (
+                    source_details.get(key)
+                    for key in source_keys
+                    if source_details.get(key)
+                ),
+                None,
+            )
         return bool(
             resource.get("id")
             and (not resource_id or str(resource["id"]) == str(resource_id))

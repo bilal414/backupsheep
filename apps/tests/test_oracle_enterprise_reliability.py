@@ -1104,6 +1104,10 @@ class OracleEnterpriseReliabilityTests(BaseTestCase):
                         ORACLE_KIND_TAG: "boot_volume",
                         ORACLE_REQUEST_TAG: witness["request_token"],
                     },
+                    # OCI boot volumes retain the original image id in
+                    # addition to the exact boot-backup source_details id.
+                    # Ownership must bind to the latter for this target type.
+                    image_id="ocid1.image.test.base",
                     source_details=model(id=provider_backup.id),
                 ),
                 status=202,
@@ -1123,6 +1127,8 @@ class OracleEnterpriseReliabilityTests(BaseTestCase):
         self.assertNotIn(
             "display_name", client.list_boot_volumes.call_args.kwargs
         )
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, "ocid1.bootvolume.test.restored")
 
     def _committed_backup(self):
         backup = self._backup()
