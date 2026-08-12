@@ -418,6 +418,121 @@ class AWSS3RestoreDestinationSafetyTests(BaseTestCase):
         s3.list_object_versions.assert_called_once()
         s3.list_multipart_uploads.assert_called_once()
 
+    @mock.patch("apps._tasks.integration.aws_backup.start_restore_job")
+    def test_exact_acceptance_fault_drops_response_then_replays_same_request(
+        self, start_restore
+    ):
+        node, _aws, backup, restore, auth, s3, backup_client = self._fixture()
+        provider_job_id = "restore-job-must-not-be-in-witness"
+        start_restore.return_value = {"RestoreJobId": provider_job_id}
+        selected = {
+            "AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED": True,
+            "AWS_RESTORE_ACCEPTANCE_FAULT_MODE": "drop_response",
+            "AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID": str(restore.id),
+            "AWS_RESTORE_ACCEPTANCE_FAULT_CORRELATION_ID": str(
+                restore.correlation_id
+            ),
+            "AWS_RESTORE_ACCEPTANCE_FAULT_RESOURCE_TYPE": "s3",
+            "AWS_RESTORE_ACCEPTANCE_FAULT_HOLD_SECONDS": 30,
+        }
+
+        with self.settings(**selected), self._client_patch(
+            auth, s3, backup_client
+        ):
+            node.aws.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertTrue(restore.params["_bs_create_outcome_unknown"])
+        self.assertFalse(restore.provider_job_id)
+        self.assertFalse(restore.resource_id)
+        witness = restore.execution_metadata["aws_restore_acceptance_fault"]
+        serialized = json.dumps(witness, sort_keys=True)
+        token = idempotency_token("restore", restore.id)
+        self.assertTrue(witness["consumed"])
+        self.assertTrue(witness["accepted_response_observed"])
+        self.assertEqual(witness["resource_type"], "s3")
+        self.assertNotIn(token, serialized)
+        self.assertNotIn(provider_job_id, serialized)
+        self.assertNotIn("DestinationBucketName", serialized)
+
+        with self.settings(
+            AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED=False
+        ), self._client_patch(auth, s3, backup_client):
+            node.aws.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.provider_job_id, provider_job_id)
+        self.assertEqual(restore.resource_id, "restore-bucket")
+        self.assertEqual(start_restore.call_count, 2)
+        self.assertEqual(
+            start_restore.call_args_list[0].args[4],
+            start_restore.call_args_list[1].args[4],
+        )
+
+    @mock.patch("apps._tasks.integration.aws_backup.start_restore_job")
+    def test_acceptance_fault_requires_every_exact_selector(self, start_restore):
+        node, _aws, backup, restore, auth, s3, backup_client = self._fixture()
+        start_restore.return_value = {"RestoreJobId": "restore-job-selector"}
+
+        with self.settings(
+            AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED=True,
+            AWS_RESTORE_ACCEPTANCE_FAULT_MODE="drop_response",
+            AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID=str(restore.id),
+            AWS_RESTORE_ACCEPTANCE_FAULT_CORRELATION_ID=(
+                "00000000-0000-4000-8000-000000000000"
+            ),
+            AWS_RESTORE_ACCEPTANCE_FAULT_RESOURCE_TYPE="s3",
+            AWS_RESTORE_ACCEPTANCE_FAULT_HOLD_SECONDS=30,
+        ), self._client_patch(auth, s3, backup_client):
+            node.aws.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.provider_job_id, "restore-job-selector")
+        self.assertNotIn(
+            "aws_restore_acceptance_fault", restore.execution_metadata
+        )
+
+    @mock.patch("apps._tasks.integration.aws_backup.start_restore_job")
+    def test_hold_fault_persists_witness_before_simulated_worker_crash(
+        self, start_restore
+    ):
+        node, _aws, backup, restore, auth, s3, backup_client = self._fixture()
+        start_restore.return_value = {"RestoreJobId": "restore-job-held"}
+
+        def crash_after_witness(_seconds):
+            durable = CoreCloudRestore.objects.get(pk=restore.pk)
+            self.assertTrue(
+                durable.execution_metadata["aws_restore_acceptance_fault"][
+                    "accepted_response_observed"
+                ]
+            )
+            self.assertFalse(durable.provider_job_id)
+            self.assertFalse(durable.resource_id)
+            raise KeyboardInterrupt()
+
+        with self.settings(
+            AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED=True,
+            AWS_RESTORE_ACCEPTANCE_FAULT_MODE="hold",
+            AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID=str(restore.id),
+            AWS_RESTORE_ACCEPTANCE_FAULT_CORRELATION_ID=str(
+                restore.correlation_id
+            ),
+            AWS_RESTORE_ACCEPTANCE_FAULT_RESOURCE_TYPE="s3",
+            AWS_RESTORE_ACCEPTANCE_FAULT_HOLD_SECONDS=30,
+        ), mock.patch(
+            "apps._tasks.integration.aws_restore_acceptance.time.sleep",
+            side_effect=crash_after_witness,
+        ), self._client_patch(auth, s3, backup_client), self.assertRaises(
+            KeyboardInterrupt
+        ):
+            node.aws.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertTrue(restore.params["_bs_create_outcome_unknown"])
+        self.assertFalse(restore.provider_job_id)
+        self.assertFalse(restore.resource_id)
+
     def test_list_restore_jobs_uses_sdk_valid_filters_and_exact_identity(self):
         node, _aws, backup, restore, auth, _s3, _backup_client = self._fixture()
         recovery_point_arn = backup.metadata["_aws_backup"]["recovery_point_arn"]
@@ -539,6 +654,55 @@ class AWSS3RestoreDestinationSafetyTests(BaseTestCase):
         )
 
         self.assertEqual([item["RestoreJobId"] for item in jobs], ["transitional-job"])
+
+    def test_list_restore_jobs_rejects_repeated_cursor(self):
+        node, _aws, backup, _restore, auth, _s3, _backup_client = self._fixture()
+        recovery_point_arn = backup.metadata["_aws_backup"]["recovery_point_arn"]
+        expected = _aws_backup_restore_identity(
+            auth, "s3", recovery_point_arn, "restore-bucket"
+        )
+        backup_client = mock.MagicMock()
+        backup_client.list_restore_jobs.side_effect = [
+            {"RestoreJobs": [], "NextToken": "cursor-1"},
+            {"RestoreJobs": [], "NextToken": "cursor-1"},
+        ]
+
+        with self.assertRaises(ValueError) as raised:
+            node.aws._find_aws_backup_restore_job(
+                backup_client,
+                recovery_point_arn=recovery_point_arn,
+                target_id="restore-bucket",
+                expected=expected,
+            )
+
+        self.assertEqual(raised.exception.code, "PROVIDER_MALFORMED_RESPONSE")
+        self.assertEqual(backup_client.list_restore_jobs.call_count, 2)
+
+    def test_list_restore_jobs_is_bounded(self):
+        node, _aws, backup, _restore, auth, _s3, _backup_client = self._fixture()
+        recovery_point_arn = backup.metadata["_aws_backup"]["recovery_point_arn"]
+        expected = _aws_backup_restore_identity(
+            auth, "s3", recovery_point_arn, "restore-bucket"
+        )
+        backup_client = mock.MagicMock()
+        backup_client.list_restore_jobs.return_value = {
+            "RestoreJobs": [],
+            "NextToken": "cursor-1",
+        }
+
+        with mock.patch(
+            "apps.console.node.models._AWS_RESTORE_RECONCILIATION_MAX_PAGES",
+            1,
+        ), self.assertRaises(ValueError) as raised:
+            node.aws._find_aws_backup_restore_job(
+                backup_client,
+                recovery_point_arn=recovery_point_arn,
+                target_id="restore-bucket",
+                expected=expected,
+            )
+
+        self.assertEqual(raised.exception.code, "PROVIDER_MALFORMED_RESPONSE")
+        backup_client.list_restore_jobs.assert_called_once()
 
     @mock.patch("apps._tasks.integration.aws_backup.start_restore_job")
     def test_missing_created_resource_arn_is_transitional_until_exact_poll(self, start_restore):

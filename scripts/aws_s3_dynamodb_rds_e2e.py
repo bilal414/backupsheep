@@ -29,6 +29,7 @@ import fcntl
 import ipaddress
 import json
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -934,13 +935,26 @@ def _describe_restore_job_exact(backup_client, intent, job_id, *, require_target
 
 def _list_restore_jobs_exact(backup_client, intent):
     """Find one exact restore job using AWS Backup's cursor contract."""
+    source_arn = str(intent.get("source_recovery_point_arn") or "")
+    arn_parts = source_arn.split(":")
+    account_id = arn_parts[4] if len(arn_parts) >= 6 else ""
+    expected_type = str(intent.get("resource_type") or "").lower()
+    api_resource_type = {"s3": "S3", "dynamodb": "DynamoDB"}.get(
+        expected_type
+    )
+    if not re.fullmatch(r"[0-9]{12}", account_id) or not api_resource_type:
+        raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
     matches = []
     next_token = None
     seen_tokens = set()
     item_count = 0
     for _ in range(MAX_PROVIDER_PAGES):
         request = {
-            "RecoveryPointArn": str(intent["source_recovery_point_arn"]),
+            # ListRestoreJobs does not accept RecoveryPointArn. Narrow with its
+            # real account/resource-type filters, then match source and target
+            # identity locally across every cursor page.
+            "ByAccountId": account_id,
+            "ByResourceType": api_resource_type,
             "MaxResults": 100,
         }
         if next_token:
@@ -960,6 +974,15 @@ def _list_restore_jobs_exact(backup_client, intent):
         for job in page:
             if not isinstance(job, dict):
                 raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
+            # Account/resource filters intentionally include unrelated jobs.
+            # Ignore them; validate complete ownership only after an exact
+            # recovery-point match identifies a possible candidate.
+            if (
+                str(job.get("RecoveryPointArn") or "") != source_arn
+                or str(job.get("ResourceType") or "").lower()
+                != expected_type
+            ):
+                continue
             _validate_restore_job(job, intent, require_target=False)
             created_arn = str(job.get("CreatedResourceArn") or "")
             target_metadata = _restore_job_metadata_target(job, intent)
@@ -969,8 +992,6 @@ def _list_restore_jobs_exact(backup_client, intent):
                 matches.append(job)
         next_value = response.get("NextToken")
         if next_value in (None, ""):
-            if len(page) >= request["MaxResults"]:
-                raise RestoreRecoveryError("PROVIDER_MALFORMED_RESPONSE")
             break
         if not isinstance(next_value, str) or next_value in seen_tokens or next_value == next_token:
             raise RestoreRecoveryError("PROVIDER_REPEATED_CURSOR")

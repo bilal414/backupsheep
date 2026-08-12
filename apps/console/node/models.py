@@ -388,6 +388,8 @@ _RESTORE_RECONCILIATION_DEFAULT_SECONDS = 15 * 60
 _RESTORE_RECONCILIATION_MAX_SECONDS = 60 * 60
 _RESTORE_RECONCILIATION_MIN_OBSERVATIONS = 3
 _RESTORE_RECONCILIATION_MAX_OBSERVATIONS = 20
+_AWS_RESTORE_RECONCILIATION_MAX_PAGES = 100
+_AWS_RESTORE_RECONCILIATION_MAX_ITEMS = 100_000
 
 
 def _restore_reconciliation_seconds():
@@ -1945,7 +1947,12 @@ class CoreDigitalOcean(UtilCloud):
         jobs = []
         token = None
         seen = set()
+        page_count = 0
+        item_count = 0
         while True:
+            page_count += 1
+            if page_count > _AWS_RESTORE_RECONCILIATION_MAX_PAGES:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
             request = {
                 "ByAccountId": expected["account_id"],
                 "ByResourceType": expected["resource_type"],
@@ -1958,6 +1965,9 @@ class CoreDigitalOcean(UtilCloud):
                 raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
             page = response.get("RestoreJobs") or []
             if not isinstance(page, list):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            item_count += len(page)
+            if item_count > _AWS_RESTORE_RECONCILIATION_MAX_ITEMS:
                 raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
             for item in page:
                 if not isinstance(item, dict):
@@ -1989,7 +1999,11 @@ class CoreDigitalOcean(UtilCloud):
             next_token = response.get("NextToken")
             if not next_token:
                 break
-            if next_token in seen:
+            if (
+                not isinstance(next_token, str)
+                or next_token == token
+                or next_token in seen
+            ):
                 raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
             seen.add(next_token)
             token = next_token
@@ -2025,6 +2039,9 @@ class CoreDigitalOcean(UtilCloud):
         auth = self.node.connection.auth_aws
         if self.resource_type in {self.ResourceType.S3, self.ResourceType.DYNAMODB}:
             from apps._tasks.integration.aws_backup import idempotency_token, start_restore_job
+            from apps._tasks.integration.aws_restore_acceptance import (
+                maybe_fault_after_accepted_restore,
+            )
 
             backup_metadata = backup.metadata if isinstance(backup.metadata, dict) else {}
             aws_backup = backup_metadata.get("_aws_backup") or {}
@@ -2166,6 +2183,17 @@ class CoreDigitalOcean(UtilCloud):
                 if not job_id:
                     _restore_unknown_outcome(restore, code="PROVIDER_MALFORMED_RESPONSE")
                     return _restore_status("IN_PROGRESS")
+                # The exact-row acceptance hook persists only hashes, then
+                # pauses or raises before either provider pointer is durable.
+                # It is disabled on normal workers and exists so a live test can
+                # hard-kill an isolated worker at the otherwise unobservable
+                # provider-accepted/database-not-yet-committed boundary.
+                maybe_fault_after_accepted_restore(
+                    restore,
+                    resource_type=self.resource_type,
+                    token=token,
+                    request_metadata=restore_metadata,
+                )
                 restore.provider_job_id = str(job_id)
                 _restore_adopt(
                     restore,

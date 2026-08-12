@@ -274,6 +274,64 @@ class AWSLiveE2EHarnessRecoveryTests(TestCase):
                 harness._list_restore_jobs_exact(provider, intent)
             self.assertEqual(error.exception.code, "PROVIDER_REPEATED_CURSOR")
 
+    def test_restore_job_list_uses_supported_cursor_filters(self):
+        restore = FakeRestore()
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+            _, intent, _ = self._intent(store, restore)
+            provider = FakeBackupClient(
+                [
+                    {"RestoreJobs": [], "NextToken": "cursor-1"},
+                    {"RestoreJobs": []},
+                ]
+            )
+
+            self.assertIsNone(harness._list_restore_jobs_exact(provider, intent))
+
+            self.assertEqual(
+                provider.list_calls,
+                [
+                    {
+                        "ByAccountId": "123456789012",
+                        "ByResourceType": "DynamoDB",
+                        "MaxResults": 100,
+                    },
+                    {
+                        "ByAccountId": "123456789012",
+                        "ByResourceType": "DynamoDB",
+                        "MaxResults": 100,
+                        "NextToken": "cursor-1",
+                    },
+                ],
+            )
+            self.assertNotIn("RecoveryPointArn", provider.list_calls[0])
+
+    def test_unrelated_jobs_are_ignored_before_exact_validation(self):
+        restore = FakeRestore()
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+            _, intent, _ = self._intent(store, restore)
+            unrelated = dict(
+                self._job(restore),
+                RestoreJobId="unrelated-job",
+                RecoveryPointArn=(
+                    "arn:aws:backup:us-east-2:123456789012:"
+                    "recovery-point/unrelated"
+                ),
+                CreatedResourceArn=(
+                    "arn:aws:dynamodb:us-east-2:123456789012:table/unrelated"
+                ),
+            )
+            exact = self._job(restore)
+            provider = FakeBackupClient(
+                [{"RestoreJobs": [unrelated, exact]}],
+                description=exact,
+            )
+
+            found = harness._list_restore_jobs_exact(provider, intent)
+
+            self.assertEqual(found["RestoreJobId"], "restore-job-1")
+
     def test_completed_job_requires_exact_target_and_source(self):
         restore = FakeRestore()
         with tempfile.TemporaryDirectory() as directory:

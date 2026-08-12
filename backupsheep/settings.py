@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 import io
 import json
 import os
+import re
 import warnings
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlparse
@@ -671,6 +672,53 @@ RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS = int(
     config.get("RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS", 120)
 )
 RESTORE_RECOVERY_BATCH_SIZE = int(config.get("RESTORE_RECOVERY_BATCH_SIZE", 100))
+
+# Live acceptance testing can pause one exact AWS Backup restore immediately
+# after AWS returns a RestoreJobId and before BackupSheep persists that pointer.
+# The switch is deliberately disabled by default and requires every selector so
+# it can never become a broad production fault injection mechanism.
+AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED = _as_bool(
+    config.get("AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED", "false")
+)
+AWS_RESTORE_ACCEPTANCE_FAULT_MODE = str(
+    config.get("AWS_RESTORE_ACCEPTANCE_FAULT_MODE", "") or ""
+).strip().lower()
+AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID = str(
+    config.get("AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID", "") or ""
+).strip()
+AWS_RESTORE_ACCEPTANCE_FAULT_CORRELATION_ID = str(
+    config.get("AWS_RESTORE_ACCEPTANCE_FAULT_CORRELATION_ID", "") or ""
+).strip().lower()
+AWS_RESTORE_ACCEPTANCE_FAULT_RESOURCE_TYPE = str(
+    config.get("AWS_RESTORE_ACCEPTANCE_FAULT_RESOURCE_TYPE", "") or ""
+).strip().lower()
+try:
+    AWS_RESTORE_ACCEPTANCE_FAULT_HOLD_SECONDS = min(
+        600,
+        max(
+            1,
+            int(config.get("AWS_RESTORE_ACCEPTANCE_FAULT_HOLD_SECONDS", 30)),
+        ),
+    )
+except (TypeError, ValueError):
+    raise ImproperlyConfigured(
+        "AWS_RESTORE_ACCEPTANCE_FAULT_HOLD_SECONDS must be an integer."
+    ) from None
+if AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED:
+    if (
+        AWS_RESTORE_ACCEPTANCE_FAULT_MODE not in {"drop_response", "hold"}
+        or not AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID.isdigit()
+        or int(AWS_RESTORE_ACCEPTANCE_FAULT_RESTORE_ID) < 1
+        or AWS_RESTORE_ACCEPTANCE_FAULT_RESOURCE_TYPE not in {"s3", "dynamodb"}
+        or not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            AWS_RESTORE_ACCEPTANCE_FAULT_CORRELATION_ID,
+        )
+    ):
+        raise ImproperlyConfigured(
+            "AWS restore acceptance fault injection requires an exact mode, "
+            "positive restore id, UUID correlation id, and s3/dynamodb resource type."
+        )
 # Lease the provider-create phase separately from polling. This closes the race in
 # which a duplicate delivery or recovery sweep enters the same create call while the
 # first worker is still waiting on the provider API.
