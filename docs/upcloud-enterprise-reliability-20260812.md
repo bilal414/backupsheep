@@ -168,17 +168,33 @@ version ID.
 2. The one-time key secret is written only to the mode-0600 ignored runtime
    file. The ledger stores a hash, never the key or secret.
 3. After UI destination validation removes its probe, `arm-object-storage`
-   proves the bucket is empty and enables versioning.
+   proves the exact run prefix is empty and enables versioning.
 4. `verify-object-storage --manifest ...` independently HEADs/GETs exact UI
    objects and checks metadata, SHA-256, byte count, ETag, and version ID.
-5. `cleanup-object-storage` enumerates versions, delete markers, and multipart
-   uploads; any unledgered item blocks cleanup. It then removes exact
-   dependencies and deletes the service with `force=false`.
+5. `cleanup-object-storage` enumerates run-prefix versions, delete markers, and
+   multipart uploads; any unledgered item in that scope blocks cleanup. It then
+   removes exact dependencies and deletes the dedicated run-owned bucket and
+   service with `force=false`; bucket deletion still fails closed if an unseen
+   out-of-prefix dependency exists.
+
+The least-privilege live probe showed that `GetBucketVersioning` succeeded while
+the existing unprefixed inventory path was denied; its `ListObjectsV2`,
+`ListObjectVersions`, and `ListMultipartUploads` requests all omitted `Prefix`.
+Supplying the exact run prefix returned two current objects, two version rows,
+zero delete markers, and zero multipart uploads. The harness therefore requires
+`runtime["prefix"]` to equal the active run's exact prefix before an S3 read and
+sends that `Prefix` on the first and every later page of all three inventory
+operations. Empty, altered, or cross-run prefixes fail closed without an S3
+request.
 
 The object manifest keeps the numeric BackupSheep ownership marker separate from
 the UUID used in the provider object key. Each website/database row must include
 `backup_id` as the positive numeric BackupSheep backup row ID, `backup_uuid` as
 the exact backup UUID, and `object_key` equal to `<prefix><backup_uuid>.zip`.
+The manifest envelope itself must be a JSON object with integer `schema` equal to
+`1` and `run_id` exactly equal to the active harness run ID. These envelope
+checks happen before account, service, or S3 inventory, so missing, unsupported,
+or cross-run manifests fail closed without provider reads.
 The verifier requires provider metadata
 `backupsheep-backup-id=<backup_id>`; it never derives that metadata from the
 object key.
@@ -191,16 +207,22 @@ object key.
   the real storage scanner through offsets 0 and 1; duplicate candidates split
   across pages still block POST/adoption.
 - New compute/workload harness safety tests: 13 passed.
-- Existing object-storage harness plus named regression: included in a 25-test
-  focused run.
+- Current object-storage live UI harness module: 28 tests passed.
+- Object-manifest envelope regressions cover JSON-object shape, valid schema/run
+  identity, wrong or missing schema, and wrong or missing run ID before provider
+  inventory.
+- Prefix-scoped inventory regressions prove all three S3 list operations retain
+  the exact run prefix across first and later pages and reject empty, altered,
+  or cross-run prefixes before S3 reads.
 - Full UpCloud-focused application/compatibility suite: 108 tests passed.
 - Django system check and migration drift check must remain green before live
   use.
 
 ## Remaining live acceptance
 
-No live result exists yet. Enterprise acceptance still requires an explicitly
-gated run against the intended UpCloud account and `demo.backupsheep.com`,
+No full live UI acceptance result exists yet. Enterprise acceptance still
+requires an explicitly gated run against the intended UpCloud account and
+`demo.backupsheep.com`,
 including lost-response/worker-crash adoption, UI in-progress status across a
 worker restart, byte/hash/database verification, exact cleanup proof, and a
 before/after inventory proving no pre-existing resource changed.

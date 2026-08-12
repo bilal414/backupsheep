@@ -429,6 +429,88 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
         with self.assertRaisesRegex(HarnessError, "incomplete dependency ledger"):
             harness._assert_cleanup_graph_complete()
 
+    def _boot_verifier_resources(self, harness):
+        boot_id = "ocid1.bootvolume.oc1.iad.restoredboot"
+        instance_id = "ocid1.instance.oc1.iad.bootverifier"
+        restored_boot = SimpleNamespace(id=boot_id)
+        instance = SimpleNamespace(
+            id=instance_id,
+            display_name=harness.names["ui_boot_verify_instance"],
+            compartment_id=self.compartment_id,
+            availability_domain=self.availability_domain,
+            lifecycle_state="RUNNING",
+            # OCI retains the original image here even when launch source was an
+            # existing boot volume. The attachment is the authoritative witness.
+            image_id="ocid1.image.oc1.iad.originalimage",
+            source_details=None,
+            freeform_tags={
+                E2E_RUN_TAG: self.run_id,
+                E2E_OWNED_TAG: "true",
+                E2E_KIND_TAG: "ui_boot_verify_instance",
+            },
+        )
+        attachment = SimpleNamespace(
+            id="ocid1.bootvolumeattachment.oc1.iad.bootverifier",
+            instance_id=instance_id,
+            boot_volume_id=boot_id,
+            lifecycle_state="ATTACHED",
+        )
+        return restored_boot, instance, attachment
+
+    def test_boot_verifier_uses_exact_attachment_not_original_image_as_source(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, clients=clients)
+        restored_boot, instance, attachment = self._boot_verifier_resources(harness)
+        clients["compute"].list_instances.return_value = response([instance])
+        clients["compute"].get_instance.return_value = response(instance)
+        clients["compute"].list_boot_volume_attachments.return_value = response(
+            [attachment]
+        )
+
+        observed = harness._launch_boot_verifier(
+            restored_boot,
+            subnet_id="ocid1.subnet.oc1.iad.testsubnet",
+            shape="VM.Standard.E2.1",
+        )
+
+        self.assertEqual(observed.id, instance.id)
+        clients["compute"].launch_instance.assert_not_called()
+        row = harness.ledger.get("ui_boot_verify_instance", instance.id)
+        self.assertEqual(row["source_witness"], restored_boot.id)
+        self.assertEqual(row["ownership"]["source_id"], restored_boot.id)
+
+        # A resumed verifier validates the same provider relationship and does
+        # not regress to comparing the instance's original image ID.
+        resumed = harness._launch_boot_verifier(
+            restored_boot,
+            subnet_id="ocid1.subnet.oc1.iad.testsubnet",
+            shape="VM.Standard.E2.1",
+        )
+        self.assertEqual(resumed.id, instance.id)
+
+    def test_boot_verifier_refuses_a_different_attached_boot_volume(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, clients=clients)
+        restored_boot, instance, attachment = self._boot_verifier_resources(harness)
+        attachment.boot_volume_id = "ocid1.bootvolume.oc1.iad.foreignboot"
+        clients["compute"].list_instances.return_value = response([instance])
+        clients["compute"].get_instance.return_value = response(instance)
+        clients["compute"].list_boot_volume_attachments.return_value = response(
+            [attachment]
+        )
+
+        with self.assertRaisesRegex(HarnessError, "different boot volume"):
+            harness._launch_boot_verifier(
+                restored_boot,
+                subnet_id="ocid1.subnet.oc1.iad.testsubnet",
+                shape="VM.Standard.E2.1",
+            )
+
+        clients["compute"].launch_instance.assert_not_called()
+        self.assertIsNone(
+            harness.ledger.get("ui_boot_verify_instance", instance.id)
+        )
+
     def test_secret_file_is_outside_repo_chmod_600_and_not_reported(self):
         secret_path = self.root / "runtime" / "oracle-storage.json"
         harness = self.harness(

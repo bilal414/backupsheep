@@ -3,6 +3,7 @@ import fcntl
 import hashlib
 import json
 import humanfriendly
+import math
 import os
 import re
 import pytz
@@ -2763,6 +2764,24 @@ class CoreDigitalOcean(UtilCloud):
                 for key, value in expected.items()
             ):
                 raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+            if target_kind == "volume" and any(
+                key in stored for key in ("region", "size_gigabytes")
+            ):
+                stored_region = str(stored.get("region") or "")
+                stored_size = stored.get("size_gigabytes")
+                if (
+                    not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", stored_region)
+                    or isinstance(stored_size, bool)
+                    or not isinstance(stored_size, int)
+                    or stored_size < 1
+                ):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                expected.update(
+                    {
+                        "region": stored_region,
+                        "size_gigabytes": stored_size,
+                    }
+                )
         params["_digitalocean_restore"] = expected
         if restore.params != params:
             restore.params = params
@@ -2814,14 +2833,28 @@ class CoreDigitalOcean(UtilCloud):
             resource, identity["target_kind"]
         )
         if identity["target_kind"] == "volume":
-            # DigitalOcean's volume response must carry both witnesses that
-            # bind the new volume to this exact source snapshot: the provider
-            # snapshot field and the BackupSheep source tag.  A tag-only
-            # candidate or a source field that is missing/ambiguous is not
-            # safe to adopt after a lost create response.
-            if identity["source_tag"] not in normalized_tags:
+            # DigitalOcean accepts the snapshot in the create request but does
+            # not expose that source on either the HTTP 201 volume or later GET
+            # responses. The source-derived tag is therefore the durable
+            # request witness; exact name, kind, region and size independently
+            # fence adoption. If a future API response does expose a source,
+            # it must still match rather than weakening this check.
+            region = resource.get("region")
+            if isinstance(region, dict):
+                region = region.get("slug")
+            size = resource.get("size_gigabytes")
+            if (
+                identity["source_tag"] not in normalized_tags
+                or str(region or "") != str(identity.get("region") or "")
+                or isinstance(size, bool)
+            ):
                 return False
-            return bool(source_values) and set(source_values) == {
+            try:
+                if int(size) != int(identity.get("size_gigabytes")):
+                    return False
+            except (TypeError, ValueError, OverflowError):
+                return False
+            return not source_values or set(source_values) == {
                 str(identity["source_id"])
             }
         if source_values:
@@ -3012,6 +3045,18 @@ class CoreDigitalOcean(UtilCloud):
                     result.close()
 
             if self.node.type == CoreNode.Type.VOLUME:
+                raw_size = getattr(backup, "size_gigabytes", None)
+                try:
+                    if isinstance(raw_size, bool):
+                        raise ValueError
+                    numeric_size = float(raw_size)
+                    if not math.isfinite(numeric_size) or numeric_size <= 0:
+                        raise ValueError
+                    size_gigabytes = math.ceil(numeric_size)
+                except (TypeError, ValueError, OverflowError):
+                    raise _RestoreProviderError(
+                        "PROVIDER_MALFORMED_RESPONSE"
+                    ) from None
                 region = params.get("region")
                 if not region:
                     result = requests.get(
@@ -3047,10 +3092,32 @@ class CoreDigitalOcean(UtilCloud):
                             )
                     finally:
                         result.close()
+                if not re.fullmatch(
+                    r"[a-z0-9][a-z0-9-]{0,63}", str(region or "")
+                ):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                identity = dict(identity)
+                for key, value in {
+                    "region": str(region),
+                    "size_gigabytes": size_gigabytes,
+                }.items():
+                    existing = identity.get(key)
+                    if existing not in (None, "", value):
+                        raise _RestoreProviderError(
+                            "PROVIDER_OWNERSHIP_MISMATCH"
+                        )
+                    identity[key] = value
+                params = _restore_params(restore)
+                params["region"] = str(region)
+                params["size_gigabytes"] = size_gigabytes
+                params["_digitalocean_restore"] = identity
+                restore.params = params
+                restore.save(update_fields=["params", "modified"])
                 volume_data = {
                     "name": identity["target_name"],
                     "region": region,
                     "snapshot": backup.unique_id,
+                    "size_gigabytes": size_gigabytes,
                     "tags": provider_tags,
                 }
                 _restore_begin_mutation(restore)
@@ -3094,6 +3161,7 @@ class CoreDigitalOcean(UtilCloud):
                         provider_status=volume.get("status"),
                         params_update={
                             "region": region,
+                            "size_gigabytes": size_gigabytes,
                             "_digitalocean_restore": identity,
                         },
                     )
@@ -4366,7 +4434,11 @@ class CoreUpCloud(UtilCloud):
         )
 
     def _upcloud_server_backup_witness(self, backup):
-        """Load and verify the durable boot-storage/config backup witness."""
+        """Load and verify the durable boot-storage/config/firewall witness."""
+        from apps._tasks.integration.upcloud import (
+            validate_upcloud_firewall_witness,
+        )
+
         execution = backup.get_execution_state(create=False)
         if execution is None:
             raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
@@ -4379,6 +4451,16 @@ class CoreUpCloud(UtilCloud):
         safe_config = witness.get("upcloud_server_config")
         if not isinstance(scope, dict) or not isinstance(safe_config, dict):
             raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        firewall_enabled = str(safe_config.get("firewall") or "").casefold()
+        if firewall_enabled not in {"on", "off"}:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        try:
+            firewall = validate_upcloud_firewall_witness(
+                witness.get("upcloud_firewall"),
+                enabled=firewall_enabled == "on",
+            )
+        except _BackupProviderError as error:
+            raise _RestoreProviderError(error.code) from None
         source_storage_id = str(witness.get("source_id") or "")
         source_server_id = str(scope.get("server_id") or "")
         marker = str(witness.get("marker") or "")
@@ -4409,6 +4491,8 @@ class CoreUpCloud(UtilCloud):
                 != str(self.node.connection_id),
                 str(scope.get("zone") or "")
                 != str(safe_config.get("zone") or ""),
+                str(scope.get("firewall_fingerprint") or "")
+                != firewall["fingerprint"],
                 fingerprint != calculated,
                 str(witness.get("upcloud_server_id") or "")
                 != source_server_id,
@@ -4424,6 +4508,7 @@ class CoreUpCloud(UtilCloud):
             r"[a-z0-9][a-z0-9-]{0,63}", str(scope.get("zone") or "")
         ):
             raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        witness["upcloud_firewall"] = firewall
         return witness
 
     def _prepare_upcloud_server_restore(self, backup, restore):
@@ -4461,6 +4546,8 @@ class CoreUpCloud(UtilCloud):
             raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
         identity = dict(identity or {})
         safe_config = dict(witness["upcloud_server_config"])
+        firewall = dict(witness["upcloud_firewall"])
+        params["_bs_upcloud_firewall_fingerprint"] = firewall["fingerprint"]
         expected = {
             "source_id": source_id,
             "source_origin_id": str(witness["source_id"]),
@@ -4477,6 +4564,8 @@ class CoreUpCloud(UtilCloud):
             "server_config_fingerprint": str(
                 witness["upcloud_server_config_fingerprint"]
             ),
+            "server_firewall": firewall,
+            "firewall_fingerprint": firewall["fingerprint"],
             "account_id": str(self.node.connection.account_id),
             "connection_id": str(self.node.connection_id),
         }
@@ -4652,6 +4741,153 @@ class CoreUpCloud(UtilCloud):
                 return None
             result[key] = str(item.get("value") or "")
         return result
+
+    def _upcloud_server_restore_firewall(self, client, restore, identity, server):
+        """Make an exact owned target firewall-safe before adoption.
+
+        UpCloud creates servers asynchronously and the firewall chain is a
+        separate replace operation.  The target is therefore not adopted, or
+        reported usable, until a canonical read-back equals the immutable
+        backup witness.  A lost PUT response fences the operation and permits
+        read-only reconciliation only; it never causes an unbounded second PUT.
+        """
+        from apps._tasks.integration.upcloud import (
+            get_upcloud_server_firewall,
+            replace_upcloud_server_firewall,
+        )
+
+        expected = identity.get("server_firewall")
+        if not isinstance(expected, dict):
+            raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+        if expected.get("enabled") is False:
+            return True
+        if str(server.get("firewall") or "").casefold() != "on":
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+
+        def readback():
+            try:
+                return get_upcloud_server_firewall(
+                    str(server.get("uuid") or ""), client, enabled=True
+                )
+            except _BackupProviderError as error:
+                raise _RestoreProviderError(
+                    error.code,
+                    retryable=error.retryable,
+                    unknown_outcome=error.unknown_outcome,
+                ) from None
+
+        actual = readback()
+        if actual == expected:
+            restore.assert_live_execution_fence()
+            params = _restore_params(restore)
+            current = dict(params.get("_bs_upcloud_restore") or {})
+            current.update(
+                {
+                    "stage": "firewall_verified",
+                    "active_mutation": "",
+                    "firewall_readback_attempts": 0,
+                }
+            )
+            params["_bs_upcloud_restore"] = current
+            restore.params = params
+            restore.save(update_fields=["params", "modified"])
+            return True
+
+        state = str(server.get("state") or "").casefold()
+        if state == "error":
+            raise _RestoreProviderError("PROVIDER_FAILED")
+        if state not in {"started", "stopped"}:
+            return False
+
+        mutation_started = bool(identity.get("firewall_mutation_started"))
+        if mutation_started:
+            try:
+                attempts = int(identity.get("firewall_readback_attempts", 0)) + 1
+            except (TypeError, ValueError):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from None
+            params = _restore_params(restore)
+            current = dict(params.get("_bs_upcloud_restore") or {})
+            current["firewall_readback_attempts"] = attempts
+            params["_bs_upcloud_restore"] = current
+            restore.params = params
+            restore.save(update_fields=["params", "modified"])
+            if attempts >= 20:
+                raise _RestoreProviderError(
+                    "PROVIDER_RECONCILIATION_REQUIRED", unknown_outcome=True
+                )
+            return False
+
+        restore.assert_live_execution_fence()
+        params = _restore_params(restore)
+        current = dict(params.get("_bs_upcloud_restore") or {})
+        current.update(
+            {
+                "stage": "firewall_replace_requested",
+                "active_mutation": "firewall",
+                "firewall_mutation_started": True,
+                "firewall_readback_attempts": 0,
+            }
+        )
+        params["_bs_upcloud_restore"] = current
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+        _restore_begin_mutation(restore)
+        _restore_begin_reconciliation(restore)
+        restore.assert_live_execution_fence()
+        try:
+            replace_upcloud_server_firewall(
+                str(server.get("uuid") or ""),
+                client,
+                expected["rules"],
+            )
+        except _BackupProviderError as error:
+            if not error.unknown_outcome:
+                restore.assert_live_execution_fence()
+                params = _restore_params(restore)
+                current = dict(params.get("_bs_upcloud_restore") or {})
+                current.update(
+                    {
+                        "active_mutation": "",
+                        "firewall_mutation_started": False,
+                    }
+                )
+                params["_bs_upcloud_restore"] = current
+                restore.params = params
+                restore.save(update_fields=["params", "modified"])
+            raise _RestoreProviderError(
+                error.code,
+                retryable=error.retryable,
+                unknown_outcome=error.unknown_outcome,
+            ) from None
+
+        self._upcloud_server_restore_fault_after_accept(
+            restore, identity["server_marker"], "firewall"
+        )
+
+        actual = readback()
+        if actual != expected:
+            restore.assert_live_execution_fence()
+            params = _restore_params(restore)
+            current = dict(params.get("_bs_upcloud_restore") or {})
+            current["firewall_readback_attempts"] = 1
+            params["_bs_upcloud_restore"] = current
+            restore.params = params
+            restore.save(update_fields=["params", "modified"])
+            return False
+        restore.assert_live_execution_fence()
+        params = _restore_params(restore)
+        current = dict(params.get("_bs_upcloud_restore") or {})
+        current.update(
+            {
+                "stage": "firewall_verified",
+                "active_mutation": "",
+                "firewall_readback_attempts": 0,
+            }
+        )
+        params["_bs_upcloud_restore"] = current
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+        return True
 
     def _upcloud_server_restore_owned(
         self, server, identity, *, resource_id=None
@@ -5001,6 +5237,10 @@ class CoreUpCloud(UtilCloud):
                 client, restore, identity
             )
             if server is not None:
+                if not self._upcloud_server_restore_firewall(
+                    client, restore, identity, server
+                ):
+                    return _restore_status("IN_PROGRESS")
                 self._adopt_upcloud_server_restore_server(restore, server)
                 return None
             if _restore_unknown(restore):
@@ -5053,45 +5293,49 @@ class CoreUpCloud(UtilCloud):
             self._upcloud_server_restore_fault_after_accept(
                 restore, identity["server_marker"], "server"
             )
-            if self._upcloud_server_restore_owned(
-                accepted, identity, resource_id=accepted_id
-            ):
-                self._adopt_upcloud_server_restore_server(restore, accepted)
-                return None
             params = _restore_params(restore)
             identity = dict(params["_bs_upcloud_restore"])
             identity.update(
                 {
                     "candidate_server_id": accepted_id,
                     "stage": "server_candidate_received",
+                    "active_mutation": "server",
                 }
             )
             params["_bs_upcloud_restore"] = identity
             restore.params = params
             restore.save(update_fields=["params", "modified"])
-            exact_response = requests.get(
-                f"{settings.UPCLOUD_API}/server/{accepted_id}",
-                auth=client,
-                verify=True,
-                timeout=request_timeout(),
-                headers={"accept": "application/json"},
-            )
-            exact_problem = self._upcloud_restore_response_problem(
-                exact_response, mutation=True
-            )
-            if exact_problem is not None:
-                raise _RestoreProviderError(
-                    exact_problem.code,
-                    retryable=True,
-                    unknown_outcome=True,
+            server = accepted
+            if not self._upcloud_server_restore_owned(
+                server, identity, resource_id=accepted_id
+            ):
+                exact_response = requests.get(
+                    f"{settings.UPCLOUD_API}/server/{accepted_id}",
+                    auth=client,
+                    verify=True,
+                    timeout=request_timeout(),
+                    headers={"accept": "application/json"},
                 )
-            server = self._upcloud_restore_response_server(exact_response)
+                exact_problem = self._upcloud_restore_response_problem(
+                    exact_response, mutation=True
+                )
+                if exact_problem is not None:
+                    raise _RestoreProviderError(
+                        exact_problem.code,
+                        retryable=True,
+                        unknown_outcome=True,
+                    )
+                server = self._upcloud_restore_response_server(exact_response)
             if not self._upcloud_server_restore_owned(
                 server, identity, resource_id=accepted_id
             ):
                 raise _RestoreProviderError(
                     "PROVIDER_OWNERSHIP_MISMATCH", unknown_outcome=True
                 )
+            if not self._upcloud_server_restore_firewall(
+                client, restore, identity, server
+            ):
+                return _restore_status("IN_PROGRESS")
             self._adopt_upcloud_server_restore_server(restore, server)
             return None
         except Exception as error:
@@ -5156,6 +5400,10 @@ class CoreUpCloud(UtilCloud):
                     "PROVIDER_OWNERSHIP_MISMATCH",
                     manual_review=True,
                 )
+            if not self._upcloud_server_restore_firewall(
+                client, restore, identity, server
+            ):
+                return _restore_status("IN_PROGRESS")
             _restore_resolve_reconciliation(restore)
             state = str(server.get("state") or "").casefold()
             if state in {"started", "stopped"}:

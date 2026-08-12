@@ -212,7 +212,8 @@ class DigitalOceanRestoreTests(BaseTestCase):
                 identity["source_tag"],
                 identity["kind_tag"],
             ],
-            "snapshot_id": str(backup.unique_id),
+            "region": {"slug": (restore.params or {}).get("region", "nyc3")},
+            "size_gigabytes": max(1, __import__("math").ceil(backup.size_gigabytes)),
             "status": status,
         }
 
@@ -305,7 +306,11 @@ class DigitalOceanRestoreTests(BaseTestCase):
 
     def test_restore_snapshot_volume_uses_snapshot_and_atomic_identity_tags(self):
         node = self._make_volume_node_with_auth()
-        backup = make_completed_backup(node, unique_id="volume-snapshot-123")
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-123",
+            size_gigabytes=1.25,
+        )
         restore = CoreCloudRestore.objects.create(
             node=node,
             backup_id=backup.id,
@@ -331,21 +336,102 @@ class DigitalOceanRestoreTests(BaseTestCase):
         )
         sent_json = post.call_args.kwargs["json"]
         identity = self._restore_identity(node, backup, restore)
+        self.assertEqual(
+            set(sent_json),
+            {"name", "region", "snapshot", "tags", "size_gigabytes"},
+        )
         self.assertEqual(sent_json["snapshot"], backup.unique_id)
         self.assertNotIn("snapshot_id", sent_json)
         self.assertEqual(
             sent_json["tags"],
             [identity["marker"], identity["source_tag"], identity["kind_tag"]],
         )
+        self.assertIs(type(sent_json["size_gigabytes"]), int)
+        self.assertEqual(sent_json["size_gigabytes"], 2)
+        self.assertGreater(sent_json["size_gigabytes"], 0)
         self.assertEqual(post.call_args.kwargs["timeout"], request_timeout())
+        restore.refresh_from_db()
+        self.assertEqual(
+            restore.params["_digitalocean_restore"]["region"], "nyc3"
+        )
+        self.assertEqual(
+            restore.params["_digitalocean_restore"]["size_gigabytes"], 2
+        )
 
-    def test_restore_snapshot_volume_requires_exact_snapshot_and_source_tag(self):
+    def test_restore_snapshot_volume_rejects_invalid_durable_sizes_before_mutation(self):
+        missing = object()
+        cases = (
+            ("missing", missing),
+            ("zero", 0),
+            ("negative", -1),
+            ("nan", float("nan")),
+            ("infinite", float("inf")),
+        )
+
+        for case, size_gigabytes in cases:
+            with self.subTest(case=case):
+                node = self._make_volume_node_with_auth()
+                backup_kwargs = {
+                    "unique_id": f"invalid-volume-snapshot-{case}",
+                }
+                if size_gigabytes is not missing:
+                    backup_kwargs["size_gigabytes"] = size_gigabytes
+                backup = make_completed_backup(node, **backup_kwargs)
+                restore = CoreCloudRestore.objects.create(
+                    node=node,
+                    backup_id=backup.id,
+                    name=f"restored-invalid-{case}",
+                    params={"region": "nyc3"},
+                )
+                post_resp = mock.MagicMock(status_code=202)
+                post_resp.json.return_value = {"volume": {"id": f"fake-{case}"}}
+
+                with self._patch_client(), mock.patch(
+                    "apps.console.node.models.requests.post",
+                    return_value=post_resp,
+                ) as post, mock.patch(
+                    "apps.console.node.models.requests.get"
+                ) as get:
+                    with self.assertRaises(ValueError) as raised:
+                        node.digitalocean.restore_snapshot(backup, restore)
+
+                self.assertEqual(
+                    getattr(raised.exception, "code", None),
+                    "PROVIDER_MALFORMED_RESPONSE",
+                )
+                post.assert_not_called()
+                get.assert_not_called()
+                restore.refresh_from_db()
+                self.assertEqual(restore.status, CoreCloudRestore.Status.FAILED)
+                self.assertEqual(
+                    restore.operation_phase,
+                    CoreCloudRestore.OperationPhase.MANUAL_REVIEW,
+                )
+                self.assertEqual(
+                    restore.last_error_code,
+                    "PROVIDER_MALFORMED_RESPONSE",
+                )
+                self.assertEqual(
+                    restore.params["_bs_last_error_code"],
+                    "PROVIDER_MALFORMED_RESPONSE",
+                )
+                self.assertFalse(restore.params["_bs_create_outcome_unknown"])
+                self.assertNotIn("_bs_mutation_started_at", restore.params)
+                self.assertIsNone(restore.resource_id)
+
+    def test_restore_snapshot_volume_requires_exact_exposed_snapshot_and_request_witness(self):
         node = self._make_volume_node_with_auth()
-        backup = make_completed_backup(node, unique_id="volume-snapshot-123")
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-123",
+            size_gigabytes=1,
+        )
 
         cases = (
             ("wrong-snapshot", {"snapshot_id": "foreign-snapshot"}),
             ("missing-source-tag", {"remove_source_tag": True}),
+            ("wrong-region", {"region": {"slug": "ams3"}}),
+            ("wrong-size", {"size_gigabytes": 2}),
         )
         for suffix, mutation in cases:
             with self.subTest(case=suffix):
@@ -384,7 +470,11 @@ class DigitalOceanRestoreTests(BaseTestCase):
 
     def test_restore_snapshot_volume_lost_response_adopts_one_exact_target_without_replay(self):
         node = self._make_volume_node_with_auth()
-        backup = make_completed_backup(node, unique_id="volume-snapshot-123")
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-123",
+            size_gigabytes=1,
+        )
         restore = CoreCloudRestore.objects.create(
             node=node,
             backup_id=backup.id,
@@ -416,7 +506,11 @@ class DigitalOceanRestoreTests(BaseTestCase):
 
     def test_restore_snapshot_volume_lost_response_rejects_duplicate_targets_without_replay(self):
         node = self._make_volume_node_with_auth()
-        backup = make_completed_backup(node, unique_id="volume-snapshot-123")
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-123",
+            size_gigabytes=1,
+        )
         restore = CoreCloudRestore.objects.create(
             node=node,
             backup_id=backup.id,
@@ -456,7 +550,11 @@ class DigitalOceanRestoreTests(BaseTestCase):
 
     def test_restore_snapshot_volume_lost_response_rejects_foreign_target_without_replay(self):
         node = self._make_volume_node_with_auth()
-        backup = make_completed_backup(node, unique_id="volume-snapshot-123")
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-123",
+            size_gigabytes=1,
+        )
         restore = CoreCloudRestore.objects.create(
             node=node,
             backup_id=backup.id,

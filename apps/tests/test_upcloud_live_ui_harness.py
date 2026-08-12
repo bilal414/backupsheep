@@ -168,6 +168,51 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
             source_witness=value["uuid"],
         )
 
+    def _assert_manifest_envelope_rejected_before_provider(
+        self, manifest, message
+    ):
+        harness = self.harness(apply=True)
+        manifest_path = self.root / "invalid-envelope.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with mock.patch.object(harness, "verify_account") as verify_account, \
+            mock.patch.object(harness, "_service_read") as service_read, \
+            mock.patch.object(harness, "_s3") as s3, \
+            mock.patch.object(harness, "_s3_inventory") as inventory, \
+            self.assertRaisesRegex(live_harness.HarnessError, message):
+            harness.verify_ui_objects(str(manifest_path), maximum_bytes=1024)
+
+        verify_account.assert_not_called()
+        service_read.assert_not_called()
+        s3.assert_not_called()
+        inventory.assert_not_called()
+
+    def test_ui_manifest_requires_json_object_before_provider_inventory(self):
+        self._assert_manifest_envelope_rejected_before_provider(
+            [], r"JSON object"
+        )
+
+    def test_ui_manifest_rejects_wrong_schema_before_provider_inventory(self):
+        self._assert_manifest_envelope_rejected_before_provider(
+            {"schema": 2, "run_id": self.run_id, "objects": []},
+            r"schema must be 1",
+        )
+
+    def test_ui_manifest_rejects_missing_schema_before_provider_inventory(self):
+        self._assert_manifest_envelope_rejected_before_provider(
+            {"run_id": self.run_id, "objects": []}, r"schema must be 1"
+        )
+
+    def test_ui_manifest_rejects_wrong_run_id_before_provider_inventory(self):
+        self._assert_manifest_envelope_rejected_before_provider(
+            {"schema": 1, "run_id": "another-run", "objects": []},
+            r"run_id does not match",
+        )
+
+    def test_ui_manifest_rejects_missing_run_id_before_provider_inventory(self):
+        self._assert_manifest_envelope_rejected_before_provider(
+            {"schema": 1, "objects": []}, r"run_id does not match"
+        )
+
     def test_plan_is_offline_and_never_reads_or_prints_token(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -536,6 +581,107 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         self.assertNotIn("LOST-KEY-CANARY", serialized)
         harness.control.request.assert_not_called()
 
+    def test_s3_inventory_scopes_first_and_later_pages_to_exact_run_prefix(self):
+        harness = self.harness(apply=True)
+        client = mock.Mock()
+        bucket = harness.names["bucket"]
+        prefix = harness.names["prefix"]
+        first_key = f"{prefix}first.zip"
+        second_key = f"{prefix}second.zip"
+        upload_key = f"{prefix}pending.zip"
+        client.list_object_versions.side_effect = [
+            {
+                "Versions": [{"Key": first_key, "VersionId": "version-1"}],
+                "DeleteMarkers": [],
+                "IsTruncated": True,
+                "NextKeyMarker": first_key,
+                "NextVersionIdMarker": "version-1",
+            },
+            {
+                "Versions": [{"Key": second_key, "VersionId": "version-2"}],
+                "DeleteMarkers": [],
+                "IsTruncated": False,
+            },
+        ]
+        client.list_objects_v2.side_effect = [
+            {
+                "Contents": [{"Key": first_key}],
+                "IsTruncated": True,
+                "NextContinuationToken": "object-page-2",
+            },
+            {"Contents": [{"Key": second_key}], "IsTruncated": False},
+        ]
+        client.list_multipart_uploads.side_effect = [
+            {
+                "Uploads": [{"Key": upload_key, "UploadId": "upload-1"}],
+                "IsTruncated": True,
+                "NextKeyMarker": upload_key,
+                "NextUploadIdMarker": "upload-1",
+            },
+            {"Uploads": [], "IsTruncated": False},
+        ]
+
+        result = harness._s3_inventory(client, bucket, prefix)
+
+        self.assertEqual(len(result["versions"]), 2)
+        self.assertEqual(len(result["objects"]), 2)
+        self.assertEqual(len(result["multipart_uploads"]), 1)
+        self.assertEqual(
+            client.list_object_versions.call_args_list,
+            [
+                mock.call(Bucket=bucket, Prefix=prefix),
+                mock.call(
+                    Bucket=bucket,
+                    Prefix=prefix,
+                    KeyMarker=first_key,
+                    VersionIdMarker="version-1",
+                ),
+            ],
+        )
+        self.assertEqual(
+            client.list_objects_v2.call_args_list,
+            [
+                mock.call(Bucket=bucket, Prefix=prefix),
+                mock.call(
+                    Bucket=bucket,
+                    Prefix=prefix,
+                    ContinuationToken="object-page-2",
+                ),
+            ],
+        )
+        self.assertEqual(
+            client.list_multipart_uploads.call_args_list,
+            [
+                mock.call(Bucket=bucket, Prefix=prefix),
+                mock.call(
+                    Bucket=bucket,
+                    Prefix=prefix,
+                    KeyMarker=upload_key,
+                    UploadIdMarker="upload-1",
+                ),
+            ],
+        )
+
+    def test_s3_inventory_rejects_invalid_prefix_before_s3_reads(self):
+        harness = self.harness(apply=True)
+        expected = harness.names["prefix"]
+        invalid_prefixes = {
+            "empty": "",
+            "wrong": f"{expected}nested/",
+            "cross-run": "backupsheep-e2e/another-run/",
+        }
+        for label, prefix in invalid_prefixes.items():
+            with self.subTest(prefix=label):
+                client = mock.Mock()
+                with self.assertRaisesRegex(
+                    live_harness.HarnessError, r"exact active BackupSheep run prefix"
+                ):
+                    harness._s3_inventory(client, harness.names["bucket"], prefix)
+
+                client.list_object_versions.assert_not_called()
+                client.list_objects_v2.assert_not_called()
+                client.list_multipart_uploads.assert_not_called()
+
     def test_arm_refuses_nonempty_bucket_before_enabling_versioning(self):
         harness = self.harness(apply=True)
         value = self.seed_service(harness)
@@ -573,7 +719,10 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
             harness, "_s3_inventory", return_value=foreign
         ), self.assertRaises(live_harness.InventoryNotEmpty):
             harness._delete_bucket_contents(
-                client, harness.names["bucket"], maximum_bytes=1024
+                client,
+                harness.names["bucket"],
+                harness.names["prefix"],
+                maximum_bytes=1024,
             )
 
         client.delete_object.assert_not_called()
@@ -621,6 +770,8 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         body = Body(payload)
         client.get_object.return_value = {"Body": body}
         manifest = {
+            "schema": 1,
+            "run_id": self.run_id,
             "objects": [
                 {
                     "kind": "website",
@@ -684,6 +835,8 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         manifest_path.write_text(
             json.dumps(
                 {
+                    "schema": 1,
+                    "run_id": self.run_id,
                     "objects": [
                         {
                             "kind": "database",
@@ -731,6 +884,8 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         manifest_path.write_text(
             json.dumps(
                 {
+                    "schema": 1,
+                    "run_id": self.run_id,
                     "objects": [
                         {
                             "kind": "website",
@@ -779,7 +934,10 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         duplicate["backup_id"] = "127"
         manifest_path = self.root / "duplicate-manifest.json"
         manifest_path.write_text(
-            json.dumps({"objects": [row, duplicate]}), encoding="utf-8"
+            json.dumps(
+                {"schema": 1, "run_id": self.run_id, "objects": [row, duplicate]}
+            ),
+            encoding="utf-8",
         )
         with mock.patch.object(harness, "verify_account", return_value=self.account), \
             mock.patch.object(harness, "_service_read", return_value=value), \
@@ -801,6 +959,8 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         manifest_path.write_text(
             json.dumps(
                 {
+                    "schema": 1,
+                    "run_id": self.run_id,
                     "objects": [
                         {
                             "kind": "website",

@@ -10,6 +10,7 @@ provider title and is persisted before crossing the mutation boundary.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 
@@ -47,6 +48,7 @@ UPCLOUD_SERVER_PAGE_LIMIT = 100
 UPCLOUD_SERVER_MAX_PAGES = 100
 UPCLOUD_SERVER_MAX_ITEMS = 10_000
 UPCLOUD_ZERO_MATCH_RECONCILIATION_LIMIT = 3
+UPCLOUD_FIREWALL_MAX_RULES = 1000
 _UPCLOUD_STORAGE_TYPES = frozenset({"backup", "normal"})
 _SAFE_MACHINE_CODE = re.compile(r"^[A-Z0-9_.:-]{1,96}$")
 _TRANSITIONAL_STORAGE_STATES = frozenset(
@@ -450,6 +452,336 @@ def _upcloud_nested_list(payload, container_key, item_key):
     return items
 
 
+_UPCLOUD_FIREWALL_RULE_FIELDS = frozenset(
+    {
+        "action",
+        "comment",
+        "destination_address_end",
+        "destination_address_start",
+        "destination_port_end",
+        "destination_port_start",
+        "direction",
+        "family",
+        "icmp_type",
+        "position",
+        "protocol",
+        "source_address_end",
+        "source_address_start",
+        "source_port_end",
+        "source_port_start",
+    }
+)
+_UPCLOUD_FIREWALL_OPTIONAL_FIELDS = (
+    "comment",
+    "destination_address_end",
+    "destination_address_start",
+    "destination_port_end",
+    "destination_port_start",
+    "family",
+    "icmp_type",
+    "protocol",
+    "source_address_end",
+    "source_address_start",
+    "source_port_end",
+    "source_port_start",
+)
+
+
+def _upcloud_rule_text(rule, key):
+    value = rule.get(key, "")
+    if value is None:
+        return ""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    return str(value)
+
+
+def _upcloud_rule_number(rule, key, *, minimum, maximum):
+    value = _upcloud_rule_text(rule, key).strip()
+    if not re.fullmatch(r"[0-9]+", value):
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    number = int(value)
+    if not minimum <= number <= maximum:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    return number
+
+
+def _upcloud_rule_ip_range(rule, prefix, family):
+    start_key = f"{prefix}_address_start"
+    end_key = f"{prefix}_address_end"
+    start = _upcloud_rule_text(rule, start_key).strip()
+    end = _upcloud_rule_text(rule, end_key).strip()
+    if bool(start) != bool(end):
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    if not start:
+        return {}
+    try:
+        start_ip = ipaddress.ip_address(start)
+        end_ip = ipaddress.ip_address(end)
+    except ValueError:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        ) from None
+    if start_ip.version != end_ip.version or int(start_ip) > int(end_ip):
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    if family and start_ip.version != int(family[-1]):
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    return {
+        start_key: str(start_ip),
+        end_key: str(end_ip),
+    }
+
+
+def _upcloud_rule_port_range(rule, prefix, protocol):
+    start_key = f"{prefix}_port_start"
+    end_key = f"{prefix}_port_end"
+    start = _upcloud_rule_text(rule, start_key).strip()
+    end = _upcloud_rule_text(rule, end_key).strip()
+    if bool(start) != bool(end):
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    if not start:
+        return {}
+    if protocol not in {"tcp", "udp"}:
+        raise _BackupProviderError(
+            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+        )
+    start_port = _upcloud_rule_number(
+        rule, start_key, minimum=1, maximum=65535
+    )
+    end_port = _upcloud_rule_number(rule, end_key, minimum=1, maximum=65535)
+    if start_port > end_port:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    return {
+        start_key: str(start_port),
+        end_key: str(end_port),
+    }
+
+
+def _upcloud_normalize_firewall_rule(rule, expected_position):
+    if not isinstance(rule, dict) or set(rule) - _UPCLOUD_FIREWALL_RULE_FIELDS:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    position = _upcloud_rule_number(
+        rule, "position", minimum=1, maximum=UPCLOUD_FIREWALL_MAX_RULES
+    )
+    if position != expected_position:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    direction = _upcloud_rule_text(rule, "direction").strip().casefold()
+    action = _upcloud_rule_text(rule, "action").strip().casefold()
+    if direction not in {"in", "out"} or action not in {"accept", "drop"}:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    family = _upcloud_rule_text(rule, "family").strip()
+    if family not in {"", "IPv4", "IPv6"}:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    protocol = _upcloud_rule_text(rule, "protocol").strip().casefold()
+    if protocol not in {"", "tcp", "udp", "icmp"}:
+        raise _BackupProviderError(
+            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+        )
+    if protocol and not family:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    comment = _upcloud_rule_text(rule, "comment")
+    if len(comment) > 250:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    icmp_type = _upcloud_rule_text(rule, "icmp_type").strip()
+    if icmp_type:
+        if protocol != "icmp":
+            raise _BackupProviderError(
+                "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+            )
+        icmp_type = str(
+            _upcloud_rule_number(
+                rule, "icmp_type", minimum=0, maximum=255
+            )
+        )
+    elif protocol == "icmp":
+        icmp_type = ""
+    normalized = {
+        "position": position,
+        "direction": direction,
+        "action": action,
+    }
+    if comment:
+        normalized["comment"] = comment
+    if family:
+        normalized["family"] = family
+    if protocol:
+        normalized["protocol"] = protocol
+    if icmp_type:
+        normalized["icmp_type"] = icmp_type
+    normalized.update(_upcloud_rule_ip_range(rule, "source", family))
+    normalized.update(_upcloud_rule_ip_range(rule, "destination", family))
+    normalized.update(_upcloud_rule_port_range(rule, "source", protocol))
+    normalized.update(_upcloud_rule_port_range(rule, "destination", protocol))
+
+    is_default = all(
+        not _upcloud_rule_text(rule, field).strip()
+        for field in _UPCLOUD_FIREWALL_OPTIONAL_FIELDS
+    )
+    return normalized, is_default
+
+
+def normalize_upcloud_firewall_rules(payload):
+    """Return a strict, canonical UpCloud firewall chain.
+
+    UpCloud returns positions as strings and may omit empty optional fields in
+    write responses.  Canonicalization makes those representations comparable,
+    while rejecting unknown fields, gaps, duplicate rules, invalid ranges, and
+    an absent final default rule before any restore mutation.
+    """
+    container = payload.get("firewall_rules") if isinstance(payload, dict) else None
+    rules = container.get("firewall_rule") if isinstance(container, dict) else None
+    if not isinstance(rules, list) or not rules:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    if len(rules) > UPCLOUD_FIREWALL_MAX_RULES:
+        raise _BackupProviderError(
+            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+        )
+    normalized = []
+    default_flags = []
+    seen = set()
+    for position, rule in enumerate(rules, start=1):
+        canonical, is_default = _upcloud_normalize_firewall_rule(
+            rule, position
+        )
+        duplicate_key = json.dumps(
+            {key: value for key, value in canonical.items() if key != "position"},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        if duplicate_key in seen:
+            raise _BackupProviderError(
+                "PROVIDER_DUPLICATE_MATCH", manual_review=True
+            )
+        seen.add(duplicate_key)
+        normalized.append(canonical)
+        default_flags.append(is_default)
+    if not default_flags[-1] or any(default_flags[:-1]):
+        raise _BackupProviderError(
+            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+        )
+    return normalized
+
+
+def _upcloud_firewall_fingerprint(rules):
+    encoded = json.dumps(
+        rules, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def validate_upcloud_firewall_witness(witness, *, enabled=None):
+    if not isinstance(witness, dict) or not isinstance(
+        witness.get("enabled"), bool
+    ):
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    if enabled is not None and witness["enabled"] is not bool(enabled):
+        raise _BackupProviderError(
+            "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True
+        )
+    rules = witness.get("rules")
+    normalized = normalize_upcloud_firewall_rules(
+        {"firewall_rules": {"firewall_rule": rules}}
+    )
+    fingerprint = _upcloud_firewall_fingerprint(normalized)
+    if str(witness.get("fingerprint") or "") != fingerprint:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    if normalized != rules:
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    return {
+        "enabled": witness["enabled"],
+        "rules": normalized,
+        "fingerprint": fingerprint,
+    }
+
+
+def get_upcloud_server_firewall(server_id, auth, *, enabled=True):
+    if not enabled:
+        rules = [{"position": 1, "direction": "in", "action": "drop"}]
+        return {
+            "enabled": False,
+            "rules": rules,
+            "fingerprint": _upcloud_firewall_fingerprint(rules),
+        }
+    response = requests.get(
+        f"{settings.UPCLOUD_API}/server/{server_id}/firewall_rule",
+        auth=auth,
+        verify=True,
+        timeout=request_timeout(),
+        headers={"accept": "application/json"},
+    )
+    rules = normalize_upcloud_firewall_rules(_upcloud_json(response))
+    return {
+        "enabled": True,
+        "rules": rules,
+        "fingerprint": _upcloud_firewall_fingerprint(rules),
+    }
+
+
+def replace_upcloud_server_firewall(server_id, auth, rules):
+    normalized = normalize_upcloud_firewall_rules(
+        {"firewall_rules": {"firewall_rule": rules}}
+    )
+    payload_rules = [
+        {key: value for key, value in rule.items() if key != "position"}
+        for rule in normalized
+    ]
+    try:
+        response = requests.put(
+            f"{settings.UPCLOUD_API}/server/{server_id}/firewall_rule",
+            auth=auth,
+            verify=True,
+            timeout=request_timeout(),
+            headers={
+                "accept": "application/json",
+                "content-type": "application/json",
+            },
+            json={"firewall_rules": {"firewall_rule": payload_rules}},
+        )
+    except Exception as error:
+        raise _backup_provider_exception(error, mutation=True) from None
+    problem = classify_upcloud_response(response, mutation=True)
+    if problem is not None:
+        raise problem
+    return normalized
+
+
 def _upcloud_safe_server_networking(server):
     networking = server.get("networking") if isinstance(server, dict) else None
     interfaces = _upcloud_nested_list(
@@ -512,7 +844,7 @@ def _upcloud_safe_server_networking(server):
     return {"interfaces": {"interface": safe_interfaces}}
 
 
-def _upcloud_safe_server_config(server, boot_device):
+def _upcloud_safe_server_config(server, boot_device, firewall_witness=None):
     if not isinstance(server, dict) or not isinstance(boot_device, dict):
         raise _BackupProviderError(
             "PROVIDER_MALFORMED_RESPONSE", manual_review=True
@@ -541,13 +873,24 @@ def _upcloud_safe_server_config(server, boot_device):
         raise _BackupProviderError(
             "PROVIDER_MALFORMED_RESPONSE", manual_review=True
         )
-    # Firewall rules are a separate server resource. Enabling an empty firewall
-    # would silently change reachability, so stop instead of creating a server
-    # whose network security does not match the source.
-    if firewall == "on":
+    # Firewall rules are a separate server resource. A firewall-enabled source
+    # is restorable only when its complete, bounded chain was witnessed before
+    # the storage-backup mutation. Never turn on an empty or unverified chain.
+    if firewall == "on" and not (
+        isinstance(firewall_witness, dict)
+        and firewall_witness.get("enabled") is True
+    ):
         raise _BackupProviderError(
             "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
         )
+    if firewall == "off" and firewall_witness not in (None, {}):
+        if not (
+            isinstance(firewall_witness, dict)
+            and firewall_witness.get("enabled") is False
+        ):
+            raise _BackupProviderError(
+                "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True
+            )
 
     config = {
         "schema": 1,
@@ -678,7 +1021,13 @@ def _upcloud_server_source_witness(integration, backup, auth):
             "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True
         )
 
-    safe_config = _upcloud_safe_server_config(server, boot_device)
+    firewall = str(server.get("firewall") or "off").casefold()
+    firewall_witness = get_upcloud_server_firewall(
+        server_id, auth, enabled=firewall == "on"
+    )
+    safe_config = _upcloud_safe_server_config(
+        server, boot_device, firewall_witness=firewall_witness
+    )
     encoded = json.dumps(
         safe_config, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     )
@@ -692,6 +1041,7 @@ def _upcloud_server_source_witness(integration, backup, auth):
             "zone": zone,
             "server_id": server_id,
             "server_config_fingerprint": config_fingerprint,
+            "firewall_fingerprint": firewall_witness["fingerprint"],
             "account_id": integration.node.connection.account_id,
             "connection_id": integration.node.connection_id,
         },
@@ -705,6 +1055,7 @@ def _upcloud_server_source_witness(integration, backup, auth):
             "upcloud_source_storage_id": boot_storage_id,
             "upcloud_source_storage_tier": str(source_storage.get("tier") or "")[:32],
             "upcloud_source_storage_encrypted": str(source_storage.get("encrypted") or "")[:8],
+            "upcloud_firewall": firewall_witness,
         }
     )
     return witness

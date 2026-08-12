@@ -2535,18 +2535,32 @@ class OracleLiveUIHarness:
     def _launch_boot_verifier(self, restored_boot, *, subnet_id, shape):
         kind = "ui_boot_verify_instance"
         client = self._clients["compute"]
+        boot_id = _require_ocid(
+            _value(restored_boot, "id"),
+            label="restored boot volume",
+            resource_type="bootvolume",
+        )
         row = self._active_ledger_entry(kind)
         if row:
+            if (
+                str(row.get("source_witness") or "") != boot_id
+                or str((row.get("ownership") or {}).get("source_id") or "")
+                != boot_id
+            ):
+                raise HarnessError(
+                    "The boot verifier ledger source does not match the restored boot volume."
+                )
             instance = _data(
                 self._call(client.get_instance, instance_id=row["resource_id"])
             )
+            self._verify_instance_boot_attachment(row["resource_id"], boot_id)
             self._assert_exact(
                 instance,
                 resource_id=row["resource_id"],
                 proof=row["ownership"],
+                source_id=boot_id,
             )
             return instance
-        boot_id = str(_value(restored_boot, "id") or "")
         name = self.names[kind]
         tags = self._source_tags(kind)
         candidate = self._find_named(
@@ -2607,6 +2621,7 @@ class OracleLiveUIHarness:
             ready={"RUNNING", "STOPPED"},
             failed={"TERMINATED", "TERMINATING"},
         )
+        self._verify_instance_boot_attachment(instance_id, boot_id)
         proof = self._expected_proof(
             name=name,
             tags=tags,
@@ -2618,10 +2633,54 @@ class OracleLiveUIHarness:
             instance,
             proof,
             source_witness=boot_id,
-            source_id=_source_id(instance),
+            # OCI reports the original image_id on an instance launched from an
+            # existing boot volume. The exact attached boot-volume relationship
+            # above is the provider-authoritative source witness.
+            source_id=boot_id,
         )
         self.intents.clear(kind)
         return instance
+
+    def _verify_instance_boot_attachment(self, instance_id, expected_boot_id):
+        """Require one exact ATTACHED boot volume for a verifier instance."""
+
+        instance_id = _require_ocid(
+            instance_id,
+            label="boot verifier instance",
+            resource_type="instance",
+        )
+        expected_boot_id = _require_ocid(
+            expected_boot_id,
+            label="restored boot volume",
+            resource_type="bootvolume",
+        )
+        attachments = self._list(
+            self._clients["compute"].list_boot_volume_attachments,
+            availability_domain=self.config.availability_domain,
+            compartment_id=self.config.compartment_id,
+            instance_id=instance_id,
+        )
+        exact = [
+            item
+            for item in attachments
+            if str(_value(item, "instance_id") or "") == instance_id
+            and str(_value(item, "lifecycle_state") or "").upper()
+            == "ATTACHED"
+        ]
+        if len(exact) != 1:
+            raise HarnessError(
+                "The boot verifier instance attachment graph is ambiguous."
+            )
+        attached_boot_id = _require_ocid(
+            _value(exact[0], "boot_volume_id"),
+            label="boot verifier attached volume",
+            resource_type="bootvolume",
+        )
+        if attached_boot_id != expected_boot_id:
+            raise HarnessError(
+                "The boot verifier instance is attached to a different boot volume."
+            )
+        return exact[0]
 
     def _verify_restored_data(
         self,

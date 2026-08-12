@@ -140,6 +140,7 @@ UI_OBJECT_KINDS = {
     "website": "mos_ui_website_object",
     "database": "mos_ui_database_object",
 }
+UI_OBJECT_MANIFEST_SCHEMA = 1
 OBJECT_LEDGER_KINDS = set(UI_OBJECT_KINDS.values()) | {
     "mos_ownership_object",
     "mos_delete_marker",
@@ -1984,13 +1985,17 @@ class UpCloudLiveHarness:
             raise HarnessError(f"UpCloud returned a non-advancing {label} cursor.")
         return following
 
-    def _s3_inventory(self, client, bucket: str) -> dict:
+    def _s3_inventory(self, client, bucket: str, prefix: str) -> dict:
+        if not isinstance(prefix, str) or prefix != self.names["prefix"]:
+            raise HarnessError(
+                "S3 inventory requires the exact active BackupSheep run prefix."
+            )
         versions = []
         delete_markers = []
         key_marker = None
         version_marker = None
         for _ in range(MAX_PAGES):
-            args = {"Bucket": bucket}
+            args = {"Bucket": bucket, "Prefix": prefix}
             if key_marker:
                 args["KeyMarker"] = key_marker
             if version_marker:
@@ -2021,7 +2026,7 @@ class UpCloudLiveHarness:
         objects = []
         continuation = None
         for _ in range(MAX_PAGES):
-            args = {"Bucket": bucket}
+            args = {"Bucket": bucket, "Prefix": prefix}
             if continuation:
                 args["ContinuationToken"] = continuation
             page = _s3_call(lambda args=args: client.list_objects_v2(**args))
@@ -2045,7 +2050,7 @@ class UpCloudLiveHarness:
         key_marker = None
         upload_marker = None
         for _ in range(MAX_PAGES):
-            args = {"Bucket": bucket}
+            args = {"Bucket": bucket, "Prefix": prefix}
             if key_marker:
                 args["KeyMarker"] = key_marker
             if upload_marker:
@@ -2167,7 +2172,7 @@ class UpCloudLiveHarness:
         ]
 
     def arm_object_storage(self) -> dict:
-        """Enable versioning only after the UI's validation probe is gone."""
+        """Enable versioning only after the UI probe leaves the exact run prefix."""
         self._require_apply()
         self._require_object_storage_config()
         self.verify_account()
@@ -2179,11 +2184,11 @@ class UpCloudLiveHarness:
             raise HarnessError("The run-owned UpCloud service ownership changed.")
         client, runtime = self._s3(service)
         bucket = runtime["bucket_name"]
-        inventory = self._s3_inventory(client, bucket)
+        inventory = self._s3_inventory(client, bucket, runtime["prefix"])
         if not self._inventory_empty(inventory):
             raise InventoryNotEmpty(
-                "The bucket is not empty. Arming refused so a UI validation probe or "
-                "foreign object cannot become an untracked version."
+                "The exact run prefix is not empty. Arming refused so a UI validation "
+                "probe or unledgered object cannot become an untracked version."
             )
 
         versioning_key = "mos_bucket_versioning_enable"
@@ -2269,7 +2274,7 @@ class UpCloudLiveHarness:
             "byte_count": len(marker_body),
             "metadata": marker_metadata,
         }
-        inventory = self._s3_inventory(client, bucket)
+        inventory = self._s3_inventory(client, bucket, runtime["prefix"])
         candidates = self._exact_key_versions(inventory, marker_key)
         marker_entry = self._one_active("mos_ownership_object")
         if len(candidates) > 1:
@@ -2316,7 +2321,7 @@ class UpCloudLiveHarness:
             except AmbiguousMutation:
                 pass
             candidates = self._exact_key_versions(
-                self._s3_inventory(client, bucket), marker_key
+                self._s3_inventory(client, bucket, runtime["prefix"]), marker_key
             )
             if len(candidates) != 1:
                 raise AmbiguousMutation(
@@ -2364,18 +2369,8 @@ class UpCloudLiveHarness:
         }
 
     def verify_ui_objects(self, manifest_path: str, *, maximum_bytes: int) -> dict:
-        self._require_object_storage_config()
-        self.verify_account()
         if maximum_bytes < 1 or maximum_bytes > 1024**4:
             raise HarnessError("The object verification byte bound is invalid.")
-        service_entry = self._one_active("mos_service")
-        config_entry = self._one_active("mos_bucket_configuration")
-        if not service_entry or not config_entry:
-            raise HarnessError("The exact bucket must be armed before UI verification.")
-        service = self._service_read(service_entry["resource_id"])
-        if not self._service_owned(service or {}, resource_id=service_entry["resource_id"]):
-            raise HarnessError("The run-owned UpCloud service ownership changed.")
-        client, runtime = self._s3(service)
         path = _safe_path(manifest_path, variable="--manifest")
         if path.is_symlink() or not path.is_file():
             raise HarnessError("The UI object manifest is missing or unsafe.")
@@ -2384,8 +2379,30 @@ class UpCloudLiveHarness:
                 manifest = json.load(source)
         except (OSError, ValueError) as error:
             raise HarnessError("The UI object manifest could not be read.") from error
+        if not isinstance(manifest, dict):
+            raise HarnessError("The UI object manifest must be a JSON object.")
         if _contains_sensitive_key(manifest):
             raise HarnessError("The UI object manifest must not contain credentials.")
+        if (
+            type(manifest.get("schema")) is not int
+            or manifest.get("schema") != UI_OBJECT_MANIFEST_SCHEMA
+        ):
+            raise HarnessError("The UI object manifest schema must be 1.")
+        if manifest.get("run_id") != self.config.run_id:
+            raise HarnessError(
+                "The UI object manifest run_id does not match this harness run."
+            )
+
+        self._require_object_storage_config()
+        self.verify_account()
+        service_entry = self._one_active("mos_service")
+        config_entry = self._one_active("mos_bucket_configuration")
+        if not service_entry or not config_entry:
+            raise HarnessError("The exact bucket must be armed before UI verification.")
+        service = self._service_read(service_entry["resource_id"])
+        if not self._service_owned(service or {}, resource_id=service_entry["resource_id"]):
+            raise HarnessError("The run-owned UpCloud service ownership changed.")
+        client, runtime = self._s3(service)
         rows = manifest.get("objects") if isinstance(manifest, dict) else None
         if not isinstance(rows, list) or not rows or len(rows) > 100:
             raise HarnessError("The UI object manifest must contain 1-100 objects.")
@@ -2427,7 +2444,9 @@ class UpCloudLiveHarness:
                 raise HarnessError("A UI object witness is incomplete or out of scope.")
             seen.add(identity)
             seen_keys.add(key)
-            inventory = self._s3_inventory(client, runtime["bucket_name"])
+            inventory = self._s3_inventory(
+                client, runtime["bucket_name"], runtime["prefix"]
+            )
             candidates = self._exact_key_versions(inventory, key)
             if len(candidates) != 1 or str(candidates[0].get("VersionId") or "") != version_id:
                 raise HarnessError(
@@ -2538,9 +2557,9 @@ class UpCloudLiveHarness:
             raise HarnessError("A ledgered object changed before cleanup.")
 
     def _preflight_object_cleanup(
-        self, client, bucket: str, *, maximum_bytes: int
+        self, client, bucket: str, prefix: str, *, maximum_bytes: int
     ) -> tuple[dict, list[dict], list[dict]]:
-        inventory = self._s3_inventory(client, bucket)
+        inventory = self._s3_inventory(client, bucket, prefix)
         object_entries = self._object_entries()
         upload_entries = self._active_entries("mos_multipart_upload")
         expected_versions = {
@@ -2594,8 +2613,9 @@ class UpCloudLiveHarness:
             or not active_keys.issubset({key for key, _version in actual_versions})
         ):
             raise InventoryNotEmpty(
-                "Cleanup refused because the bucket contains an unledgered object "
-                "version, delete marker, current object, or multipart upload."
+                "Cleanup refused because the exact run prefix contains an "
+                "unledgered object version, delete marker, current object, or "
+                "multipart upload."
             )
         for entry in object_entries:
             self._verify_object_entry(client, entry, maximum_bytes)
@@ -2612,10 +2632,10 @@ class UpCloudLiveHarness:
         return inventory, object_entries, upload_entries
 
     def _delete_bucket_contents(
-        self, client, bucket: str, *, maximum_bytes: int
+        self, client, bucket: str, prefix: str, *, maximum_bytes: int
     ) -> None:
         _inventory, objects, uploads = self._preflight_object_cleanup(
-            client, bucket, maximum_bytes=maximum_bytes
+            client, bucket, prefix, maximum_bytes=maximum_bytes
         )
         for entry in uploads:
             ownership = entry["ownership"]
@@ -2679,9 +2699,9 @@ class UpCloudLiveHarness:
                 entry["kind"], entry["resource_id"], state="deleted"
             )
             self.intents.clear(intent_key)
-        if not self._inventory_empty(self._s3_inventory(client, bucket)):
+        if not self._inventory_empty(self._s3_inventory(client, bucket, prefix)):
             raise InventoryNotEmpty(
-                "The exact bucket still contains objects after ledgered cleanup."
+                "The exact run prefix still contains objects after ledgered cleanup."
             )
 
     def _control_delete(
@@ -2845,7 +2865,10 @@ class UpCloudLiveHarness:
             else:
                 client, runtime = self._s3(service)
                 self._delete_bucket_contents(
-                    client, self.names["bucket"], maximum_bytes=maximum_bytes
+                    client,
+                    self.names["bucket"],
+                    runtime["prefix"],
+                    maximum_bytes=maximum_bytes,
                 )
                 bucket_path = (
                     f"/object-storage-2/{quote(service_id, safe='')}/buckets/"
