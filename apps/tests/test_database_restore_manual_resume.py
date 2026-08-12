@@ -476,6 +476,7 @@ class DatabaseRestoreResumeTemplateTests(SimpleTestCase):
             "databaseRestoreCanResume",
             "resumeDatabaseRestore",
             "item.can_resume_verification === true",
+            'x-show="!loading && restoreList.length > 0"',
             "/resume_restore/",
             "No second restore was created.",
         ):
