@@ -78,6 +78,8 @@ def upcloud_storage(
         "zone": zone,
         "state": "cloning",
         "size": 10,
+        "tier": "standard",
+        "encrypted": "yes",
     }
     if storage_type:
         value["type"] = storage_type
@@ -150,7 +152,11 @@ class OVHUpCloudReliabilityTests(BaseTestCase):
             node=node,
             name="upcloud-source",
             unique_id="source-1",
-            metadata={"_bs_zone": zone},
+            metadata={
+                "_bs_zone": zone,
+                "tier": "standard",
+                "encrypted": "yes",
+            },
         )
         backup = integration.backups.create(
             uuid="upcloud-backup-1",
@@ -391,7 +397,17 @@ class OVHUpCloudReliabilityTests(BaseTestCase):
     def test_upcloud_backup_page_two_duplicate_and_repeated_cursor_guards(self):
         _node, integration, backup = self._upcloud()
         client = mock.MagicMock()
-        source = Response(200, {"storage": {"uuid": "source-1", "zone": "us-chi1"}})
+        source = Response(
+            200,
+            {
+                "storage": {
+                    "uuid": "source-1",
+                    "zone": "us-chi1",
+                    "tier": "standard",
+                    "encrypted": "yes",
+                }
+            },
+        )
         page_two = Response(200, {"storages": {"storage": [upcloud_storage("u-2", backup.uuid_str)]}})
         client.get.side_effect = [
             source,
@@ -445,7 +461,17 @@ class OVHUpCloudReliabilityTests(BaseTestCase):
         _node, integration, backup = self._upcloud()
         client = mock.MagicMock()
         client.get.side_effect = [
-            Response(200, {"storage": {"uuid": "source-1", "zone": "us-chi1"}}),
+            Response(
+                200,
+                {
+                    "storage": {
+                        "uuid": "source-1",
+                        "zone": "us-chi1",
+                        "tier": "standard",
+                        "encrypted": "yes",
+                    }
+                },
+            ),
             Response(200, {"storages": {"storage": []}}),
         ]
         created = Response(201, {"storage": upcloud_storage("u-created", backup.uuid_str)})

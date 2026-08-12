@@ -17,12 +17,13 @@ from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.upcloud import (
     create_upcloud_snapshot,
     normalize_upcloud_firewall_rules,
+    select_upcloud_boot_device,
 )
 from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.backup.models import CoreCloudRestore
 from apps.console.connection.models import CoreAuthUpCloud, CoreIntegration
 from apps.console.node.models import CoreNode
-from apps.console.node.models import CoreUpCloud
+from apps.console.node.models import CoreUpCloud, _BackupProviderError
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -36,6 +37,23 @@ class Response:
 
     def json(self):
         return self._payload
+
+
+SOURCE_BOOT_ID = "11111111-1111-4111-8111-111111111111"
+SOURCE_DATA_ID = "22222222-2222-4222-8222-222222222222"
+BACKUP_STORAGE_ID = "33333333-3333-4333-8333-333333333333"
+TARGET_STORAGE_ID = "44444444-4444-4444-8444-444444444444"
+
+
+def storage_labels():
+    return [
+        {"key": "_os_type", "value": "debian"},
+        {
+            "key": "_template_uuid",
+            "value": "01000000-0000-4000-8000-000020050100",
+        },
+        {"key": "_os_main_category", "value": "Linux"},
+    ]
 
 
 def firewall_rule(position, *, port=None, protocol="tcp", family="IPv4"):
@@ -84,6 +102,7 @@ def source_server(server_id="source-server"):
     return {
         "uuid": server_id,
         "state": "started",
+        "boot_order": "disk",
         "zone": "us-chi1",
         "title": "source-server",
         "hostname": "source.example",
@@ -115,35 +134,41 @@ def source_server(server_id="source-server"):
         "storage_devices": {
             "storage_device": [
                 {
-                    "storage": "boot-storage",
+                    "storage": SOURCE_BOOT_ID,
                     "type": "disk",
                     "boot_disk": "1",
                     "address": "virtio:0",
+                    "labels": storage_labels(),
                 }
             ]
         },
     }
 
 
-def source_storage(storage_id="boot-storage", *, source_server_id="source-server"):
+def source_storage(storage_id=SOURCE_BOOT_ID, *, source_server_id="source-server"):
     return {
         "uuid": storage_id,
         "type": "normal",
         "zone": "us-chi1",
         "state": "online",
+        "tier": "standard",
+        "encrypted": "yes",
         "servers": {"server": [{"uuid": source_server_id}]},
     }
 
 
-def backup_storage(storage_id, marker):
-    return {
+def backup_storage(storage_id, marker, *, origin=SOURCE_BOOT_ID, include_attributes=False):
+    value = {
         "uuid": storage_id,
         "type": "backup",
         "title": marker,
-        "origin": "boot-storage",
+        "origin": origin,
         "zone": "us-chi1",
         "state": "online",
     }
+    if include_attributes:
+        value.update({"tier": "standard", "encrypted": "yes"})
+    return value
 
 
 class UpCloudServerFirewallReliabilityTests(BaseTestCase):
@@ -182,6 +207,130 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
             celery_task_id="upcloud-server-backup-task",
         )
         return integration, backup
+
+    def _complete_volume_backup(self):
+        CoreIntegration.objects.get_or_create(
+            code="upcloud",
+            defaults={"type": CoreIntegration.Type.CLOUD, "enabled": True},
+        )
+        connection = factories.make_connection(
+            self.account, self.member, code="upcloud"
+        )
+        CoreAuthUpCloud.objects.create(
+            connection=connection,
+            username=bs_encrypt("test-user", self.account.get_encryption_key()),
+            password=bs_encrypt(
+                "test-password", self.account.get_encryption_key()
+            ),
+        )
+        node = CoreNode.objects.create(
+            connection=connection,
+            type=CoreNode.Type.VOLUME,
+            name="upcloud-volume",
+            added_by=self.member,
+        )
+        integration = CoreUpCloud.objects.create(
+            node=node,
+            name="upcloud-volume",
+            unique_id="source-volume",
+            metadata={
+                "_bs_zone": "us-chi1",
+                "tier": "standard",
+                "encrypted": "yes",
+            },
+        )
+        backup = integration.backups.create(
+            uuid="volume-backup-marker",
+            status=UtilBackup.Status.IN_PROGRESS,
+            type=UtilBackup.Type.ON_DEMAND,
+            attempt_no=1,
+            celery_task_id="upcloud-volume-backup-task",
+        )
+        source = source_storage("source-volume")
+        backup_resource = backup_storage(
+            BACKUP_STORAGE_ID,
+            backup.uuid_str,
+            origin="source-volume",
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps._tasks.integration.upcloud.requests.get",
+            side_effect=[
+                Response(200, {"storage": source}),
+                Response(
+                    200,
+                    {"storages": {"storage": []}},
+                    headers={"UpCloud-Total-Count": "0"},
+                ),
+            ],
+        ), mock.patch(
+            "apps._tasks.integration.upcloud.requests.post",
+            return_value=Response(201, {"storage": backup_resource}),
+        ):
+            create_upcloud_snapshot(backup)
+        backup.status = UtilBackup.Status.COMPLETE
+        backup.save(update_fields=["status", "modified"])
+        return integration, backup
+
+    @staticmethod
+    def _bind_restore(restore):
+        lease_token = uuid4()
+        restore.lease_owner = "upcloud-firewall-test"
+        restore.lease_token = lease_token
+        restore.lease_expires_at = timezone.now() + timedelta(hours=1)
+        restore.save(
+            update_fields=["lease_owner", "lease_token", "lease_expires_at", "modified"]
+        )
+        restore.bind_execution_fence("upcloud-firewall-test", lease_token)
+
+    def _volume_restore_http(self, integration, backup, restore, *, conflict=False):
+        self._bind_restore(restore)
+        digest = integration._upcloud_restore_marker_digest(restore, backup.unique_id)
+        marker = f"backupsheep-upcloud-{restore.pk}-{digest}"[:128]
+        target = {
+            "uuid": TARGET_STORAGE_ID,
+            "type": "normal",
+            "title": marker,
+            "origin": backup.unique_id,
+            "zone": "us-chi1",
+            "state": "online",
+            "tier": "standard",
+            "encrypted": "yes",
+        }
+
+        def get(url, **kwargs):
+            if str(url).endswith(f"/storage/{backup.unique_id}"):
+                # The provider backup deliberately omits tier; the durable
+                # source witness and CoreUpCloud metadata carry it.
+                return Response(
+                    200,
+                    {"storage": backup_storage(backup.unique_id, backup.uuid_str, origin=integration.unique_id)},
+                )
+            if str(url).endswith("/storage/normal"):
+                return Response(
+                    200,
+                    {"storages": {"storage": []}},
+                    headers={"UpCloud-Total-Count": "0"},
+                )
+            if str(url).endswith(f"/storage/{TARGET_STORAGE_ID}"):
+                return Response(200, {"storage": target})
+            raise AssertionError(f"Unexpected UpCloud GET: {url}")
+
+        def post(url, **kwargs):
+            self.assertTrue(str(url).endswith(f"/storage/{backup.unique_id}/clone"))
+            if conflict:
+                return Response(409, {"error": {"error_code": "CONFLICT"}})
+            self.assertEqual(
+                kwargs["json"]["storage"]["tier"], "standard"
+            )
+            self.assertEqual(
+                kwargs["json"]["storage"]["encrypted"], "yes"
+            )
+            return Response(201, {"storage": target})
+
+        return get, post, target
 
     def _complete_server_backup(self):
         integration, backup = self._server_backup()
@@ -253,7 +402,15 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         return target, ids
 
     def _restore_http(
-        self, integration, backup, restore, rules, *, lost=False, lost_firewall=False
+        self,
+        integration,
+        backup,
+        restore,
+        rules,
+        *,
+        lost=False,
+        lost_firewall=False,
+        lost_ip=False,
     ):
         lease_token = uuid4()
         restore.lease_owner = "upcloud-firewall-test"
@@ -264,18 +421,33 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         )
         restore.bind_execution_fence("upcloud-firewall-test", lease_token)
         target_storage = {
-            "uuid": "restored-storage",
+            "uuid": TARGET_STORAGE_ID,
             "type": "normal",
             "title": self._restore_ids(integration, backup, restore)["storage"],
             "origin": backup.unique_id,
             "zone": "us-chi1",
             "state": "online",
+            "tier": "standard",
+            "encrypted": "yes",
         }
         target_server, ids = self._target_server(
             integration, backup, restore, target_storage["uuid"]
         )
         default_rules = [firewall_rule(1)]
-        state = {"storage_created": False, "server_created": False}
+        isolated_target = deepcopy(target_server)
+        isolated_target["networking"]["interfaces"]["interface"] = [
+            interface
+            for interface in isolated_target["networking"]["interfaces"]["interface"]
+            if interface.get("type") != "public"
+        ]
+        state = {
+            "storage_created": False,
+            "server_created": False,
+            "ip_assigned": False,
+        }
+
+        def target_view():
+            return deepcopy(target_server if state["ip_assigned"] else isolated_target)
 
         def get(url, **kwargs):
             if str(url).endswith(f"/storage/{backup.unique_id}"):
@@ -310,7 +482,7 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
                     headers={"UpCloud-Total-Count": "0"},
                 )
             if str(url).endswith(f"/server/{target_server['uuid']}"):
-                return Response(200, {"server": target_server})
+                return Response(200, {"server": target_view()})
             if str(url).endswith(
                 f"/server/{target_server['uuid']}/firewall_rule"
             ):
@@ -325,9 +497,33 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
                 return Response(202, {"storage": target_storage})
             if str(url).endswith("/server"):
                 state["server_created"] = True
-                response = Response(202, {"server": target_server})
+                response = Response(202, {"server": target_view()})
                 if lost:
                     raise raw_requests.Timeout("lost response")
+                return response
+            if str(url).endswith("/ip_address"):
+                request = kwargs.get("json") or {}
+                self.assertEqual(
+                    request,
+                    {
+                        "ip_address": {
+                            "family": "IPv4",
+                            "server": target_server["uuid"],
+                        }
+                    },
+                )
+                state["ip_assigned"] = True
+                response = Response(
+                    201,
+                    {
+                        "ip_address": {
+                            "family": "IPv4",
+                            "server": target_server["uuid"],
+                        }
+                    },
+                )
+                if lost_ip:
+                    raise raw_requests.Timeout("lost public IP response")
                 return response
             raise AssertionError(f"Unexpected UpCloud POST: {url}")
 
@@ -414,6 +610,9 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
                 self.assertEqual(raised.exception.error_code, expected_code)
                 post.assert_not_called()
 
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
     def test_restore_lost_server_response_reconciles_chain_without_duplicate_server(self):
         integration, backup, rules = self._complete_server_backup()
         restore = CoreCloudRestore.objects.create(
@@ -445,11 +644,14 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         self.assertEqual(restore.resource_id, target["uuid"])
         self.assertEqual(
             post_mock.call_count,
-            2,
-        )  # one boot clone and one server create
+            3,
+        )  # boot clone, isolated server create, and public IPv4 assignment
         self.assertEqual(put_mock.call_count, 1)
         self.assertTrue(state["firewall_replaced"])
 
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
     def test_restore_lost_firewall_response_reconciles_without_duplicate_put(self):
         integration, backup, rules = self._complete_server_backup()
         restore = CoreCloudRestore.objects.create(
@@ -479,10 +681,14 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
 
         restore.refresh_from_db()
         self.assertEqual(restore.resource_id, target["uuid"])
-        self.assertEqual(post_mock.call_count, 2)
+        self.assertEqual(post_mock.call_count, 3)
         self.assertEqual(put_mock.call_count, 1)
         self.assertTrue(state["firewall_replaced"])
+        self.assertTrue(state["ip_assigned"])
 
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
     def test_restore_worker_crash_after_firewall_acceptance_reconciles_without_duplicate_put(self):
         integration, backup, rules = self._complete_server_backup()
         restore = CoreCloudRestore.objects.create(
@@ -539,7 +745,11 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         self.assertEqual(post_mock.call_count, 2)
         self.assertEqual(put_mock.call_count, 1)
         self.assertTrue(state["firewall_replaced"])
+        self.assertTrue(state["ip_assigned"])
 
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
     def test_restore_worker_crash_after_server_acceptance_adopts_one_exact_target(self):
         integration, backup, rules = self._complete_server_backup()
         restore = CoreCloudRestore.objects.create(
@@ -592,6 +802,7 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         self.assertEqual(post_mock.call_count, 2)
         self.assertEqual(put_mock.call_count, 0)
         self.assertTrue(state["firewall_replaced"])
+        self.assertTrue(state["ip_assigned"])
 
     def test_restore_duplicate_or_foreign_server_candidate_never_mutates(self):
         for candidate_count, foreign, expected_code in (
@@ -614,7 +825,7 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
                 identity = dict(params["_bs_upcloud_restore"])
                 identity.update(
                     {
-                        "target_storage_id": "restored-storage",
+                        "target_storage_id": TARGET_STORAGE_ID,
                         "active_mutation": "server",
                     }
                 )
@@ -688,7 +899,7 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         identity = dict(params["_bs_upcloud_restore"])
         identity.update(
             {
-                "target_storage_id": "restored-storage",
+                "target_storage_id": TARGET_STORAGE_ID,
                 "active_mutation": "server",
             }
         )
@@ -730,8 +941,6 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
                     },
                     headers={"UpCloud-Total-Count": "1"},
                 )
-            if str(url).endswith(f"/server/{target['uuid']}"):
-                return Response(200, {"server": target})
             return original_get(url, **kwargs)
 
         auth_cls = integration.node.connection.auth_upcloud.__class__
@@ -766,3 +975,354 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
                     ]
                 )
             )
+
+    def test_multi_disk_boot_selector_accepts_unique_provider_os_device(self):
+        server = source_server()
+        devices = server["storage_devices"]["storage_device"]
+        devices[0]["boot_disk"] = "0"
+        devices.append(
+            {
+                "storage": SOURCE_DATA_ID,
+                "type": "disk",
+                "boot_disk": "0",
+                "address": "scsi:0:0",
+            }
+        )
+        self.assertEqual(select_upcloud_boot_device(server)["storage"], SOURCE_BOOT_ID)
+
+    def test_multi_disk_boot_selector_rejects_duplicate_or_ambiguous_candidates(self):
+        duplicate = source_server()
+        duplicate_devices = duplicate["storage_devices"]["storage_device"]
+        duplicate_devices[0]["boot_disk"] = "0"
+        duplicate_devices.append(
+            {
+                "storage": SOURCE_DATA_ID,
+                "type": "disk",
+                "boot_disk": "0",
+                "address": "virtio:0",
+                "labels": storage_labels(),
+            }
+        )
+        with self.assertRaises(_BackupProviderError) as raised:
+            select_upcloud_boot_device(duplicate)
+        self.assertEqual(raised.exception.code, "PROVIDER_DUPLICATE_MATCH")
+
+        ambiguous = source_server()
+        ambiguous_devices = ambiguous["storage_devices"]["storage_device"]
+        ambiguous_devices[0]["boot_disk"] = "0"
+        ambiguous_devices[0]["address"] = "virtio:1"
+        ambiguous_devices.append(
+            {
+                "storage": SOURCE_DATA_ID,
+                "type": "disk",
+                "boot_disk": "0",
+                "address": "scsi:0:0",
+                "labels": storage_labels(),
+            }
+        )
+        with self.assertRaises(_BackupProviderError) as raised:
+            select_upcloud_boot_device(ambiguous)
+        self.assertEqual(
+            raised.exception.code, "PROVIDER_RECONCILIATION_REQUIRED"
+        )
+
+    def test_volume_witness_persists_source_attributes_when_backup_omits_them(self):
+        integration, backup = self._complete_volume_backup()
+        witness = backup.get_execution_state().provider_metadata["witness"]
+        self.assertEqual(witness["scope"]["tier"], "standard")
+        self.assertEqual(witness["scope"]["encrypted"], "yes")
+
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="volume-attributes",
+            params={"zone": "us-chi1"},
+        )
+        get, post, target = self._volume_restore_http(integration, backup, restore)
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ) as post_mock:
+            result = integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertIsNone(result)
+        self.assertEqual(restore.resource_id, target["uuid"])
+        post_mock.assert_called_once()
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"]["storage"]["tier"], "standard"
+        )
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"]["storage"]["encrypted"], "yes"
+        )
+        self.assertFalse(restore.params.get("_bs_create_outcome_unknown"))
+
+    def test_volume_provider_conflict_is_definitive_and_never_blindly_replayed(self):
+        integration, backup = self._complete_volume_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="volume-provider-conflict",
+            params={"zone": "us-chi1"},
+        )
+        get, post, _target = self._volume_restore_http(
+            integration, backup, restore, conflict=True
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ) as post_mock:
+            first = integration.restore_snapshot(backup, restore)
+            second = integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(first, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(second, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(post_mock.call_count, 1)
+        self.assertEqual(restore.params["_bs_last_error_code"], "PROVIDER_CONFLICT")
+        self.assertEqual(
+            restore.params["_bs_upcloud_restore"]["stage"], "clone_rejected"
+        )
+        self.assertFalse(restore.params.get("_bs_create_outcome_unknown"))
+
+    def test_firewall_stabilization_blocks_public_ip_until_deadline_then_assigns_once(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="firewall-stabilization",
+            params={"zone": "us-chi1"},
+        )
+        get, post, put, state, target = self._restore_http(
+            integration, backup, restore, rules
+        )
+        base = timezone.now().replace(microsecond=0)
+        clock = [base]
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.timezone.now",
+            side_effect=lambda: clock[0],
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ) as post_mock, mock.patch(
+            "apps.console.node.models.requests.put", side_effect=put
+        ) as put_mock:
+            first = integration.restore_snapshot(backup, restore)
+            self.assertEqual(first, CoreCloudRestore.Status.IN_PROGRESS)
+            self.assertEqual(post_mock.call_count, 2)
+            self.assertFalse(state["ip_assigned"])
+            restore.refresh_from_db()
+            verified_at = restore.params["_bs_upcloud_restore"]["firewall_verified_at"]
+            self.assertEqual(verified_at, base.isoformat())
+            self.assertEqual(
+                restore.params["_bs_upcloud_restore"]["stage"],
+                "firewall_stabilizing",
+            )
+
+            clock[0] = base + timedelta(seconds=119)
+            integration.restore_snapshot(backup, restore)
+            self.assertEqual(post_mock.call_count, 2)
+            self.assertFalse(state["ip_assigned"])
+
+            clock[0] = base + timedelta(seconds=120)
+            integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, target["uuid"])
+        self.assertEqual(put_mock.call_count, 1)
+        ip_posts = [
+            call
+            for call in post_mock.call_args_list
+            if str(call.args[0]).endswith("/ip_address")
+        ]
+        self.assertEqual(len(ip_posts), 1)
+        self.assertTrue(state["ip_assigned"])
+
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
+    def test_restore_lost_public_ip_response_reconciles_without_duplicate_assignment(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="lost-public-ip-response",
+            params={"zone": "us-chi1"},
+        )
+        get, post, put, state, target = self._restore_http(
+            integration, backup, restore, rules, lost_ip=True
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ) as post_mock, mock.patch(
+            "apps.console.node.models.requests.put", side_effect=put
+        ) as put_mock:
+            result = integration.restore_snapshot(backup, restore)
+            self.assertEqual(result, CoreCloudRestore.Status.IN_PROGRESS)
+            restore.refresh_from_db()
+            self.assertTrue(restore.params["_bs_create_outcome_unknown"])
+            integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, target["uuid"])
+        self.assertEqual(put_mock.call_count, 1)
+        ip_posts = [
+            call
+            for call in post_mock.call_args_list
+            if str(call.args[0]).endswith("/ip_address")
+        ]
+        self.assertEqual(len(ip_posts), 1)
+        self.assertTrue(state["ip_assigned"])
+
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
+    def test_restore_worker_crash_after_public_ip_acceptance_adopts_without_duplicate_assignment(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="public-ip-worker-crash",
+            params={"zone": "us-chi1"},
+        )
+        get, post, put, state, target = self._restore_http(
+            integration, backup, restore, rules
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+
+        def crash_after_ip(_restore, _marker, stage):
+            if stage == "ip":
+                raise SystemExit("worker crash after public IP acceptance")
+
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ) as post_mock, mock.patch(
+            "apps.console.node.models.requests.put", side_effect=put
+        ) as put_mock, mock.patch.object(
+            CoreUpCloud,
+            "_upcloud_server_restore_fault_after_accept",
+            side_effect=crash_after_ip,
+        ) as fault:
+            with self.assertRaises(SystemExit):
+                integration.restore_snapshot(backup, restore)
+            restore.refresh_from_db()
+            self.assertTrue(restore.params["_bs_create_outcome_unknown"])
+            self.assertEqual(
+                restore.params["_bs_upcloud_restore"]["active_mutation"],
+                "public_ip:0:IPv4",
+            )
+            fault.side_effect = None
+            integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, target["uuid"])
+        self.assertEqual(put_mock.call_count, 1)
+        ip_posts = [
+            call
+            for call in post_mock.call_args_list
+            if str(call.args[0]).endswith("/ip_address")
+        ]
+        self.assertEqual(len(ip_posts), 1)
+        self.assertTrue(state["ip_assigned"])
+
+    def test_target_ownership_accepts_provider_all_zero_boot_disk_one_disk_fallback(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="target-all-zero-boot",
+            params={"zone": "us-chi1"},
+        )
+        target, _ids = self._target_server(
+            integration, backup, restore, TARGET_STORAGE_ID
+        )
+        target["networking"]["interfaces"]["interface"] = [
+            interface
+            for interface in target["networking"]["interfaces"]["interface"]
+            if interface.get("type") != "public"
+        ]
+        target["storage_devices"]["storage_device"][0]["boot_disk"] = "0"
+
+        integration._prepare_upcloud_server_restore(backup, restore)
+        identity = dict(restore.params["_bs_upcloud_restore"])
+        identity.update(
+            {
+                "target_storage_id": TARGET_STORAGE_ID,
+                "stage": "firewall_verified",
+            }
+        )
+        self.assertTrue(
+            integration._upcloud_server_restore_owned(
+                target, identity, resource_id=target["uuid"]
+            )
+        )
+
+        foreign_boot = deepcopy(target)
+        foreign_boot["storage_devices"]["storage_device"][0]["storage"] = SOURCE_DATA_ID
+        self.assertFalse(
+            integration._upcloud_server_restore_owned(
+                foreign_boot, identity, resource_id=target["uuid"]
+            )
+        )
+
+    def test_target_ownership_rejects_ambiguous_all_zero_boot_disks(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="target-ambiguous-boot",
+            params={"zone": "us-chi1"},
+        )
+        target, _ids = self._target_server(
+            integration, backup, restore, TARGET_STORAGE_ID
+        )
+        target["networking"]["interfaces"]["interface"] = [
+            interface
+            for interface in target["networking"]["interfaces"]["interface"]
+            if interface.get("type") != "public"
+        ]
+        devices = target["storage_devices"]["storage_device"]
+        devices[0]["boot_disk"] = "0"
+        devices.append(
+            {
+                "storage": SOURCE_DATA_ID,
+                "type": "disk",
+                "boot_disk": "0",
+                "address": "scsi:0:0",
+            }
+        )
+
+        integration._prepare_upcloud_server_restore(backup, restore)
+        identity = dict(restore.params["_bs_upcloud_restore"])
+        identity.update(
+            {
+                "target_storage_id": TARGET_STORAGE_ID,
+                "stage": "firewall_verified",
+            }
+        )
+        self.assertFalse(
+            integration._upcloud_server_restore_owned(
+                target, identity, resource_id=target["uuid"]
+            )
+        )

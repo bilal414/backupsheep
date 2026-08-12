@@ -67,7 +67,12 @@ the harness never reads `_docs`.
   The provider chain is bounded to the documented 1,000-rule limit, positions
   are validated, duplicate rules fail closed, and the exact chain is persisted
   in the run ledger. A lost firewall mutation response is adopted only after
-  exact read-back; it is never re-issued blindly.
+  exact read-back; it is never re-issued blindly. Because UpCloud documents
+  that firewall changes can take 1-2 minutes to take effect, an exact readback
+  persists `firewall_verified_at` and a 120-second stabilization deadline.
+  Public interfaces remain omitted and public-IP assignment is refused until
+  that durable deadline has elapsed; retries schedule the next attempt rather
+  than sleeping inside a worker.
 - Source-server ownership and cleanup re-read the provider firewall state and
   require it to remain enabled. Cleanup deletes only the six ledger-owned
   allow rules by their current provider positions, with a durable intent per
@@ -76,6 +81,24 @@ the harness never reads `_docs`.
 - Generated SSH and PostgreSQL credentials exist only in ignored
   `scripts/.upcloud-runtime/` files (or an explicitly external runtime path),
   with mode `0600`. Secrets are not put in the ownership ledger or stdout.
+
+### Additional fail-closed witnesses
+
+- Cloud Server boot selection first accepts one explicit provider
+  `boot_disk=1`. When UpCloud reports the live multi-disk shape with every
+  `boot_disk=0`, the selector accepts only one disk at `virtio:0` with a
+  provider OS type and valid template UUID, while the provider boot order is
+  exactly `disk`. Duplicate addresses, duplicate system candidates, missing
+  labels, or an ambiguous data-disk layout stop the backup before mutation.
+  The provider server and network contracts are based on the official
+  [Cloud Servers API](https://developers.upcloud.com/1.3/8-servers/).
+- Volume witnesses persist the authoritative source `tier` and `encrypted`
+  values before the backup request. Restore reads those durable values even
+  when the backup-storage response omits them, sends the exact values in the
+  clone request, and verifies them on the target. A definite provider `409`
+  is recorded as `PROVIDER_CONFLICT` and `clone_rejected`; it is not blindly
+  replayed. Public-IP family assignment follows the official
+  [IP Addresses API](https://developers.upcloud.com/1.3/10-ip-addresses/).
 
 ### Compute and Block Storage workflow
 

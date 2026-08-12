@@ -75,6 +75,7 @@ _RESTORE_ERROR_MESSAGES = {
     "PROVIDER_TRANSIENT_OUTAGE": "The provider is temporarily unavailable. We will retry the restore.",
     "PROVIDER_MALFORMED_RESPONSE": "The provider returned an invalid restore response. Manual review is required.",
     "PROVIDER_FAILED": "The provider reported a terminal restore failure.",
+    "PROVIDER_CONFLICT": "The provider rejected the restore because the requested resource conflicts with current provider state.",
     "PROVIDER_OWNERSHIP_MISMATCH": "The provider target did not match this BackupSheep restore. Manual review is required.",
     "PROVIDER_DUPLICATE_MATCH": "Multiple provider resources matched this restore. Manual review is required.",
     "PROVIDER_UNKNOWN_OUTCOME": "The provider accepted an uncertain restore request. We are reconciling it before retrying.",
@@ -324,6 +325,7 @@ def _restore_safe_failure(restore, code, *, manual_review=False):
         "PROVIDER_RATE_LIMIT",
         "PROVIDER_REQUEST_FAILED",
         "PROVIDER_FAILED",
+        "PROVIDER_CONFLICT",
     }:
         params["_bs_create_outcome_unknown"] = False
     else:
@@ -391,6 +393,7 @@ _RESTORE_RECONCILIATION_MIN_OBSERVATIONS = 3
 _RESTORE_RECONCILIATION_MAX_OBSERVATIONS = 20
 _AWS_RESTORE_RECONCILIATION_MAX_PAGES = 100
 _AWS_RESTORE_RECONCILIATION_MAX_ITEMS = 100_000
+_UPCLOUD_FIREWALL_STABILIZATION_SECONDS = 120
 
 
 def _restore_reconciliation_seconds():
@@ -4266,7 +4269,70 @@ class CoreUpCloud(UtilCloud):
                 execution.provider_idempotency_key
             ) != str(backup.uuid_str):
                 raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        self._upcloud_restore_storage_configuration(backup, storage)
         return storage
+
+    @staticmethod
+    def _upcloud_storage_attribute(value, allowed):
+        if value in (None, ""):
+            return ""
+        normalized = str(value).strip().casefold()
+        if normalized not in allowed:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        return normalized
+
+    def _upcloud_restore_storage_configuration(self, backup, source_storage):
+        """Load the immutable source tier/encryption witness for a clone."""
+        execution = backup.get_execution_state(create=False)
+        provider_metadata = (
+            dict(execution.provider_metadata or {}) if execution is not None else {}
+        )
+        witness = provider_metadata.get("witness")
+        scope = witness.get("scope") if isinstance(witness, dict) else {}
+        if scope is None:
+            scope = {}
+        if not isinstance(scope, dict):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        if witness is not None and (
+            not isinstance(witness, dict)
+            or str(witness.get("provider") or "") != "upcloud"
+            or str(witness.get("resource_type") or "") != "storage"
+            or str(witness.get("source_id") or "") != str(self.unique_id)
+        ):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+
+        metadata = self.metadata if isinstance(self.metadata, dict) else {}
+        durable_tier = self._upcloud_storage_attribute(
+            scope.get("tier")
+            or metadata.get("tier")
+            or metadata.get("_bs_tier"),
+            self._UPCLOUD_STORAGE_TIERS,
+        )
+        durable_encrypted = self._upcloud_storage_attribute(
+            scope.get("encrypted")
+            or metadata.get("encrypted")
+            or metadata.get("_bs_encrypted"),
+            {"yes", "no"},
+        )
+        provider_tier = self._upcloud_storage_attribute(
+            source_storage.get("tier"), self._UPCLOUD_STORAGE_TIERS
+        )
+        provider_encrypted = self._upcloud_storage_attribute(
+            source_storage.get("encrypted"), {"yes", "no"}
+        )
+        if provider_tier and durable_tier and provider_tier != durable_tier:
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        if (
+            provider_encrypted
+            and durable_encrypted
+            and provider_encrypted != durable_encrypted
+        ):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        tier = durable_tier or provider_tier
+        encrypted = durable_encrypted or provider_encrypted
+        if not tier or not encrypted:
+            raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+        return {"tier": tier, "encrypted": encrypted}
 
     def _persist_upcloud_restore_scope(self, restore, source_storage):
         params = _restore_params(restore)
@@ -4275,18 +4341,30 @@ class CoreUpCloud(UtilCloud):
         target_zone = str(params.get("zone") or source_zone).strip().casefold()
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", target_zone):
             raise _RestoreProviderError("PROVIDER_REQUEST_FAILED")
-        tier = str(params.get("tier") or "").strip().casefold()
-        if tier and tier not in self._UPCLOUD_STORAGE_TIERS:
+        source_configuration = self._upcloud_restore_storage_configuration(
+            restore.backup, source_storage
+        )
+        requested_tier = self._upcloud_storage_attribute(
+            params.get("tier"), self._UPCLOUD_STORAGE_TIERS
+        )
+        requested_encrypted = self._upcloud_storage_attribute(
+            params.get("encrypted"), {"yes", "no"}
+        )
+        if requested_tier and requested_tier != source_configuration["tier"]:
             raise _RestoreProviderError("PROVIDER_REQUEST_FAILED")
-        encrypted = str(params.get("encrypted") or "").strip().casefold()
-        if encrypted and encrypted not in {"yes", "no"}:
+        if (
+            requested_encrypted
+            and requested_encrypted != source_configuration["encrypted"]
+        ):
             raise _RestoreProviderError("PROVIDER_REQUEST_FAILED")
 
         expected = {
             "source_zone": source_zone,
             "target_zone": target_zone,
-            "target_tier": tier,
-            "target_encrypted": encrypted,
+            "source_tier": source_configuration["tier"],
+            "source_encrypted": source_configuration["encrypted"],
+            "target_tier": source_configuration["tier"],
+            "target_encrypted": source_configuration["encrypted"],
         }
         for key, value in expected.items():
             current = identity.get(key)
@@ -4294,6 +4372,8 @@ class CoreUpCloud(UtilCloud):
                 raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
         identity.update(expected)
         params["zone"] = target_zone
+        params["tier"] = source_configuration["tier"]
+        params["encrypted"] = source_configuration["encrypted"]
         params["_bs_upcloud_restore"] = identity
         restore.params = params
         restore.save(update_fields=["params", "modified"])
@@ -4324,7 +4404,14 @@ class CoreUpCloud(UtilCloud):
         if str(origin or "") != str(source_id):
             raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
         tier = str(identity.get("target_tier") or "")
-        if tier and str(resource.get("tier") or "") != tier:
+        if not tier or str(resource.get("tier") or "").strip().casefold() != tier:
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        encrypted = str(identity.get("target_encrypted") or "")
+        if (
+            not encrypted
+            or str(resource.get("encrypted") or "").strip().casefold()
+            != encrypted
+        ):
             raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
         state = str(resource.get("state") or "").casefold()
         if state not in self._UPCLOUD_RESTORE_STATES:
@@ -4461,6 +4548,14 @@ class CoreUpCloud(UtilCloud):
             )
         except _BackupProviderError as error:
             raise _RestoreProviderError(error.code) from None
+        boot_storage_tier = self._upcloud_storage_attribute(
+            safe_config.get("boot_storage_tier"), self._UPCLOUD_STORAGE_TIERS
+        )
+        boot_storage_encrypted = self._upcloud_storage_attribute(
+            safe_config.get("boot_storage_encrypted"), {"yes", "no"}
+        )
+        if not boot_storage_tier or not boot_storage_encrypted:
+            raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
         source_storage_id = str(witness.get("source_id") or "")
         source_server_id = str(scope.get("server_id") or "")
         marker = str(witness.get("marker") or "")
@@ -4493,6 +4588,8 @@ class CoreUpCloud(UtilCloud):
                 != str(safe_config.get("zone") or ""),
                 str(scope.get("firewall_fingerprint") or "")
                 != firewall["fingerprint"],
+                str(scope.get("tier") or "") != boot_storage_tier,
+                str(scope.get("encrypted") or "") != boot_storage_encrypted,
                 fingerprint != calculated,
                 str(witness.get("upcloud_server_id") or "")
                 != source_server_id,
@@ -4547,6 +4644,8 @@ class CoreUpCloud(UtilCloud):
         identity = dict(identity or {})
         safe_config = dict(witness["upcloud_server_config"])
         firewall = dict(witness["upcloud_firewall"])
+        boot_storage_tier = str(safe_config["boot_storage_tier"])
+        boot_storage_encrypted = str(safe_config["boot_storage_encrypted"])
         params["_bs_upcloud_firewall_fingerprint"] = firewall["fingerprint"]
         expected = {
             "source_id": source_id,
@@ -4566,6 +4665,8 @@ class CoreUpCloud(UtilCloud):
             ),
             "server_firewall": firewall,
             "firewall_fingerprint": firewall["fingerprint"],
+            "boot_storage_tier": boot_storage_tier,
+            "boot_storage_encrypted": boot_storage_encrypted,
             "account_id": str(self.node.connection.account_id),
             "connection_id": str(self.node.connection_id),
         }
@@ -4638,6 +4739,10 @@ class CoreUpCloud(UtilCloud):
                 str(storage.get("zone") or "")
                 == str(identity["target_zone"]),
                 str(storage.get("type") or "") == "normal",
+                str(storage.get("tier") or "").strip().casefold()
+                == str(identity.get("boot_storage_tier") or ""),
+                str(storage.get("encrypted") or "").strip().casefold()
+                == str(identity.get("boot_storage_encrypted") or ""),
                 state in self._UPCLOUD_RESTORE_STATES,
             )
         )
@@ -4742,6 +4847,32 @@ class CoreUpCloud(UtilCloud):
             result[key] = str(item.get("value") or "")
         return result
 
+    @staticmethod
+    def _upcloud_firewall_verified_state(restore):
+        """Build the durable firewall readback witness and its deadline."""
+        params = _restore_params(restore)
+        current = dict(params.get("_bs_upcloud_restore") or {})
+        verified_raw = current.get("firewall_verified_at")
+        if verified_raw:
+            verified_at = _restore_reconciliation_timestamp(verified_raw)
+        else:
+            verified_at = timezone.now().astimezone(datetime.timezone.utc)
+        deadline = verified_at + datetime.timedelta(
+            seconds=_UPCLOUD_FIREWALL_STABILIZATION_SECONDS
+        )
+        stored_deadline = current.get("firewall_stabilization_deadline_at")
+        if stored_deadline:
+            persisted_deadline = _restore_reconciliation_timestamp(stored_deadline)
+            if persisted_deadline != deadline:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+        current.update(
+            {
+                "firewall_verified_at": verified_at.isoformat(),
+                "firewall_stabilization_deadline_at": deadline.isoformat(),
+            }
+        )
+        return params, current
+
     def _upcloud_server_restore_firewall(self, client, restore, identity, server):
         """Make an exact owned target firewall-safe before adoption.
 
@@ -4779,8 +4910,7 @@ class CoreUpCloud(UtilCloud):
         actual = readback()
         if actual == expected:
             restore.assert_live_execution_fence()
-            params = _restore_params(restore)
-            current = dict(params.get("_bs_upcloud_restore") or {})
+            params, current = self._upcloud_firewall_verified_state(restore)
             current.update(
                 {
                     "stage": "firewall_verified",
@@ -4875,8 +5005,7 @@ class CoreUpCloud(UtilCloud):
             restore.save(update_fields=["params", "modified"])
             return False
         restore.assert_live_execution_fence()
-        params = _restore_params(restore)
-        current = dict(params.get("_bs_upcloud_restore") or {})
+        params, current = self._upcloud_firewall_verified_state(restore)
         current.update(
             {
                 "stage": "firewall_verified",
@@ -4889,12 +5018,213 @@ class CoreUpCloud(UtilCloud):
         restore.save(update_fields=["params", "modified"])
         return True
 
+    def _upcloud_server_restore_network(self, client, restore, identity, server):
+        """Assign witnessed public IP families only after firewall verification."""
+        from apps._tasks.integration.upcloud import _upcloud_server_network_contract
+
+        config = identity.get("server_config")
+        expected = config.get("public_ip_families") if isinstance(config, dict) else None
+        if not isinstance(expected, list) or any(
+            family not in {"IPv4", "IPv6"} for family in expected
+        ) or expected != sorted(expected, key=lambda family: (family != "IPv4", family)):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+
+        current_server = server
+        for _step in range(len(expected) + 2):
+            try:
+                contract = _upcloud_server_network_contract(current_server)
+            except _BackupProviderError as error:
+                raise _RestoreProviderError(
+                    error.code,
+                    retryable=error.retryable,
+                    unknown_outcome=error.unknown_outcome,
+                ) from None
+            if contract["networking"] != config.get("networking"):
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+            actual = list(contract["public_ip_families"])
+            if len(actual) > len(expected) or actual != expected[: len(actual)]:
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+
+            params = _restore_params(restore)
+            current = dict(params.get("_bs_upcloud_restore") or {})
+            firewall = identity.get("server_firewall")
+            if expected and isinstance(firewall, dict) and firewall.get("enabled") is True:
+                verified_raw = current.get("firewall_verified_at")
+                if not verified_raw:
+                    raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+                verified_at = _restore_reconciliation_timestamp(verified_raw)
+                deadline = verified_at + datetime.timedelta(
+                    seconds=_UPCLOUD_FIREWALL_STABILIZATION_SECONDS
+                )
+                stored_deadline = current.get("firewall_stabilization_deadline_at")
+                if stored_deadline:
+                    persisted_deadline = _restore_reconciliation_timestamp(
+                        stored_deadline
+                    )
+                    if persisted_deadline != deadline:
+                        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                else:
+                    current["firewall_stabilization_deadline_at"] = deadline.isoformat()
+                now = timezone.now().astimezone(datetime.timezone.utc)
+                if now < deadline:
+                    if actual:
+                        raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                    current.update(
+                        {
+                            "stage": "firewall_stabilizing",
+                            "active_mutation": "",
+                            "public_ip_assignments": [],
+                        }
+                    )
+                    current.pop("public_ip_assignment", None)
+                    params["_bs_upcloud_restore"] = current
+                    restore.params = params
+                    restore.status = _restore_status("IN_PROGRESS")
+                    restore.operation_phase = _restore_phase("POLLING")
+                    restore.next_retry_at = deadline
+                    restore.save(
+                        update_fields=[
+                            "params",
+                            "status",
+                            "operation_phase",
+                            "next_retry_at",
+                            "modified",
+                        ]
+                    )
+                    return False
+            if actual == expected:
+                current.update(
+                    {
+                        "stage": "network_verified",
+                        "active_mutation": "",
+                        "public_ip_assignments": actual,
+                        "public_ip_reconciliation_attempts": 0,
+                    }
+                )
+                current.pop("public_ip_assignment", None)
+                params["_bs_upcloud_restore"] = current
+                restore.params = params
+                restore.save(update_fields=["params", "modified"])
+                _restore_resolve_reconciliation(restore)
+                return True
+
+            state = str(current_server.get("state") or "").casefold()
+            if state == "error":
+                raise _RestoreProviderError("PROVIDER_FAILED")
+            if state not in {"started", "stopped"}:
+                return False
+
+            assignment = current.get("public_ip_assignment")
+            if assignment is not None:
+                if not isinstance(assignment, dict):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                try:
+                    ordinal = int(assignment.get("ordinal"))
+                except (TypeError, ValueError):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from None
+                family = str(assignment.get("family") or "")
+                if (
+                    ordinal != len(actual)
+                    or ordinal < 0
+                    or ordinal >= len(expected)
+                    or family != expected[ordinal]
+                ):
+                    raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                try:
+                    attempts = int(current.get("public_ip_reconciliation_attempts", 0)) + 1
+                except (TypeError, ValueError):
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from None
+                current["public_ip_reconciliation_attempts"] = attempts
+                params["_bs_upcloud_restore"] = current
+                restore.params = params
+                restore.save(update_fields=["params", "modified"])
+                if attempts >= 20:
+                    raise _RestoreProviderError(
+                        "PROVIDER_RECONCILIATION_REQUIRED", unknown_outcome=True
+                    )
+                return False
+
+            ordinal = len(actual)
+            family = expected[ordinal]
+            request = {"ip_address": {"family": family, "server": str(current_server.get("uuid") or "")}}
+            fingerprint = hashlib.sha256(
+                json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            current.update(
+                {
+                    "stage": "public_ip_assign_requested",
+                    "active_mutation": f"public_ip:{ordinal}:{family}",
+                    "public_ip_assignment": {
+                        "ordinal": ordinal,
+                        "family": family,
+                        "request_fingerprint": fingerprint,
+                    },
+                    "public_ip_reconciliation_attempts": 0,
+                }
+            )
+            params["_bs_upcloud_restore"] = current
+            restore.params = params
+            restore.save(update_fields=["params", "modified"])
+            _restore_begin_mutation(restore)
+            _restore_begin_reconciliation(restore)
+            restore.assert_live_execution_fence()
+            try:
+                response = requests.post(
+                    f"{settings.UPCLOUD_API}/ip_address",
+                    json=request,
+                    auth=client,
+                    verify=True,
+                    timeout=request_timeout(),
+                    headers={
+                        "accept": "application/json",
+                        "content-type": "application/json",
+                    },
+                )
+                problem = self._upcloud_restore_response_problem(
+                    response, mutation=True
+                )
+                if problem is not None:
+                    if not problem.unknown_outcome:
+                        params = _restore_params(restore)
+                        current = dict(params.get("_bs_upcloud_restore") or {})
+                        current.update({"active_mutation": ""})
+                        current.pop("public_ip_assignment", None)
+                        params["_bs_upcloud_restore"] = current
+                        restore.params = params
+                        restore.save(update_fields=["params", "modified"])
+                    raise problem
+                # The server readback is authoritative.  The IP acceptance
+                # body is intentionally not used to adopt an address.
+                self._upcloud_server_restore_fault_after_accept(
+                    restore, identity["server_marker"], "ip"
+                )
+            except _BackupProviderError as error:
+                raise _RestoreProviderError(
+                    error.code,
+                    retryable=error.retryable,
+                    unknown_outcome=error.unknown_outcome,
+                ) from None
+
+            response = requests.get(
+                f"{settings.UPCLOUD_API}/server/{current_server.get('uuid')}",
+                auth=client,
+                verify=True,
+                timeout=request_timeout(),
+                headers={"accept": "application/json"},
+            )
+            current_server = self._upcloud_restore_response_server(
+                response, mutation=True
+            )
+        raise _RestoreProviderError(
+            "PROVIDER_RECONCILIATION_REQUIRED", unknown_outcome=True
+        )
+
     def _upcloud_server_restore_owned(
         self, server, identity, *, resource_id=None
     ):
         from apps._tasks.integration.upcloud import (
-            _upcloud_nested_list,
-            _upcloud_safe_server_networking,
+            _upcloud_server_network_contract,
+            select_upcloud_boot_device,
         )
 
         if not isinstance(server, dict):
@@ -4939,30 +5269,44 @@ class CoreUpCloud(UtilCloud):
             if config.get(key) and str(server.get(key) or "") != str(config[key]):
                 return False
         try:
-            networking = _upcloud_safe_server_networking(server)
+            network_contract = _upcloud_server_network_contract(server)
         except _BackupProviderError:
             return False
-        if networking != config.get("networking"):
+        if network_contract["networking"] != config.get("networking"):
+            return False
+        expected_public = config.get("public_ip_families")
+        actual_public = network_contract["public_ip_families"]
+        if not isinstance(expected_public, list) or any(
+            family not in {"IPv4", "IPv6"} for family in expected_public
+        ) or expected_public != sorted(
+            expected_public, key=lambda family: (family != "IPv4", family)
+        ):
+            return False
+        if len(actual_public) > len(expected_public) or actual_public != expected_public[: len(actual_public)]:
+            return False
+        stage = str(identity.get("stage") or "")
+        if stage in {
+            "prepared",
+            "storage_adopted",
+            "server_create_requested",
+            "server_candidate_received",
+            "firewall_replace_requested",
+            "firewall_verified",
+            "firewall_stabilizing",
+        } and actual_public:
+            return False
+        if stage in {"network_verified", "server_adopted"} and actual_public != expected_public:
             return False
         try:
-            devices = _upcloud_nested_list(
-                server, "storage_devices", "storage_device"
-            )
+            boot_device = select_upcloud_boot_device(server)
         except _BackupProviderError:
             return False
-        boot_matches = [
-            device
-            for device in devices
-            if str(device.get("storage") or "")
-            == str(identity.get("target_storage_id") or "")
-            and str(device.get("type") or "disk").casefold() == "disk"
-            and str(device.get("boot_disk") or "0").casefold()
-            in {"1", "yes", "true"}
-        ]
-        if len(boot_matches) != 1:
+        if str(boot_device.get("storage") or "") != str(
+            identity.get("target_storage_id") or ""
+        ):
             return False
         expected_address = str(config.get("boot_address") or "")
-        if expected_address and str(boot_matches[0].get("address") or "") != (
+        if not expected_address or str(boot_device.get("address") or "") != (
             expected_address
         ):
             return False
@@ -5075,6 +5419,16 @@ class CoreUpCloud(UtilCloud):
     @staticmethod
     def _upcloud_server_create_payload(identity):
         config = identity["server_config"]
+        networking = config.get("networking")
+        if not isinstance(networking, dict):
+            raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+        interfaces = networking.get("interfaces", {}).get("interface", [])
+        if not isinstance(interfaces, list) or any(
+            str(interface.get("type") or "").casefold() == "public"
+            for interface in interfaces
+            if isinstance(interface, dict)
+        ):
+            raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
         server = {
             "zone": identity["target_zone"],
             "title": identity["server_marker"],
@@ -5082,7 +5436,7 @@ class CoreUpCloud(UtilCloud):
             "plan": config["plan"],
             "firewall": config["firewall"],
             "metadata": config["metadata"],
-            "networking": config["networking"],
+            "networking": networking,
             "password_delivery": "none",
             "remote_access_enabled": "no",
             "simple_backup": "no",
@@ -5195,6 +5549,8 @@ class CoreUpCloud(UtilCloud):
                             "storage": {
                                 "zone": identity["target_zone"],
                                 "title": identity["storage_marker"],
+                                "tier": identity["boot_storage_tier"],
+                                "encrypted": identity["boot_storage_encrypted"],
                             }
                         },
                         auth=client,
@@ -5238,6 +5594,10 @@ class CoreUpCloud(UtilCloud):
             )
             if server is not None:
                 if not self._upcloud_server_restore_firewall(
+                    client, restore, identity, server
+                ):
+                    return _restore_status("IN_PROGRESS")
+                if not self._upcloud_server_restore_network(
                     client, restore, identity, server
                 ):
                     return _restore_status("IN_PROGRESS")
@@ -5336,6 +5696,10 @@ class CoreUpCloud(UtilCloud):
                 client, restore, identity, server
             ):
                 return _restore_status("IN_PROGRESS")
+            if not self._upcloud_server_restore_network(
+                client, restore, identity, server
+            ):
+                return _restore_status("IN_PROGRESS")
             self._adopt_upcloud_server_restore_server(restore, server)
             return None
         except Exception as error:
@@ -5343,8 +5707,11 @@ class CoreUpCloud(UtilCloud):
                 restore,
                 error,
                 mutation=bool(
-                    mutation_started
-                    or getattr(error, "unknown_outcome", False)
+                    getattr(error, "unknown_outcome", False)
+                    or (
+                        mutation_started
+                        and not isinstance(error, _RestoreProviderError)
+                    )
                 ),
             )
 
@@ -5404,7 +5771,10 @@ class CoreUpCloud(UtilCloud):
                 client, restore, identity, server
             ):
                 return _restore_status("IN_PROGRESS")
-            _restore_resolve_reconciliation(restore)
+            if not self._upcloud_server_restore_network(
+                client, restore, identity, server
+            ):
+                return _restore_status("IN_PROGRESS")
             state = str(server.get("state") or "").casefold()
             if state in {"started", "stopped"}:
                 restore.operation_phase = _restore_phase("COMPLETE")
@@ -5448,6 +5818,11 @@ class CoreUpCloud(UtilCloud):
             params = self._persist_upcloud_restore_scope(
                 restore, source_storage
             )
+            if (
+                (params.get("_bs_upcloud_restore") or {}).get("stage")
+                == "clone_rejected"
+            ):
+                return _restore_status("FAILED")
             existing = self._find_restore_storage(
                 client, restore, backup.unique_id
             )
@@ -5459,12 +5834,13 @@ class CoreUpCloud(UtilCloud):
                     restore, provider_error_code="PROVIDER_NOT_FOUND"
                 )
 
-            storage = {"zone": params["zone"], "title": marker}
             identity = params["_bs_upcloud_restore"]
-            if identity.get("target_tier"):
-                storage["tier"] = identity["target_tier"]
-            if identity.get("target_encrypted"):
-                storage["encrypted"] = identity["target_encrypted"]
+            storage = {
+                "zone": params["zone"],
+                "title": marker,
+                "tier": identity["target_tier"],
+                "encrypted": identity["target_encrypted"],
+            }
 
             restore.assert_live_execution_fence()
             _restore_begin_mutation(restore)
@@ -5486,6 +5862,21 @@ class CoreUpCloud(UtilCloud):
                 response, mutation=True
             )
             if problem is not None:
+                if problem.code == "PROVIDER_CONFLICT" and not problem.unknown_outcome:
+                    params = _restore_params(restore)
+                    identity = dict(params.get("_bs_upcloud_restore") or {})
+                    identity.update(
+                        {
+                            "stage": "clone_rejected",
+                            "active_mutation": "",
+                            "clone_rejected_code": problem.code,
+                        }
+                    )
+                    params["_bs_upcloud_restore"] = identity
+                    params["_bs_create_outcome_unknown"] = False
+                    restore.params = params
+                    restore.save(update_fields=["params", "modified"])
+                    return _restore_safe_failure(restore, "PROVIDER_CONFLICT")
                 if not problem.unknown_outcome:
                     _restore_clear_unknown(restore)
                 return _restore_handle_error(
@@ -5533,7 +5924,12 @@ class CoreUpCloud(UtilCloud):
             except Exception:
                 raise _RestoreProviderError("PROVIDER_AUTH_FAILED") from None
             source_storage = self._upcloud_restore_source(client, backup)
-            self._persist_upcloud_restore_scope(restore, source_storage)
+            params = self._persist_upcloud_restore_scope(restore, source_storage)
+            if (
+                (params.get("_bs_upcloud_restore") or {}).get("stage")
+                == "clone_rejected"
+            ):
+                return _restore_status("FAILED")
 
             if not restore.resource_id:
                 if not _restore_unknown(restore):

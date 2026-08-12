@@ -3,18 +3,27 @@
 Date: 2026-08-12
 Branch: `develop`
 Starting commit: `05f2ebeb9c2e1d997c9fb248149c040ec1e85ff1`
+Live validation checkpoint: `28ee48d5483f501de6b3838eb0f3b230df1a0c45`
 
 ## Evidence boundary
 
-This implementation pass was deliberately offline. It did not read
-`_docs/digitalocean.txt`, use a provider token, call DigitalOcean, mutate live
-resources, drive `demo.backupsheep.com`, commit, push, or deploy.
+The first implementation pass described by this document was deliberately
+offline. A later controlled live pass used only the required Personal team,
+created a run-ledgered Droplet, volume, firewall, and versioned Spaces bucket,
+and drove native plus website/database backup and restore workflows through
+`demo.backupsheep.com`.
 
-The automated tests prove deterministic control flow and safety behavior against
-mocked provider responses. They do not prove that the currently deployed demo,
-the current Personal-team token scopes, or DigitalOcean's live control plane
-will behave successfully. The live plan below is still required before granting
-provider acceptance.
+The live pass completed Droplet and volume snapshots, safe-fork Droplet and
+volume restores, versioned Spaces uploads with persisted SHA-256, byte count,
+ETag, and version ID, and website/PostgreSQL restores. The exact rows, provider
+IDs, integrity witnesses, deployment snapshot, and remaining cleanup/credential
+rotation gates are recorded in
+`docs/provider-live-e2e-resume-handoff-20260812.md`.
+
+Live success does not waive the ownership boundary: final cleanup remains
+blocked until the hardened harness performs a fresh direct readback of every
+exact ID and revalidates the complete creation fingerprint. The offline test
+matrix and original UI plan below are retained as design and regression history.
 
 ## Provider contracts used
 
@@ -296,7 +305,7 @@ ledgered key is then verified by name, full-access grant, direct read-back, and
 access-key hash before deletion. The runtime secret file is removed only after
 key absence is proven.
 
-## Offline test matrix
+## Offline regression matrix
 
 The DigitalOcean-focused tests cover:
 
@@ -346,7 +355,7 @@ Final offline evidence:
 - Django system checks: **0 issues** in both runs; and
 - scoped Python compilation and `git diff --check`: passed.
 
-## Personal-team-only UI E2E plan
+## Personal-team-only UI E2E procedure (executed; retained for regression)
 
 Do not begin mutation until the deployed commit and every safety gate are
 recorded.
@@ -404,20 +413,23 @@ recorded.
     inventory.
 19. Rotate the acceptance token and retain the non-secret ledger/report.
 
-## Remaining acceptance blockers
+## Remaining operational gates
 
-There is no known offline DigitalOcean code blocker inside the authorized
-DigitalOcean-specific ranges after this pass. The remaining blockers are
-operational evidence:
+The Personal-team compute, volume, Spaces, website, and PostgreSQL UI workflows
+have been run successfully against the deployed checkpoint, including restored
+application-content validation. The remaining operational gates are narrower:
 
-- the final focused and broad regression suites must remain green after all
-  concurrent provider changes settle;
-- the final code has not been deployed to the demo in this pass;
-- the Personal-team compute/volume/Spaces live workflow has not been run against
-  the final deployed SHA;
-- deterministic crash tests have not been run on an isolated acceptance worker;
-- website/database UI restore contents have not been validated live; and
-- exact provider cleanup and token rotation have not been evidenced.
+- integrate the independent manifest-prefix, creation-fingerprint, firewall,
+  and cleanup-intent harness hardening;
+- keep the focused and broad regression suites green after all concurrent
+  provider changes settle;
+- run the controlled DigitalOcean lost-response/worker-crash cases against the
+  final deployed SHA and prove exactly one provider target;
+- perform a fresh exact-ID ownership inventory before cleanup, then prove each
+  exact-owned resource absent; and
+- rotate the exposed acceptance token after the last provider call.
 
-Enterprise DigitalOcean acceptance remains **not granted** until those live
-steps pass and the resulting non-secret ledger/report is reviewed.
+The exact live evidence and current acceptance matrix are maintained in
+`docs/provider-live-e2e-resume-handoff-20260812.md`. Enterprise DigitalOcean
+acceptance remains conditional until the remaining crash, cleanup, and rotation
+gates are evidenced.

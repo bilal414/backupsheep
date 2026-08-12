@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 import tarfile
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -58,6 +59,7 @@ SSH_POLL_SECONDS = 5
 FIREWALL_RULE_LIMIT = 1000
 FIREWALL_MAX_WAIT_POLLS = 24
 FIREWALL_POLL_SECONDS = 5
+FIREWALL_STABILIZATION_SECONDS = 120
 FIREWALL_ALLOWED_PORTS = (22, 80, 5432)
 FIREWALL_LEDGER_KIND = "compute_source_firewall_rule"
 FIREWALL_RULE_FIELDS = (
@@ -199,6 +201,21 @@ def _canonical(value) -> str:
 
 def _fingerprint(value) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _utc_timestamp(value) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        raise HarnessError("The UpCloud firewall verification timestamp is missing.")
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        raise HarnessError("The UpCloud firewall verification timestamp is malformed.") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _hash(value: str) -> str:
@@ -1032,6 +1049,7 @@ class UpCloudLiveHarness:
         control=None,
         s3_factory=None,
         sleeper=None,
+        clock=None,
     ):
         self.config = config
         self.environment = environment or os.environ
@@ -1039,6 +1057,7 @@ class UpCloudLiveHarness:
         self.control = control or UpCloudControlPlane(token)
         self.s3_factory = s3_factory or _s3_client
         self.sleep = sleeper or time.sleep
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.names = _resource_names(config.run_id)
         self.ledger = DurableResourceLedger(
             config.ledger_path,
@@ -3192,10 +3211,10 @@ class UpCloudLiveHarness:
         )
         container = payload.get("firewall_rules") if isinstance(payload, dict) else None
         rules = container.get("firewall_rule") if isinstance(container, dict) else None
-        if rules is None:
-            rules = []
-        if not isinstance(rules, list) or len(rules) > FIREWALL_RULE_LIMIT:
-            raise HarnessError("UpCloud returned an oversized firewall inventory.")
+        if not isinstance(rules, list) or not rules or len(rules) > FIREWALL_RULE_LIMIT:
+            raise HarnessError(
+                "UpCloud returned a malformed or empty firewall inventory."
+            )
 
         positions = []
         fingerprints = set()
@@ -3298,7 +3317,7 @@ class UpCloudLiveHarness:
     @staticmethod
     def _provider_firewall_is_default_drop(observation: dict) -> bool:
         default_drop = _normalize_firewall_rule({"direction": "in", "action": "drop"})
-        return observation.get("rules") in ([], [default_drop])
+        return observation.get("rules") == [default_drop]
 
     def _wait_provider_firewall_exact(self, server_id: str) -> dict:
         for attempt in range(FIREWALL_MAX_WAIT_POLLS):
@@ -3317,6 +3336,32 @@ class UpCloudLiveHarness:
     ) -> dict:
         if not self._provider_firewall_is_exact(observation):
             raise HarnessError("The UpCloud provider firewall chain is not exact.")
+        prior_timestamps = {
+            str((row.get("ownership") or {}).get("firewall_verified_at") or "")
+            for row in self.ledger.entries(FIREWALL_LEDGER_KIND)
+            if str((row.get("ownership") or {}).get("server_id") or "")
+            == str(server_id)
+            and (row.get("ownership") or {}).get("firewall_verified_at")
+        }
+        if len(prior_timestamps) > 1:
+            raise HarnessError(
+                "The UpCloud firewall ledger has inconsistent verification timestamps."
+            )
+        if prior_timestamps:
+            verified_at = _utc_timestamp(prior_timestamps.pop())
+        else:
+            clock_value = self.clock()
+            if isinstance(clock_value, datetime):
+                verified_at = clock_value
+                if verified_at.tzinfo is None:
+                    verified_at = verified_at.replace(tzinfo=timezone.utc)
+                verified_at = verified_at.astimezone(timezone.utc)
+            else:
+                verified_at = _utc_timestamp(clock_value)
+        verified_at_text = verified_at.isoformat()
+        stabilization_deadline = verified_at + timedelta(
+            seconds=FIREWALL_STABILIZATION_SECONDS
+        )
         expected = [
             _normalize_firewall_rule(rule)
             for rule in self._provider_firewall_expected_rules()
@@ -3336,6 +3381,7 @@ class UpCloudLiveHarness:
                     "server_id": server_id,
                     "rule": rule,
                     "rule_fingerprint": rule_fingerprint,
+                    "firewall_verified_at": verified_at_text,
                 },
                 source_witness=server_id,
             )
@@ -3350,6 +3396,8 @@ class UpCloudLiveHarness:
             "allow_rule_count": len(allow_rules),
             "default_incoming": "drop",
             "outbound": "provider-default",
+            "firewall_verified_at": verified_at_text,
+            "firewall_stabilization_deadline_at": stabilization_deadline.isoformat(),
             "ledger_rule_ids": rule_ids,
         }
 
@@ -3453,6 +3501,19 @@ class UpCloudLiveHarness:
     def _server_public_addresses(server: dict) -> list[str]:
         container = server.get("ip_addresses") if isinstance(server, dict) else None
         values = container.get("ip_address") if isinstance(container, dict) else None
+        if values is None and isinstance(server, dict):
+            networking = server.get("networking")
+            interfaces = networking.get("interfaces") if isinstance(networking, dict) else None
+            interfaces = interfaces.get("interface") if isinstance(interfaces, dict) else None
+            values = []
+            for interface in interfaces or []:
+                if not isinstance(interface, dict) or str(interface.get("type") or "").casefold() != "public":
+                    continue
+                addresses = interface.get("ip_addresses")
+                addresses = addresses.get("ip_address") if isinstance(addresses, dict) else None
+                for value in addresses or []:
+                    if isinstance(value, dict):
+                        values.append({**value, "access": "public"})
         if not isinstance(values, list):
             raise HarnessError("UpCloud returned malformed server addresses.")
         addresses = []
@@ -3474,7 +3535,7 @@ class UpCloudLiveHarness:
         return addresses
 
     @staticmethod
-    def _server_network_shape(server: dict) -> dict:
+    def _server_network_contract(server: dict) -> dict:
         networking = server.get("networking") if isinstance(server, dict) else None
         interfaces = (
             networking.get("interfaces") if isinstance(networking, dict) else None
@@ -3485,12 +3546,14 @@ class UpCloudLiveHarness:
         if not isinstance(values, list) or not values:
             raise HarnessError("UpCloud returned malformed server networking.")
         normalized = []
+        safe = []
+        public_families = []
         seen_indexes = set()
         for interface in values:
             if not isinstance(interface, dict):
                 raise HarnessError("UpCloud returned malformed server networking.")
             interface_type = str(interface.get("type") or "").casefold()
-            if interface_type not in {"public", "utility"}:
+            if interface_type not in {"public", "utility", "private"}:
                 raise HarnessError("The test server escaped its safe network shape.")
             try:
                 index = int(interface.get("index"))
@@ -3512,18 +3575,49 @@ class UpCloudLiveHarness:
                 family = str(address.get("family") or "") if isinstance(address, dict) else ""
                 if family not in {"IPv4", "IPv6"}:
                     raise HarnessError("UpCloud returned an unknown address family.")
+                if interface_type in {"utility", "private"} and family != "IPv4":
+                    raise HarnessError(
+                        "UpCloud returned an unsupported non-public IPv6 interface."
+                    )
                 families.append({"family": family})
-            normalized.append(
-                {
-                    "index": index,
-                    "type": interface_type,
-                    "ip_addresses": {"ip_address": families},
-                }
-            )
+                if interface_type == "public":
+                    public_families.append(family)
+            value = {
+                "index": index,
+                "type": interface_type,
+                "ip_addresses": {"ip_address": families},
+            }
+            if interface_type == "private":
+                network = str(interface.get("network") or "")
+                if not UPCLOUD_UUID_RE.fullmatch(network):
+                    raise HarnessError("UpCloud returned a malformed private network ID.")
+                value["network"] = network
+            for field in ("source_ip_filtering", "bootable"):
+                flag = str(interface.get(field) or "").strip().casefold()
+                if flag:
+                    if flag not in {"yes", "no"}:
+                        raise HarnessError("UpCloud returned a malformed interface flag.")
+                    value[field] = flag
+            normalized.append(value)
+            if interface_type != "public":
+                safe.append(value)
+        if not safe:
+            raise HarnessError("UpCloud server has no reconstructible non-public interface.")
         normalized.sort(key=lambda item: item["index"])
+        safe.sort(key=lambda item: item["index"])
         for interface in normalized:
             interface.pop("index")
-        return {"interfaces": {"interface": normalized}}
+        return {
+            "networking": {"interfaces": {"interface": safe}},
+            "full_networking": {"interfaces": {"interface": normalized}},
+            "public_ip_families": sorted(
+                public_families, key=lambda family: (family != "IPv4", family)
+            ),
+        }
+
+    @staticmethod
+    def _server_network_shape(server: dict) -> dict:
+        return UpCloudLiveHarness._server_network_contract(server)["full_networking"]
 
     def _server_safe_config(self, server: dict, boot_device: dict) -> dict:
         plan = str(server.get("plan") or "")
@@ -3537,13 +3631,15 @@ class UpCloudLiveHarness:
             or server.get("server_group") not in (None, "")
         ):
             raise HarnessError("The UpCloud server safe configuration changed.")
+        network_contract = self._server_network_contract(server)
         config = {
             "schema": 1,
             "zone": self.config.zone,
             "plan": plan,
             "firewall": firewall,
             "metadata": metadata,
-            "networking": self._server_network_shape(server),
+            "networking": network_contract["networking"],
+            "public_ip_families": network_contract["public_ip_families"],
             "boot_address": str(boot_device.get("address") or "virtio")[:64],
         }
         if plan == "custom":
@@ -3805,21 +3901,18 @@ class UpCloudLiveHarness:
                         },
                     ]
                 },
+                # UpCloud starts the server before the separate firewall PUT.
+                # Create it with only the utility interface; public families
+                # are assigned after the exact chain is read back.
                 "networking": {
                     "interfaces": {
                         "interface": [
-                            {
-                                "type": "public",
-                                "ip_addresses": {
-                                    "ip_address": [{"family": "IPv4"}]
-                                },
-                            },
                             {
                                 "type": "utility",
                                 "ip_addresses": {
                                     "ip_address": [{"family": "IPv4"}]
                                 },
-                            },
+                            }
                         ]
                     }
                 },
@@ -3834,6 +3927,9 @@ class UpCloudLiveHarness:
     @staticmethod
     def _boot_device(server: dict) -> dict:
         devices = UpCloudLiveHarness._server_storage_devices(server)
+        boot_order = str(server.get("boot_order") or "").strip().casefold()
+        if boot_order != "disk":
+            raise HarnessError("The UpCloud server boot order is not disk.")
         boot = [
             device
             for device in devices
@@ -3849,15 +3945,143 @@ class UpCloudLiveHarness:
         # can return "0" for every attached device. The first cloned plan disk
         # is assigned virtio:0, while this harness pins the data volume to the
         # SCSI bus. Infer only that one exact, provider-assigned boot address.
-        inferred = [
+        disk_devices = [
             device
             for device in devices
             if str(device.get("type") or "disk").casefold() == "disk"
-            and str(device.get("address") or "").casefold() == "virtio:0"
+        ]
+        addresses = [str(device.get("address") or "").casefold() for device in disk_devices]
+        if len(addresses) != len(set(addresses)):
+            raise HarnessError("The UpCloud server has duplicate storage addresses.")
+        inferred = [
+            device
+            for device in disk_devices
+            if str(device.get("address") or "").casefold() == "virtio:0"
+            and _label_map(device.get("labels")).get("_os_type")
+            and UPCLOUD_UUID_RE.fullmatch(
+                _label_map(device.get("labels")).get("_template_uuid", "")
+            )
         ]
         if len(inferred) != 1:
             raise HarnessError("The UpCloud server does not have one exact boot storage.")
         return inferred[0]
+
+    def _ensure_provider_public_ip_families(
+        self,
+        server_id: str,
+        expected_families=("IPv4",),
+        *,
+        firewall_verified_at,
+    ) -> dict:
+        """Assign public families after the durable firewall settle window."""
+        if not UPCLOUD_UUID_RE.fullmatch(str(server_id or "")):
+            raise HarnessError("UpCloud server UUID is malformed.")
+        expected = [str(family) for family in expected_families]
+        if not expected or any(family not in {"IPv4", "IPv6"} for family in expected):
+            raise HarnessError("The witnessed UpCloud public IP families are malformed.")
+        if expected != sorted(expected, key=lambda family: (family != "IPv4", family)):
+            raise HarnessError("The witnessed UpCloud public IP families are unordered.")
+
+        def observe():
+            server = self._server_read(server_id)
+            if server is None:
+                raise AmbiguousMutation(
+                    "The exact UpCloud server is not readable for public-IP reconciliation."
+                )
+            contract = self._server_network_contract(server)
+            actual = list(contract["public_ip_families"])
+            if len(actual) > len(expected) or actual != expected[: len(actual)]:
+                raise HarnessError(
+                    "The UpCloud server has an unexpected public network shape."
+                )
+            return server, actual
+
+        server, actual = observe()
+        verified_at = _utc_timestamp(firewall_verified_at)
+        stabilization_deadline = verified_at + timedelta(
+            seconds=FIREWALL_STABILIZATION_SECONDS
+        )
+        clock_value = self.clock()
+        if isinstance(clock_value, datetime):
+            now = clock_value
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            now = now.astimezone(timezone.utc)
+        else:
+            now = _utc_timestamp(clock_value)
+        if now < stabilization_deadline:
+            if actual:
+                raise HarnessError(
+                    "The UpCloud server exposed a public interface before firewall "
+                    "stabilization completed."
+                )
+            raise HarnessError(
+                "The UpCloud firewall is read back exactly but remains in its "
+                f"120-second stabilization window until {stabilization_deadline.isoformat()}."
+            )
+        for ordinal in range(len(expected)):
+            if len(actual) > ordinal:
+                continue
+            family = expected[ordinal]
+            intent_key = f"compute_source_public_ip:{server_id}:{ordinal}:{family}"
+            request = {
+                "ip_address": {"family": family, "server": str(server_id)}
+            }
+            request_fingerprint = _fingerprint(request)
+            intent = self.intents.get(intent_key)
+            if intent and any(
+                (
+                    intent.get("request_fingerprint") != request_fingerprint,
+                    intent.get("server_id") != str(server_id),
+                    intent.get("family") != family,
+                    intent.get("ordinal") != ordinal,
+                )
+            ):
+                raise HarnessError("The pending UpCloud public-IP intent changed scope.")
+            if intent and intent.get("request_boundary_crossed"):
+                server, actual = observe()
+                if len(actual) <= ordinal:
+                    raise AmbiguousMutation(
+                        "The UpCloud public-IP request crossed the provider boundary "
+                        "without exact read-back; no duplicate was sent."
+                    )
+                self.intents.clear(intent_key)
+                continue
+
+            self.intents.put(
+                intent_key,
+                {
+                    "marker": self.config.run_id,
+                    "kind": "compute_source_public_ip",
+                    "name": self.names["source_server"],
+                    "operation": "assign",
+                    "server_id": str(server_id),
+                    "family": family,
+                    "ordinal": ordinal,
+                    "request_fingerprint": request_fingerprint,
+                    "preflight_families": list(actual),
+                },
+            )
+            self.intents.update(intent_key, request_boundary_crossed=True)
+            self._control_mutation(
+                intent_key,
+                "POST",
+                "/ip_address",
+                accepted=(201, 202),
+                json_body=request,
+            )
+            server, actual = observe()
+            if len(actual) <= ordinal:
+                raise AmbiguousMutation(
+                    "UpCloud accepted a public-IP assignment without exact read-back."
+                )
+            self.intents.clear(intent_key)
+        server, actual = observe()
+        if actual != expected:
+            raise AmbiguousMutation(
+                "The UpCloud server public network did not reach the exact witnessed shape."
+            )
+        return server
 
     def _source_server_owned(
         self,
@@ -3926,6 +4150,11 @@ class UpCloudLiveHarness:
             raise HarnessError("UpCloud source-server ownership verification failed.")
         server = self._wait_server_started(resource_id)
         firewall_evidence = self._ensure_provider_firewall(resource_id)
+        server = self._ensure_provider_public_ip_families(
+            resource_id,
+            ("IPv4",),
+            firewall_verified_at=firewall_evidence["firewall_verified_at"],
+        )
         server = self._server_read(resource_id)
         owned, safe_config, boot_id = self._source_server_owned(
             server or {},
@@ -3984,6 +4213,7 @@ class UpCloudLiveHarness:
                 "safe_config": safe_config,
                 "safe_config_sha256": _fingerprint(safe_config),
                 "public_ipv4": self._server_public_addresses(server),
+                "public_ip_families": safe_config["public_ip_families"],
                 "provider_firewall": firewall_evidence,
             },
             source_witness=source_volume_id,

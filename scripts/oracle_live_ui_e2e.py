@@ -20,12 +20,15 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +38,7 @@ from scripts.live_e2e_ledger import (  # noqa: E402
     DurableMutationIntentStore,
     DurableResourceLedger,
     LedgerError,
+    bounded_error,
     require_run_id,
 )
 
@@ -50,7 +54,10 @@ class HarnessError(RuntimeError):
         definitive_rejection=False,
         mutation_outcome_unknown=False,
     ):
-        super().__init__(message)
+        # HarnessError is the only exception type intentionally rendered by
+        # the CLI. Keep even caller-supplied messages bounded and redacted so
+        # an SDK response cannot accidentally reach the terminal or ledger.
+        super().__init__(bounded_error(message))
         self.code = str(code or "")
         self.mutation_outcome_unknown = bool(mutation_outcome_unknown)
         self.definitive_rejection = bool(definitive_rejection)
@@ -112,6 +119,46 @@ TAGGABLE_SOURCE_KINDS = {
     "source_boot_volume",
     "source_vnic",
 }
+
+STORAGE_SECRET_KEYS = frozenset(
+    {
+        "access_key_id",
+        "secret_access_key",
+        "bucket",
+        "namespace",
+        "region",
+        "endpoint",
+        "prefix",
+        "user_ocid",
+        "tenancy_ocid",
+        "compartment_ocid",
+    }
+)
+STORAGE_SCOPE_KEYS = frozenset(
+    {
+        "bucket",
+        "namespace",
+        "region",
+        "endpoint",
+        "prefix",
+        "user_ocid",
+        "tenancy_ocid",
+        "compartment_ocid",
+    }
+)
+CLEANUP_INTENT_PREFIX = "cleanup:"
+CLEANUP_TRANSITIONAL_STATES = frozenset(
+    {
+        "ATTACHING",
+        "DETACHING",
+        "DETACHED",
+        "DELETING",
+        "TERMINATING",
+        "UPDATING",
+        "PENDING",
+        "IN_PROGRESS",
+    }
+)
 
 
 def _safe_path(value, *, variable):
@@ -207,6 +254,8 @@ def _source_id(resource):
 def _provider_error_code(error):
     status = getattr(error, "status", None) or getattr(error, "status_code", None)
     code = str(getattr(error, "code", "") or "").casefold()
+    if code.startswith("provider_"):
+        return code.upper()
     if code == "notauthorizedornotfound":
         return "PROVIDER_NOT_FOUND_OR_UNAUTHORIZED"
     if status in {401, 403} or code in {"notauthenticated", "notauthorized"}:
@@ -255,7 +304,26 @@ def _provider_error_outcome(error):
 
 
 def _checked(response, accepted):
-    if _status(response) not in set(accepted):
+    status = _status(response)
+    if status not in set(accepted):
+        if status == 404:
+            raise HarnessError(
+                "OCI resource was not found.", code="PROVIDER_NOT_FOUND", definitive_rejection=True
+            )
+        if status == 429:
+            raise HarnessError(
+                "OCI provider rate limit was returned.", code="PROVIDER_RATE_LIMIT"
+            )
+        if status in {401, 403}:
+            raise HarnessError(
+                "OCI provider authorization failed.", code="PROVIDER_AUTH_FAILED"
+            )
+        if status in {408, 504} or (isinstance(status, int) and status >= 500):
+            raise HarnessError(
+                "OCI provider returned a transient failure.",
+                code=("PROVIDER_TIMEOUT" if status in {408, 504} else "PROVIDER_TRANSIENT_OUTAGE"),
+                mutation_outcome_unknown=True,
+            )
         raise HarnessError("OCI returned an unexpected response status.")
     return response
 
@@ -466,14 +534,22 @@ class OracleLiveUIHarness:
                 ):
                     raise HarnessError(
                         "OCI definitively rejected the bounded request.",
-                        code=f"PROVIDER_HTTP_{status}",
+                        code=_provider_error_code(
+                            SimpleNamespace(status=status, code="")
+                        ),
                         definitive_rejection=True,
                     )
                 outcome_unknown = mutation
+                if status in {408, 504}:
+                    code = "PROVIDER_TIMEOUT"
+                elif isinstance(status, int) and status >= 500:
+                    code = "PROVIDER_TRANSIENT_OUTAGE"
+                else:
+                    code = "PROVIDER_REQUEST_FAILED"
                 raise HarnessError(
                     "OCI returned an unexpected response status; the mutation "
                     "outcome may be unknown.",
-                    code="PROVIDER_UNEXPECTED_STATUS",
+                    code=code,
                     mutation_outcome_unknown=outcome_unknown,
                 )
             return response
@@ -1942,11 +2018,16 @@ class OracleLiveUIHarness:
     def _secret_path(self):
         configured = self.environment.get("ORACLE_E2E_SECRET_FILE")
         if configured:
-            path = _safe_path(configured, variable="ORACLE_E2E_SECRET_FILE")
+            raw_path = Path(configured).expanduser()
+            variable = "ORACLE_E2E_SECRET_FILE"
         else:
-            path = self.config.ledger_path.with_name(
+            raw_path = self.config.ledger_path.with_name(
                 self.config.ledger_path.name + ".oracle-object-storage-credentials.json"
-            ).resolve()
+            )
+            variable = "ORACLE_E2E_SECRET_FILE"
+        self._reject_secret_symlink_components(raw_path, variable=variable)
+        path = _safe_path(raw_path, variable=variable)
+        self._reject_secret_symlink_components(path, variable=variable)
         try:
             relative = path.relative_to(ROOT)
         except ValueError:
@@ -1966,36 +2047,223 @@ class OracleLiveUIHarness:
             )
         return path
 
+    @staticmethod
+    def _reject_secret_symlink_components(path, *, variable):
+        """Reject symlink indirection before resolving a secret path."""
+
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        current = Path(absolute.anchor)
+        for component in absolute.parts[1:]:
+            current /= component
+            try:
+                if current.is_symlink():
+                    raise HarnessError(f"{variable} must not use symlinked path components.")
+            except OSError as error:
+                raise HarnessError(f"{variable} could not be inspected safely.") from error
+
+    @staticmethod
+    def _storage_endpoint(namespace, region):
+        return f"https://{namespace}.compat.objectstorage.{region}.oraclecloud.com"
+
+    def _storage_scope(self, *, bucket_name, namespace, region, user_ocid):
+        tenancy_id = _require_ocid(
+            (self._oci_config or {}).get("tenancy"),
+            label="OCI profile tenancy",
+            resource_type="tenancy",
+        )
+        compartment_id = _require_ocid(
+            self.config.compartment_id,
+            label="Oracle E2E compartment",
+            resource_type="compartment",
+        )
+        user_ocid = _require_ocid(
+            user_ocid,
+            label="OCI storage user",
+            resource_type="user",
+        )
+        namespace = str(namespace or "").strip()
+        region = str(region or "").strip()
+        bucket_name = str(bucket_name or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", namespace):
+            raise HarnessError("OCI Object Storage namespace is malformed.")
+        if not re.fullmatch(r"[a-z0-9-]{3,64}", region):
+            raise HarnessError("OCI profile region is malformed.")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,254}", bucket_name):
+            raise HarnessError("OCI Object Storage bucket name is malformed.")
+        return {
+            "bucket": bucket_name,
+            "namespace": namespace,
+            "region": region,
+            "endpoint": self._storage_endpoint(namespace, region),
+            "prefix": f"{self.config.run_id}/",
+            "user_ocid": user_ocid,
+            "tenancy_ocid": tenancy_id,
+            "compartment_ocid": compartment_id,
+        }
+
+    def _assert_storage_scope_ledger(self, expected, *, require_evidence=True):
+        """Require storage scope to match both durable witnesses and config."""
+
+        if set(expected) != STORAGE_SCOPE_KEYS:
+            raise HarnessError("Oracle storage scope is incomplete.")
+        bucket_row = self._active_ledger_entry("object_bucket")
+        user_row = self._active_ledger_entry("iam_user")
+        if not bucket_row or not user_row:
+            raise HarnessError(
+                "Oracle storage scope lacks durable bucket and IAM-user witnesses."
+            )
+        if (
+            str(bucket_row.get("name") or "") != expected["bucket"]
+            or str((bucket_row.get("ownership") or {}).get("compartment_id") or "")
+            != expected["compartment_ocid"]
+            or str(user_row.get("resource_id") or "") != expected["user_ocid"]
+            or str((user_row.get("ownership") or {}).get("compartment_id") or "")
+            != expected["tenancy_ocid"]
+        ):
+            raise HarnessError("Oracle storage scope does not match durable ownership witnesses.")
+        if require_evidence:
+            durable = self.evidence.get("storage_scope")
+            if not isinstance(durable, dict) or any(
+                str(durable.get(field) or "") != str(expected[field])
+                for field in STORAGE_SCOPE_KEYS
+            ):
+                raise HarnessError(
+                    "Oracle storage scope does not match durable configuration evidence."
+                )
+        return expected
+
+    def _persist_storage_scope(self, expected):
+        """Persist the non-secret S3 scope before any S3 client is created."""
+
+        self._assert_storage_scope_ledger(expected, require_evidence=False)
+        current = self.evidence.get("storage_scope")
+        if current and any(
+            str(current.get(field) or "") != str(expected[field])
+            for field in STORAGE_SCOPE_KEYS
+        ):
+            raise HarnessError("Oracle storage scope changed across resumptions.")
+        self.evidence.put(
+            "storage_scope",
+            {
+                "operation": "evidence",
+                "kind": "storage_scope",
+                "name": expected["bucket"],
+                "marker": self.config.run_id,
+                **expected,
+            },
+        )
+        return expected
+
+    def _validate_storage_secret_payload(self, payload):
+        if not isinstance(payload, dict) or set(payload) != STORAGE_SECRET_KEYS:
+            raise HarnessError(
+                "Oracle storage credential file contains an unsupported or incomplete key set."
+            )
+        for field in STORAGE_SECRET_KEYS:
+            if not isinstance(payload.get(field), str) or not payload[field].strip():
+                raise HarnessError("Oracle storage credential file contains an invalid value.")
+        _require_customer_secret_key_id(payload["access_key_id"])
+        _require_ocid(payload["user_ocid"], label="OCI storage user", resource_type="user")
+        _require_ocid(
+            payload["tenancy_ocid"], label="OCI storage tenancy", resource_type="tenancy"
+        )
+        _require_ocid(
+            payload["compartment_ocid"],
+            label="OCI storage compartment",
+            resource_type="compartment",
+        )
+        parsed = urlsplit(payload["endpoint"])
+        expected_endpoint = self._storage_endpoint(
+            payload["namespace"], payload["region"]
+        )
+        if (
+            payload["endpoint"] != expected_endpoint
+            or parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise HarnessError("Oracle storage credential endpoint is not canonical.")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", payload["namespace"]):
+            raise HarnessError("Oracle storage credential namespace is malformed.")
+        if not re.fullmatch(r"[a-z0-9-]{3,64}", payload["region"]):
+            raise HarnessError("Oracle storage credential region is malformed.")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,254}", payload["bucket"]):
+            raise HarnessError("Oracle storage credential bucket is malformed.")
+        if payload["prefix"] != f"{self.config.run_id}/":
+            raise HarnessError("Oracle storage credential prefix is not run-scoped.")
+        return dict(payload)
+
     def _write_storage_secret(self, payload):
         path = self._secret_path()
+        self._validate_storage_secret_payload(payload)
         encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         self._atomic_private_write(path, encoded, 0o600)
-        if path.stat().st_mode & 0o077:
+        try:
+            mode = stat.S_IMODE(path.lstat().st_mode)
+        except OSError as error:
+            raise HarnessError("Oracle storage credential file could not be verified.") from error
+        if (
+            not stat.S_ISREG(path.lstat().st_mode)
+            or mode != 0o600
+            or path.is_symlink()
+        ):
             raise HarnessError("Oracle storage credential file permissions are unsafe.")
         return path
 
-    def _read_storage_secret(self):
+    def _read_storage_secret(self, *, expected_scope=None):
+        """Load one exact, non-symlinked, scope-bound credential document."""
+
         path = self._secret_path()
-        if not path.exists():
-            return None
-        if path.stat().st_mode & 0o077:
-            raise HarnessError("Oracle storage credential file permissions are unsafe.")
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise HarnessError("Oracle storage credential file could not be inspected.") from error
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise HarnessError("Oracle storage credential file must be a regular 0600 file.")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags)
+            with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+                descriptor = None
+                opened = os.fstat(source.fileno())
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or stat.S_IMODE(opened.st_mode) != 0o600
+                    or opened.st_dev != metadata.st_dev
+                    or opened.st_ino != metadata.st_ino
+                ):
+                    raise HarnessError(
+                        "Oracle storage credential file must be a regular 0600 file."
+                    )
+                payload = json.load(source)
+        except HarnessError:
+            raise
         except (OSError, ValueError) as error:
             raise HarnessError("Oracle storage credential file is malformed.") from error
-        required = {
-            "access_key_id",
-            "secret_access_key",
-            "bucket",
-            "namespace",
-            "region",
-            "endpoint",
-            "prefix",
-            "user_ocid",
-        }
-        if not isinstance(payload, dict) or not required.issubset(payload):
-            raise HarnessError("Oracle storage credential file is incomplete.")
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        payload = self._validate_storage_secret_payload(payload)
+        if expected_scope is not None:
+            if set(expected_scope) != STORAGE_SCOPE_KEYS:
+                raise HarnessError("Oracle storage scope is incomplete.")
+            self._assert_storage_scope_ledger(expected_scope)
+            if any(
+                payload[field] != str(expected_scope[field])
+                for field in STORAGE_SCOPE_KEYS
+            ):
+                raise HarnessError("Oracle storage credential scope does not match the run.")
         return payload
 
     def _provision_customer_secret_key(self, user, *, namespace, region, bucket):
@@ -2003,7 +2271,13 @@ class OracleLiveUIHarness:
         client = self._clients["identity"]
         user_id = str(_value(user, "id") or "")
         name = self.names[kind]
-        secret_file = self._read_storage_secret()
+        expected_secret_scope = self._storage_scope(
+            bucket_name=str(_value(bucket, "name") or ""),
+            namespace=namespace,
+            region=region,
+            user_ocid=user_id,
+        )
+        secret_file = self._read_storage_secret(expected_scope=expected_secret_scope)
         keys = self._list_unpaged(client.list_customer_secret_keys, user_id=user_id)
         named = [item for item in keys if str(_value(item, "display_name") or "") == name]
         row = self._active_ledger_entry(kind)
@@ -2084,16 +2358,10 @@ class OracleLiveUIHarness:
                 "endpoint": endpoint,
                 "prefix": f"{self.config.run_id}/",
                 "user_ocid": user_id,
+                "tenancy_ocid": expected_secret_scope["tenancy_ocid"],
+                "compartment_ocid": expected_secret_scope["compartment_ocid"],
             }
             self._write_storage_secret(secret_file)
-        expected_secret_scope = {
-            "bucket": str(_value(bucket, "name") or ""),
-            "namespace": namespace,
-            "region": region,
-            "endpoint": f"https://{namespace}.compat.objectstorage.{region}.oraclecloud.com",
-            "prefix": f"{self.config.run_id}/",
-            "user_ocid": user_id,
-        }
         if not secret_file or any(
             str(secret_file.get(field) or "") != expected
             for field, expected in expected_secret_scope.items()
@@ -2158,13 +2426,45 @@ class OracleLiveUIHarness:
         self.evidence.put("object_storage_preflight", evidence)
         return evidence
 
-    @staticmethod
-    def _storage_s3_client(secret_path):
+    def _storage_scope_for_s3(self):
+        durable = self.evidence.get("storage_scope")
+        if not isinstance(durable, dict) or any(
+            not str(durable.get(field) or "") for field in STORAGE_SCOPE_KEYS
+        ):
+            raise HarnessError("Oracle S3 use requires durable storage scope evidence.")
+        expected = self._storage_scope(
+            bucket_name=durable["bucket"],
+            namespace=durable["namespace"],
+            region=durable["region"],
+            user_ocid=durable["user_ocid"],
+        )
+        if any(
+            str(durable.get(field) or "") != str(expected[field])
+            for field in STORAGE_SCOPE_KEYS
+        ):
+            raise HarnessError("Oracle S3 storage scope does not match OCI configuration.")
+        return self._assert_storage_scope_ledger(expected)
+
+    def _storage_s3_client(self, secret_path=None):
+        expected_scope = self._storage_scope_for_s3()
+        canonical_path = self._secret_path()
+        if secret_path is not None:
+            requested_path = Path(secret_path).expanduser()
+            self._reject_secret_symlink_components(
+                requested_path, variable="ORACLE_E2E_SECRET_FILE"
+            )
+            requested_path = _safe_path(
+                requested_path, variable="ORACLE_E2E_SECRET_FILE"
+            )
+            if requested_path != canonical_path:
+                raise HarnessError("Oracle S3 client received an unexpected credential path.")
+        secret = self._read_storage_secret(expected_scope=expected_scope)
+        if secret is None:
+            raise HarnessError("Oracle Object Storage credential file is missing.")
         try:
             import boto3
             from botocore.config import Config
 
-            secret = json.loads(secret_path.read_text(encoding="utf-8"))
             client = boto3.client(
                 "s3",
                 aws_access_key_id=secret["access_key_id"],
@@ -2197,6 +2497,13 @@ class OracleLiveUIHarness:
             create_method=self._clients["identity"].create_user,
             details_class=oci.identity.models.CreateUserDetails,
         )
+        storage_scope = self._storage_scope(
+            bucket_name=str(_value(bucket, "name") or ""),
+            namespace=namespace,
+            region=region,
+            user_ocid=str(_value(user, "id") or ""),
+        )
+        self._persist_storage_scope(storage_scope)
         group = self._provision_iam_named(
             kind="iam_group",
             tenancy_id=tenancy_id,
@@ -2785,10 +3092,7 @@ class OracleLiveUIHarness:
         return result
 
     def _verify_storage_objects(self, storage_manifest):
-        secret_path = self._secret_path()
-        if not secret_path.exists():
-            raise HarnessError("Oracle Object Storage credential file is missing.")
-        client, secret = self._storage_s3_client(secret_path)
+        client, secret = self._storage_s3_client()
         objects = storage_manifest.get("objects") or []
         kinds = {str(item.get("kind") or "") for item in objects if isinstance(item, dict)}
         if not {"website", "database"}.issubset(kinds):
@@ -3137,102 +3441,299 @@ class OracleLiveUIHarness:
         finally:
             client.close()
 
+    def _cleanup_intent_key(self, kind, resource_id, operation, discriminator=""):
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                [
+                    self.config.run_id,
+                    str(kind),
+                    str(resource_id),
+                    str(operation),
+                    str(discriminator),
+                ],
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+        return f"{CLEANUP_INTENT_PREFIX}{kind}:{fingerprint}"
+
+    @staticmethod
+    def _cleanup_state(resource):
+        return str(_value(resource, "lifecycle_state") or "").upper()
+
+    def _cleanup_complete(self, key, row, *, mark_ledger=True):
+        if mark_ledger:
+            self.ledger.mark_cleanup(
+                row["kind"], row["resource_id"], state="deleted"
+            )
+        self.intents.clear(key)
+        return "DELETED"
+
+    def _cleanup_manual_review(self, key, row, *, reason="PROVIDER_AMBIGUOUS"):
+        """Persist an ambiguity and make subsequent runs refuse replay."""
+
+        self.intents.update(
+            key,
+            state="manual_review",
+            reconciliation="PROVIDER_AMBIGUOUS",
+            reconciliation_reason=str(reason or "PROVIDER_AMBIGUOUS")[:120],
+        )
+        self.ledger.mark_cleanup(
+            row["kind"],
+            row["resource_id"],
+            state="manual_review",
+            error="PROVIDER_AMBIGUOUS",
+        )
+        raise HarnessError(
+            "Oracle cleanup outcome is ambiguous; the provider request will not be replayed."
+        )
+
+    def _reconcile_cleanup_intent(
+        self,
+        key,
+        row,
+        *,
+        probe,
+        operation=None,
+        terminal_states=(),
+        mark_ledger=True,
+    ):
+        intent = self.intents.get(key)
+        if not intent:
+            return None
+        if (
+            str(intent.get("provider_resource_id") or "") != str(row["resource_id"])
+            or str(intent.get("kind") or "") != str(row["kind"])
+            or (operation and str(intent.get("operation") or "") != str(operation))
+        ):
+            self._cleanup_manual_review(key, row, reason="OWNERSHIP_WITNESS_CHANGED")
+        try:
+            resource = probe()
+        except HarnessError as error:
+            self._cleanup_manual_review(key, row, reason=error.code or "PROVIDER_READ_FAILED")
+        if resource is None or self._cleanup_state(resource) in set(terminal_states):
+            return self._cleanup_complete(key, row, mark_ledger=mark_ledger)
+
+        state = str(intent.get("state") or "").lower()
+        provider_state = self._cleanup_state(resource)
+        if state == "accepted" or (
+            state == "submitted" and provider_state in CLEANUP_TRANSITIONAL_STATES
+        ):
+            return self._wait_cleanup_intent(
+                key,
+                row,
+                probe=probe,
+                terminal_states=terminal_states,
+                mark_ledger=mark_ledger,
+            )
+        self._cleanup_manual_review(key, row)
+
+    def _wait_cleanup_intent(
+        self,
+        key,
+        row,
+        *,
+        probe,
+        terminal_states=(),
+        mark_ledger=True,
+    ):
+        deadline = time.monotonic() + self.config.timeout_seconds
+        while True:
+            try:
+                resource = probe()
+            except HarnessError as error:
+                self._cleanup_manual_review(
+                    key, row, reason=error.code or "PROVIDER_READ_FAILED"
+                )
+            if resource is None or self._cleanup_state(resource) in set(terminal_states):
+                return self._cleanup_complete(key, row, mark_ledger=mark_ledger)
+            intent = self.intents.get(key)
+            state = str((intent or {}).get("state") or "").lower()
+            provider_state = self._cleanup_state(resource)
+            if state != "accepted" and provider_state not in CLEANUP_TRANSITIONAL_STATES:
+                self._cleanup_manual_review(key, row)
+            if time.monotonic() >= deadline:
+                self._cleanup_manual_review(key, row, reason="PROVIDER_TIMEOUT")
+            self._sleep(self.config.poll_seconds)
+
+    def _run_cleanup_mutation(
+        self,
+        row,
+        *,
+        operation,
+        method,
+        operation_kwargs,
+        probe,
+        terminal_states=(),
+        discriminator="",
+        mark_ledger=True,
+    ):
+        kind = row["kind"]
+        resource_id = row["resource_id"]
+        key = self._cleanup_intent_key(
+            kind, resource_id, operation, discriminator=discriminator
+        )
+        current = self.intents.get(key)
+        if current:
+            expected_fingerprint = hashlib.sha256(
+                json.dumps(
+                    operation_kwargs, sort_keys=True, default=str, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()
+            if (
+                str(current.get("provider_resource_id") or "") != str(resource_id)
+                or str(current.get("request_fingerprint") or "") != expected_fingerprint
+            ):
+                self._cleanup_manual_review(key, row, reason="OWNERSHIP_WITNESS_CHANGED")
+            return self._reconcile_cleanup_intent(
+                key,
+                row,
+                probe=probe,
+                terminal_states=terminal_states,
+                mark_ledger=mark_ledger,
+            )
+
+        request_fingerprint = hashlib.sha256(
+            json.dumps(
+                operation_kwargs, sort_keys=True, default=str, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        self.intents.put(
+            key,
+            {
+                "operation": operation,
+                "kind": kind,
+                "name": str(row.get("name") or resource_id),
+                "marker": self.config.run_id,
+                "provider_resource_id": resource_id,
+                "request_fingerprint": request_fingerprint,
+                "state": "prepared",
+            },
+        )
+        # A crash after this fsync and before the provider call is deliberately
+        # treated the same as a lost response. Cleanup never blindly replays a
+        # request whose acceptance cannot be proven.
+        self.intents.update(key, state="submitted")
+        try:
+            self._call(
+                method,
+                accepted=(200, 202, 204),
+                mutation=True,
+                **operation_kwargs,
+            )
+        except HarnessError as error:
+            self.intents.update(
+                key,
+                state="rejected" if error.definitive_rejection else "submitted",
+                provider_error=error.code or "PROVIDER_REQUEST_FAILED",
+            )
+            return self._reconcile_cleanup_intent(
+                key,
+                row,
+                probe=probe,
+                terminal_states=terminal_states,
+                mark_ledger=mark_ledger,
+            )
+        self.intents.update(key, state="accepted")
+        return self._wait_cleanup_intent(
+            key,
+            row,
+            probe=probe,
+            terminal_states=terminal_states,
+            mark_ledger=mark_ledger,
+        )
+
     def _cleanup_graph_kind(self, kind):
         row = self._active_ledger_entry(kind)
         if row is None:
             return "NOT_LEDGERED"
-        resource = self._exact_graph_resource(kind, row)
-        if resource is None:
-            self.ledger.mark_cleanup(kind, row["resource_id"], state="absent")
-            return "ABSENT"
         resource_id = row["resource_id"]
-        try:
-            if kind in {"source_block_attachment", "ui_block_restore_attachment"}:
-                self._unmount_test_attachment(kind)
-                self._call(
-                    self._clients["compute"].detach_volume,
-                    volume_attachment_id=resource_id,
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-                self._wait_graph_absent(kind, resource_id)
-            elif kind in {
-                "source_instance",
-                "ui_compute_restore",
-                "ui_boot_verify_instance",
-            }:
-                self._call(
-                    self._clients["compute"].terminate_instance,
-                    instance_id=resource_id,
-                    preserve_boot_volume=True,
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-                self._wait_graph_absent(kind, resource_id, terminal_ok=True)
-            elif kind == "ui_compute_backup":
-                self._call(
-                    self._clients["compute"].delete_image,
-                    image_id=resource_id,
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-                self._wait_graph_absent(kind, resource_id)
-            elif kind == "ui_block_backup":
-                self._call(
-                    self._clients["block"].delete_volume_backup,
-                    volume_backup_id=resource_id,
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-                self._wait_graph_absent(kind, resource_id)
-            elif kind == "ui_boot_backup":
-                self._call(
-                    self._clients["block"].delete_boot_volume_backup,
-                    boot_volume_backup_id=resource_id,
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-                self._wait_graph_absent(kind, resource_id)
-            elif kind in {"source_block_volume", "ui_block_restore"}:
-                self._call(
-                    self._clients["block"].delete_volume,
-                    volume_id=resource_id,
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-                self._wait_graph_absent(kind, resource_id)
-            elif kind in {
-                "source_boot_volume",
-                "ui_boot_restore",
-                "ui_compute_restore_boot_volume",
-            }:
-                self._call(
-                    self._clients["block"].delete_boot_volume,
-                    boot_volume_id=resource_id,
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-                self._wait_graph_absent(kind, resource_id)
-            elif kind in {
-                "source_vnic",
-                "ui_compute_restore_vnic",
-                "ui_boot_verify_vnic",
-            }:
+        operation = {
+            "source_block_attachment": "detach",
+            "ui_block_restore_attachment": "detach",
+            "source_instance": "terminate",
+            "ui_compute_restore": "terminate",
+            "ui_boot_verify_instance": "terminate",
+            "ui_compute_backup": "delete_image",
+            "ui_block_backup": "delete_volume_backup",
+            "ui_boot_backup": "delete_boot_volume_backup",
+            "source_block_volume": "delete_volume",
+            "ui_block_restore": "delete_volume",
+            "source_boot_volume": "delete_boot_volume",
+            "ui_boot_restore": "delete_boot_volume",
+            "ui_compute_restore_boot_volume": "delete_boot_volume",
+        }.get(kind)
+        if not operation:
+            if kind in {"source_vnic", "ui_compute_restore_vnic", "ui_boot_verify_vnic"}:
+                resource = self._exact_graph_resource(kind, row)
+                if resource is None:
+                    self.ledger.mark_cleanup(kind, resource_id, state="absent")
+                    return "ABSENT"
                 raise HarnessError(
                     "A ledgered VNIC still exists after its exact parent instance was terminated."
                 )
-            else:
-                raise HarnessError("Unsupported Oracle graph cleanup kind.")
-        except Exception as error:
-            self.ledger.mark_cleanup(
-                kind,
-                resource_id,
-                state="failed",
-                error=_provider_error_code(error),
+            raise HarnessError("Unsupported Oracle graph cleanup kind.")
+
+        probe = lambda: self._exact_graph_resource(kind, row)
+        key = self._cleanup_intent_key(kind, resource_id, operation)
+        if self.intents.get(key):
+            return self._reconcile_cleanup_intent(
+                key,
+                row,
+                probe=probe,
+                operation=operation,
+                terminal_states={"TERMINATED"} if operation == "terminate" else set(),
             )
+        resource = probe()
+        if resource is None:
+            self.ledger.mark_cleanup(kind, resource_id, state="absent")
+            return "ABSENT"
+        if operation == "detach":
+            operation_kwargs = {"volume_attachment_id": resource_id}
+        elif operation == "terminate":
+            operation_kwargs = {
+                "instance_id": resource_id,
+                "preserve_boot_volume": True,
+            }
+        elif operation == "delete_image":
+            operation_kwargs = {"image_id": resource_id}
+        elif operation == "delete_volume_backup":
+            operation_kwargs = {"volume_backup_id": resource_id}
+        elif operation == "delete_boot_volume_backup":
+            operation_kwargs = {"boot_volume_backup_id": resource_id}
+        elif operation == "delete_volume":
+            operation_kwargs = {"volume_id": resource_id}
+        else:
+            operation_kwargs = {"boot_volume_id": resource_id}
+        if operation == "detach":
+            self._unmount_test_attachment(kind)
+        method = {
+            "detach": self._clients["compute"].detach_volume,
+            "terminate": self._clients["compute"].terminate_instance,
+            "delete_image": self._clients["compute"].delete_image,
+            "delete_volume_backup": self._clients["block"].delete_volume_backup,
+            "delete_boot_volume_backup": self._clients["block"].delete_boot_volume_backup,
+            "delete_volume": self._clients["block"].delete_volume,
+            "delete_boot_volume": self._clients["block"].delete_boot_volume,
+        }[operation]
+        try:
+            return self._run_cleanup_mutation(
+                row,
+                operation=operation,
+                method=method,
+                operation_kwargs=operation_kwargs,
+                probe=probe,
+                terminal_states={"TERMINATED"} if operation == "terminate" else set(),
+            )
+        except Exception as error:
+            current = self.ledger.get(kind, resource_id)
+            if not current or current.get("cleanup_state") != "manual_review":
+                self.ledger.mark_cleanup(
+                    kind,
+                    resource_id,
+                    state="failed",
+                    error=_provider_error_code(error),
+                )
             raise
-        self.ledger.mark_cleanup(kind, resource_id, state="deleted")
-        return "DELETED"
 
     def _object_inventory(self, namespace, bucket):
         client = self._clients["object"]
@@ -3389,7 +3890,53 @@ class OracleLiveUIHarness:
                 raise HarnessError("OCI IAM/Object Storage cleanup waiter timed out.")
             self._sleep(self.config.poll_seconds)
 
+    def _assert_object_inventory_owned(self, versions, objects):
+        prefix = f"{self.config.run_id}/"
+        inventory = [*versions, *objects]
+        if any(
+            not str(_value(item, "name") or "").startswith(prefix)
+            for item in inventory
+        ):
+            raise HarnessError(
+                "The exact test bucket contains an object outside the run prefix; cleanup is blocked."
+            )
+
+    def _object_probe(self, *, namespace, bucket_name, object_name, version_id):
+        versions, objects = self._object_inventory(namespace, bucket_name)
+        self._assert_object_inventory_owned(versions, objects)
+        if version_id:
+            matches = [
+                item
+                for item in versions
+                if str(_value(item, "name") or "") == object_name
+                and str(_value(item, "version_id") or "") == version_id
+            ]
+        else:
+            matches = [
+                item
+                for item in objects
+                if str(_value(item, "name") or "") == object_name
+            ]
+        if len(matches) > 1:
+            raise HarnessError("OCI object cleanup inventory contains a duplicate witness.")
+        return matches[0] if matches else None
+
     def _cleanup_bucket(self, row, *, namespace):
+        bucket_name = row["name"]
+        delete_operation = "delete_bucket"
+        delete_key = self._cleanup_intent_key(
+            "object_bucket", row["resource_id"], delete_operation
+        )
+        delete_probe = lambda: self._exact_storage_resource(
+            "object_bucket", row, tenancy_id="", namespace=namespace
+        )
+        if self.intents.get(delete_key):
+            return self._reconcile_cleanup_intent(
+                delete_key,
+                row,
+                probe=delete_probe,
+                operation=delete_operation,
+            )
         bucket = self._exact_storage_resource(
             "object_bucket",
             row,
@@ -3399,28 +3946,32 @@ class OracleLiveUIHarness:
         if bucket is None:
             self.ledger.mark_cleanup("object_bucket", row["resource_id"], state="absent")
             return "ABSENT"
-        bucket_name = row["name"]
         versions, objects = self._object_inventory(namespace, bucket_name)
-        prefix = f"{self.config.run_id}/"
-        inventory = [*versions, *objects]
-        if any(not str(_value(item, "name") or "").startswith(prefix) for item in inventory):
-            raise HarnessError(
-                "The exact test bucket contains an object outside the run prefix; cleanup is blocked."
-            )
+        self._assert_object_inventory_owned(versions, objects)
         deleted_versions = set()
         for item in versions:
             name = str(_value(item, "name") or "")
             version_id = str(_value(item, "version_id") or "")
             if not name or not version_id:
                 raise HarnessError("OCI object-version cleanup witness is malformed.")
-            self._call(
-                self._clients["object"].delete_object,
-                namespace_name=namespace,
-                bucket_name=bucket_name,
-                object_name=name,
-                version_id=version_id,
-                accepted=(200, 202, 204),
-                mutation=True,
+            self._run_cleanup_mutation(
+                row,
+                operation="delete_object_version",
+                method=self._clients["object"].delete_object,
+                operation_kwargs={
+                    "namespace_name": namespace,
+                    "bucket_name": bucket_name,
+                    "object_name": name,
+                    "version_id": version_id,
+                },
+                probe=lambda name=name, version_id=version_id: self._object_probe(
+                    namespace=namespace,
+                    bucket_name=bucket_name,
+                    object_name=name,
+                    version_id=version_id,
+                ),
+                discriminator=f"{name}:{version_id}",
+                mark_ledger=False,
             )
             deleted_versions.add((name, version_id))
         # A versioning-disabled/null object may not appear with a usable version
@@ -3429,29 +3980,44 @@ class OracleLiveUIHarness:
         for item in objects:
             name = str(_value(item, "name") or "")
             if name not in versioned_names:
-                self._call(
-                    self._clients["object"].delete_object,
-                    namespace_name=namespace,
-                    bucket_name=bucket_name,
-                    object_name=name,
-                    accepted=(200, 202, 204),
-                    mutation=True,
+                self._run_cleanup_mutation(
+                    row,
+                    operation="delete_object",
+                    method=self._clients["object"].delete_object,
+                    operation_kwargs={
+                        "namespace_name": namespace,
+                        "bucket_name": bucket_name,
+                        "object_name": name,
+                    },
+                    probe=lambda name=name: self._object_probe(
+                        namespace=namespace,
+                        bucket_name=bucket_name,
+                        object_name=name,
+                        version_id="",
+                    ),
+                    discriminator=name,
+                    mark_ledger=False,
                 )
         remaining_versions, remaining_objects = self._object_inventory(namespace, bucket_name)
+        self._assert_object_inventory_owned(remaining_versions, remaining_objects)
         if remaining_versions or remaining_objects:
+            self.ledger.mark_cleanup(
+                "object_bucket",
+                row["resource_id"],
+                state="manual_review",
+                error="PROVIDER_AMBIGUOUS",
+            )
             raise HarnessError("OCI bucket inventory is not empty after exact object cleanup.")
-        self._call(
-            self._clients["object"].delete_bucket,
-            namespace_name=namespace,
-            bucket_name=bucket_name,
-            accepted=(200, 202, 204),
-            mutation=True,
+        return self._run_cleanup_mutation(
+            row,
+            operation=delete_operation,
+            method=self._clients["object"].delete_bucket,
+            operation_kwargs={
+                "namespace_name": namespace,
+                "bucket_name": bucket_name,
+            },
+            probe=delete_probe,
         )
-        self._wait_storage_absent(
-            "object_bucket", row, tenancy_id="", namespace=namespace
-        )
-        self.ledger.mark_cleanup("object_bucket", row["resource_id"], state="deleted")
-        return "DELETED"
 
     def _cleanup_storage_kind(self, kind, *, tenancy_id, namespace):
         row = self._active_ledger_entry(kind)
@@ -3459,6 +4025,43 @@ class OracleLiveUIHarness:
             return "NOT_LEDGERED"
         if kind == "object_bucket":
             return self._cleanup_bucket(row, namespace=namespace)
+        operation = {
+            "customer_secret_key": "delete_customer_secret_key",
+            "iam_policy": "delete_policy",
+            "iam_membership": "remove_user_from_group",
+            "iam_group": "delete_group",
+            "iam_user": "delete_user",
+        }.get(kind)
+        if not operation:
+            raise HarnessError("Unsupported Oracle IAM cleanup kind.")
+        identity = self._clients["identity"]
+        if kind == "customer_secret_key":
+            user_id = (row["ownership"].get("relationships") or {})["user_id"]
+            operation_kwargs = {
+                "user_id": user_id,
+                "customer_secret_key_id": row["resource_id"],
+            }
+            method = identity.delete_customer_secret_key
+        elif kind == "iam_policy":
+            operation_kwargs = {"policy_id": row["resource_id"]}
+            method = identity.delete_policy
+        elif kind == "iam_membership":
+            operation_kwargs = {"user_group_membership_id": row["resource_id"]}
+            method = identity.remove_user_from_group
+        elif kind == "iam_group":
+            operation_kwargs = {"group_id": row["resource_id"]}
+            method = identity.delete_group
+        else:
+            operation_kwargs = {"user_id": row["resource_id"]}
+            method = identity.delete_user
+        probe = lambda: self._exact_storage_resource(
+            kind, row, tenancy_id=tenancy_id, namespace=namespace
+        )
+        key = self._cleanup_intent_key(kind, row["resource_id"], operation)
+        if self.intents.get(key):
+            return self._reconcile_cleanup_intent(
+                key, row, probe=probe, operation=operation
+            )
         resource = self._exact_storage_resource(
             kind,
             row,
@@ -3468,63 +4071,24 @@ class OracleLiveUIHarness:
         if resource is None:
             self.ledger.mark_cleanup(kind, row["resource_id"], state="absent")
             return "ABSENT"
-        identity = self._clients["identity"]
         try:
-            if kind == "customer_secret_key":
-                user_id = (row["ownership"].get("relationships") or {})["user_id"]
-                self._call(
-                    identity.delete_customer_secret_key,
-                    user_id=user_id,
-                    customer_secret_key_id=row["resource_id"],
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-            elif kind == "iam_policy":
-                self._call(
-                    identity.delete_policy,
-                    policy_id=row["resource_id"],
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-            elif kind == "iam_membership":
-                self._call(
-                    identity.remove_user_from_group,
-                    user_group_membership_id=row["resource_id"],
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-            elif kind == "iam_group":
-                self._call(
-                    identity.delete_group,
-                    group_id=row["resource_id"],
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-            elif kind == "iam_user":
-                self._call(
-                    identity.delete_user,
-                    user_id=row["resource_id"],
-                    accepted=(200, 202, 204),
-                    mutation=True,
-                )
-            else:
-                raise HarnessError("Unsupported OCI IAM cleanup kind.")
-            self._wait_storage_absent(
-                kind,
+            return self._run_cleanup_mutation(
                 row,
-                tenancy_id=tenancy_id,
-                namespace=namespace,
+                operation=operation,
+                method=method,
+                operation_kwargs=operation_kwargs,
+                probe=probe,
             )
         except Exception as error:
-            self.ledger.mark_cleanup(
-                kind,
-                row["resource_id"],
-                state="failed",
-                error=_provider_error_code(error),
-            )
+            current = self.ledger.get(kind, row["resource_id"])
+            if not current or current.get("cleanup_state") != "manual_review":
+                self.ledger.mark_cleanup(
+                    kind,
+                    row["resource_id"],
+                    state="failed",
+                    error=_provider_error_code(error),
+                )
             raise
-        self.ledger.mark_cleanup(kind, row["resource_id"], state="deleted")
-        return "DELETED"
 
     def _assert_cleanup_graph_complete(self):
         requirements = {

@@ -58,6 +58,8 @@ def storage(
         "zone": zone,
         "state": state,
         "size": 10,
+        "tier": "standard",
+        "encrypted": "yes",
     }
     if origin is not None:
         value["origin"] = origin
@@ -96,7 +98,11 @@ class UpCloudEnterpriseReliabilityTests(BaseTestCase):
             node=node,
             name="upcloud-source",
             unique_id="source-1",
-            metadata={"_bs_zone": "us-chi1"},
+            metadata={
+                "_bs_zone": "us-chi1",
+                "tier": "standard",
+                "encrypted": "yes",
+            },
         )
         backup = integration.backups.create(
             uuid="upcloud-enterprise-backup-1",

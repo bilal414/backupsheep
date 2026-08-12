@@ -50,7 +50,15 @@ UPCLOUD_SERVER_MAX_ITEMS = 10_000
 UPCLOUD_ZERO_MATCH_RECONCILIATION_LIMIT = 3
 UPCLOUD_FIREWALL_MAX_RULES = 1000
 _UPCLOUD_STORAGE_TYPES = frozenset({"backup", "normal"})
+_UPCLOUD_STORAGE_TIERS = frozenset({"hdd", "standard", "maxiops"})
 _SAFE_MACHINE_CODE = re.compile(r"^[A-Z0-9_.:-]{1,96}$")
+_UPCLOUD_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_UPCLOUD_DEVICE_ADDRESS = re.compile(
+    r"^(?:virtio|scsi|ide)(?::[0-9]+){0,2}$", re.IGNORECASE
+)
 _TRANSITIONAL_STORAGE_STATES = frozenset(
     {"backuping", "cloning", "maintenance", "offline", "syncing"}
 )
@@ -452,6 +460,253 @@ def _upcloud_nested_list(payload, container_key, item_key):
     return items
 
 
+def _upcloud_storage_device_labels(device):
+    """Return strict provider labels used for boot-device selection.
+
+    UpCloud returns storage-device system labels as a list of ``key``/``value``
+    objects.  A malformed label block is not silently treated as a data disk;
+    doing so could select the wrong boot volume on a multi-disk server.
+    """
+    raw = device.get("labels") if isinstance(device, dict) else None
+    if raw in (None, "", []):
+        return {}
+    if isinstance(raw, dict):
+        raw = raw.get("label")
+    if not isinstance(raw, list):
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    labels = {}
+    for label in raw:
+        if not isinstance(label, dict):
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        key = str(label.get("key") or "").strip()
+        value = label.get("value")
+        if not key or isinstance(value, (dict, list, tuple, set)):
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        if key in labels:
+            raise _BackupProviderError(
+                "PROVIDER_DUPLICATE_MATCH", manual_review=True
+            )
+        labels[key] = str(value or "")
+    return labels
+
+
+def _upcloud_storage_configuration(integration, storage):
+    """Return provider-authoritative normal-storage clone attributes.
+
+    UpCloud backup-storage responses can omit ``tier`` while the original
+    normal storage response and the durable node metadata still identify the
+    source tier.  The source response wins when present; metadata is accepted
+    only as the previously discovered provider record.  Missing or conflicting
+    values are never replaced with a provider default.
+    """
+    if not isinstance(storage, dict):
+        raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+    metadata = integration.metadata if isinstance(integration.metadata, dict) else {}
+
+    def normalized(raw, allowed):
+        if raw in (None, ""):
+            return ""
+        value = str(raw).strip().casefold()
+        if value not in allowed:
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        return value
+
+    provider_tier = normalized(storage.get("tier"), _UPCLOUD_STORAGE_TIERS)
+    metadata_tier = normalized(metadata.get("tier"), _UPCLOUD_STORAGE_TIERS)
+    provider_encrypted = normalized(storage.get("encrypted"), {"yes", "no"})
+    metadata_encrypted = normalized(metadata.get("encrypted"), {"yes", "no"})
+    if provider_tier and metadata_tier and provider_tier != metadata_tier:
+        raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+    if (
+        provider_encrypted
+        and metadata_encrypted
+        and provider_encrypted != metadata_encrypted
+    ):
+        raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH", manual_review=True)
+    tier = provider_tier or metadata_tier
+    encrypted = provider_encrypted or metadata_encrypted
+    if not tier or not encrypted:
+        # A normal volume without these two fields cannot be reconstructed
+        # safely because UpCloud may select a different storage tier.
+        raise _BackupProviderError(
+            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+        )
+    return {"tier": tier, "encrypted": encrypted}
+
+
+def select_upcloud_boot_device(server):
+    """Select one provider-authoritative boot disk or fail closed.
+
+    The API can report multiple disks with ``boot_disk=0`` while
+    ``boot_order=disk``.  In that documented/live shape the uniquely created
+    system disk is identified by the provider-assigned ``virtio:0`` address and
+    system/template labels.  We never guess from list order or from a title.
+    """
+    if not isinstance(server, dict):
+        raise _BackupProviderError("PROVIDER_MALFORMED_RESPONSE", manual_review=True)
+    devices = _upcloud_nested_list(server, "storage_devices", "storage_device")
+    disks = []
+    seen_storage = set()
+    seen_addresses = set()
+    for device in devices:
+        if str(device.get("type") or "disk").casefold() != "disk":
+            continue
+        storage_id = str(device.get("storage") or "").strip()
+        address = str(device.get("address") or "").strip().casefold()
+        if not storage_id or not _UPCLOUD_UUID.fullmatch(storage_id):
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        if not _UPCLOUD_DEVICE_ADDRESS.fullmatch(address):
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        if storage_id in seen_storage or address in seen_addresses:
+            raise _BackupProviderError(
+                "PROVIDER_DUPLICATE_MATCH", manual_review=True
+            )
+        seen_storage.add(storage_id)
+        seen_addresses.add(address)
+        disks.append((device, _upcloud_storage_device_labels(device)))
+    if not disks:
+        raise _BackupProviderError(
+            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+        )
+
+    explicit = [
+        item
+        for item in disks
+        if str(item[0].get("boot_disk") or "0").casefold()
+        in {"1", "yes", "true"}
+    ]
+    if len(explicit) > 1:
+        raise _BackupProviderError("PROVIDER_DUPLICATE_MATCH", manual_review=True)
+    boot_order = str(server.get("boot_order") or "").strip().casefold()
+    if boot_order != "disk":
+        raise _BackupProviderError(
+            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+        )
+    if len(explicit) == 1:
+        return explicit[0][0]
+    if len(disks) == 1:
+        return disks[0][0]
+
+    system_candidates = []
+    for device, labels in disks:
+        address = str(device.get("address") or "").strip().casefold()
+        template_uuid = str(labels.get("_template_uuid") or "").strip()
+        os_type = str(labels.get("_os_type") or "").strip()
+        if (
+            address == "virtio:0"
+            and os_type
+            and _UPCLOUD_UUID.fullmatch(template_uuid)
+        ):
+            system_candidates.append(device)
+    if len(system_candidates) != 1:
+        raise _BackupProviderError(
+            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+        )
+    return system_candidates[0]
+
+
+def _upcloud_server_network_contract(server):
+    """Return reconstructible non-public networking and public IP families."""
+    networking = server.get("networking") if isinstance(server, dict) else None
+    interfaces = _upcloud_nested_list(networking or {}, "interfaces", "interface")
+    all_interfaces = []
+    safe_interfaces = []
+    public_families = []
+    seen_indexes = set()
+    for interface in interfaces:
+        interface_type = str(interface.get("type") or "").casefold()
+        if interface_type not in {"public", "utility", "private"}:
+            raise _BackupProviderError(
+                "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+            )
+        try:
+            index = int(interface.get("index"))
+        except (TypeError, ValueError):
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            ) from None
+        if index < 1 or index in seen_indexes:
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        seen_indexes.add(index)
+        addresses = _upcloud_nested_list(interface, "ip_addresses", "ip_address")
+        if not addresses:
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        families = []
+        for address in addresses:
+            family = str(address.get("family") or "")
+            if family not in {"IPv4", "IPv6"}:
+                raise _BackupProviderError(
+                    "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+                )
+            if interface_type in {"utility", "private"} and family != "IPv4":
+                # UpCloud documents IPv6 as public-interface-only.
+                raise _BackupProviderError(
+                    "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+                )
+            families.append({"family": family})
+            if interface_type == "public":
+                public_families.append(family)
+        normalized = {
+            "type": interface_type,
+            "ip_addresses": {"ip_address": families},
+        }
+        if interface_type == "private":
+            network = str(interface.get("network") or "").strip()
+            if not _UPCLOUD_UUID.fullmatch(network):
+                raise _BackupProviderError(
+                    "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+                )
+            normalized["network"] = network
+        for field in ("source_ip_filtering", "bootable"):
+            value = str(interface.get(field) or "").strip().casefold()
+            if value:
+                if value not in {"yes", "no"}:
+                    raise _BackupProviderError(
+                        "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+                    )
+                normalized[field] = value
+        all_interfaces.append((index, normalized))
+        if interface_type != "public":
+            safe_interfaces.append((index, normalized))
+    if not safe_interfaces:
+        raise _BackupProviderError(
+            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
+        )
+    all_interfaces.sort(key=lambda item: item[0])
+    safe_interfaces.sort(key=lambda item: item[0])
+    return {
+        "networking": {
+            "interfaces": {
+                "interface": [item for _index, item in safe_interfaces]
+            }
+        },
+        "full_networking": {
+            "interfaces": {
+                "interface": [item for _index, item in all_interfaces]
+            }
+        },
+        "public_ip_families": sorted(
+            public_families, key=lambda family: (family != "IPv4", family)
+        ),
+    }
+
+
 _UPCLOUD_FIREWALL_RULE_FIELDS = frozenset(
     {
         "action",
@@ -782,66 +1037,13 @@ def replace_upcloud_server_firewall(server_id, auth, rules):
     return normalized
 
 
-def _upcloud_safe_server_networking(server):
-    networking = server.get("networking") if isinstance(server, dict) else None
-    interfaces = _upcloud_nested_list(
-        networking or {}, "interfaces", "interface"
-    )
-    safe_interfaces = []
-    seen_indexes = set()
-    for interface in interfaces:
-        interface_type = str(interface.get("type") or "").casefold()
-        if interface_type not in {"public", "utility", "private"}:
-            raise _BackupProviderError(
-                "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
-            )
-        try:
-            index = int(interface.get("index"))
-        except (TypeError, ValueError):
-            raise _BackupProviderError(
-                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
-            ) from None
-        if index < 1 or index in seen_indexes:
-            raise _BackupProviderError(
-                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
-            )
-        seen_indexes.add(index)
-        addresses = _upcloud_nested_list(
-            interface, "ip_addresses", "ip_address"
-        )
-        families = []
-        for address in addresses:
-            family = str(address.get("family") or "")
-            if family not in {"IPv4", "IPv6"}:
-                raise _BackupProviderError(
-                    "PROVIDER_MALFORMED_RESPONSE", manual_review=True
-                )
-            families.append({"family": family})
-        if not families:
-            raise _BackupProviderError(
-                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
-            )
-        safe_interface = {
-            "index": index,
-            "type": interface_type,
-            "ip_addresses": {"ip_address": families},
-        }
-        if interface_type == "private":
-            network = str(interface.get("network") or "")
-            if not network:
-                raise _BackupProviderError(
-                    "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
-                )
-            safe_interface["network"] = network[:255]
-        safe_interfaces.append(safe_interface)
-    if not safe_interfaces:
-        raise _BackupProviderError(
-            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
-        )
-    safe_interfaces.sort(key=lambda item: item["index"])
-    for item in safe_interfaces:
-        item.pop("index", None)
-    return {"interfaces": {"interface": safe_interfaces}}
+def _upcloud_safe_server_networking(server, *, include_public=True):
+    contract = _upcloud_server_network_contract(server)
+    return contract["full_networking" if include_public else "networking"]
+
+
+def _upcloud_server_public_ip_families(server):
+    return _upcloud_server_network_contract(server)["public_ip_families"]
 
 
 def _upcloud_safe_server_config(server, boot_device, firewall_witness=None):
@@ -892,13 +1094,18 @@ def _upcloud_safe_server_config(server, boot_device, firewall_witness=None):
                 "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True
             )
 
+    network_contract = _upcloud_server_network_contract(server)
     config = {
         "schema": 1,
         "zone": zone,
         "plan": plan,
         "firewall": firewall,
         "metadata": metadata_enabled,
-        "networking": _upcloud_safe_server_networking(server),
+        # Public interfaces are intentionally omitted from the create request.
+        # They are reconstructed only after the exact firewall chain is read
+        # back, using the durable family/count witness below.
+        "networking": network_contract["networking"],
+        "public_ip_families": network_contract["public_ip_families"],
         "source_hostname": str(server.get("hostname") or "")[:255],
         "source_title": str(server.get("title") or "")[:255],
         "boot_address": str(boot_device.get("address") or "virtio")[:64],
@@ -957,28 +1164,7 @@ def _upcloud_server_source_witness(integration, backup, auth):
             "PROVIDER_MALFORMED_RESPONSE", manual_review=True
         )
 
-    storage_devices = _upcloud_nested_list(
-        server, "storage_devices", "storage_device"
-    )
-    disks = [
-        device
-        for device in storage_devices
-        if str(device.get("type") or "disk").casefold() == "disk"
-        and device.get("storage")
-    ]
-    explicit_boot = [
-        device
-        for device in disks
-        if str(device.get("boot_disk") or "0").casefold() in {"1", "yes", "true"}
-    ]
-    if len(explicit_boot) == 1:
-        boot_device = explicit_boot[0]
-    elif not explicit_boot and len(disks) == 1:
-        boot_device = disks[0]
-    else:
-        raise _BackupProviderError(
-            "PROVIDER_RECONCILIATION_REQUIRED", manual_review=True
-        )
+    boot_device = select_upcloud_boot_device(server)
     boot_storage_id = str(boot_device.get("storage") or "")
 
     storage_response = requests.get(
@@ -1020,6 +1206,9 @@ def _upcloud_server_source_witness(integration, backup, auth):
         raise _BackupProviderError(
             "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True
         )
+    storage_configuration = _upcloud_storage_configuration(
+        integration, source_storage
+    )
 
     firewall = str(server.get("firewall") or "off").casefold()
     firewall_witness = get_upcloud_server_firewall(
@@ -1027,6 +1216,12 @@ def _upcloud_server_source_witness(integration, backup, auth):
     )
     safe_config = _upcloud_safe_server_config(
         server, boot_device, firewall_witness=firewall_witness
+    )
+    safe_config.update(
+        {
+            "boot_storage_tier": storage_configuration["tier"],
+            "boot_storage_encrypted": storage_configuration["encrypted"],
+        }
     )
     encoded = json.dumps(
         safe_config, sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -1042,6 +1237,8 @@ def _upcloud_server_source_witness(integration, backup, auth):
             "server_id": server_id,
             "server_config_fingerprint": config_fingerprint,
             "firewall_fingerprint": firewall_witness["fingerprint"],
+            "tier": storage_configuration["tier"],
+            "encrypted": storage_configuration["encrypted"],
             "account_id": integration.node.connection.account_id,
             "connection_id": integration.node.connection_id,
         },
@@ -1125,6 +1322,7 @@ def _upcloud_source_witness(integration, backup, auth):
         raise _BackupProviderError(
             "PROVIDER_MALFORMED_RESPONSE", manual_review=True
         )
+    storage_configuration = _upcloud_storage_configuration(integration, source)
     witness = _backup_provider_witness(
         backup,
         provider="upcloud",
@@ -1132,6 +1330,8 @@ def _upcloud_source_witness(integration, backup, auth):
         resource_type="storage",
         scope={
             "zone": source["zone"],
+            "tier": storage_configuration["tier"],
+            "encrypted": storage_configuration["encrypted"],
             "account_id": integration.node.connection.account_id,
             "connection_id": integration.node.connection_id,
         },

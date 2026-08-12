@@ -6,6 +6,8 @@ import io
 import json
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
+from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
@@ -369,6 +371,97 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         self.assertNotIn("SECRET-CANARY", str(raised.exception))
         self.assertNotIn("TOKEN-CANARY", str(raised.exception))
         self.assertTrue(response.closed)
+
+    def test_provider_firewall_inventory_rejects_empty_chain(self):
+        harness = self.harness(apply=True)
+        harness.control.request.return_value = {
+            "firewall_rules": {"firewall_rule": []}
+        }
+        with self.assertRaisesRegex(live_harness.HarnessError, r"empty firewall"):
+            harness._provider_firewall_inventory(
+                "11111111-1111-4111-8111-111111111111"
+            )
+
+    def test_empty_chain_is_not_evidence_of_default_drop(self):
+        default_drop = live_harness._normalize_firewall_rule(
+            {"direction": "in", "action": "drop"}
+        )
+        self.assertFalse(
+            live_harness.UpCloudLiveHarness._provider_firewall_is_default_drop(
+                {"rules": []}
+            )
+        )
+        self.assertTrue(
+            live_harness.UpCloudLiveHarness._provider_firewall_is_default_drop(
+                {"rules": [default_drop]}
+            )
+        )
+
+    def test_source_server_request_omits_public_interface_until_firewall_is_verified(self):
+        harness = self.harness(apply=True)
+        request = harness._source_server_request(
+            "11111111-1111-4111-8111-111111111111", "ssh-rsa PUBLIC"
+        )
+        interfaces = request["server"]["networking"]["interfaces"]["interface"]
+        self.assertEqual([interface["type"] for interface in interfaces], ["utility"])
+
+    def test_public_ip_assignment_waits_for_firewall_stabilization_without_duplicate_post(self):
+        harness = self.harness(apply=True)
+        server_id = "11111111-1111-4111-8111-111111111111"
+        utility = {
+            "uuid": server_id,
+            "networking": {
+                "interfaces": {
+                    "interface": [
+                        {
+                            "index": 1,
+                            "type": "utility",
+                            "ip_addresses": {
+                                "ip_address": [{"family": "IPv4"}]
+                            },
+                        }
+                    ]
+                }
+            },
+        }
+        public = deepcopy(utility)
+        public["networking"]["interfaces"]["interface"].append(
+            {
+                "index": 2,
+                "type": "public",
+                "ip_addresses": {"ip_address": [{"family": "IPv4"}]},
+            }
+        )
+        base = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+        harness.clock = lambda: base
+        harness._server_read = mock.Mock(return_value=utility)
+        harness._control_mutation = mock.Mock()
+        verified_at = base.isoformat()
+
+        with self.assertRaisesRegex(
+            live_harness.HarnessError, r"120-second stabilization window"
+        ):
+            harness._ensure_provider_public_ip_families(
+                server_id,
+                ("IPv4",),
+                firewall_verified_at=verified_at,
+            )
+        harness._control_mutation.assert_not_called()
+
+        harness.clock = lambda: datetime(2026, 8, 12, 12, 2, tzinfo=timezone.utc)
+        harness._server_read = mock.Mock(side_effect=[utility, public, public])
+        result = harness._ensure_provider_public_ip_families(
+            server_id,
+            ("IPv4",),
+            firewall_verified_at=verified_at,
+        )
+        self.assertEqual(result, public)
+        harness._control_mutation.assert_called_once()
+        self.assertEqual(harness._control_mutation.call_args.args[:3], (
+            "compute_source_public_ip:11111111-1111-4111-8111-111111111111:0:IPv4",
+            "POST",
+            "/ip_address",
+        ))
 
     def test_definite_mutation_rejection_clears_intent_but_lost_response_keeps_it(self):
         harness = self.harness(apply=True)

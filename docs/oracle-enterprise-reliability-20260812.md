@@ -1,18 +1,28 @@
 # Oracle Cloud enterprise reliability handoff
 
 Date: 2026-08-12
-Branch inspected: `develop` at `05f2ebeb9c2e` before these uncommitted edits
+Branch initially inspected: `develop` at `05f2ebeb9c2e`
+Live validation checkpoint: `28ee48d5483f501de6b3838eb0f3b230df1a0c45`
 
 ## Safety statement
 
-This work was offline only. It did not read `_docs`, load the configured OCI
-profile, call a live OCI endpoint, create or delete a provider resource, deploy,
-commit, or push. OCI SDK model/signature inspection and all tests ran locally in
-Docker with mocked provider clients.
+The first provider-specific implementation pass described by this document was
+offline. A later controlled live pass used the configured OCI profile and a
+dedicated test compartment, created only run-tagged resources, and exercised the
+wired Oracle integration through `demo.backupsheep.com`.
 
-The Oracle adapter is materially safer, but Oracle is **not yet production-wired
-or live-accepted**. Shared routing/model/task changes listed below were outside
-the permitted edit boundary and remain release gates.
+The live pass completed compute-image, boot-volume, and block-volume backups;
+safe-fork restores for all three resource kinds; versioned Object Storage
+website/PostgreSQL uploads and application restores; and a real SIGKILL after
+OCI accepted a boot-volume restore but before BackupSheep persisted its OCID.
+Recovery adopted exactly one provider target and completed the original durable
+row. Exact rows, OCIDs, payload witnesses, deployment evidence, and remaining
+cleanup/credential gates are recorded in
+`docs/provider-live-e2e-resume-handoff-20260812.md`.
+
+The original offline-only language and unwired checklist later in this file are
+retained as implementation history, not current product status. Cleanup still
+requires a fresh, exact ownership inventory and durable pre-mutation intents.
 
 ## Native resource scope
 
@@ -39,7 +49,7 @@ ambiguous `NotAuthorizedOrNotFound`, quota, rate-limit, timeout, transient
 outage, malformed response, and terminal provider failures separately. An
 ambiguous Oracle 404 is never treated as proof that deletion completed.
 
-## Offline hardening completed
+## Initial offline hardening completed
 
 - Bounded OCI SDK connect/read timeouts and `NoneRetryStrategy` at mutation
   boundaries. BackupSheep owns retry/reconciliation timing.
@@ -117,7 +127,7 @@ count only after both paths match and `sync` completes. It also performs a
 versioned S3 preflight and records its SHA-256, byte count, ETag, and version ID.
 No credential value appears in stdout, the ledger, report, test fixture, or docs.
 
-## Exact live UI E2E procedure (not executed)
+## Exact live UI E2E procedure (executed; retained for regression)
 
 ### 1. Preflight and provision
 
@@ -295,7 +305,13 @@ removed in dependency order. The secret and SSH files are deleted only after
 their provider graph is gone. A duplicate, changed witness, unknown ledger kind,
 or incomplete dependency ledger stops cleanup for manual review.
 
-## Shared changes still required (outside this task boundary)
+## Historical shared-wiring checklist (superseded by the integrated checkpoint)
+
+The list below records gaps at the initial offline checkpoint. The native
+backup/restore and recovery routes needed by the tested compute, boot-volume,
+block-volume, and Object Storage workflows were integrated before the live run.
+It should not be used as a current readiness checklist; current evidence and
+remaining gates live in `docs/provider-live-e2e-resume-handoff-20260812.md`.
 
 1. Add `path("", include("apps.api.v1.cloud.oracle.urls"))` to the shared cloud
    URL router. The new Oracle cloud endpoint is otherwise unreachable.

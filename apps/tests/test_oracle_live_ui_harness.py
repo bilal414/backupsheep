@@ -1,6 +1,7 @@
 """Offline safety tests for the Oracle live UI support harness."""
 
 import tempfile
+import os
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -77,6 +78,56 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
             environment=environment or {},
             sleep=lambda _seconds: None,
         )
+
+    def storage_secret(self, harness, *, bucket="bucket", user_ocid=None):
+        user_ocid = user_ocid or "ocid1.user.oc1..backupsheeptest"
+        return {
+            "access_key_id": "A" * 40,
+            "secret_access_key": "credential-canary",
+            "bucket": bucket,
+            "namespace": "namespace",
+            "region": "us-chicago-1",
+            "endpoint": "https://namespace.compat.objectstorage.us-chicago-1.oraclecloud.com",
+            "prefix": f"{self.run_id}/",
+            "user_ocid": user_ocid,
+            "tenancy_ocid": self.tenancy_id,
+            "compartment_ocid": self.compartment_id,
+        }
+
+    def establish_storage_scope(self, harness, *, bucket_name="bucket"):
+        bucket = SimpleNamespace(
+            id="ocid1.bucket.oc1.iad.backupsheeptest",
+            name=bucket_name,
+            compartment_id=self.compartment_id,
+            lifecycle_state="ACTIVE",
+            versioning="Enabled",
+            freeform_tags=harness._storage_tags("object_bucket"),
+        )
+        user = self._iam_user(harness)
+        harness._record_storage(
+            "object_bucket",
+            bucket,
+            resource_id=bucket.id,
+            name=bucket.name,
+            compartment_id=self.compartment_id,
+            tags=bucket.freeform_tags,
+        )
+        harness._record_storage(
+            "iam_user",
+            user,
+            resource_id=user.id,
+            name=user.name,
+            compartment_id=self.tenancy_id,
+            tags=user.freeform_tags,
+        )
+        scope = harness._storage_scope(
+            bucket_name=bucket.name,
+            namespace="namespace",
+            region="us-chicago-1",
+            user_ocid=user.id,
+        )
+        harness._persist_storage_scope(scope)
+        return bucket, user, scope
 
     def test_plan_is_inert_and_does_not_load_oci_profile_or_clients(self):
         harness = self.harness()
@@ -517,16 +568,7 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
             apply=True,
             environment={"ORACLE_E2E_SECRET_FILE": str(secret_path)},
         )
-        secret = {
-            "access_key_id": "A" * 40,
-            "secret_access_key": "credential-canary",
-            "bucket": "bucket",
-            "namespace": "namespace",
-            "region": "us-chicago-1",
-            "endpoint": "https://example.invalid",
-            "prefix": f"{self.run_id}/",
-            "user_ocid": "ocid1.user.oc1..user",
-        }
+        secret = self.storage_secret(harness)
 
         written = harness._write_storage_secret(secret)
 
@@ -534,6 +576,96 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
         self.assertEqual(written.stat().st_mode & 0o777, 0o600)
         self.assertNotIn("credential-canary", repr(harness.plan()))
         self.assertEqual(harness._read_storage_secret(), secret)
+
+    def test_secret_loader_requires_exact_0600_exact_keys_and_no_symlink(self):
+        secret_path = self.root / "oracle-storage.json"
+        harness = self.harness(
+            apply=True,
+            environment={"ORACLE_E2E_SECRET_FILE": str(secret_path)},
+        )
+        secret = self.storage_secret(harness)
+        harness._write_storage_secret(secret)
+
+        os.chmod(secret_path, 0o640)
+        with self.assertRaisesRegex(HarnessError, "0600"):
+            harness._read_storage_secret()
+
+        os.chmod(secret_path, 0o600)
+        with self.assertRaisesRegex(HarnessError, "unsupported or incomplete"):
+            harness._write_storage_secret({**secret, "unexpected": "value"})
+
+        secret_path.unlink()
+        target = self.root / "target-secret.json"
+        target.write_text(__import__("json").dumps(secret), encoding="utf-8")
+        os.chmod(target, 0o600)
+        secret_path.symlink_to(target)
+        with self.assertRaisesRegex(HarnessError, "symlink"):
+            harness._read_storage_secret()
+
+        secret_path.unlink()
+        secret_path.mkdir(mode=0o700)
+        os.chmod(secret_path, 0o600)
+        with self.assertRaisesRegex(HarnessError, "regular 0600 file"):
+            harness._read_storage_secret()
+
+    def test_storage_s3_use_requires_durable_scope_and_rejects_scope_drift(self):
+        secret_path = self.root / "oracle-storage.json"
+        harness = self.harness(
+            apply=True,
+            environment={"ORACLE_E2E_SECRET_FILE": str(secret_path)},
+        )
+        secret = self.storage_secret(harness)
+        harness._write_storage_secret(secret)
+        with mock.patch("boto3.client") as client:
+            with self.assertRaisesRegex(HarnessError, "durable storage scope"):
+                harness._storage_s3_client()
+        client.assert_not_called()
+
+        self.establish_storage_scope(harness)
+        changed = dict(secret, bucket="other-bucket")
+        harness._write_storage_secret(changed)
+        with mock.patch("boto3.client") as client:
+            with self.assertRaisesRegex(HarnessError, "scope does not match"):
+                harness._storage_s3_client()
+        client.assert_not_called()
+
+    def test_storage_scope_change_in_durable_evidence_fails_closed_before_s3(self):
+        secret_path = self.root / "oracle-storage.json"
+        harness = self.harness(
+            apply=True,
+            environment={"ORACLE_E2E_SECRET_FILE": str(secret_path)},
+        )
+        self.establish_storage_scope(harness)
+        harness._write_storage_secret(self.storage_secret(harness))
+        harness.evidence.update("storage_scope", bucket="foreign-bucket")
+
+        with mock.patch("boto3.client") as client:
+            with self.assertRaisesRegex(
+                HarnessError, "does not match (durable ownership|OCI configuration)"
+            ):
+                harness._storage_s3_client()
+        client.assert_not_called()
+
+    def test_provider_error_messages_are_sanitized_and_statuses_are_classified(self):
+        harness = self.harness(apply=True)
+        with self.assertRaises(HarnessError) as raised:
+            harness._call(
+                mock.Mock(side_effect=RuntimeError("Authorization: Bearer secret-canary")),
+                mutation=True,
+            )
+        self.assertNotIn("secret-canary", str(raised.exception))
+        self.assertEqual(raised.exception.code, "PROVIDER_REQUEST_FAILED")
+
+        for status, code in (
+            (404, "PROVIDER_NOT_FOUND"),
+            (429, "PROVIDER_RATE_LIMIT"),
+            (500, "PROVIDER_TRANSIENT_OUTAGE"),
+        ):
+            with self.subTest(status=status):
+                with self.assertRaises(HarnessError) as raised:
+                    harness._call(mock.Mock(return_value=response(status=status)), mutation=True)
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual(raised.exception.mutation_outcome_unknown, status == 500)
 
     def test_customer_secret_key_uses_oci_access_key_id_not_ocid(self):
         harness = self.harness(apply=True)
@@ -567,23 +699,21 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
 
     def test_oracle_s3_client_disables_unsupported_aws_chunked_checksums(self):
         secret_path = self.root / "oracle-storage.json"
+        harness = self.harness(
+            apply=True,
+            environment={"ORACLE_E2E_SECRET_FILE": str(secret_path)},
+        )
+        self.establish_storage_scope(harness)
+        secret = self.storage_secret(harness)
         secret_path.write_text(
             __import__("json").dumps(
-                {
-                    "access_key_id": "A" * 40,
-                    "secret_access_key": "credential-canary",
-                    "bucket": "bucket",
-                    "namespace": "namespace",
-                    "region": "us-chicago-1",
-                    "endpoint": "https://namespace.compat.objectstorage.us-chicago-1.oraclecloud.com",
-                    "prefix": f"{self.run_id}/",
-                    "user_ocid": "ocid1.user.oc1..user",
-                }
+                secret
             ),
             encoding="utf-8",
         )
+        os.chmod(secret_path, 0o600)
         with mock.patch("boto3.client", return_value=mock.sentinel.client) as client:
-            created, _secret = OracleLiveUIHarness._storage_s3_client(secret_path)
+            created, _secret = harness._storage_s3_client(secret_path)
 
         self.assertIs(created, mock.sentinel.client)
         config = client.call_args.kwargs["config"]
@@ -623,16 +753,7 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
             apply=True,
             environment={"ORACLE_E2E_SECRET_FILE": str(secret_path)},
         )
-        secret = {
-            "access_key_id": "A" * 40,
-            "secret_access_key": "credential-canary",
-            "bucket": "bucket",
-            "namespace": "namespace",
-            "region": "us-chicago-1",
-            "endpoint": "https://example.invalid",
-            "prefix": f"{self.run_id}/",
-            "user_ocid": "ocid1.user.oc1..user",
-        }
+        secret = self.storage_secret(harness)
         harness._write_storage_secret(secret)
         s3 = mock.MagicMock()
         manifest = {
@@ -661,6 +782,275 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
             with self.assertRaisesRegex(HarnessError, "witness failed"):
                 harness._verify_storage_objects(manifest)
         s3.get_object.assert_not_called()
+
+    def test_graph_delete_lost_response_adopts_exact_absence_without_replay(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, cleanup=True, clients=clients)
+        volume = self._volume(harness)
+        proof = harness._expected_proof(
+            name=volume.display_name,
+            tags=volume.freeform_tags,
+            availability_domain=self.availability_domain,
+        )
+        harness._record("source_block_volume", volume, proof)
+        clients["block"].list_volumes.side_effect = [
+            response([volume]),
+            response([]),
+        ]
+        clients["block"].delete_volume.side_effect = TimeoutError("lost response")
+
+        self.assertEqual(harness._cleanup_graph_kind("source_block_volume"), "DELETED")
+        clients["block"].delete_volume.assert_called_once()
+        self.assertEqual(
+            harness.ledger.get("source_block_volume", volume.id)["cleanup_state"],
+            "deleted",
+        )
+        self.assertFalse(
+            any(key.startswith("cleanup:") for key in harness.intents.pending())
+        )
+
+    def test_graph_unknown_response_with_live_resource_is_manual_and_never_replayed(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, cleanup=True, clients=clients)
+        volume = self._volume(harness)
+        proof = harness._expected_proof(
+            name=volume.display_name,
+            tags=volume.freeform_tags,
+            availability_domain=self.availability_domain,
+        )
+        harness._record("source_block_volume", volume, proof)
+        clients["block"].list_volumes.return_value = response([volume])
+        clients["block"].delete_volume.side_effect = TimeoutError("accepted-but-lost")
+
+        with self.assertRaisesRegex(HarnessError, "will not be replayed"):
+            harness._cleanup_graph_kind("source_block_volume")
+        self.assertEqual(
+            harness.ledger.get("source_block_volume", volume.id)["cleanup_state"],
+            "manual_review",
+        )
+        clients["block"].delete_volume.assert_called_once()
+
+        with self.assertRaisesRegex(HarnessError, "will not be replayed"):
+            harness._cleanup_graph_kind("source_block_volume")
+        clients["block"].delete_volume.assert_called_once()
+
+    def test_prepared_cleanup_intent_is_fail_closed_before_provider_call(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, cleanup=True, clients=clients)
+        volume = self._volume(harness)
+        proof = harness._expected_proof(
+            name=volume.display_name,
+            tags=volume.freeform_tags,
+            availability_domain=self.availability_domain,
+        )
+        harness._record("source_block_volume", volume, proof)
+        key = harness._cleanup_intent_key(
+            "source_block_volume", volume.id, "delete_volume"
+        )
+        harness.intents.put(
+            key,
+            {
+                "operation": "delete_volume",
+                "kind": "source_block_volume",
+                "name": volume.display_name,
+                "marker": self.run_id,
+                "provider_resource_id": volume.id,
+                "state": "prepared",
+            },
+        )
+        clients["block"].list_volumes.return_value = response([volume])
+
+        with self.assertRaisesRegex(HarnessError, "will not be replayed"):
+            harness._cleanup_graph_kind("source_block_volume")
+        clients["block"].delete_volume.assert_not_called()
+
+    def test_graph_success_polls_accepted_termination_to_terminal_state(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, cleanup=True, clients=clients)
+        instance = SimpleNamespace(
+            id="ocid1.instance.oc1.iad.backupsheeptest",
+            display_name=harness.names["source_instance"],
+            compartment_id=self.compartment_id,
+            availability_domain=self.availability_domain,
+            lifecycle_state="RUNNING",
+            image_id="ocid1.image.oc1.iad.backupsheeptest",
+            source_details=None,
+            freeform_tags=harness._source_tags("source_instance"),
+        )
+        proof = harness._expected_proof(
+            name=instance.display_name,
+            tags=instance.freeform_tags,
+            availability_domain=self.availability_domain,
+            source_id=instance.image_id,
+        )
+        harness._record(
+            "source_instance", instance, proof, source_id=instance.image_id
+        )
+        terminated = SimpleNamespace(**{**vars(instance), "lifecycle_state": "TERMINATED"})
+        clients["compute"].list_instances.side_effect = [
+            response([instance]),
+            response([terminated]),
+        ]
+        clients["compute"].terminate_instance.return_value = response(status=202)
+
+        self.assertEqual(harness._cleanup_graph_kind("source_instance"), "DELETED")
+        clients["compute"].terminate_instance.assert_called_once_with(
+            instance_id=instance.id,
+            preserve_boot_volume=True,
+        )
+
+    def test_graph_detach_persists_intent_and_adopts_detached_attachment(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, cleanup=True, clients=clients)
+        attachment = SimpleNamespace(
+            id="ocid1.volumeattachment.oc1.iad.backupsheeptest",
+            display_name=harness.names["source_block_attachment"],
+            compartment_id=self.compartment_id,
+            lifecycle_state="ATTACHED",
+        )
+        proof = harness._expected_proof(
+            name=attachment.display_name,
+            tags={},
+        )
+        harness._record("source_block_attachment", attachment, proof)
+        clients["compute"].list_volume_attachments.side_effect = [
+            response([attachment]),
+            response([]),
+        ]
+        clients["compute"].detach_volume.return_value = response(status=202)
+        with mock.patch.object(harness, "_unmount_test_attachment") as unmount:
+            self.assertEqual(
+                harness._cleanup_graph_kind("source_block_attachment"), "DELETED"
+            )
+        unmount.assert_called_once_with("source_block_attachment")
+        clients["compute"].detach_volume.assert_called_once_with(
+            volume_attachment_id=attachment.id
+        )
+
+    def test_iam_delete_lost_response_adopts_exact_absence_without_replay(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, cleanup=True, clients=clients)
+        user = self._iam_user(harness)
+        harness._record_storage(
+            "iam_user",
+            user,
+            resource_id=user.id,
+            name=user.name,
+            compartment_id=self.tenancy_id,
+            tags=user.freeform_tags,
+        )
+        clients["identity"].list_users.side_effect = [
+            response([user]),
+            response([]),
+        ]
+        clients["identity"].delete_user.side_effect = TimeoutError("lost response")
+
+        self.assertEqual(
+            harness._cleanup_storage_kind(
+                "iam_user", tenancy_id=self.tenancy_id, namespace="namespace"
+            ),
+            "DELETED",
+        )
+        clients["identity"].delete_user.assert_called_once_with(user_id=user.id)
+        self.assertEqual(
+            harness.ledger.get("iam_user", user.id)["cleanup_state"], "deleted"
+        )
+
+    def test_iam_unknown_response_is_manual_and_never_replayed(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, cleanup=True, clients=clients)
+        user = self._iam_user(harness)
+        harness._record_storage(
+            "iam_user",
+            user,
+            resource_id=user.id,
+            name=user.name,
+            compartment_id=self.tenancy_id,
+            tags=user.freeform_tags,
+        )
+        clients["identity"].list_users.return_value = response([user])
+        clients["identity"].delete_user.side_effect = TimeoutError("accepted-but-lost")
+
+        with self.assertRaisesRegex(HarnessError, "will not be replayed"):
+            harness._cleanup_storage_kind(
+                "iam_user", tenancy_id=self.tenancy_id, namespace="namespace"
+            )
+        clients["identity"].delete_user.assert_called_once()
+        self.assertEqual(
+            harness.ledger.get("iam_user", user.id)["cleanup_state"],
+            "manual_review",
+        )
+        with self.assertRaisesRegex(HarnessError, "will not be replayed"):
+            harness._cleanup_storage_kind(
+                "iam_user", tenancy_id=self.tenancy_id, namespace="namespace"
+            )
+        clients["identity"].delete_user.assert_called_once()
+
+    def test_object_version_delete_lost_response_reconciles_before_bucket_delete(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, cleanup=True, clients=clients)
+        bucket, _user, _scope = self.establish_storage_scope(harness)
+        key = f"{self.run_id}/website.zip"
+        version = SimpleNamespace(name=key, version_id="version-one")
+        current = SimpleNamespace(name=key)
+        clients["object"].get_bucket.side_effect = [
+            response(bucket),
+            response(status=404),
+        ]
+        clients["object"].list_object_versions.side_effect = [
+            response([version]),
+            response([]),
+            response([]),
+        ]
+        clients["object"].list_objects.side_effect = [
+            response(SimpleNamespace(objects=[current], next_start_with=None)),
+            response(SimpleNamespace(objects=[], next_start_with=None)),
+            response(SimpleNamespace(objects=[], next_start_with=None)),
+        ]
+        clients["object"].delete_object.side_effect = TimeoutError("lost response")
+        clients["object"].delete_bucket.return_value = response(status=204)
+
+        self.assertEqual(
+            harness._cleanup_bucket(
+                harness.ledger.get("object_bucket", bucket.id),
+                namespace="namespace",
+            ),
+            "DELETED",
+        )
+        clients["object"].delete_object.assert_called_once()
+        clients["object"].delete_bucket.assert_called_once()
+        self.assertEqual(
+            harness.ledger.get("object_bucket", bucket.id)["cleanup_state"],
+            "deleted",
+        )
+
+    def test_object_version_unknown_response_is_manual_and_never_replayed(self):
+        clients = self.clients()
+        harness = self.harness(apply=True, cleanup=True, clients=clients)
+        bucket, _user, _scope = self.establish_storage_scope(harness)
+        key_name = f"{self.run_id}/website.zip"
+        version = SimpleNamespace(name=key_name, version_id="version-one")
+        current = SimpleNamespace(name=key_name)
+        clients["object"].get_bucket.return_value = response(bucket)
+        clients["object"].list_object_versions.return_value = response([version])
+        clients["object"].list_objects.return_value = response(
+            SimpleNamespace(objects=[current], next_start_with=None)
+        )
+        clients["object"].delete_object.side_effect = TimeoutError("lost response")
+        row = harness.ledger.get("object_bucket", bucket.id)
+
+        with self.assertRaisesRegex(HarnessError, "will not be replayed"):
+            harness._cleanup_bucket(row, namespace="namespace")
+        clients["object"].delete_object.assert_called_once()
+        clients["object"].delete_bucket.assert_not_called()
+        self.assertEqual(
+            harness.ledger.get("object_bucket", bucket.id)["cleanup_state"],
+            "manual_review",
+        )
+
+        with self.assertRaisesRegex(HarnessError, "will not be replayed"):
+            harness._cleanup_bucket(row, namespace="namespace")
+        clients["object"].delete_object.assert_called_once()
 
     def test_bucket_cleanup_refuses_any_object_outside_exact_run_prefix(self):
         clients = self.clients()

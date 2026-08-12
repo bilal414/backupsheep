@@ -99,6 +99,121 @@ SPACES_OBJECT_KINDS = {
     "spaces_ui_website_object",
     "spaces_ui_database_object",
 }
+UI_OBJECT_MANIFEST_SCHEMA = 1
+UI_OBJECT_KINDS = {"website", "database"}
+SPACES_UI_METADATA_KEYS = {
+    "backupsheep-backup-id",
+    "backupsheep-bytes",
+    "backupsheep-sha256",
+}
+MUTATION_INTENT_SCHEMA = 1
+MUTATION_INTENT_MAX_AGE_SECONDS = 24 * 60 * 60
+MUTATION_RECONCILE_TIMEOUT_SECONDS = 300
+MUTATION_RECONCILE_INTERVAL_SECONDS = 5
+FIREWALL_SELECTOR_FIELDS = {
+    "addresses",
+    "droplet_ids",
+    "load_balancer_uids",
+    "kubernetes_ids",
+    "tags",
+}
+
+
+def _spaces_prefix(value: Any) -> str:
+    """Return one unambiguous, durable S3 object prefix.
+
+    S3 keys are opaque strings, but operators and providers routinely render
+    them through URL/path tooling.  Refusing path separators, encoded path
+    separators, dot segments, and absolute prefixes keeps the ownership proof
+    stable across those representations.
+    """
+
+    prefix = str(value or "")
+    if (
+        not prefix
+        or prefix != prefix.strip()
+        or not prefix.endswith("/")
+        or prefix.startswith(("/", "\\"))
+        or "\x00" in prefix
+        or "\\" in prefix
+        or "%" in prefix
+        or "//" in prefix
+    ):
+        raise HarnessError("The active Spaces object prefix is ambiguous.")
+    if any(part in {".", ".."} for part in prefix.split("/")[:-1]):
+        raise HarnessError("The active Spaces object prefix contains traversal.")
+    return prefix
+
+
+def _spaces_object_key(key: Any, prefix: str) -> str:
+    """Validate that *key* is exactly below the already-pinned *prefix*."""
+
+    prefix = _spaces_prefix(prefix)
+    value = str(key or "")
+    if (
+        not value
+        or value != value.strip()
+        or not value.startswith(prefix)
+        or value == prefix
+        or value.startswith(("/", "\\"))
+        or "\x00" in value
+        or "\\" in value
+        or "%" in value
+        or "//" in value
+        or any(part in {".", ".."} for part in value.split("/"))
+    ):
+        raise HarnessError("The Spaces object key is outside the exact run prefix.")
+    return value
+
+
+def _backup_witness(value: Any) -> str:
+    """Validate the positive BackupSheep row ID persisted in object metadata."""
+
+    if isinstance(value, bool) or value is None:
+        raise HarnessError("The Spaces object has no exact BackupSheep backup witness.")
+    if isinstance(value, int):
+        witness = str(value)
+    elif isinstance(value, str):
+        witness = value.strip()
+    else:
+        raise HarnessError("The Spaces object has no exact BackupSheep backup witness.")
+    if not re.fullmatch(r"[1-9][0-9]*", witness):
+        raise HarnessError("The Spaces object has no exact BackupSheep backup witness.")
+    return witness
+
+
+def _spaces_ui_metadata(
+    metadata: Any, *, backup_id: str, sha256: str, byte_count: int
+) -> dict[str, str]:
+    """Require the complete, exact metadata contract before object reads."""
+
+    if not isinstance(metadata, dict):
+        raise HarnessError("The Spaces object metadata witness is malformed.")
+    normalized = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise HarnessError("The Spaces object metadata witness is malformed.")
+        normalized_key = key.casefold()
+        if normalized_key in normalized:
+            raise HarnessError("The Spaces object metadata witness has duplicate keys.")
+        normalized[normalized_key] = value
+    try:
+        normalized_bytes = int(byte_count)
+    except (TypeError, ValueError):
+        raise HarnessError("The Spaces object byte witness is malformed.") from None
+    checksum = str(sha256).casefold()
+    if normalized_bytes < 0 or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+        raise HarnessError("The Spaces object checksum or byte witness is malformed.")
+    expected = {
+        "backupsheep-backup-id": _backup_witness(backup_id),
+        "backupsheep-bytes": str(normalized_bytes),
+        "backupsheep-sha256": checksum,
+    }
+    if set(normalized) != SPACES_UI_METADATA_KEYS or normalized != expected:
+        raise HarnessError(
+            "The Spaces object metadata is not the exact BackupSheep witness."
+        )
+    return expected
 
 
 def _canonical(value: dict[str, Any]) -> str:
@@ -358,6 +473,97 @@ def _restore_target_owned(resource: dict, witness: dict) -> bool:
     if values:
         return set(values) == {source_id}
     return _digitalocean_source_tag(source_id) in normalized
+
+
+def _resource_region(resource: dict) -> str:
+    region = resource.get("region") if isinstance(resource, dict) else None
+    if isinstance(region, dict):
+        return str(region.get("slug") or region.get("name") or "")
+    return str(region or "")
+
+
+def _resource_image(resource: dict) -> str:
+    image = resource.get("image") if isinstance(resource, dict) else None
+    if isinstance(image, dict):
+        return str(image.get("slug") or image.get("id") or "")
+    return str(image or "")
+
+
+def _creation_witness(kind: str, resource: dict, request: dict | None = None) -> dict:
+    """Capture immutable provider fields needed for later destructive cleanup."""
+
+    request = request if isinstance(request, dict) else {}
+    tags = resource.get("tags") if isinstance(resource, dict) else None
+    request_tags = request.get("tags")
+    expected_tags = request_tags if isinstance(request_tags, list) else tags
+    witness = {
+        "name": str(request.get("name") or resource.get("name") or ""),
+        "region": str(request.get("region") or _resource_region(resource)),
+        "tags": sorted(
+            {str(tag) for tag in (expected_tags or []) if isinstance(tag, str)}
+        ),
+    }
+    if kind.endswith("droplet") or kind == "payload_firewall":
+        if kind == "payload_firewall":
+            return witness
+        witness.update(
+            {
+                "size": str(
+                    request.get("size")
+                    or resource.get("size_slug")
+                    or resource.get("size")
+                    or ""
+                ),
+                "image": str(request.get("image") or _resource_image(resource)),
+            }
+        )
+    elif kind.endswith("volume"):
+        size = request.get("size_gigabytes")
+        if size is None:
+            size = resource.get("size_gigabytes")
+        try:
+            witness["size_gigabytes"] = int(size)
+        except (TypeError, ValueError):
+            witness["size_gigabytes"] = -1
+    return witness
+
+
+def _creation_witness_matches(kind: str, resource: dict, witness: dict) -> bool:
+    if not isinstance(resource, dict) or not isinstance(witness, dict):
+        return False
+    expected = _creation_witness(kind, resource, witness)
+    # _creation_witness() uses the request-shaped values when present; compare
+    # provider fields explicitly so a changed resource cannot be deleted merely
+    # because its name and run tag still happen to match.
+    if str(resource.get("name") or "") != str(witness.get("name") or ""):
+        return False
+    actual_tags = resource.get("tags")
+    if sorted(
+        {str(tag) for tag in (actual_tags or []) if isinstance(tag, str)}
+    ) != sorted(str(tag) for tag in (witness.get("tags") or [])):
+        return False
+    if witness.get("region") and _resource_region(resource) != str(witness["region"]):
+        return False
+    if "size" in witness and str(
+        resource.get("size_slug") or resource.get("size") or ""
+    ) != str(witness.get("size") or ""):
+        return False
+    if "image" in witness and _resource_image(resource) != str(witness.get("image") or ""):
+        return False
+    if "size_gigabytes" in witness:
+        try:
+            actual_size = int(resource.get("size_gigabytes"))
+        except (TypeError, ValueError):
+            return False
+        if actual_size != int(witness.get("size_gigabytes") or -1):
+            return False
+    return _fingerprint(expected) == str(witness.get("immutable_fingerprint") or "")
+
+
+def _request_creation_matches(kind: str, resource: dict, request: dict) -> bool:
+    expected = _creation_witness(kind, resource, request)
+    expected["immutable_fingerprint"] = _fingerprint(expected)
+    return _creation_witness_matches(kind, resource, expected)
 
 
 def _stored_snapshot_marker(ownership: dict) -> str:
@@ -836,6 +1042,13 @@ class DigitalOceanHarness:
                 or _default_spaces_secret_path(self.run_id)
             )
         )
+        self.spaces_prefix = _spaces_prefix(
+            getattr(args, "spaces_prefix", None)
+            or os.environ.get("DIGITALOCEAN_E2E_SPACES_PREFIX")
+            or f"ui/{self.run_id}/"
+        )
+        self.mutation_reconcile_timeout_seconds = MUTATION_RECONCILE_TIMEOUT_SECONDS
+        self.mutation_reconcile_interval_seconds = MUTATION_RECONCILE_INTERVAL_SECONDS
         self.account = _safe_account(get_json("/v2/account", headers=self.headers))
         require_personal_team(
             self.account,
@@ -937,12 +1150,28 @@ class DigitalOceanHarness:
             raise HarnessError("DigitalOcean resource ownership verification failed.")
         return resource
 
+    def _verify_creation_fingerprint(
+        self, kind: str, resource: dict, ownership: dict
+    ) -> None:
+        witness = ownership.get("creation_witness") if isinstance(ownership, dict) else None
+        if not isinstance(witness, dict) or not witness.get("immutable_fingerprint"):
+            raise HarnessError(
+                "The durable DigitalOcean creation fingerprint is missing."
+            )
+        if not _creation_witness_matches(kind, resource, witness):
+            raise HarnessError(
+                "The DigitalOcean resource changed after creation; cleanup stopped."
+            )
+
     def _record(self, kind: str, resource: dict, request: dict):
         name = str(resource["name"])
+        creation = _creation_witness(kind, resource, request)
+        creation["immutable_fingerprint"] = _fingerprint(creation)
         ownership = {
             "team_uuid": self.account["team_uuid"],
             "run_tag": self.run_tag,
             "request_fingerprint": _fingerprint(request),
+            "creation_witness": creation,
         }
         if kind == "source_droplet":
             ownership.update(
@@ -1001,6 +1230,10 @@ class DigitalOceanHarness:
         if candidates:
             resource = self._read_resource(kind, str(candidates[0]["id"]))
             self._verify_owned(kind, resource or {}, name)
+            if not _request_creation_matches(kind, resource or {}, request):
+                raise HarnessError(
+                    "The exact DigitalOcean resource creation fingerprint changed."
+                )
             ledger_entry = self.ledger.get(kind, str(resource["id"]))
             intent_matches = bool(
                 intent
@@ -1012,6 +1245,16 @@ class DigitalOceanHarness:
                 raise HarnessError(
                     "An exact name/tag match exists without this run's durable create intent."
                 )
+            if ledger_entry is not None:
+                stored_ownership = ledger_entry.get("ownership") or {}
+                if stored_ownership.get("request_fingerprint") != fingerprint or not _creation_witness_matches(
+                    kind,
+                    resource,
+                    stored_ownership.get("creation_witness") or {},
+                ):
+                    raise HarnessError(
+                        "The durable DigitalOcean creation fingerprint no longer matches."
+                    )
             self._record(kind, resource, request)
             self._record_run_tag()
             if intent_matches:
@@ -1103,16 +1346,393 @@ class DigitalOceanHarness:
             "DigitalOcean accepted tag cleanup but the tag is still visible."
         )
 
+    def _prepare_mutation_intent(
+        self,
+        intent_key: str,
+        *,
+        kind: str,
+        name: str,
+        operation: str,
+        request: dict,
+        **extra,
+    ) -> tuple[dict | None, str]:
+        """Fence one provider mutation before its first possible side effect."""
+
+        fingerprint = _fingerprint(request)
+        expected = {
+            "intent_schema": MUTATION_INTENT_SCHEMA,
+            "marker": self.run_tag,
+            "kind": kind,
+            "name": str(name),
+            "operation": operation,
+            "request_fingerprint": fingerprint,
+            **extra,
+        }
+        current = self.intents.get(intent_key)
+        if current:
+            if any(current.get(key) != value for key, value in expected.items()):
+                raise HarnessError("The durable DigitalOcean mutation intent drifted.")
+            if current.get("request_boundary_crossed") is not True:
+                raise HarnessError("The DigitalOcean mutation intent is incomplete.")
+        else:
+            self.intents.put(intent_key, expected)
+            # This write is deliberately separate so the durable record has a
+            # complete request boundary before the provider call is attempted.
+            # A restart still has to reconcile provider state before replay.
+            self.intents.update(intent_key, request_boundary_crossed=True)
+        return current, fingerprint
+
+    def _poll_mutation_state(
+        self,
+        *,
+        read_back,
+        verify_present,
+        complete,
+        label: str,
+    ) -> bool:
+        """Poll one exact provider identity without issuing another mutation."""
+
+        try:
+            timeout_seconds = max(
+                0.0,
+                float(
+                    getattr(
+                        self,
+                        "mutation_reconcile_timeout_seconds",
+                        MUTATION_RECONCILE_TIMEOUT_SECONDS,
+                    )
+                ),
+            )
+            interval_seconds = max(
+                0.01,
+                float(
+                    getattr(
+                        self,
+                        "mutation_reconcile_interval_seconds",
+                        MUTATION_RECONCILE_INTERVAL_SECONDS,
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            raise HarnessError("The mutation reconciliation bounds are malformed.") from None
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            current = read_back()
+            if complete(current):
+                return True
+            if current is not None:
+                verify_present(current)
+            now = time.monotonic()
+            if now >= deadline:
+                return False
+            time.sleep(min(interval_seconds, max(0.0, deadline - now)))
+
     @staticmethod
-    def _firewall_rule_addresses(rule: dict) -> set[str]:
-        sources = rule.get("sources") if isinstance(rule, dict) else None
-        addresses = sources.get("addresses") if isinstance(sources, dict) else None
-        if not isinstance(addresses, list):
+    def _intent_mutation_state(intent: dict) -> str:
+        if not isinstance(intent, dict):
+            return ""
+        state = intent.get("state") or intent.get("mutation_state")
+        return str(state or "")
+
+    def _set_intent_mutation_state(self, intent_key: str, state: str, **updates):
+        if state not in {"submitted", "accepted"}:
+            raise HarnessError("The DigitalOcean mutation state is invalid.")
+        return self.intents.update(
+            intent_key,
+            state=state,
+            mutation_state=state,
+            **updates,
+        )
+
+    def _delete_provider_with_intent(
+        self,
+        *,
+        intent_key: str,
+        kind: str,
+        resource_id: str,
+        name: str,
+        request: dict,
+        read_back,
+        verify_present,
+        delete_call,
+    ) -> str:
+        """Reconcile an exact provider ID before and after a destructive call."""
+
+        intent, _fingerprint_value = self._prepare_mutation_intent(
+            intent_key,
+            kind=kind,
+            name=name,
+            operation="delete",
+            request=request,
+            provider_id=str(resource_id),
+        )
+        current = read_back()
+        if current is None:
+            self.intents.clear(intent_key)
+            return "absent"
+        verify_present(current)
+        if intent is not None:
+            state = self._intent_mutation_state(intent)
+            if state not in {"submitted", "accepted"}:
+                raise HarnessError(
+                    "The cleanup intent has no safe submitted or accepted state."
+                )
+            if self._poll_mutation_state(
+                read_back=read_back,
+                verify_present=verify_present,
+                complete=lambda resource: resource is None,
+                label=f"{kind}:{resource_id}",
+            ):
+                self.intents.clear(intent_key)
+                return "deleted"
+            raise AmbiguousMutation(
+                f"DigitalOcean {kind} cleanup is still visible; "
+                "no DELETE replay was issued."
+            )
+        # A pending intent is never replayed from memory alone.  The exact ID,
+        # current provider state, and immutable ownership witness were just
+        # observed and persisted before replay is considered.
+        self._set_intent_mutation_state(
+            intent_key,
+            "submitted",
+            submitted_at=time.time(),
+            outcome_unknown=False,
+            reconciled_provider_id=str(resource_id),
+            reconciled_state=str(
+                current.get("status") or current.get("state") or "present"
+            ),
+        )
+        try:
+            delete_call()
+        except AmbiguousMutation:
+            self._set_intent_mutation_state(
+                intent_key, "submitted", outcome_unknown=True
+            )
+            if self._poll_mutation_state(
+                read_back=read_back,
+                verify_present=verify_present,
+                complete=lambda resource: resource is None,
+                label=f"{kind}:{resource_id}",
+            ):
+                self.intents.clear(intent_key)
+                return "deleted"
+            raise
+        except HarnessError:
+            self.intents.clear(intent_key)
+            raise
+        self._set_intent_mutation_state(
+            intent_key,
+            "accepted",
+            accepted_at=time.time(),
+            outcome_unknown=False,
+        )
+        if not self._poll_mutation_state(
+            read_back=read_back,
+            verify_present=verify_present,
+            complete=lambda resource: resource is None,
+            label=f"{kind}:{resource_id}",
+        ):
+            raise AmbiguousMutation(
+                "DigitalOcean accepted cleanup but the exact resource remains visible; "
+                "the accepted intent will be reconciled without replay."
+            )
+        self.intents.clear(intent_key)
+        return "deleted"
+
+    def _delete_spaces_with_intent(
+        self,
+        *,
+        intent_key: str,
+        kind: str,
+        name: str,
+        request: dict,
+        read_back,
+        verify_present,
+        delete_call,
+    ) -> str:
+        """S3-compatible equivalent of _delete_provider_with_intent."""
+
+        intent, _fingerprint_value = self._prepare_mutation_intent(
+            intent_key,
+            kind=kind,
+            name=name,
+            operation="delete",
+            request=request,
+        )
+        current = read_back()
+        if current is None:
+            self.intents.clear(intent_key)
+            return "absent"
+        verify_present(current)
+        if intent is not None:
+            state = self._intent_mutation_state(intent)
+            if state not in {"submitted", "accepted"}:
+                raise HarnessError(
+                    "The Spaces cleanup intent has no safe submitted or accepted state."
+                )
+            if self._poll_mutation_state(
+                read_back=read_back,
+                verify_present=verify_present,
+                complete=lambda resource: resource is None,
+                label=f"{kind}:{name}",
+            ):
+                self.intents.clear(intent_key)
+                return "deleted"
+            raise AmbiguousMutation(
+                "DigitalOcean Spaces cleanup is still visible; no delete replay was issued."
+            )
+        self._set_intent_mutation_state(
+            intent_key,
+            "submitted",
+            submitted_at=time.time(),
+            outcome_unknown=False,
+            reconciled_state="present",
+        )
+        try:
+            delete_call()
+        except AmbiguousMutation:
+            self._set_intent_mutation_state(
+                intent_key, "submitted", outcome_unknown=True
+            )
+            if self._poll_mutation_state(
+                read_back=read_back,
+                verify_present=verify_present,
+                complete=lambda resource: resource is None,
+                label=f"{kind}:{name}",
+            ):
+                self.intents.clear(intent_key)
+                return "deleted"
+            raise
+        except HarnessError:
+            self.intents.clear(intent_key)
+            raise
+        self._set_intent_mutation_state(
+            intent_key,
+            "accepted",
+            accepted_at=time.time(),
+            outcome_unknown=False,
+        )
+        if not self._poll_mutation_state(
+            read_back=read_back,
+            verify_present=verify_present,
+            complete=lambda resource: resource is None,
+            label=f"{kind}:{name}",
+        ):
+            raise AmbiguousMutation(
+                "DigitalOcean Spaces accepted cleanup but the exact object remains visible; "
+                "the accepted intent will be reconciled without replay."
+            )
+        self.intents.clear(intent_key)
+        return "deleted"
+
+    @staticmethod
+    def _normalize_firewall_selector(selector: Any) -> dict[str, list[str]]:
+        """Normalize a DO selector while rejecting broadened selectors.
+
+        DigitalOcean can echo optional selector arrays alongside ``addresses``.
+        Empty optional arrays are harmless and are normalized away; any
+        non-empty selector would broaden the firewall's reach and therefore
+        cannot be adopted or deleted by this harness.
+        """
+
+        if not isinstance(selector, dict):
+            raise HarnessError("The DigitalOcean firewall selector is malformed.")
+        if not set(selector).issubset(FIREWALL_SELECTOR_FIELDS):
+            raise HarnessError("The DigitalOcean firewall selector has unknown fields.")
+        addresses = selector.get("addresses")
+        if not isinstance(addresses, list) or any(
+            not isinstance(value, str) or not value for value in addresses
+        ):
+            raise HarnessError("The DigitalOcean firewall addresses are malformed.")
+        if len(addresses) != len(set(addresses)):
+            raise HarnessError("The DigitalOcean firewall addresses are duplicated.")
+        for field in FIREWALL_SELECTOR_FIELDS - {"addresses"}:
+            if field in selector:
+                values = selector[field]
+                if not isinstance(values, list) or values:
+                    raise HarnessError(
+                        "The DigitalOcean firewall has a non-address selector."
+                    )
+        return {"addresses": sorted(addresses)}
+
+    @classmethod
+    def _firewall_rule_selector(
+        cls, rule: dict, *, outbound: bool = False
+    ) -> dict[str, list[str]]:
+        if not isinstance(rule, dict):
+            raise HarnessError("The DigitalOcean firewall rule is malformed.")
+        field = "destinations" if outbound else "sources"
+        selector = rule.get(field)
+        if selector is None and outbound:
+            # Read-back normalizers pass outbound destinations as ``sources``.
+            selector = rule.get("sources")
+        return cls._normalize_firewall_selector(selector)
+
+    @classmethod
+    def _firewall_rule_addresses(cls, rule: dict) -> set[str]:
+        try:
+            return set(cls._firewall_rule_selector(rule).get("addresses") or [])
+        except HarnessError:
             return set()
-        return {str(value) for value in addresses if isinstance(value, str)}
+
+    @classmethod
+    def _firewall_immutable_fingerprint(cls, firewall: dict) -> str:
+        """Fingerprint the complete name/rule contract, excluding attachments."""
+
+        if not isinstance(firewall, dict):
+            raise HarnessError("The DigitalOcean firewall witness is malformed.")
+
+        def normalize(rule: dict, *, outbound: bool) -> dict:
+            selector = cls._firewall_rule_selector(rule, outbound=outbound)
+            return {
+                "protocol": str(rule.get("protocol") or ""),
+                "ports": str(rule.get("ports") or ""),
+                "selector": selector,
+            }
+
+        inbound = firewall.get("inbound_rules")
+        outbound = firewall.get("outbound_rules")
+        if not isinstance(inbound, list) or not isinstance(outbound, list):
+            raise HarnessError("The DigitalOcean firewall rule lists are malformed.")
+        return _fingerprint(
+            {
+                "name": str(firewall.get("name") or ""),
+                "inbound_rules": sorted(
+                    (normalize(rule, outbound=False) for rule in inbound),
+                    key=_canonical,
+                ),
+                "outbound_rules": sorted(
+                    (normalize(rule, outbound=True) for rule in outbound),
+                    key=_canonical,
+                ),
+            }
+        )
+
+    @staticmethod
+    def _firewall_intent_is_bounded(intent: dict, *, fingerprint: str) -> bool:
+        if not isinstance(intent, dict):
+            return False
+        if (
+            intent.get("intent_schema") != MUTATION_INTENT_SCHEMA
+            or intent.get("preflight_absent") is not True
+            or intent.get("preflight_candidate_count") != 0
+            or intent.get("immutable_fingerprint") != fingerprint
+        ):
+            return False
+        try:
+            created_at = float(intent.get("created_at"))
+        except (TypeError, ValueError):
+            return False
+        return 0 <= time.time() - created_at <= MUTATION_INTENT_MAX_AGE_SECONDS
 
     def _firewall_owned(
-        self, firewall: dict, *, firewall_id=None, allowed_droplet_ids=None
+        self,
+        firewall: dict,
+        *,
+        firewall_id=None,
+        allowed_droplet_ids=None,
+        required_droplet_id=None,
+        require_empty_droplet_ids=False,
     ) -> bool:
         if not isinstance(firewall, dict):
             return False
@@ -1151,7 +1771,13 @@ class DigitalOceanHarness:
             return False
         actual = {str(value) for value in droplet_ids}
         allowed = {str(value) for value in (allowed_droplet_ids or [])}
-        return actual.issubset(allowed)
+        if not actual.issubset(allowed):
+            return False
+        if required_droplet_id is not None and str(required_droplet_id) not in actual:
+            return False
+        if require_empty_droplet_ids and actual:
+            return False
+        return True
 
     def _firewall_allowed_droplet_ids(self) -> set[str]:
         allowed = {
@@ -1205,9 +1831,11 @@ class DigitalOceanHarness:
                 firewall_id=resource_id,
                 allowed_droplet_ids=self._firewall_allowed_droplet_ids()
                 | {str(source_droplet_id)},
+                required_droplet_id=source_droplet_id,
             )
 
         fingerprint = _fingerprint(request)
+        immutable_fingerprint = self._firewall_immutable_fingerprint(request)
         intent = self.intents.get(kind)
         candidates = [
             item
@@ -1226,9 +1854,30 @@ class DigitalOceanHarness:
                 and intent.get("request_boundary_crossed")
                 and intent.get("name") == name
                 and intent.get("request_fingerprint") == fingerprint
+                and self._firewall_intent_is_bounded(
+                    intent, fingerprint=immutable_fingerprint
+                )
             )
             if ledger_entry is None and not intent_matches:
                 raise HarnessError("An unledgered firewall matches the run name.")
+            if ledger_entry is not None:
+                stored = ledger_entry.get("ownership") or {}
+                creation = stored.get("creation_witness")
+                if (
+                    stored.get("team_uuid") != self.account["team_uuid"]
+                    or stored.get("run_tag") != self.run_tag
+                    or stored.get("source_droplet_id") != str(source_droplet_id)
+                    or stored.get("request_fingerprint") != fingerprint
+                    or stored.get("immutable_fingerprint") != immutable_fingerprint
+                    or not isinstance(creation, dict)
+                    or creation.get("name") != name
+                    or creation.get("rules_fingerprint") != immutable_fingerprint
+                    or creation.get("immutable_fingerprint") != immutable_fingerprint
+                    or creation.get("source_droplet_id") != str(source_droplet_id)
+                ):
+                    raise HarnessError(
+                        "The durable payload firewall creation fingerprint changed."
+                    )
             self.ledger.record(
                 kind=kind,
                 resource_id=str(resource["id"]),
@@ -1239,6 +1888,13 @@ class DigitalOceanHarness:
                     "source_droplet_id": str(source_droplet_id),
                     "probe_cidrs": list(self.probe_cidrs),
                     "request_fingerprint": fingerprint,
+                    "immutable_fingerprint": immutable_fingerprint,
+                    "creation_witness": {
+                        "name": name,
+                        "rules_fingerprint": immutable_fingerprint,
+                        "source_droplet_id": str(source_droplet_id),
+                        "immutable_fingerprint": immutable_fingerprint,
+                    },
                 },
                 source_witness=f"payload-firewall:{name}",
             )
@@ -1259,6 +1915,11 @@ class DigitalOceanHarness:
                 "name": name,
                 "operation": "create",
                 "request_fingerprint": fingerprint,
+                "immutable_fingerprint": immutable_fingerprint,
+                "intent_schema": MUTATION_INTENT_SCHEMA,
+                "created_at": time.time(),
+                "preflight_absent": True,
+                "preflight_candidate_count": 0,
             },
         )
         self.intents.update(kind, request_boundary_crossed=True)
@@ -1292,6 +1953,13 @@ class DigitalOceanHarness:
                 "source_droplet_id": str(source_droplet_id),
                 "probe_cidrs": list(self.probe_cidrs),
                 "request_fingerprint": fingerprint,
+                "immutable_fingerprint": immutable_fingerprint,
+                "creation_witness": {
+                    "name": name,
+                    "rules_fingerprint": immutable_fingerprint,
+                    "source_droplet_id": str(source_droplet_id),
+                    "immutable_fingerprint": immutable_fingerprint,
+                },
             },
             source_witness=f"payload-firewall:{name}",
         )
@@ -1308,39 +1976,164 @@ class DigitalOceanHarness:
             raise HarnessError("One exact ledgered payload firewall is required.")
         entry = entries[0]
         firewall_id = str(entry["resource_id"])
+        firewall_ownership = entry.get("ownership") or {}
         firewall = self._read_resource("payload_firewall", firewall_id)
         if firewall is None:
             raise HarnessError("The ledgered payload firewall is missing.")
-        normalized = dict(firewall)
-        normalized["outbound_rules"] = [
+        allowed = self._firewall_allowed_droplet_ids()
+        initial_normalized = dict(firewall)
+        initial_normalized["outbound_rules"] = [
             {**rule, "sources": rule.get("destinations")}
             for rule in firewall.get("outbound_rules") or []
             if isinstance(rule, dict)
         ]
-        allowed = self._firewall_allowed_droplet_ids()
-        if not self._firewall_owned(
-            normalized,
-            firewall_id=firewall_id,
-            allowed_droplet_ids=allowed,
+        immutable_fingerprint = self._firewall_immutable_fingerprint(initial_normalized)
+        creation = firewall_ownership.get("creation_witness")
+        if (
+            firewall_ownership.get("immutable_fingerprint") != immutable_fingerprint
+            or not isinstance(creation, dict)
+            or creation.get("rules_fingerprint") != immutable_fingerprint
+            or creation.get("immutable_fingerprint") != immutable_fingerprint
+            or creation.get("source_droplet_id")
+            != str(firewall_ownership.get("source_droplet_id") or "")
         ):
-            raise HarnessError("The payload firewall has foreign assignments or rules.")
+            raise HarnessError("The payload firewall creation fingerprint changed.")
+
+        def verify_firewall(resource):
+            if not isinstance(resource, dict):
+                raise HarnessError("The payload firewall read-back is malformed.")
+            normalized = dict(resource)
+            normalized["outbound_rules"] = [
+                {**rule, "sources": rule.get("destinations")}
+                for rule in resource.get("outbound_rules") or []
+                if isinstance(rule, dict)
+            ]
+            if not self._firewall_owned(
+                normalized,
+                firewall_id=firewall_id,
+                allowed_droplet_ids=allowed,
+                required_droplet_id=firewall_ownership.get("source_droplet_id"),
+            ):
+                raise HarnessError(
+                    "The payload firewall has foreign assignments or rules."
+                )
+            if self._firewall_immutable_fingerprint(normalized) != immutable_fingerprint:
+                raise HarnessError("The payload firewall rule fingerprint changed.")
+            return resource
+
+        verify_firewall(firewall)
+        request = {
+            "firewall_id": str(firewall_id),
+            "droplet_id": str(droplet_id),
+            "operation": "attach",
+        }
+        intent_key = f"attach:payload-firewall:{firewall_id}:{droplet_id}"
         if str(droplet_id) in {str(value) for value in firewall.get("droplet_ids") or []}:
+            pending = self.intents.get(intent_key)
+            if pending:
+                pending, _ = self._prepare_mutation_intent(
+                    intent_key,
+                    kind="payload_firewall_attachment",
+                    name=f"{firewall_id}:{droplet_id}",
+                    operation="attach",
+                    request=request,
+                    firewall_id=str(firewall_id),
+                    droplet_id=str(droplet_id),
+                )
+                if self._intent_mutation_state(pending) not in {"submitted", "accepted"}:
+                    raise HarnessError(
+                        "The firewall attachment intent has no safe submitted or accepted state."
+                    )
+                self.intents.clear(intent_key)
             return
         if str(droplet_id) not in allowed:
             raise HarnessError("The restored Droplet is not in the durable ledger.")
-        _mutation_response(
-            "POST",
-            f"/v2/firewalls/{quote(firewall_id, safe='')}/droplets",
-            headers=self.headers,
-            body={"droplet_ids": [int(droplet_id)]},
+        intent, _fingerprint_value = self._prepare_mutation_intent(
+            intent_key,
+            kind="payload_firewall_attachment",
+            name=f"{firewall_id}:{droplet_id}",
+            operation="attach",
+            request=request,
+            firewall_id=str(firewall_id),
+            droplet_id=str(droplet_id),
         )
+        if intent is not None:
+            state = self._intent_mutation_state(intent)
+            if state not in {"submitted", "accepted"}:
+                raise HarnessError(
+                    "The firewall attachment intent has no safe submitted or accepted state."
+                )
+            if self._poll_mutation_state(
+                read_back=lambda: self._read_resource("payload_firewall", firewall_id),
+                verify_present=verify_firewall,
+                complete=lambda resource: isinstance(resource, dict)
+                and str(droplet_id)
+                in {str(value) for value in resource.get("droplet_ids") or []},
+                label=f"payload-firewall:{firewall_id}:{droplet_id}",
+            ):
+                self.intents.clear(intent_key)
+                return
+            raise AmbiguousMutation(
+                "The firewall attachment is still unconfirmed; no attachment replay was issued."
+            )
+        # If a worker restarted after acceptance, adoption is based on the
+        # exact firewall ID and the current assignment state.  A foreign or
+        # changed firewall never receives a replay.
         observed = self._read_resource("payload_firewall", firewall_id)
-        if observed is None or str(droplet_id) not in {
-            str(value) for value in observed.get("droplet_ids") or []
-        }:
+        if observed is None:
+            raise AmbiguousMutation("The exact payload firewall disappeared during attachment.")
+        verify_firewall(observed)
+        if str(droplet_id) in {str(value) for value in observed.get("droplet_ids") or []}:
+            self.intents.clear(intent_key)
+            return
+        self._set_intent_mutation_state(
+            intent_key,
+            "submitted",
+            submitted_at=time.time(),
+            outcome_unknown=False,
+            reconciled_provider_id=str(firewall_id),
+            reconciled_state="present_unattached",
+        )
+        try:
+            _mutation_response(
+                "POST",
+                f"/v2/firewalls/{quote(firewall_id, safe='')}/droplets",
+                headers=self.headers,
+                body={"droplet_ids": [int(droplet_id)]},
+            )
+        except AmbiguousMutation:
+            self._set_intent_mutation_state(
+                intent_key, "submitted", outcome_unknown=True
+            )
+            if self._poll_mutation_state(
+                read_back=lambda: self._read_resource("payload_firewall", firewall_id),
+                verify_present=verify_firewall,
+                complete=lambda resource: isinstance(resource, dict)
+                and str(droplet_id)
+                in {str(value) for value in resource.get("droplet_ids") or []},
+                label=f"payload-firewall:{firewall_id}:{droplet_id}",
+            ):
+                self.intents.clear(intent_key)
+                return
+            raise
+        except HarnessError:
+            self.intents.clear(intent_key)
+            raise
+        self._set_intent_mutation_state(
+            intent_key, "accepted", accepted_at=time.time(), outcome_unknown=False
+        )
+        if not self._poll_mutation_state(
+            read_back=lambda: self._read_resource("payload_firewall", firewall_id),
+            verify_present=verify_firewall,
+            complete=lambda resource: isinstance(resource, dict)
+            and str(droplet_id)
+            in {str(value) for value in resource.get("droplet_ids") or []},
+            label=f"payload-firewall:{firewall_id}:{droplet_id}",
+        ):
             raise AmbiguousMutation(
                 "The firewall attachment was accepted but is not yet visible."
             )
+        self.intents.clear(intent_key)
 
     def wait_payload_ready(
         self, droplet: dict, *, timeout_seconds=600
@@ -1423,6 +2216,12 @@ class DigitalOceanHarness:
         if snapshot is None:
             raise HarnessError("The exact BackupSheep snapshot is not visible yet.")
         snapshot_id = str(snapshot["id"])
+        snapshot_creation = {
+            "name": str(snapshot.get("name") or ""),
+            "resource_id": str(snapshot.get("resource_id") or ""),
+            "resource_type": str(snapshot.get("resource_type") or ""),
+        }
+        snapshot_creation["immutable_fingerprint"] = _fingerprint(snapshot_creation)
         self.ledger.record(
             kind=f"ui_snapshot_{resource_type}",
             resource_id=snapshot_id,
@@ -1436,6 +2235,7 @@ class DigitalOceanHarness:
                 "marker": snapshot_marker,
                 "source_id": str(source_id),
                 "resource_type": resource_type,
+                "creation_witness": snapshot_creation,
             },
             source_witness=(
                 f"snapshot:{resource_type}:{source_id}:{snapshot_marker}"
@@ -1523,6 +2323,19 @@ class DigitalOceanHarness:
             raise HarnessError("The exact UI restore target failed direct read-back.")
         if str(selected.get("id")) != str(resource.get("id")):
             raise HarnessError("The UI restore inventory and direct ID disagree.")
+        creation = _creation_witness(
+            f"ui_restore_{target_kind}",
+            resource,
+            {
+                "name": str(name),
+                "region": _resource_region(resource),
+                "tags": list(resource.get("tags") or []),
+                "size": resource.get("size_slug") or resource.get("size"),
+                "image": _resource_image(resource),
+                "size_gigabytes": resource.get("size_gigabytes"),
+            },
+        )
+        creation["immutable_fingerprint"] = _fingerprint(creation)
         ownership = {
             "team_uuid": self.account["team_uuid"],
             "run_tag": self.run_tag,
@@ -1531,6 +2344,7 @@ class DigitalOceanHarness:
             "snapshot_id": str(snapshot_id),
             "target_kind": target_kind,
             "source_tag": _digitalocean_source_tag(snapshot_id),
+            "creation_witness": creation,
         }
         if target_kind == "droplet":
             ownership.update(
@@ -1633,6 +2447,11 @@ class DigitalOceanHarness:
     def _record_spaces_key(self, key: dict, request: dict) -> dict:
         access_key = str(key.get("access_key") or "")
         key_hash = self._spaces_key_hash(access_key)
+        creation = {
+            "name": str(request.get("name") or ""),
+            "grants": request.get("grants") or [],
+        }
+        creation["immutable_fingerprint"] = _fingerprint(creation)
         return self.ledger.record(
             kind="spaces_key",
             resource_id=key_hash,
@@ -1643,6 +2462,7 @@ class DigitalOceanHarness:
                 "access_key_sha256": key_hash,
                 "permission": "fullaccess",
                 "request_fingerprint": _fingerprint(request),
+                "creation_witness": creation,
             },
             source_witness=f"spaces-key:{key.get('name')}",
         )
@@ -1764,6 +2584,16 @@ class DigitalOceanHarness:
             f"{bucket}\0{key}\0{version_id}".encode("utf-8")
         ).hexdigest()
 
+    def _durable_spaces_prefix(self, bucket: str) -> str:
+        entry = self.ledger.get("spaces_bucket", str(bucket))
+        ownership = entry.get("ownership") if isinstance(entry, dict) else None
+        prefix = ownership.get("prefix") if isinstance(ownership, dict) else None
+        if not isinstance(prefix, str) or prefix != self.spaces_prefix:
+            raise HarnessError(
+                "The exact active BackupSheep Spaces prefix is not durably pinned."
+            )
+        return _spaces_prefix(prefix)
+
     def _record_spaces_object(
         self,
         *,
@@ -1778,6 +2608,17 @@ class DigitalOceanHarness:
     ) -> dict:
         if kind not in SPACES_OBJECT_KINDS:
             raise HarnessError("The Spaces object kind is invalid.")
+        if kind in {"spaces_ui_website_object", "spaces_ui_database_object"}:
+            prefix = self._durable_spaces_prefix(bucket)
+            _spaces_object_key(key, prefix)
+            metadata = _spaces_ui_metadata(
+                metadata,
+                backup_id=(metadata or {}).get("backupsheep-backup-id")
+                if isinstance(metadata, dict)
+                else "",
+                sha256=sha256,
+                byte_count=byte_count,
+            )
         object_id = self._spaces_object_id(bucket, key, version_id)
         return self.ledger.record(
             kind=kind,
@@ -1793,6 +2634,11 @@ class DigitalOceanHarness:
                 "byte_count": int(byte_count),
                 "etag": str(etag).strip('"'),
                 "metadata": dict(metadata or {}),
+                "prefix": (
+                    self.spaces_prefix
+                    if kind in {"spaces_ui_website_object", "spaces_ui_database_object"}
+                    else ""
+                ),
             },
             source_witness=f"spaces-object:{bucket}:{kind}:{object_id}",
         )
@@ -1839,11 +2685,66 @@ class DigitalOceanHarness:
             raise HarnessError("Spaces object metadata does not match the durable witness.")
         expected_metadata = ownership.get("metadata") or {}
         actual_metadata = head.get("Metadata") or {}
-        if not isinstance(actual_metadata, dict) or any(
-            str(actual_metadata.get(key) or "") != str(value)
-            for key, value in expected_metadata.items()
-        ):
+        if not isinstance(expected_metadata, dict) or not isinstance(actual_metadata, dict):
             raise HarnessError("Spaces custom object metadata does not match.")
+        def normalize(metadata):
+            normalized = {}
+            for key, value in metadata.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    raise HarnessError("Spaces custom object metadata does not match.")
+                normalized_key = key.casefold()
+                if normalized_key in normalized:
+                    raise HarnessError("Spaces custom object metadata has duplicate keys.")
+                normalized[normalized_key] = value
+            return normalized
+
+        expected_normalized = normalize(expected_metadata)
+        actual_normalized = normalize(actual_metadata)
+        if actual_normalized != expected_normalized:
+            raise HarnessError("Spaces custom object metadata does not match.")
+
+    def _verify_spaces_object_entry(
+        self, kind: str, ownership: dict, *, bucket: str
+    ) -> tuple[str, str]:
+        if not isinstance(ownership, dict):
+            raise HarnessError("The Spaces object ownership witness is malformed.")
+        if (
+            ownership.get("team_uuid") != self.account["team_uuid"]
+            or ownership.get("run_tag") != self.run_tag
+            or ownership.get("bucket") != bucket
+        ):
+            raise HarnessError("Spaces object cleanup ownership failed.")
+        key = str(ownership.get("key") or "")
+        version_id = str(ownership.get("version_id") or "")
+        if not version_id or version_id == "null":
+            raise HarnessError("The Spaces object version witness is missing.")
+        if kind in {"spaces_ui_website_object", "spaces_ui_database_object"}:
+            prefix = self._durable_spaces_prefix(bucket)
+            if ownership.get("prefix") != prefix:
+                raise HarnessError("The Spaces object prefix witness changed.")
+            _spaces_object_key(key, prefix)
+            metadata = ownership.get("metadata")
+            _spaces_ui_metadata(
+                metadata,
+                backup_id=(metadata or {}).get("backupsheep-backup-id")
+                if isinstance(metadata, dict)
+                else "",
+                sha256=str(ownership.get("sha256") or ""),
+                byte_count=ownership.get("byte_count"),
+            )
+        elif kind == "spaces_ownership_object":
+            if key != ".backupsheep-e2e/ownership.bin":
+                raise HarnessError("The Spaces ownership object key changed.")
+        else:
+            raise HarnessError("The Spaces object kind is invalid.")
+        if str(ownership.get("etag") or "") == "":
+            raise HarnessError("The Spaces object ETag witness is missing.")
+        try:
+            if int(ownership.get("byte_count")) < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise HarnessError("The Spaces object byte witness is malformed.") from None
+        return key, version_id
 
     def ensure_spaces_bucket(self) -> dict:
         if not self.spaces_apply:
@@ -1862,6 +2763,7 @@ class DigitalOceanHarness:
             "region": self.region,
             "acl": "private",
             "versioning": "Enabled",
+            "prefix": self.spaces_prefix,
         }
         fingerprint = _fingerprint(request)
         intent = self.intents.get(kind)
@@ -2108,12 +3010,29 @@ class DigitalOceanHarness:
                 "team_uuid": self.account["team_uuid"],
                 "run_tag": self.run_tag,
                 "region": self.region,
+                "prefix": self.spaces_prefix,
                 "endpoint_sha256": hashlib.sha256(
                     credentials["endpoint_url"].encode("utf-8")
                 ).hexdigest(),
                 "access_key_sha256": key_entries[0]["resource_id"],
                 "request_fingerprint": fingerprint,
                 "versioning": "Enabled",
+                "creation_witness": {
+                    "bucket": bucket,
+                    "region": self.region,
+                    "prefix": self.spaces_prefix,
+                    "acl": "private",
+                    "versioning": "Enabled",
+                    "immutable_fingerprint": _fingerprint(
+                        {
+                            "bucket": bucket,
+                            "region": self.region,
+                            "prefix": self.spaces_prefix,
+                            "acl": "private",
+                            "versioning": "Enabled",
+                        }
+                    ),
+                },
             },
             source_witness=f"spaces-bucket:{bucket}:{self.region}",
         )
@@ -2165,50 +3084,119 @@ class DigitalOceanHarness:
             or str(bucket_ownership.get("endpoint_sha256") or "")
             != hashlib.sha256(credentials["endpoint_url"].encode("utf-8")).hexdigest()
             or str(bucket_ownership.get("versioning") or "") != "Enabled"
+            or bucket_ownership.get("prefix") != self.spaces_prefix
         ):
             raise HarnessError(
                 "The Spaces bucket credentials do not match the durable run witness."
             )
+        prefix = self._durable_spaces_prefix(bucket)
         try:
-            with open(Path(manifest_path).expanduser(), encoding="utf-8") as source:
+            path = Path(manifest_path).expanduser()
+            if path.is_symlink() or not path.is_file():
+                raise OSError("manifest is not a regular file")
+            with open(path, encoding="utf-8") as source:
                 manifest = json.load(source)
         except (OSError, ValueError) as error:
             raise HarnessError("The UI upload manifest could not be read.") from error
+        if not isinstance(manifest, dict):
+            raise HarnessError("The UI upload manifest must be a JSON object.")
         if self._manifest_has_sensitive_keys(manifest):
             raise HarnessError("The UI upload manifest must not contain credentials.")
-        objects = manifest.get("objects") if isinstance(manifest, dict) else None
-        if not isinstance(objects, list) or not objects:
-            raise HarnessError("The UI upload manifest has no object witnesses.")
-        client = _spaces_client(credentials)
-        verified = {"website": 0, "database": 0}
+        if (
+            type(manifest.get("schema")) is not int
+            or manifest.get("schema") != UI_OBJECT_MANIFEST_SCHEMA
+            or manifest.get("run_id") != self.run_id
+            or manifest.get("prefix") != prefix
+        ):
+            raise HarnessError(
+                "The UI upload manifest schema, run_id, or prefix is outside this run."
+            )
+        objects = manifest.get("objects")
+        if not isinstance(objects, list) or not objects or len(objects) > 100:
+            raise HarnessError("The UI upload manifest must contain 1-100 objects.")
+
+        # Complete validation happens before constructing a client or issuing a
+        # provider HEAD.  A manifest cannot choose an arbitrary object and then
+        # ask the harness to discover whether it belongs to this run.
+        normalized_objects = []
         seen = set()
+        seen_keys = set()
         for item in objects:
             if not isinstance(item, dict):
-                raise HarnessError("The UI upload manifest is malformed.")
+                raise HarnessError("The UI upload manifest contains a malformed row.")
             object_kind = str(item.get("kind") or "")
-            key = str(item.get("key") or "")
+            key = _spaces_object_key(item.get("key"), prefix)
             version_id = str(item.get("version_id") or "")
-            sha256 = str(item.get("sha256") or "").lower()
+            sha256 = str(item.get("sha256") or "").casefold()
             etag = str(item.get("etag") or "").strip('"')
-            metadata = item.get("metadata") or {}
+            backup_id = _backup_witness(item.get("backup_id"))
             try:
                 byte_count = int(item.get("byte_count"))
             except (TypeError, ValueError):
                 raise HarnessError("The UI upload byte count is malformed.") from None
+            metadata = _spaces_ui_metadata(
+                item.get("metadata"),
+                backup_id=backup_id,
+                sha256=sha256,
+                byte_count=byte_count,
+            )
             identity = (key, version_id)
             if (
-                object_kind not in verified
-                or not key
+                object_kind not in UI_OBJECT_KINDS
                 or not version_id
+                or version_id == "null"
                 or not re.fullmatch(r"[0-9a-f]{64}", sha256)
                 or not etag
                 or byte_count < 0
                 or byte_count > maximum_bytes
-                or not isinstance(metadata, dict)
                 or identity in seen
+                or key in seen_keys
             ):
                 raise HarnessError("The UI upload witness is incomplete or unsafe.")
             seen.add(identity)
+            seen_keys.add(key)
+            normalized_objects.append(
+                {
+                    "kind": object_kind,
+                    "key": key,
+                    "version_id": version_id,
+                    "sha256": sha256,
+                    "etag": etag,
+                    "backup_id": backup_id,
+                    "byte_count": byte_count,
+                    "metadata": metadata,
+                }
+            )
+
+        client = _spaces_client(credentials)
+        inventory = self._spaces_inventory(client, bucket, prefix)
+        verified = {"website": 0, "database": 0}
+        for item in normalized_objects:
+            object_kind = item["kind"]
+            key = item["key"]
+            version_id = item["version_id"]
+            sha256 = item["sha256"]
+            etag = item["etag"]
+            byte_count = item["byte_count"]
+            metadata = item["metadata"]
+            versions = [
+                row
+                for row in inventory["versions"]
+                if str(row.get("Key") or "") == key
+            ]
+            delete_markers = [
+                row
+                for row in inventory["delete_markers"]
+                if str(row.get("Key") or "") == key
+            ]
+            if (
+                len(versions) != 1
+                or str(versions[0].get("VersionId") or "") != version_id
+                or delete_markers
+            ):
+                raise HarnessError(
+                    "The exact UI object has a missing, duplicate, or deleted provider version."
+                )
             head = self._head_spaces_object(
                 client, bucket=bucket, key=key, version_id=version_id
             )
@@ -2217,6 +3205,7 @@ class DigitalOceanHarness:
                 "byte_count": byte_count,
                 "etag": etag,
                 "metadata": metadata,
+                "prefix": prefix,
             }
             if head is None:
                 raise HarnessError("The exact UI upload version is missing.")
@@ -2263,13 +3252,19 @@ class DigitalOceanHarness:
         return {"status": "verified", "object_counts": verified}
 
     @staticmethod
-    def _spaces_inventory(client, bucket: str) -> dict[str, list[dict]]:
+    def _spaces_inventory(
+        client, bucket: str, prefix: str | None = None
+    ) -> dict[str, list[dict]]:
+        if prefix is not None:
+            prefix = _spaces_prefix(prefix)
         versions = []
         delete_markers = []
         seen = set()
         key_marker = version_marker = None
         for _page in range(SPACES_MAX_PAGES):
             request = {"Bucket": bucket, "MaxKeys": 1000}
+            if prefix is not None:
+                request["Prefix"] = prefix
             if key_marker:
                 request["KeyMarker"] = key_marker
             if version_marker:
@@ -2310,6 +3305,8 @@ class DigitalOceanHarness:
         continuation = None
         for _page in range(SPACES_MAX_PAGES):
             request = {"Bucket": bucket, "MaxKeys": 1000}
+            if prefix is not None:
+                request["Prefix"] = prefix
             if continuation:
                 request["ContinuationToken"] = continuation
             payload = _spaces_call(
@@ -2335,6 +3332,8 @@ class DigitalOceanHarness:
         key_marker = upload_marker = None
         for _page in range(SPACES_MAX_PAGES):
             request = {"Bucket": bucket, "MaxUploads": 1000}
+            if prefix is not None:
+                request["Prefix"] = prefix
             if key_marker:
                 request["KeyMarker"] = key_marker
             if upload_marker:
@@ -2431,6 +3430,7 @@ class DigitalOceanHarness:
             "region": credentials["region"],
             "acl": "private",
             "versioning": "Enabled",
+            "prefix": self.spaces_prefix,
         }
         request_fingerprint = _fingerprint(request)
         if intent.get("request_fingerprint") != request_fingerprint:
@@ -2513,12 +3513,29 @@ class DigitalOceanHarness:
                 "team_uuid": self.account["team_uuid"],
                 "run_tag": self.run_tag,
                 "region": credentials["region"],
+                "prefix": self.spaces_prefix,
                 "endpoint_sha256": hashlib.sha256(
                     credentials["endpoint_url"].encode("utf-8")
                 ).hexdigest(),
                 "access_key_sha256": key_entries[0]["resource_id"],
                 "request_fingerprint": request_fingerprint,
                 "versioning": status or "not_enabled",
+                "creation_witness": {
+                    "bucket": bucket,
+                    "region": credentials["region"],
+                    "prefix": self.spaces_prefix,
+                    "acl": "private",
+                    "versioning": "Enabled",
+                    "immutable_fingerprint": _fingerprint(
+                        {
+                            "bucket": bucket,
+                            "region": credentials["region"],
+                            "prefix": self.spaces_prefix,
+                            "acl": "private",
+                            "versioning": "Enabled",
+                        }
+                    ),
+                },
             },
             source_witness=f"spaces-bucket:{bucket}:{credentials['region']}",
         )
@@ -2563,32 +3580,58 @@ class DigitalOceanHarness:
                 != ownership.get("access_key_sha256")
                 or ownership.get("team_uuid") != self.account["team_uuid"]
                 or ownership.get("run_tag") != self.run_tag
+                or ownership.get("prefix") != self.spaces_prefix
             ):
                 self.ledger.mark_cleanup(
                     "spaces_bucket", bucket, state="manual_review"
                 )
                 raise HarnessError("Spaces bucket cleanup ownership verification failed.")
+            bucket_creation = ownership.get("creation_witness")
+            expected_bucket_creation = {
+                "bucket": bucket,
+                "region": ownership.get("region"),
+                "prefix": self.spaces_prefix,
+                "acl": "private",
+                "versioning": "Enabled",
+            }
+            if (
+                not isinstance(bucket_creation, dict)
+                or any(
+                    bucket_creation.get(key) != value
+                    for key, value in expected_bucket_creation.items()
+                )
+                or bucket_creation.get("immutable_fingerprint")
+                != _fingerprint(expected_bucket_creation)
+            ):
+                self.ledger.mark_cleanup(
+                    "spaces_bucket", bucket, state="manual_review"
+                )
+                raise HarnessError("Spaces bucket creation fingerprint changed.")
             client = _spaces_client(credentials)
             names = self._spaces_bucket_names(client)
             if bucket not in names:
                 for kind in sorted(SPACES_OBJECT_KINDS):
                     for entry in self.ledger.entries(kind):
                         if entry.get("cleanup_state") in {"eligible", "failed"}:
+                            object_id = str(entry.get("resource_id") or "")
                             ownership = entry.get("ownership") or {}
-                            if ownership.get("bucket") != bucket:
+                            try:
+                                key, version_id = self._verify_spaces_object_entry(
+                                    kind, ownership, bucket=bucket
+                                )
+                            except HarnessError:
                                 self.ledger.mark_cleanup(
                                     kind,
-                                    str(entry.get("resource_id") or ""),
+                                    object_id,
                                     state="manual_review",
                                 )
-                                raise HarnessError(
-                                    "A Spaces object ledger entry targets another bucket."
+                                raise HarnessError("Spaces object cleanup ownership failed.")
+                            if self._spaces_object_id(bucket, key, version_id) != object_id:
+                                self.ledger.mark_cleanup(
+                                    kind, object_id, state="manual_review"
                                 )
-                            self.ledger.mark_cleanup(
-                                kind,
-                                str(entry.get("resource_id") or ""),
-                                state="absent",
-                            )
+                                raise HarnessError("Spaces object identity ownership failed.")
+                            self.ledger.mark_cleanup(kind, object_id, state="absent")
                 self.ledger.mark_cleanup("spaces_bucket", bucket, state="absent")
             else:
                 for kind in sorted(SPACES_OBJECT_KINDS):
@@ -2597,55 +3640,56 @@ class DigitalOceanHarness:
                             continue
                         object_id = str(entry.get("resource_id") or "")
                         object_ownership = entry.get("ownership") or {}
-                        key = str(object_ownership.get("key") or "")
-                        version_id = str(object_ownership.get("version_id") or "")
-                        if (
-                            object_ownership.get("team_uuid")
-                            != self.account["team_uuid"]
-                            or object_ownership.get("run_tag") != self.run_tag
-                            or object_ownership.get("bucket") != bucket
-                            or self._spaces_object_id(bucket, key, version_id)
-                            != object_id
-                        ):
+                        try:
+                            key, version_id = self._verify_spaces_object_entry(
+                                kind, object_ownership, bucket=bucket
+                            )
+                        except HarnessError:
                             self.ledger.mark_cleanup(
                                 kind, object_id, state="manual_review"
                             )
                             raise HarnessError("Spaces object cleanup ownership failed.")
-                        head = self._head_spaces_object(
-                            client,
-                            bucket=bucket,
-                            key=key,
-                            version_id=version_id,
-                        )
-                        if head is None:
+                        if self._spaces_object_id(bucket, key, version_id) != object_id:
                             self.ledger.mark_cleanup(
-                                kind, object_id, state="absent"
+                                kind, object_id, state="manual_review"
                             )
-                            continue
-                        self._verify_spaces_head(head, object_ownership)
-                        _spaces_call(
-                            lambda bucket=bucket, key=key, version_id=version_id: client.delete_object(
-                                Bucket=bucket, Key=key, VersionId=version_id
+                            raise HarnessError("Spaces object identity ownership failed.")
+                        request = {
+                            "bucket": bucket,
+                            "key": key,
+                            "version_id": version_id,
+                            "etag": object_ownership.get("etag"),
+                            "byte_count": object_ownership.get("byte_count"),
+                            "metadata": object_ownership.get("metadata") or {},
+                            "prefix": object_ownership.get("prefix") or "",
+                        }
+                        status = self._delete_spaces_with_intent(
+                            intent_key=f"cleanup:spaces-object:{object_id}",
+                            kind=kind,
+                            name=key,
+                            request=request,
+                            read_back=lambda: self._head_spaces_object(
+                                client,
+                                bucket=bucket,
+                                key=key,
+                                version_id=version_id,
                             ),
-                            mutation=True,
-                            required_scope="Spaces object delete",
+                            verify_present=lambda head, ownership=object_ownership: self._verify_spaces_head(
+                                head, ownership
+                            ),
+                            delete_call=lambda bucket=bucket, key=key, version_id=version_id: _spaces_call(
+                                lambda: client.delete_object(
+                                    Bucket=bucket, Key=key, VersionId=version_id
+                                ),
+                                mutation=True,
+                                required_scope="Spaces object delete",
+                            ),
                         )
-                        if self._head_spaces_object(
-                            client,
-                            bucket=bucket,
-                            key=key,
-                            version_id=version_id,
-                        ) is not None:
-                            self.ledger.mark_cleanup(
-                                kind,
-                                object_id,
-                                state="failed",
-                                error="Exact object version remains visible.",
-                            )
-                            raise AmbiguousMutation(
-                                "The exact Spaces object version remains visible."
-                            )
-                        self.ledger.mark_cleanup(kind, object_id, state="deleted")
+                        self.ledger.mark_cleanup(
+                            kind,
+                            object_id,
+                            state="absent" if status == "absent" else "deleted",
+                        )
                 inventory = self._spaces_inventory(client, bucket)
                 if any(inventory.values()):
                     self.ledger.mark_cleanup(
@@ -2661,22 +3705,42 @@ class DigitalOceanHarness:
                         "Spaces cleanup refused a non-empty or version-bearing bucket; "
                         "no unledgered item was deleted."
                     )
-                _spaces_call(
-                    lambda: client.delete_bucket(Bucket=bucket),
-                    mutation=True,
-                    required_scope="Spaces full access",
+                bucket_request = {
+                    "bucket": bucket,
+                    "region": ownership.get("region"),
+                    "prefix": ownership.get("prefix"),
+                    "operation": "delete",
+                }
+
+                def read_bucket():
+                    if bucket not in self._spaces_bucket_names(client):
+                        return None
+                    return {"name": bucket}
+
+                def verify_bucket(_resource):
+                    if any(self._spaces_inventory(client, bucket).values()):
+                        raise InventoryNotEmpty(
+                            "The Spaces bucket became non-empty during cleanup."
+                        )
+
+                status = self._delete_spaces_with_intent(
+                    intent_key=f"cleanup:spaces-bucket:{bucket}",
+                    kind="spaces_bucket",
+                    name=bucket,
+                    request=bucket_request,
+                    read_back=read_bucket,
+                    verify_present=verify_bucket,
+                    delete_call=lambda: _spaces_call(
+                        lambda: client.delete_bucket(Bucket=bucket),
+                        mutation=True,
+                        required_scope="Spaces full access",
+                    ),
                 )
-                if bucket in self._spaces_bucket_names(client):
-                    self.ledger.mark_cleanup(
-                        "spaces_bucket",
-                        bucket,
-                        state="failed",
-                        error="Bucket remains visible after exact delete.",
-                    )
-                    raise AmbiguousMutation(
-                        "The exact Spaces bucket remains visible after deletion."
-                    )
-                self.ledger.mark_cleanup("spaces_bucket", bucket, state="deleted")
+                self.ledger.mark_cleanup(
+                    "spaces_bucket",
+                    bucket,
+                    state="absent" if status == "absent" else "deleted",
+                )
 
         if key_entries:
             key_entry = key_entries[0]
@@ -2695,6 +3759,24 @@ class DigitalOceanHarness:
                     state="manual_review",
                 )
                 raise HarnessError("Spaces key cleanup ownership verification failed.")
+            key_creation = ownership.get("creation_witness")
+            expected_key_creation = {
+                "name": name,
+                "grants": [{"bucket": "", "permission": "fullaccess"}],
+            }
+            if (
+                not isinstance(key_creation, dict)
+                or key_creation.get("name") != expected_key_creation["name"]
+                or key_creation.get("grants") != expected_key_creation["grants"]
+                or key_creation.get("immutable_fingerprint")
+                != _fingerprint(expected_key_creation)
+            ):
+                self.ledger.mark_cleanup(
+                    "spaces_key",
+                    str(key_entry["resource_id"]),
+                    state="manual_review",
+                )
+                raise HarnessError("Spaces key creation fingerprint changed.")
             candidates = self._spaces_keys(name=name)
             if not candidates:
                 self.ledger.mark_cleanup(
@@ -2711,28 +3793,45 @@ class DigitalOceanHarness:
                     )
                     raise HarnessError("The exact Spaces key hash no longer matches.")
                 read_back = self._read_spaces_key(access_key)
-                if not self._spaces_key_owned(
-                    read_back or {}, name=name, access_key=access_key
-                ):
-                    raise HarnessError("The exact Spaces key failed read-back.")
-                _mutation_response(
-                    "DELETE",
-                    f"/v2/spaces/keys/{quote(access_key, safe='')}",
-                    headers=self.headers,
-                    required_scope="spaces_key:delete",
+                def verify_key(current):
+                    if not self._spaces_key_owned(
+                        current or {}, name=name, access_key=access_key
+                    ):
+                        raise HarnessError("The exact Spaces key failed read-back.")
+                    current_creation = {
+                        "name": str(current.get("name") or ""),
+                        "grants": current.get("grants") or [],
+                    }
+                    if (
+                        current_creation != expected_key_creation
+                        or _fingerprint(current_creation)
+                        != key_creation.get("immutable_fingerprint")
+                    ):
+                        raise HarnessError("The Spaces key creation fingerprint changed.")
+
+                verify_key(read_back)
+                status = self._delete_spaces_with_intent(
+                    intent_key=f"cleanup:spaces-key:{key_entry['resource_id']}",
+                    kind="spaces_key",
+                    name=name,
+                    request={
+                        "access_key_sha256": key_entry["resource_id"],
+                        "name": name,
+                        "grants": expected_key_creation["grants"],
+                    },
+                    read_back=lambda: self._read_spaces_key(access_key),
+                    verify_present=verify_key,
+                    delete_call=lambda: _mutation_response(
+                        "DELETE",
+                        f"/v2/spaces/keys/{quote(access_key, safe='')}",
+                        headers=self.headers,
+                        required_scope="spaces_key:delete",
+                    ),
                 )
-                if self._read_spaces_key(access_key) is not None:
-                    self.ledger.mark_cleanup(
-                        "spaces_key",
-                        str(key_entry["resource_id"]),
-                        state="failed",
-                        error="Spaces key remains visible after exact delete.",
-                    )
-                    raise AmbiguousMutation(
-                        "The exact Spaces key remains visible after deletion."
-                    )
                 self.ledger.mark_cleanup(
-                    "spaces_key", str(key_entry["resource_id"]), state="deleted"
+                    "spaces_key",
+                    str(key_entry["resource_id"]),
+                    state="absent" if status == "absent" else "deleted",
                 )
         all_key_entries = self.ledger.entries("spaces_key")
         key_cleanup_proven = bool(all_key_entries) and all(
@@ -2761,6 +3860,13 @@ class DigitalOceanHarness:
                 if self.intents.get(intent_key):
                     self.intents.clear(intent_key)
         return {"status": "completed"}
+
+    def _verify_ui_restore_cleanup_resource(
+        self, kind: str, resource: dict, witness: dict, ownership: dict
+    ) -> None:
+        if not _restore_target_owned(resource, witness):
+            raise HarnessError("UI restore cleanup ownership verification failed.")
+        self._verify_creation_fingerprint(kind, resource, ownership)
 
     def cleanup(self):
         if not (self.apply and self.cleanup_enabled):
@@ -2803,13 +3909,40 @@ class DigitalOceanHarness:
                         kind, resource_id, state="manual_review"
                     )
                     raise HarnessError("UI restore cleanup ownership verification failed.")
-                _mutation_response(
-                    "DELETE",
-                    f"/v2/{plural}/{quote(resource_id, safe='')}",
-                    headers=self.headers,
+                try:
+                    self._verify_creation_fingerprint(kind, resource, ownership)
+                except HarnessError:
+                    self.ledger.mark_cleanup(kind, resource_id, state="manual_review")
+                    raise
+                status = self._delete_provider_with_intent(
+                    intent_key=f"cleanup:{kind}:{resource_id}",
+                    kind=kind,
+                    resource_id=resource_id,
+                    name=str(entry.get("name") or ""),
+                    request={
+                        "provider_id": resource_id,
+                        "target_kind": target_kind,
+                        "name": str(entry.get("name") or ""),
+                        "snapshot_id": witness["snapshot_id"],
+                        "restore_marker": restore_marker,
+                    },
+                    read_back=lambda: self._read_resource(kind, resource_id),
+                    verify_present=lambda current: (
+                        self._verify_ui_restore_cleanup_resource(
+                            kind, current, witness, ownership
+                        )
+                    ),
+                    delete_call=lambda: _mutation_response(
+                        "DELETE",
+                        f"/v2/{plural}/{quote(resource_id, safe='')}",
+                        headers=self.headers,
+                    ),
                 )
-                self.wait_absent(kind, resource_id)
-                self.ledger.mark_cleanup(kind, resource_id, state="deleted")
+                self.ledger.mark_cleanup(
+                    kind,
+                    resource_id,
+                    state="absent" if status == "absent" else "deleted",
+                )
                 if kind == "ui_restore_droplet":
                     payload_entry = self.ledger.get(
                         "ui_restore_payload_witness", resource_id
@@ -2843,57 +3976,77 @@ class DigitalOceanHarness:
                         kind, resource_id, state="manual_review"
                     )
                     raise HarnessError("Snapshot cleanup ledger ownership failed.")
-                try:
-                    payload = get_json(
-                        f"/v2/snapshots/{quote(resource_id, safe='')}",
-                        headers=self.headers,
-                    )
-                except DigitalOceanAPIError as error:
-                    if error.code == "PROVIDER_NOT_FOUND":
-                        self.ledger.mark_cleanup(
-                            kind, resource_id, state="absent"
-                        )
-                        continue
-                    raise
-                snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
-                if not (
-                    isinstance(snapshot, dict)
-                    and str(snapshot.get("id") or "") == resource_id
-                    and str(snapshot.get("name") or "")
-                    == snapshot_marker
-                    and str(snapshot.get("resource_id") or "")
-                    == str(ownership.get("source_id") or "")
-                    and str(snapshot.get("resource_type") or "")
-                    == str(ownership.get("resource_type") or "")
-                ):
-                    self.ledger.mark_cleanup(
-                        kind, resource_id, state="manual_review"
-                    )
-                    raise HarnessError("Snapshot cleanup ownership verification failed.")
-                _mutation_response(
-                    "DELETE",
-                    f"/v2/snapshots/{quote(resource_id, safe='')}",
-                    headers=self.headers,
-                )
-                deadline = time.monotonic() + 300
-                while time.monotonic() < deadline:
+                def read_snapshot():
                     try:
-                        get_json(
+                        payload = get_json(
                             f"/v2/snapshots/{quote(resource_id, safe='')}",
                             headers=self.headers,
                         )
                     except DigitalOceanAPIError as error:
                         if error.code == "PROVIDER_NOT_FOUND":
-                            self.ledger.mark_cleanup(
-                                kind, resource_id, state="deleted"
-                            )
-                            break
+                            return None
                         raise
-                    time.sleep(5)
-                else:
-                    raise AmbiguousMutation(
-                        "The exact snapshot remains visible after cleanup."
-                    )
+                    snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+                    if not isinstance(snapshot, dict):
+                        raise HarnessError("DigitalOcean returned a malformed snapshot.")
+                    return snapshot
+
+                def verify_snapshot(snapshot):
+                    if (
+                        str(snapshot.get("id") or "") != resource_id
+                        or str(snapshot.get("name") or "") != snapshot_marker
+                        or str(snapshot.get("resource_id") or "")
+                        != str(ownership.get("source_id") or "")
+                        or str(snapshot.get("resource_type") or "")
+                        != str(ownership.get("resource_type") or "")
+                    ):
+                        raise HarnessError("Snapshot cleanup ownership verification failed.")
+                    creation = ownership.get("creation_witness")
+                    expected = {
+                        "name": snapshot_marker,
+                        "resource_id": str(ownership.get("source_id") or ""),
+                        "resource_type": str(ownership.get("resource_type") or ""),
+                    }
+                    if (
+                        not isinstance(creation, dict)
+                        or any(creation.get(key) != value for key, value in expected.items())
+                        or creation.get("immutable_fingerprint") != _fingerprint(expected)
+                    ):
+                        raise HarnessError("Snapshot creation fingerprint changed.")
+
+                snapshot = read_snapshot()
+                if snapshot is None:
+                    self.ledger.mark_cleanup(kind, resource_id, state="absent")
+                    continue
+                try:
+                    verify_snapshot(snapshot)
+                except HarnessError:
+                    self.ledger.mark_cleanup(kind, resource_id, state="manual_review")
+                    raise
+                status = self._delete_provider_with_intent(
+                    intent_key=f"cleanup:{kind}:{resource_id}",
+                    kind=kind,
+                    resource_id=resource_id,
+                    name=snapshot_marker,
+                    request={
+                        "provider_id": resource_id,
+                        "snapshot_marker": snapshot_marker,
+                        "source_id": str(ownership.get("source_id") or ""),
+                        "resource_type": str(ownership.get("resource_type") or ""),
+                    },
+                    read_back=read_snapshot,
+                    verify_present=verify_snapshot,
+                    delete_call=lambda: _mutation_response(
+                        "DELETE",
+                        f"/v2/snapshots/{quote(resource_id, safe='')}",
+                        headers=self.headers,
+                    ),
+                )
+                self.ledger.mark_cleanup(
+                    kind,
+                    resource_id,
+                    state="absent" if status == "absent" else "deleted",
+                )
 
         for kind in ("source_volume", "source_droplet"):
             for entry in reversed(self.ledger.entries(kind)):
@@ -2912,14 +4065,40 @@ class DigitalOceanHarness:
                     self.ledger.mark_cleanup(kind, resource_id, state="absent")
                     continue
                 self._verify_owned(kind, resource, str(entry.get("name") or ""))
+                try:
+                    self._verify_creation_fingerprint(kind, resource, ownership)
+                except HarnessError:
+                    self.ledger.mark_cleanup(kind, resource_id, state="manual_review")
+                    raise
                 plural = "droplets" if kind == "source_droplet" else "volumes"
-                _mutation_response(
-                    "DELETE",
-                    f"/v2/{plural}/{quote(resource_id, safe='')}",
-                    headers=self.headers,
+
+                def verify_source(current):
+                    self._verify_owned(kind, current, str(entry.get("name") or ""))
+                    self._verify_creation_fingerprint(kind, current, ownership)
+
+                status = self._delete_provider_with_intent(
+                    intent_key=f"cleanup:{kind}:{resource_id}",
+                    kind=kind,
+                    resource_id=resource_id,
+                    name=str(entry.get("name") or ""),
+                    request={
+                        "provider_id": resource_id,
+                        "kind": kind,
+                        "name": str(entry.get("name") or ""),
+                    },
+                    read_back=lambda: self._read_resource(kind, resource_id),
+                    verify_present=verify_source,
+                    delete_call=lambda: _mutation_response(
+                        "DELETE",
+                        f"/v2/{plural}/{quote(resource_id, safe='')}",
+                        headers=self.headers,
+                    ),
                 )
-                self.wait_absent(kind, resource_id)
-                self.ledger.mark_cleanup(kind, resource_id, state="deleted")
+                self.ledger.mark_cleanup(
+                    kind,
+                    resource_id,
+                    state="absent" if status == "absent" else "deleted",
+                )
                 if kind == "source_droplet":
                     payload_entry = self.ledger.get(
                         "source_payload_witness", resource_id
@@ -2964,19 +4143,68 @@ class DigitalOceanHarness:
                 normalized,
                 firewall_id=resource_id,
                 allowed_droplet_ids=self._firewall_allowed_droplet_ids(),
+                require_empty_droplet_ids=True,
             ):
                 self.ledger.mark_cleanup(
                     "payload_firewall", resource_id, state="manual_review"
                 )
                 raise HarnessError("Payload firewall has foreign rules or assignments.")
-            _mutation_response(
-                "DELETE",
-                f"/v2/firewalls/{quote(resource_id, safe='')}",
-                headers=self.headers,
+            immutable_fingerprint = self._firewall_immutable_fingerprint(normalized)
+            creation = ownership.get("creation_witness")
+            if (
+                ownership.get("immutable_fingerprint") != immutable_fingerprint
+                or not isinstance(creation, dict)
+                or creation.get("name") != str(firewall.get("name") or "")
+                or creation.get("rules_fingerprint") != immutable_fingerprint
+                or creation.get("immutable_fingerprint") != immutable_fingerprint
+                or creation.get("source_droplet_id")
+                != str(ownership.get("source_droplet_id") or "")
+            ):
+                self.ledger.mark_cleanup(
+                    "payload_firewall", resource_id, state="manual_review"
+                )
+                raise HarnessError("Payload firewall creation fingerprint changed.")
+
+            def read_firewall():
+                return self._read_resource("payload_firewall", resource_id)
+
+            def verify_firewall(current):
+                current_normalized = dict(current or {})
+                current_normalized["outbound_rules"] = [
+                    {**rule, "sources": rule.get("destinations")}
+                    for rule in current.get("outbound_rules") or []
+                    if isinstance(rule, dict)
+                ]
+                if not self._firewall_owned(
+                    current_normalized,
+                    firewall_id=resource_id,
+                    allowed_droplet_ids=self._firewall_allowed_droplet_ids(),
+                    require_empty_droplet_ids=True,
+                ) or self._firewall_immutable_fingerprint(current_normalized) != immutable_fingerprint:
+                    raise HarnessError("Payload firewall ownership changed during cleanup.")
+
+            status = self._delete_provider_with_intent(
+                intent_key=f"cleanup:payload-firewall:{resource_id}",
+                kind="payload_firewall",
+                resource_id=resource_id,
+                name=str(firewall.get("name") or ""),
+                request={
+                    "provider_id": resource_id,
+                    "name": str(firewall.get("name") or ""),
+                    "immutable_fingerprint": immutable_fingerprint,
+                },
+                read_back=read_firewall,
+                verify_present=verify_firewall,
+                delete_call=lambda: _mutation_response(
+                    "DELETE",
+                    f"/v2/firewalls/{quote(resource_id, safe='')}",
+                    headers=self.headers,
+                ),
             )
-            self.wait_absent("payload_firewall", resource_id)
             self.ledger.mark_cleanup(
-                "payload_firewall", resource_id, state="deleted"
+                "payload_firewall",
+                resource_id,
+                state="absent" if status == "absent" else "deleted",
             )
 
         tag_entry = self.ledger.get("run_tag", self.run_tag)
@@ -3017,13 +4245,46 @@ class DigitalOceanHarness:
                 raise HarnessError(
                     "The run tag still owns resources; delete exact snapshots/targets first."
                 )
-            _mutation_response(
-                "DELETE",
-                f"/v2/tags/{quote(self.run_tag, safe='')}",
-                headers=self.headers,
+            def read_cleanup_tag():
+                return self._read_run_tag()
+
+            def verify_cleanup_tag(current):
+                if str(current.get("name") or "") != self.run_tag:
+                    raise HarnessError("Run-tag cleanup ownership changed.")
+                current_resources = current.get("resources") or {}
+                if not isinstance(current_resources, dict):
+                    raise HarnessError("DigitalOcean returned malformed run-tag resources.")
+                for value in current_resources.values():
+                    if isinstance(value, dict) and value.get("count") is not None:
+                        try:
+                            if int(value["count"]) != 0:
+                                raise HarnessError(
+                                    "The run tag still owns resources; cleanup stopped."
+                                )
+                        except (TypeError, ValueError) as error:
+                            raise HarnessError(
+                                "DigitalOcean returned malformed run-tag counts."
+                            ) from error
+
+            status = self._delete_provider_with_intent(
+                intent_key=f"cleanup:run-tag:{self.run_tag}",
+                kind="run_tag",
+                resource_id=self.run_tag,
+                name=self.run_tag,
+                request={"tag": self.run_tag, "operation": "delete"},
+                read_back=read_cleanup_tag,
+                verify_present=verify_cleanup_tag,
+                delete_call=lambda: _mutation_response(
+                    "DELETE",
+                    f"/v2/tags/{quote(self.run_tag, safe='')}",
+                    headers=self.headers,
+                ),
             )
-            self.wait_tag_absent()
-            self.ledger.mark_cleanup("run_tag", self.run_tag, state="deleted")
+            self.ledger.mark_cleanup(
+                "run_tag",
+                self.run_tag,
+                state="absent" if status == "absent" else "deleted",
+            )
 
 
 def _parser():
@@ -3093,6 +4354,11 @@ def _parser():
     parser.add_argument("--spaces-setup", action="store_true")
     parser.add_argument("--spaces-cleanup", action="store_true")
     parser.add_argument("--spaces-ui-upload-manifest")
+    parser.add_argument(
+        "--spaces-prefix",
+        default=os.environ.get("DIGITALOCEAN_E2E_SPACES_PREFIX"),
+        help="Exact durable BackupSheep object prefix, including its trailing slash.",
+    )
     parser.add_argument(
         "--spaces-secret-file",
         default=os.environ.get("DIGITALOCEAN_E2E_SPACES_SECRET_FILE"),

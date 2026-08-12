@@ -189,6 +189,10 @@ class UpCloudComputeLiveUIHarnessSafetyTests(SimpleTestCase):
             "type": "disk",
             "address": "virtio:0",
             "boot_disk": "0",
+            "labels": [
+                {"key": "_os_type", "value": "linux"},
+                {"key": "_template_uuid", "value": OS_TEMPLATE_ID},
+            ],
         }
         data = {
             "storage": SOURCE_VOLUME_ID,
@@ -196,11 +200,15 @@ class UpCloudComputeLiveUIHarnessSafetyTests(SimpleTestCase):
             "address": "scsi:0:0",
             "boot_disk": "0",
         }
-        server = {"storage_devices": {"storage_device": [boot, data]}}
+        server = {
+            "boot_order": "disk",
+            "storage_devices": {"storage_device": [boot, data]},
+        }
         self.assertEqual(live_harness.UpCloudLiveHarness._boot_device(server), boot)
         with self.assertRaises(live_harness.HarnessError):
             live_harness.UpCloudLiveHarness._boot_device(
                 {
+                    "boot_order": "disk",
                     "storage_devices": {
                         "storage_device": [boot, {**data, "address": "virtio:0"}]
                     }
