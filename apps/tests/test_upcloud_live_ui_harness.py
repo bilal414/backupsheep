@@ -153,6 +153,21 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         live_harness._write_runtime_secret(harness.config.runtime_path, payload)
         return payload
 
+    def arm_bucket_for_manifest(self, harness, value, runtime):
+        harness.ledger.record(
+            kind="mos_bucket_configuration",
+            resource_id=f"{value['uuid']}:{runtime['bucket_name']}:versioning",
+            name=runtime["bucket_name"],
+            ownership={
+                "account": self.account,
+                "run_id": self.run_id,
+                "service_uuid": value["uuid"],
+                "bucket": runtime["bucket_name"],
+                "versioning": "Enabled",
+            },
+            source_witness=value["uuid"],
+        )
+
     def test_plan_is_offline_and_never_reads_or_prints_token(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -584,10 +599,11 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
             },
             source_witness=f"{value['uuid']}:{runtime['bucket_name']}",
         )
-        backup_id = "backup-row-123"
+        backup_id = "123"
+        backup_uuid = "11111111-1111-4111-8111-111111111111"
         payload = b"deterministic-backup-bytes\x00\xff"
         sha256 = live_harness.hashlib.sha256(payload).hexdigest()
-        key = f"{runtime['prefix']}{backup_id}.zip"
+        key = f"{runtime['prefix']}{backup_uuid}.zip"
         version_id = "version-1"
         etag = "etag-1"
         metadata = {
@@ -609,6 +625,7 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
                 {
                     "kind": "website",
                     "backup_id": backup_id,
+                    "backup_uuid": backup_uuid,
                     "object_key": key,
                     "sha256": sha256,
                     "byte_count": len(payload),
@@ -660,8 +677,9 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
             },
             source_witness=value["uuid"],
         )
-        backup_id = "backup-row-duplicate"
-        key = f"{runtime['prefix']}{backup_id}.zip"
+        backup_id = "124"
+        backup_uuid = "22222222-2222-4222-8222-222222222222"
+        key = f"{runtime['prefix']}{backup_uuid}.zip"
         manifest_path = self.root / "duplicate.json"
         manifest_path.write_text(
             json.dumps(
@@ -670,6 +688,7 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
                         {
                             "kind": "database",
                             "backup_id": backup_id,
+                            "backup_uuid": backup_uuid,
                             "object_key": key,
                             "sha256": "a" * 64,
                             "byte_count": 1,
@@ -699,3 +718,104 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
             harness.verify_ui_objects(str(manifest_path), maximum_bytes=1024)
 
         self.assertIsNone(harness._one_active("mos_ui_database_object"))
+
+    def test_ui_manifest_rejects_object_key_that_uses_numeric_row_id(self):
+        harness = self.harness(apply=True)
+        value = self.seed_service(harness)
+        self.seed_bucket(harness, value)
+        self.seed_user_policy_key(harness, value)
+        runtime = self.write_runtime(harness, value)
+        self.arm_bucket_for_manifest(harness, value, runtime)
+        backup_uuid = "33333333-3333-4333-8333-333333333333"
+        manifest_path = self.root / "wrong-key.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "objects": [
+                        {
+                            "kind": "website",
+                            "backup_id": "125",
+                            "backup_uuid": backup_uuid,
+                            "object_key": f"{runtime['prefix']}125.zip",
+                            "sha256": "a" * 64,
+                            "byte_count": 1,
+                            "etag": "etag",
+                            "version_id": "v1",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch.object(harness, "verify_account", return_value=self.account), \
+            mock.patch.object(harness, "_service_read", return_value=value), \
+            mock.patch.object(harness, "_s3", return_value=(mock.Mock(), runtime)), \
+            mock.patch.object(harness, "_s3_inventory") as inventory, \
+            self.assertRaises(live_harness.HarnessError):
+            harness.verify_ui_objects(str(manifest_path), maximum_bytes=1024)
+
+        inventory.assert_not_called()
+
+    def test_ui_manifest_rejects_duplicate_manifest_keys(self):
+        harness = self.harness(apply=True)
+        value = self.seed_service(harness)
+        self.seed_bucket(harness, value)
+        self.seed_user_policy_key(harness, value)
+        runtime = self.write_runtime(harness, value)
+        self.arm_bucket_for_manifest(harness, value, runtime)
+        backup_uuid = "44444444-4444-4444-8444-444444444444"
+        key = f"{runtime['prefix']}{backup_uuid}.zip"
+        row = {
+            "kind": "database",
+            "backup_id": "126",
+            "backup_uuid": backup_uuid,
+            "object_key": key,
+            "sha256": "a" * 64,
+            "byte_count": 1,
+            "etag": "etag",
+            "version_id": "v1",
+        }
+        duplicate = dict(row)
+        duplicate["backup_id"] = "127"
+        manifest_path = self.root / "duplicate-manifest.json"
+        manifest_path.write_text(
+            json.dumps({"objects": [row, duplicate]}), encoding="utf-8"
+        )
+        with mock.patch.object(harness, "verify_account", return_value=self.account), \
+            mock.patch.object(harness, "_service_read", return_value=value), \
+            mock.patch.object(harness, "_s3", return_value=(mock.Mock(), runtime)), \
+            mock.patch.object(harness, "_s3_inventory") as inventory, \
+            self.assertRaises(live_harness.HarnessError):
+            harness.verify_ui_objects(str(manifest_path), maximum_bytes=1024)
+
+        inventory.assert_called_once()
+
+    def test_ui_manifest_rejects_sensitive_keys(self):
+        harness = self.harness(apply=True)
+        value = self.seed_service(harness)
+        self.seed_bucket(harness, value)
+        self.seed_user_policy_key(harness, value)
+        runtime = self.write_runtime(harness, value)
+        self.arm_bucket_for_manifest(harness, value, runtime)
+        manifest_path = self.root / "sensitive.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "objects": [
+                        {
+                            "kind": "website",
+                            "backup_id": "128",
+                            "backup_uuid": "55555555-5555-4555-8555-555555555555",
+                            "object_key": "outside",
+                            "api_token": "TOKEN-CANARY",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch.object(harness, "verify_account", return_value=self.account), \
+            mock.patch.object(harness, "_service_read", return_value=value), \
+            mock.patch.object(harness, "_s3", return_value=(mock.Mock(), runtime)), \
+            self.assertRaises(live_harness.HarnessError):
+            harness.verify_ui_objects(str(manifest_path), maximum_bytes=1024)

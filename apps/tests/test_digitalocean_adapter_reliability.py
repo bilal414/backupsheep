@@ -345,6 +345,8 @@ class DigitalOceanClientTests(SimpleTestCase):
             "target_kind": "droplet",
             "provider_id": "901",
             "name": "bs-e2e-do-test-run-restored",
+            "snapshot_marker": "bs-ui-backup-marker",
+            "restore_marker": "bs-ui-restore-marker",
             "marker": "bs-ui-restore-marker",
             "run_tag": "bs-e2e-do-test-run",
             "snapshot_id": "123456",
@@ -356,7 +358,7 @@ class DigitalOceanClientTests(SimpleTestCase):
             "id": 901,
             "name": witness["name"],
             "tags": [
-                witness["marker"],
+                witness["restore_marker"],
                 "backupsheep-restore-droplet",
             ],
             "image": {"id": 123456},
@@ -378,6 +380,107 @@ class DigitalOceanClientTests(SimpleTestCase):
             [candidate], self._restore_witness()
         )
         self.assertEqual(str(selected["id"]), "901")
+
+    def test_harness_refuses_restore_marker_mismatch(self):
+        witness = self._restore_witness()
+        witness["marker"] = "bs-ui-other-restore-marker"
+        with self.assertRaises(live_harness.HarnessError):
+            live_harness.select_ui_restore_witness(
+                [self._restore_candidate()], witness
+            )
+
+    def test_cli_exposes_distinct_snapshot_and_restore_witnesses(self):
+        parsed = live_harness._parser().parse_args(
+            [
+                "--run-id",
+                "bs-e2e-do-test-run",
+                "--ui-droplet-snapshot-marker",
+                "bs-ui-backup-marker",
+                "--ui-droplet-restore-marker",
+                "bs-ui-restore-marker",
+            ]
+        )
+        self.assertEqual(parsed.ui_droplet_snapshot_marker, "bs-ui-backup-marker")
+        self.assertEqual(parsed.ui_droplet_restore_marker, "bs-ui-restore-marker")
+
+    def test_harness_accepts_distinct_snapshot_and_restore_markers(self):
+        witness = self._restore_witness()
+        harness = object.__new__(live_harness.DigitalOceanHarness)
+        harness.run_tag = witness["run_tag"]
+        harness.account = {"team_uuid": "team-uuid"}
+        harness.headers = {"Authorization": "Bearer redacted"}
+        harness.ledger = mock.Mock()
+        harness.ledger.get.return_value = {
+            "cleanup_state": "eligible",
+            "ownership": {
+                "team_uuid": "team-uuid",
+                "run_tag": witness["run_tag"],
+                "snapshot_marker": witness["snapshot_marker"],
+                "marker": witness["snapshot_marker"],
+                "source_id": "source-1",
+                "resource_type": "volume",
+            },
+        }
+        candidate = {
+            "id": 901,
+            "name": witness["name"],
+            "tags": [
+                witness["restore_marker"],
+                "backupsheep-restore-volume",
+            ],
+            "snapshot_id": 123456,
+            "status": "available",
+        }
+        harness._read_resource = mock.Mock(return_value=candidate)
+        with mock.patch.object(
+            live_harness, "iter_collection", return_value=[candidate]
+        ):
+            result = harness.verify_ui_restore(
+                target_kind="volume",
+                provider_id=witness["provider_id"],
+                name=witness["name"],
+                snapshot_id=witness["snapshot_id"],
+                run_tag=witness["run_tag"],
+                snapshot_marker=witness["snapshot_marker"],
+                restore_marker=witness["restore_marker"],
+            )
+
+        self.assertEqual(result["snapshot_marker"], witness["snapshot_marker"])
+        self.assertEqual(result["restore_marker"], witness["restore_marker"])
+        ownership = harness.ledger.record.call_args.kwargs["ownership"]
+        self.assertEqual(ownership["snapshot_marker"], witness["snapshot_marker"])
+        self.assertEqual(ownership["restore_marker"], witness["restore_marker"])
+
+    def test_harness_refuses_snapshot_marker_mismatch_before_inventory(self):
+        witness = self._restore_witness()
+        harness = object.__new__(live_harness.DigitalOceanHarness)
+        harness.run_tag = witness["run_tag"]
+        harness.account = {"team_uuid": "team-uuid"}
+        harness.ledger = mock.Mock()
+        harness.ledger.get.return_value = {
+            "cleanup_state": "eligible",
+            "ownership": {
+                "team_uuid": "team-uuid",
+                "run_tag": witness["run_tag"],
+                "snapshot_marker": witness["snapshot_marker"],
+                "source_id": "source-1",
+                "resource_type": "volume",
+            },
+        }
+
+        with mock.patch.object(live_harness, "iter_collection") as inventory:
+            with self.assertRaises(live_harness.HarnessError):
+                harness.verify_ui_restore(
+                    target_kind="volume",
+                    provider_id=witness["provider_id"],
+                    name=witness["name"],
+                    snapshot_id=witness["snapshot_id"],
+                    run_tag=witness["run_tag"],
+                    snapshot_marker="bs-ui-wrong-backup-marker",
+                    restore_marker=witness["restore_marker"],
+                )
+
+        inventory.assert_not_called()
 
     def test_harness_refuses_foreign_ui_restore_witness(self):
         with self.assertRaises(live_harness.HarnessError):
@@ -410,7 +513,7 @@ class DigitalOceanClientTests(SimpleTestCase):
             "ownership": {
                 "team_uuid": "team-uuid",
                 "run_tag": "foreign-run",
-                "marker": "bs-ui-restore-marker",
+                "snapshot_marker": "bs-ui-backup-marker",
                 "source_id": "source-volume",
                 "resource_type": "volume",
             },
@@ -421,7 +524,7 @@ class DigitalOceanClientTests(SimpleTestCase):
                 target_kind="volume",
                 provider_id="901",
                 name="bs-e2e-do-test-run-restored",
-                marker="bs-ui-restore-marker",
+                marker="bs-ui-backup-marker",
                 snapshot_id="123456",
                 run_tag=harness.run_tag,
             )

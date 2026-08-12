@@ -360,6 +360,55 @@ def _restore_target_owned(resource: dict, witness: dict) -> bool:
     return _digitalocean_source_tag(source_id) in normalized
 
 
+def _stored_snapshot_marker(ownership: dict) -> str:
+    """Read a snapshot marker without conflating it with a restore marker.
+
+    ``marker`` is the field used by older ledgers. It is accepted only when
+    it is the sole witness or agrees exactly with the new explicit field.
+    """
+
+    if not isinstance(ownership, dict):
+        return ""
+    explicit = str(ownership.get("snapshot_marker") or "").strip()
+    legacy = str(ownership.get("marker") or "").strip()
+    if explicit and legacy and explicit != legacy:
+        raise HarnessError("The snapshot ledger contains conflicting marker witnesses.")
+    return explicit or legacy
+
+
+def _stored_restore_marker(ownership: dict) -> str:
+    """Read a restore marker while safely supporting pre-split ledgers."""
+
+    if not isinstance(ownership, dict):
+        return ""
+    explicit = str(ownership.get("restore_marker") or "").strip()
+    legacy = str(ownership.get("marker") or "").strip()
+    if explicit and legacy and explicit != legacy:
+        raise HarnessError("The restore ledger contains conflicting marker witnesses.")
+    return explicit or legacy
+
+
+def _resolve_legacy_marker(
+    *,
+    snapshot_marker: str | None,
+    restore_marker: str | None,
+    legacy_marker: str | None,
+) -> tuple[str, str]:
+    """Resolve old one-marker callers only when both roles are unambiguous."""
+
+    snapshot = str(snapshot_marker or "").strip()
+    restore = str(restore_marker or "").strip()
+    legacy = str(legacy_marker or "").strip()
+    if legacy and snapshot and legacy != snapshot:
+        raise HarnessError("The legacy marker conflicts with the snapshot marker.")
+    if legacy and restore and legacy != restore:
+        raise HarnessError("The legacy marker conflicts with the restore marker.")
+    if legacy:
+        snapshot = snapshot or legacy
+        restore = restore or legacy
+    return snapshot, restore
+
+
 def select_ui_restore_witness(candidates: list[dict], witness: dict) -> dict:
     """Select one exact UI restore and fail on missing, duplicate, or foreign rows."""
 
@@ -1334,7 +1383,21 @@ class DigitalOceanHarness:
             source_witness=f"payload:{kind}:{resource_id}",
         )
 
-    def verify_snapshot(self, *, kind: str, marker: str, source_id: str):
+    def verify_snapshot(
+        self,
+        *,
+        kind: str,
+        source_id: str,
+        snapshot_marker: str | None = None,
+        marker: str | None = None,
+    ):
+        snapshot_marker, _restore_marker = _resolve_legacy_marker(
+            snapshot_marker=snapshot_marker,
+            restore_marker=None,
+            legacy_marker=marker,
+        )
+        if not snapshot_marker:
+            raise HarnessError("The snapshot backup marker is required.")
         resource_type = "droplet" if kind == "droplet" else "volume"
         source_kind = f"source_{resource_type}"
         source_entry = self.ledger.get(source_kind, str(source_id))
@@ -1353,7 +1416,7 @@ class DigitalOceanHarness:
                 )
         snapshot = find_exact_snapshot(
             headers=self.headers,
-            marker=marker,
+            marker=snapshot_marker,
             source_id=source_id,
             resource_type=resource_type,
         )
@@ -1367,11 +1430,16 @@ class DigitalOceanHarness:
             ownership={
                 "team_uuid": self.account["team_uuid"],
                 "run_tag": self.run_tag,
-                "marker": str(marker),
+                # Keep the legacy alias for old cleanup tooling. It is
+                # deliberately identical to the explicit snapshot witness.
+                "snapshot_marker": snapshot_marker,
+                "marker": snapshot_marker,
                 "source_id": str(source_id),
                 "resource_type": resource_type,
             },
-            source_witness=f"snapshot:{resource_type}:{source_id}:{marker}",
+            source_witness=(
+                f"snapshot:{resource_type}:{source_id}:{snapshot_marker}"
+            ),
         )
         return {
             "id": snapshot_id,
@@ -1386,12 +1454,19 @@ class DigitalOceanHarness:
         target_kind: str,
         provider_id: str,
         name: str,
-        marker: str,
         snapshot_id: str,
         run_tag: str,
+        snapshot_marker: str | None = None,
+        restore_marker: str | None = None,
+        marker: str | None = None,
     ) -> dict:
         if target_kind not in {"droplet", "volume"}:
             raise HarnessError("The UI restore target kind is invalid.")
+        snapshot_marker, restore_marker = _resolve_legacy_marker(
+            snapshot_marker=snapshot_marker,
+            restore_marker=restore_marker,
+            legacy_marker=marker,
+        )
         snapshot_entry = self.ledger.get(
             f"ui_snapshot_{target_kind}", str(snapshot_id)
         )
@@ -1403,12 +1478,21 @@ class DigitalOceanHarness:
         if run_tag != self.run_tag:
             raise HarnessError("The UI restore run tag does not match this harness run.")
         snapshot_ownership = snapshot_entry.get("ownership")
+        stored_snapshot_marker = _stored_snapshot_marker(snapshot_ownership)
+        if not snapshot_marker:
+            # A legacy caller may omit the snapshot marker only when the exact
+            # ledgered snapshot supplies one unambiguous witness. This does
+            # not infer a restore marker from the snapshot marker.
+            snapshot_marker = stored_snapshot_marker
+        if not restore_marker:
+            raise HarnessError("The UI restore marker is required.")
         if (
             not isinstance(snapshot_ownership, dict)
             or str(snapshot_ownership.get("team_uuid") or "")
             != str(self.account["team_uuid"])
             or str(snapshot_ownership.get("run_tag") or "") != self.run_tag
-            or str(snapshot_ownership.get("marker") or "") != str(marker)
+            or not snapshot_marker
+            or stored_snapshot_marker != snapshot_marker
             or str(snapshot_ownership.get("source_id") or "") == ""
             or str(snapshot_ownership.get("resource_type") or "")
             != target_kind
@@ -1420,7 +1504,7 @@ class DigitalOceanHarness:
             "target_kind": target_kind,
             "provider_id": str(provider_id),
             "name": str(name),
-            "marker": str(marker),
+            "marker": restore_marker,
             "run_tag": str(run_tag),
             "snapshot_id": str(snapshot_id),
         }
@@ -1429,7 +1513,7 @@ class DigitalOceanHarness:
             f"/v2/{plural}",
             plural,
             headers=self.headers,
-            params={"tag_name": marker},
+            params={"tag_name": restore_marker},
         )
         selected = select_ui_restore_witness(candidates, witness)
         resource = self._read_resource(
@@ -1442,7 +1526,8 @@ class DigitalOceanHarness:
         ownership = {
             "team_uuid": self.account["team_uuid"],
             "run_tag": self.run_tag,
-            "marker": str(marker),
+            "snapshot_marker": snapshot_marker,
+            "restore_marker": restore_marker,
             "snapshot_id": str(snapshot_id),
             "target_kind": target_kind,
             "source_tag": _digitalocean_source_tag(snapshot_id),
@@ -1459,7 +1544,9 @@ class DigitalOceanHarness:
             resource_id=str(provider_id),
             name=str(name),
             ownership=ownership,
-            source_witness=f"ui-restore:{target_kind}:{snapshot_id}:{marker}",
+            source_witness=(
+                f"ui-restore:{target_kind}:{snapshot_id}:{restore_marker}"
+            ),
         )
         if target_kind == "droplet":
             self._attach_payload_firewall(str(provider_id))
@@ -1472,6 +1559,8 @@ class DigitalOceanHarness:
             "provider_id": str(provider_id),
             "target_kind": target_kind,
             "snapshot_id": str(snapshot_id),
+            "snapshot_marker": snapshot_marker,
+            "restore_marker": restore_marker,
             "payload_verified": target_kind == "droplet",
         }
 
@@ -2688,11 +2777,12 @@ class DigitalOceanHarness:
                 if not self.ledger.cleanup_eligible(kind, resource_id):
                     continue
                 ownership = entry.get("ownership") or {}
+                restore_marker = _stored_restore_marker(ownership)
                 witness = {
                     "target_kind": target_kind,
                     "provider_id": resource_id,
                     "name": str(entry.get("name") or ""),
-                    "marker": str(ownership.get("marker") or ""),
+                    "marker": restore_marker,
                     "run_tag": str(ownership.get("run_tag") or ""),
                     "snapshot_id": str(ownership.get("snapshot_id") or ""),
                 }
@@ -2742,6 +2832,7 @@ class DigitalOceanHarness:
                 if not self.ledger.cleanup_eligible(kind, resource_id):
                     continue
                 ownership = entry.get("ownership") or {}
+                snapshot_marker = _stored_snapshot_marker(ownership)
                 if (
                     ownership.get("team_uuid") != self.account["team_uuid"]
                     or ownership.get("run_tag") != self.run_tag
@@ -2769,7 +2860,7 @@ class DigitalOceanHarness:
                     isinstance(snapshot, dict)
                     and str(snapshot.get("id") or "") == resource_id
                     and str(snapshot.get("name") or "")
-                    == str(ownership.get("marker") or "")
+                    == snapshot_marker
                     and str(snapshot.get("resource_id") or "")
                     == str(ownership.get("source_id") or "")
                     and str(snapshot.get("resource_type") or "")
@@ -2963,19 +3054,39 @@ def _parser():
     )
     parser.add_argument("--provision-sources", action="store_true")
     parser.add_argument("--cleanup", action="store_true")
-    parser.add_argument("--droplet-snapshot-marker")
+    parser.add_argument(
+        "--droplet-snapshot-marker",
+        "--droplet-backup-marker",
+        dest="droplet_snapshot_marker",
+    )
     parser.add_argument("--droplet-source-id")
-    parser.add_argument("--volume-snapshot-marker")
+    parser.add_argument(
+        "--volume-snapshot-marker",
+        "--volume-backup-marker",
+        dest="volume_snapshot_marker",
+    )
     parser.add_argument("--volume-source-id")
     parser.add_argument("--verify-ui-droplet-restore", action="store_true")
     parser.add_argument("--ui-droplet-restore-id")
     parser.add_argument("--ui-droplet-restore-name")
+    parser.add_argument(
+        "--ui-droplet-snapshot-marker",
+        "--ui-droplet-backup-marker",
+        "--ui-droplet-restore-snapshot-marker",
+        dest="ui_droplet_snapshot_marker",
+    )
     parser.add_argument("--ui-droplet-restore-marker")
     parser.add_argument("--ui-droplet-restore-snapshot-id")
     parser.add_argument("--ui-droplet-restore-run-tag")
     parser.add_argument("--verify-ui-volume-restore", action="store_true")
     parser.add_argument("--ui-volume-restore-id")
     parser.add_argument("--ui-volume-restore-name")
+    parser.add_argument(
+        "--ui-volume-snapshot-marker",
+        "--ui-volume-backup-marker",
+        "--ui-volume-restore-snapshot-marker",
+        dest="ui_volume_snapshot_marker",
+    )
     parser.add_argument("--ui-volume-restore-marker")
     parser.add_argument("--ui-volume-restore-snapshot-id")
     parser.add_argument("--ui-volume-restore-run-tag")
@@ -3033,7 +3144,7 @@ def main(argv=None):
             raise HarnessError("Droplet snapshot marker and source ID are required together.")
         result["droplet_snapshot"] = harness.verify_snapshot(
             kind="droplet",
-            marker=args.droplet_snapshot_marker,
+            snapshot_marker=args.droplet_snapshot_marker,
             source_id=args.droplet_source_id,
         )
     if args.volume_snapshot_marker or args.volume_source_id:
@@ -3041,35 +3152,55 @@ def main(argv=None):
             raise HarnessError("Volume snapshot marker and source ID are required together.")
         result["volume_snapshot"] = harness.verify_snapshot(
             kind="volume",
-            marker=args.volume_snapshot_marker,
+            snapshot_marker=args.volume_snapshot_marker,
             source_id=args.volume_source_id,
         )
     if args.verify_ui_droplet_restore:
         values = {
             "provider_id": args.ui_droplet_restore_id,
             "name": args.ui_droplet_restore_name,
-            "marker": args.ui_droplet_restore_marker,
             "snapshot_id": args.ui_droplet_restore_snapshot_id,
+            "snapshot_marker": args.ui_droplet_snapshot_marker,
+            "restore_marker": args.ui_droplet_restore_marker,
         }
-        if any(not value for value in values.values()):
+        if any(
+            not values[key]
+            for key in ("provider_id", "name", "snapshot_id", "restore_marker")
+        ):
             raise HarnessError("All exact UI Droplet restore witnesses are required.")
+        legacy_marker = (
+            args.ui_droplet_restore_marker
+            if not args.ui_droplet_snapshot_marker
+            else None
+        )
         result["ui_droplet_restore"] = harness.verify_ui_restore(
             target_kind="droplet",
             run_tag=args.ui_droplet_restore_run_tag or harness.run_tag,
+            marker=legacy_marker,
             **values,
         )
     if args.verify_ui_volume_restore:
         values = {
             "provider_id": args.ui_volume_restore_id,
             "name": args.ui_volume_restore_name,
-            "marker": args.ui_volume_restore_marker,
             "snapshot_id": args.ui_volume_restore_snapshot_id,
+            "snapshot_marker": args.ui_volume_snapshot_marker,
+            "restore_marker": args.ui_volume_restore_marker,
         }
-        if any(not value for value in values.values()):
+        if any(
+            not values[key]
+            for key in ("provider_id", "name", "snapshot_id", "restore_marker")
+        ):
             raise HarnessError("All exact UI volume restore witnesses are required.")
+        legacy_marker = (
+            args.ui_volume_restore_marker
+            if not args.ui_volume_snapshot_marker
+            else None
+        )
         result["ui_volume_restore"] = harness.verify_ui_restore(
             target_kind="volume",
             run_tag=args.ui_volume_restore_run_tag or harness.run_tag,
+            marker=legacy_marker,
             **values,
         )
     if args.spaces_setup:

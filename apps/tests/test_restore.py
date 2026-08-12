@@ -9,6 +9,7 @@ from unittest import mock
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps._tasks.exceptions import IntegrationValidationError
+from apps.api.v1.utils.http import request_timeout
 from apps.api.v1.node.views import CoreNodeView
 from apps.console.backup.models import CoreCloudRestore
 from apps.console.connection.models import CoreAuthDatabase
@@ -152,20 +153,34 @@ class DigitalOceanRestoreTests(BaseTestCase):
 
     @staticmethod
     def _restore_identity(node, backup, restore):
+        target_kind = "droplet" if node.type == CoreNode.Type.CLOUD else "volume"
         marker, _params = _prepare_cloud_restore(
             restore,
             provider="digitalocean",
             source_id=backup.unique_id,
-            target_kind="droplet",
+            target_kind=target_kind,
             target_name=restore.name,
         )
         identity, _params = node.digitalocean._prepare_digitalocean_restore_identity(
             restore,
             marker=marker,
             source_id=backup.unique_id,
-            target_kind="droplet",
+            target_kind=target_kind,
         )
         return identity
+
+    def _make_volume_node_with_auth(self):
+        from apps.console.connection.models import CoreAuthDigitalOcean
+
+        node = factories.make_cloud_node(
+            self.account,
+            self.member,
+            node_type=CoreNode.Type.VOLUME,
+        )
+        node.digitalocean.unique_id = "source-volume"
+        node.digitalocean.save(update_fields=["unique_id", "modified"])
+        CoreAuthDigitalOcean.objects.create(connection=node.connection)
+        return node
 
     @staticmethod
     def _owned_droplet(node, backup, restore, *, resource_id, status="new"):
@@ -181,6 +196,23 @@ class DigitalOceanRestoreTests(BaseTestCase):
                 identity["kind_tag"],
             ],
             "image": {"id": int(backup.unique_id)},
+            "status": status,
+        }
+
+    @staticmethod
+    def _owned_volume(node, backup, restore, *, resource_id, status="new"):
+        identity = DigitalOceanRestoreTests._restore_identity(
+            node, backup, restore
+        )
+        return {
+            "id": resource_id,
+            "name": identity["target_name"],
+            "tags": [
+                identity["marker"],
+                identity["source_tag"],
+                identity["kind_tag"],
+            ],
+            "snapshot_id": str(backup.unique_id),
             "status": status,
         }
 
@@ -270,6 +302,195 @@ class DigitalOceanRestoreTests(BaseTestCase):
             with self._patch_client(), \
                     mock.patch("apps.console.node.models.requests.get", return_value=get_resp):
                 self.assertEqual(node.digitalocean.check_restore(restore), expected)
+
+    def test_restore_snapshot_volume_uses_snapshot_and_atomic_identity_tags(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(node, unique_id="volume-snapshot-123")
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored-volume",
+            params={"region": "nyc3"},
+        )
+        post_resp = mock.MagicMock(status_code=202)
+        post_resp.json.return_value = {
+            "volume": self._owned_volume(
+                node, backup, restore, resource_id="restored-volume-1"
+            )
+        }
+
+        with self._patch_client(), mock.patch(
+            "apps.console.node.models.requests.post", return_value=post_resp
+        ) as post:
+            node.digitalocean.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, "restored-volume-1")
+        self.assertEqual(
+            post.call_args.args[0], "https://api.digitalocean.com/v2/volumes"
+        )
+        sent_json = post.call_args.kwargs["json"]
+        identity = self._restore_identity(node, backup, restore)
+        self.assertEqual(sent_json["snapshot"], backup.unique_id)
+        self.assertNotIn("snapshot_id", sent_json)
+        self.assertEqual(
+            sent_json["tags"],
+            [identity["marker"], identity["source_tag"], identity["kind_tag"]],
+        )
+        self.assertEqual(post.call_args.kwargs["timeout"], request_timeout())
+
+    def test_restore_snapshot_volume_requires_exact_snapshot_and_source_tag(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(node, unique_id="volume-snapshot-123")
+
+        cases = (
+            ("wrong-snapshot", {"snapshot_id": "foreign-snapshot"}),
+            ("missing-source-tag", {"remove_source_tag": True}),
+        )
+        for suffix, mutation in cases:
+            with self.subTest(case=suffix):
+                restore = CoreCloudRestore.objects.create(
+                    node=node,
+                    backup_id=backup.id,
+                    name=f"restored-{suffix}",
+                    params={"region": "nyc3"},
+                )
+                volume = self._owned_volume(
+                    node, backup, restore, resource_id=f"target-{suffix}"
+                )
+                identity = self._restore_identity(node, backup, restore)
+                if mutation.get("remove_source_tag"):
+                    volume["tags"].remove(identity["source_tag"])
+                volume.update(
+                    {
+                        key: value
+                        for key, value in mutation.items()
+                        if key != "remove_source_tag"
+                    }
+                )
+                post_resp = mock.MagicMock(status_code=202)
+                post_resp.json.return_value = {"volume": volume}
+
+                with self._patch_client(), mock.patch(
+                    "apps.console.node.models.requests.post", return_value=post_resp
+                ) as post:
+                    result = node.digitalocean.restore_snapshot(backup, restore)
+
+                restore.refresh_from_db()
+                self.assertEqual(result, CoreCloudRestore.Status.IN_PROGRESS)
+                self.assertIsNone(restore.resource_id)
+                self.assertTrue(restore.params["_bs_create_outcome_unknown"])
+                self.assertEqual(post.call_count, 1)
+
+    def test_restore_snapshot_volume_lost_response_adopts_one_exact_target_without_replay(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(node, unique_id="volume-snapshot-123")
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored-volume",
+            params={"region": "nyc3"},
+        )
+        with self._patch_client(), mock.patch(
+            "apps.console.node.models.requests.post",
+            side_effect=TimeoutError("lost response"),
+        ) as post:
+            first = node.digitalocean.restore_snapshot(backup, restore)
+            restore.refresh_from_db()
+            candidate = self._owned_volume(
+                node, backup, restore, resource_id="adopted-volume-1", status="creating"
+            )
+            with mock.patch.object(
+                node.digitalocean,
+                "_find_restore_resource",
+                return_value=[candidate],
+            ):
+                second = node.digitalocean.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(first, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertFalse(restore.params["_bs_create_outcome_unknown"])
+        self.assertIsNone(second)
+        self.assertEqual(restore.resource_id, "adopted-volume-1")
+        self.assertEqual(post.call_count, 1)
+
+    def test_restore_snapshot_volume_lost_response_rejects_duplicate_targets_without_replay(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(node, unique_id="volume-snapshot-123")
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored-volume",
+            params={"region": "nyc3"},
+        )
+        with self._patch_client(), mock.patch(
+            "apps.console.node.models.requests.post",
+            side_effect=TimeoutError("lost response"),
+        ) as post:
+            node.digitalocean.restore_snapshot(backup, restore)
+            restore.refresh_from_db()
+            first = self._owned_volume(
+                node, backup, restore, resource_id="duplicate-volume-1"
+            )
+            second = self._owned_volume(
+                node, backup, restore, resource_id="duplicate-volume-2"
+            )
+            with mock.patch.object(
+                node.digitalocean,
+                "_find_restore_resource",
+                return_value=[first, second],
+            ):
+                with self.assertRaises(Exception) as raised:
+                    node.digitalocean.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(
+            getattr(raised.exception, "code", None), "PROVIDER_DUPLICATE_MATCH"
+        )
+        self.assertEqual(restore.status, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(
+            restore.params["_bs_last_error_code"], "PROVIDER_DUPLICATE_MATCH"
+        )
+        self.assertIsNone(restore.resource_id)
+        self.assertEqual(post.call_count, 1)
+
+    def test_restore_snapshot_volume_lost_response_rejects_foreign_target_without_replay(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(node, unique_id="volume-snapshot-123")
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored-volume",
+            params={"region": "nyc3"},
+        )
+        with self._patch_client(), mock.patch(
+            "apps.console.node.models.requests.post",
+            side_effect=TimeoutError("lost response"),
+        ) as post:
+            node.digitalocean.restore_snapshot(backup, restore)
+            restore.refresh_from_db()
+            foreign = self._owned_volume(
+                node, backup, restore, resource_id="foreign-volume-1"
+            )
+            foreign["snapshot_id"] = "foreign-snapshot"
+            with mock.patch.object(
+                node.digitalocean,
+                "_find_restore_resource",
+                return_value=[foreign],
+            ):
+                with self.assertRaises(Exception) as raised:
+                    node.digitalocean.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(
+            getattr(raised.exception, "code", None), "PROVIDER_OWNERSHIP_MISMATCH"
+        )
+        self.assertEqual(restore.status, CoreCloudRestore.Status.FAILED)
+        self.assertEqual(
+            restore.params["_bs_last_error_code"], "PROVIDER_OWNERSHIP_MISMATCH"
+        )
+        self.assertIsNone(restore.resource_id)
+        self.assertEqual(post.call_count, 1)
 
 
 class LightsailRestoreTests(BaseTestCase):

@@ -178,6 +178,9 @@ class UtilBackup(TimeStampedModel):
         "PROVIDER_CREATE_OUTCOME_UNKNOWN": (
             "The provider request outcome is unknown; reconciliation is required."
         ),
+        "PROVIDER_RECONCILIATION_REQUIRED": (
+            "The provider operation requires reconciliation before it can continue."
+        ),
         "PROVIDER_NOT_FOUND": "The provider resource was not found.",
         "PROVIDER_AUTH_FAILED": (
             "The provider rejected the configured credentials or permissions."
@@ -238,6 +241,13 @@ class UtilBackup(TimeStampedModel):
         "WORKER_LEASE_LOST": (
             "This worker lost ownership of the backup execution lease."
         ),
+    }
+
+    # Provider reconciliation is a durable coordination outcome, not an ordinary
+    # terminal error. Keep the public reason a bounded, known token so the API/UI
+    # can explain recovery without exposing provider response text.
+    RECONCILIATION_ERROR_REASONS = {
+        "PROVIDER_RECONCILIATION_REQUIRED": "provider_reconciliation_required",
     }
 
     def __str__(self):
@@ -684,13 +694,18 @@ class UtilBackup(TimeStampedModel):
                 update_fields.append("next_retry_at")
 
             # Required/in-progress reconciliation is no longer actionable once all
-            # local storage points have reached a terminal outcome. Preserve manual
-            # review, which is an explicit operator decision rather than a worker
-            # lease condition.
+            # local storage points have reached a terminal outcome. Preserve an
+            # explicit provider reconciliation failure: a terminal backup row can
+            # still need operator/provider investigation, and resolving it here
+            # would erase the durable evidence before the API/UI reads it. Manual
+            # review is preserved separately as an explicit operator decision.
             if state.reconciliation_state in {
                 state.ReconciliationState.REQUIRED,
                 state.ReconciliationState.IN_PROGRESS,
-            }:
+            } and not (
+                terminal_phase == "failed"
+                and state.last_error_code == "PROVIDER_RECONCILIATION_REQUIRED"
+            ):
                 state.reconciliation_state = state.ReconciliationState.RESOLVED
                 state.reconciliation_reason = "backup_finalized"
                 update_fields.extend(["reconciliation_state", "reconciliation_reason"])
@@ -740,6 +755,15 @@ class UtilBackup(TimeStampedModel):
                 execution_metadata = dict(state.metadata or {})
                 execution_metadata["retryable"] = bool(retryable)
                 state.metadata = execution_metadata
+            if not reconciliation_reason:
+                reconciliation_reason = self.RECONCILIATION_ERROR_REASONS.get(
+                    safe_code, ""
+                )
+                if reconciliation_reason and reconciliation_metadata is None:
+                    reconciliation_metadata = {
+                        "source": "provider_outcome",
+                        "error_code": safe_code,
+                    }
             if reconciliation_reason:
                 if (
                     state.reconciliation_state

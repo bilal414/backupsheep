@@ -127,6 +127,7 @@ SERVICE_TRANSITIONAL_STATES = {
 }
 SERVICE_FAILED_STATES = {"error", "failed", "stopped", "terminated"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+BACKUP_ROW_ID_RE = re.compile(r"^[1-9][0-9]*$")
 UPCLOUD_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
@@ -2128,6 +2129,7 @@ class UpCloudLiveHarness:
         etag: str,
         backup_id: str,
         metadata: dict,
+        backup_uuid: str = "",
     ) -> dict:
         if kind not in OBJECT_LEDGER_KINDS:
             raise HarnessError("The UpCloud object ledger kind is invalid.")
@@ -2148,9 +2150,13 @@ class UpCloudLiveHarness:
                 "byte_count": int(byte_count),
                 "etag": _etag(etag),
                 "backup_id": backup_id,
+                "backup_uuid": backup_uuid,
                 "metadata": dict(metadata),
             },
-            source_witness=f"{bucket}:{kind}:{backup_id or self.config.run_id}",
+            source_witness=(
+                f"{bucket}:{kind}:{backup_uuid or backup_id or self.config.run_id}"
+                f":{backup_id}"
+            ),
         )
 
     def _exact_key_versions(self, inventory: dict, key: str) -> list[dict]:
@@ -2344,6 +2350,7 @@ class UpCloudLiveHarness:
             byte_count=len(marker_body),
             etag=head.get("ETag"),
             backup_id="",
+            backup_uuid="",
             metadata=marker_metadata,
         )
         if self.intents.get(marker_intent_key):
@@ -2383,13 +2390,19 @@ class UpCloudLiveHarness:
         if not isinstance(rows, list) or not rows or len(rows) > 100:
             raise HarnessError("The UI object manifest must contain 1-100 objects.")
         seen = set()
+        seen_keys = set()
         verified = []
         for row in rows:
             if not isinstance(row, dict):
                 raise HarnessError("The UI object manifest contains a malformed row.")
             object_kind = str(row.get("kind") or "")
             kind = UI_OBJECT_KINDS.get(object_kind)
-            backup_id = str(row.get("backup_id") or "")
+            backup_id = self._manifest_backup_row_id(
+                row.get("backup_id"), "backup_id"
+            )
+            backup_uuid = self._manifest_uuid(
+                row.get("backup_uuid"), "backup_uuid"
+            )
             key = str(row.get("object_key") or "")
             sha256 = str(row.get("sha256") or "").casefold()
             version_id = str(row.get("version_id") or "")
@@ -2398,12 +2411,12 @@ class UpCloudLiveHarness:
                 byte_count = int(row.get("byte_count"))
             except (TypeError, ValueError):
                 raise HarnessError("A UI object byte count is malformed.") from None
-            identity = (object_kind, backup_id)
+            identity = (object_kind, backup_id, backup_uuid)
             if (
                 not kind
-                or not backup_id
                 or identity in seen
-                or key != f"{runtime['prefix']}{backup_id}.zip"
+                or key in seen_keys
+                or key != f"{runtime['prefix']}{backup_uuid}.zip"
                 or not SHA256_RE.fullmatch(sha256)
                 or byte_count < 0
                 or byte_count > maximum_bytes
@@ -2413,6 +2426,7 @@ class UpCloudLiveHarness:
             ):
                 raise HarnessError("A UI object witness is incomplete or out of scope.")
             seen.add(identity)
+            seen_keys.add(key)
             inventory = self._s3_inventory(client, runtime["bucket_name"])
             candidates = self._exact_key_versions(inventory, key)
             if len(candidates) != 1 or str(candidates[0].get("VersionId") or "") != version_id:
@@ -2460,12 +2474,14 @@ class UpCloudLiveHarness:
                 byte_count=byte_count,
                 etag=etag,
                 backup_id=backup_id,
+                backup_uuid=backup_uuid,
                 metadata=expected_metadata,
             )
             verified.append(
                 {
                     "kind": object_kind,
                     "backup_id": backup_id,
+                    "backup_uuid": backup_uuid,
                     "object_key": key,
                     "version_id": version_id,
                     "byte_count": byte_count,
@@ -5255,6 +5271,20 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
         value = str(value or "").strip().casefold()
         if not UPCLOUD_UUID_RE.fullmatch(value):
             raise HarnessError(f"{field} must be an exact UpCloud UUID.")
+        return value
+
+    @staticmethod
+    def _manifest_backup_row_id(value, field: str) -> str:
+        if isinstance(value, bool) or value is None:
+            raise HarnessError(f"{field} must be a positive numeric BackupSheep row ID.")
+        if isinstance(value, int):
+            value = str(value)
+        elif isinstance(value, str):
+            value = value.strip()
+        else:
+            raise HarnessError(f"{field} must be a positive numeric BackupSheep row ID.")
+        if not BACKUP_ROW_ID_RE.fullmatch(value):
+            raise HarnessError(f"{field} must be a positive numeric BackupSheep row ID.")
         return value
 
     @staticmethod

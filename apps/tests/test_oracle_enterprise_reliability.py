@@ -42,7 +42,11 @@ from apps._tasks.helper import tasks as helper_tasks
 from apps.api.v1.cloud.oracle.serializers import CoreCloudOracleWriteSerializer
 from apps.api.v1.volume.oracle.serializers import CoreVolumeOracleWriteSerializer
 from apps.api.v1.utils.api_helpers import bs_encrypt
-from apps.console.backup.models import CoreCloudRestore, CoreOracleBackup
+from apps.console.backup.models import (
+    CoreBackupExecution,
+    CoreCloudRestore,
+    CoreOracleBackup,
+)
 from apps.console.connection.models import CoreAuthOracle, CoreConnection, CoreIntegration
 from apps.console.node.models import CoreNode, CoreOracle
 from apps.console.utils.models import UtilBackup
@@ -653,6 +657,25 @@ class OracleEnterpriseReliabilityTests(BaseTestCase):
         execution.refresh_from_db()
         self.assertEqual(
             execution.last_error_code, "PROVIDER_RECONCILIATION_REQUIRED"
+        )
+        self.assertEqual(
+            execution.reconciliation_state,
+            CoreBackupExecution.ReconciliationState.REQUIRED,
+        )
+        self.assertEqual(
+            execution.reconciliation_reason, "provider_reconciliation_required"
+        )
+        self.assertEqual(
+            execution.reconciliation_metadata["source"], "provider_outcome"
+        )
+        self.assertEqual(
+            execution.reconciliation_metadata["error_code"],
+            "PROVIDER_RECONCILIATION_REQUIRED",
+        )
+        self.assertEqual(execution.reconciliation_metadata["provider"], "oracle")
+        self.assertEqual(
+            execution.reconciliation_metadata["resource_id"],
+            backup.unique_id,
         )
         client.get_volume_backup.assert_not_called()
 

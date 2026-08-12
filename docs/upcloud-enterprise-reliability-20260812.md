@@ -175,6 +175,14 @@ version ID.
    uploads; any unledgered item blocks cleanup. It then removes exact
    dependencies and deletes the service with `force=false`.
 
+The object manifest keeps the numeric BackupSheep ownership marker separate from
+the UUID used in the provider object key. Each website/database row must include
+`backup_id` as the positive numeric BackupSheep backup row ID, `backup_uuid` as
+the exact backup UUID, and `object_key` equal to `<prefix><backup_uuid>.zip`.
+The verifier requires provider metadata
+`backupsheep-backup-id=<backup_id>`; it never derives that metadata from the
+object key.
+
 ## Offline test evidence
 
 - Named regression:

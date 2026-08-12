@@ -2813,6 +2813,17 @@ class CoreDigitalOcean(UtilCloud):
         source_values = self._digitalocean_restore_source_values(
             resource, identity["target_kind"]
         )
+        if identity["target_kind"] == "volume":
+            # DigitalOcean's volume response must carry both witnesses that
+            # bind the new volume to this exact source snapshot: the provider
+            # snapshot field and the BackupSheep source tag.  A tag-only
+            # candidate or a source field that is missing/ambiguous is not
+            # safe to adopt after a lost create response.
+            if identity["source_tag"] not in normalized_tags:
+                return False
+            return bool(source_values) and set(source_values) == {
+                str(identity["source_id"])
+            }
         if source_values:
             return set(source_values) == {str(identity["source_id"])}
         return identity["source_tag"] in normalized_tags
@@ -3039,7 +3050,7 @@ class CoreDigitalOcean(UtilCloud):
                 volume_data = {
                     "name": identity["target_name"],
                     "region": region,
-                    "snapshot_id": backup.unique_id,
+                    "snapshot": backup.unique_id,
                     "tags": provider_tags,
                 }
                 _restore_begin_mutation(restore)

@@ -275,12 +275,26 @@ def _record_provider_outcome(
             "The backup worker lost its execution lease while recording provider outcome."
         )
     if error_code:
+        reconciliation_reason = None
+        reconciliation_metadata = None
+        if error_code == "PROVIDER_RECONCILIATION_REQUIRED":
+            # A categorized provider poll can run after a previous successful
+            # adoption marked the execution resolved. Preserve a bounded,
+            # provider-independent reconciliation witness for the durable state
+            # machine; never pass provider response or exception text here.
+            reconciliation_reason = "provider_reconciliation_required"
+            reconciliation_metadata = {
+                "source": "provider_outcome",
+                "error_code": error_code,
+            }
         saved = backup.record_execution_error(
             code=error_code,
             message=backup.EXECUTION_ERROR_MESSAGES.get(
                 error_code, "The provider operation failed."
             ),
             retry_at=retry_at,
+            reconciliation_reason=reconciliation_reason,
+            reconciliation_metadata=reconciliation_metadata,
             **fence,
         )
         if fence and saved is None:

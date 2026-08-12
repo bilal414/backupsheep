@@ -64,6 +64,7 @@ MARKER_VERSION = "1"
 MYSQL_MARKER_TABLE = "__backupsheep_restore_marker"
 POSTGRES_MARKER_SCHEMA = "__backupsheep_restore"
 POSTGRES_MARKER_TABLE = "marker"
+POSTGRES_MARKER_RELATION_SENTINEL = "__BACKUPSHEEP_MARKER_RELATION_PRESENT__"
 MAX_DATABASE_IDENTIFIER_LENGTH = 63
 DATABASE_RESTORE_PERMISSION_ERROR_CODE = "DATABASE_RESTORE_PERMISSION_DENIED"
 SFTP_OPEN_TIMEOUT = 30
@@ -1206,6 +1207,27 @@ def _parse_marker_row(text, fields):
             raise RestoreError("database restore found an ambiguous BackupSheep marker.")
         return None
     return dict(zip(fields, rows[0]))
+
+
+def _postgres_marker_result(text, fields):
+    """Parse a safe marker lookup and report whether the relation exists.
+
+    ``_postgres_marker_query`` emits a sentinel only after ``to_regclass`` has
+    proven that the marker relation exists.  The boolean-prefix handling keeps
+    the parser tolerant of psql versions/configurations that echo the
+    ``\\gset`` query result, and also preserves compatibility with old worker
+    deliveries whose provider-side response contains only the marker row.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    relation_exists = False
+    if lines and lines[0] == POSTGRES_MARKER_RELATION_SENTINEL:
+        relation_exists = True
+        lines = lines[1:]
+    elif lines and lines[0].lower() in {"t", "true", "f", "false"}:
+        relation_exists = lines[0].lower() in {"t", "true"}
+        lines = lines[1:]
+    row = _parse_marker_row("\n".join(lines), fields)
+    return row, relation_exists or row is not None
 
 
 def _mysql_query(
@@ -2456,9 +2478,46 @@ def _postgres_marker_sql(marker):
 
 def _postgres_marker_query():
     table = f"{_postgres_identifier(POSTGRES_MARKER_SCHEMA)}.{_postgres_identifier(POSTGRES_MARKER_TABLE)}"
+    table_literal = _sql_literal(table)
     return (
+        f"SELECT to_regclass({table_literal}) IS NOT NULL AS "
+        "backupsheep_marker_exists \\gset\n"
+        "\\if :backupsheep_marker_exists\n"
+        f"\\echo {POSTGRES_MARKER_RELATION_SENTINEL}\n"
         "SELECT marker_version, correlation_id, backup_uuid, source_database, "
-        f"target_database, source_digest, state FROM {table} ORDER BY marker_key;"
+        f"target_database, source_digest, state FROM {table} ORDER BY marker_key;\n"
+        "\\endif"
+    )
+
+
+def _postgres_in_place_dump_is_safe(backup):
+    """Return whether persisted pg_dump options safely support in-place replay.
+
+    An in-place restore can encounter objects that are already present or
+    absent after a partial/failed attempt.  ``--clean`` supplies the drop
+    semantics and ``--if-exists`` makes those drops idempotent.  Only the
+    options persisted on the backup are trusted; the current node settings
+    may have changed since that backup was created.
+    """
+    raw_options = getattr(backup, "option_postgres", None)
+    if not isinstance(raw_options, str) or not raw_options.strip():
+        return False
+    try:
+        options = set(shlex.split(raw_options))
+    except ValueError:
+        return False
+    has_clean = bool({"-c", "--clean"}.intersection(options))
+    return has_clean and "--if-exists" in options
+
+
+def _ensure_postgresql_in_place_dump_is_safe(backup):
+    """Reject unsafe in-place dumps before any target-side mutation."""
+    if _postgres_in_place_dump_is_safe(backup):
+        return
+    raise RestoreError(
+        "PostgreSQL in-place restore is blocked because the persisted backup "
+        "options do not prove idempotent cleanup. The backup must include both "
+        "--clean and --if-exists; no target was changed."
     )
 
 
@@ -2592,7 +2651,7 @@ def _ensure_postgres_target(
                 remote_pgpass=remote_pgpass,
                 restore=restore,
             )
-            row = _parse_marker_row(row_text, fields)
+            row, marker_relation_exists = _postgres_marker_result(row_text, fields)
             if not row or not _marker_matches(row, expected):
                 raise RestoreError("PostgreSQL target ownership is ambiguous; no changes were retried.") from None
     else:
@@ -2609,8 +2668,13 @@ def _ensure_postgres_target(
             remote_pgpass=remote_pgpass,
             restore=restore,
         )
-        row = _parse_marker_row(row_text, fields)
+        row, marker_relation_exists = _postgres_marker_result(row_text, fields)
     if row is None:
+        if marker_relation_exists:
+            raise RestoreError(
+                "PostgreSQL target has a BackupSheep marker relation without an "
+                "exact restore marker; no changes were made."
+            )
         if not in_place:
             raise RestoreError("fork target name collision: existing PostgreSQL database is not BackupSheep-owned.")
         _postgres_query(
@@ -2674,6 +2738,11 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
     try:
         mode, _params = _restore_mode(restore)
         in_place = mode == "in_place"
+        if in_place:
+            # This must run before creating credentials, a target database, or
+            # the ownership marker.  The persisted backup options are the only
+            # reliable record of how this dump was produced.
+            _ensure_postgresql_in_place_dump_is_safe(backup)
         if auth.use_public_key or auth.use_private_key:
             ssh, ssh_key_path = auth.get_ssh_client()
             _cleanup_stale_remote_restore_artifacts(ssh, restore, backup)

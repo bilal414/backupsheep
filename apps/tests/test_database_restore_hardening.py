@@ -51,7 +51,7 @@ class _FakeRestore:
         self.saves.append(tuple(update_fields or ()))
 
 
-def _fake_backup():
+def _fake_backup(*, option_postgres=None):
     return SimpleNamespace(
         uuid=uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
         uuid_str="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -60,6 +60,7 @@ def _fake_backup():
         size=1,
         tables=None,
         all_tables=True,
+        option_postgres=option_postgres,
     )
 
 
@@ -1237,6 +1238,184 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(restore.execution_metadata["target_checkpoints"]["bs_restore_owned"]["status"], "complete")
         self.assertEqual(restore.progress_completed, 1)
         self.assertTrue(run.called)
+
+    def test_postgresql_in_place_claims_target_when_marker_schema_is_absent(self):
+        """An absent marker relation is safe evidence for the explicit claim."""
+        backup = _fake_backup(option_postgres="-w --clean --if-exists")
+        restore = _FakeRestore(mode="in_place")
+        auth = _fake_auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+
+        with mock.patch.object(
+            RD, "_postgres_query", side_effect=["1\n", "", ""]
+        ) as query:
+            result = RD._ensure_postgres_target(
+                SimpleNamespace(),
+                backup,
+                restore,
+                auth,
+                "source_db",
+                "source_db",
+                "a" * 64,
+                "dbuser",
+                "password",
+                in_place=True,
+                pg_env={},
+            )
+
+        self.assertEqual(result["state"], "importing")
+        self.assertEqual(query.call_count, 3)
+        marker_lookup = query.call_args_list[1].args[6]
+        self.assertIn("to_regclass", marker_lookup)
+        self.assertIn("\\if :backupsheep_marker_exists", marker_lookup)
+        self.assertIn("CREATE SCHEMA", query.call_args_list[2].args[6])
+
+    def test_postgresql_foreign_marker_blocks_in_place_without_mutation(self):
+        backup = _fake_backup(option_postgres="-w --clean --if-exists")
+        restore = _FakeRestore(mode="in_place")
+        auth = _fake_auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        foreign = RD._marker_values(
+            restore,
+            backup,
+            "different_source",
+            "source_db",
+            "b" * 64,
+            "importing",
+        )
+        foreign["correlation_id"] = str(uuid.uuid4())
+        foreign_text = "\t".join(
+            foreign[field]
+            for field in (
+                "marker_version",
+                "correlation_id",
+                "backup_uuid",
+                "source_database",
+                "target_database",
+                "source_digest",
+                "state",
+            )
+        ) + "\n"
+
+        with mock.patch.object(
+            RD, "_postgres_query", side_effect=["1\n", foreign_text]
+        ) as query, mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaisesRegex(RestoreError, "marker does not belong"):
+                RD._ensure_postgres_target(
+                    SimpleNamespace(),
+                    backup,
+                    restore,
+                    auth,
+                    "source_db",
+                    "source_db",
+                    "a" * 64,
+                    "dbuser",
+                    "password",
+                    in_place=True,
+                    pg_env={},
+                )
+
+        run.assert_not_called()
+        self.assertEqual(query.call_count, 2)
+        self.assertFalse(
+            any("CREATE SCHEMA" in call.args[6] for call in query.call_args_list)
+        )
+
+    def test_postgresql_in_place_rejects_incompatible_dump_before_target_mutation(self):
+        backup = _fake_backup(option_postgres="-w --clean")
+        restore = _FakeRestore(mode="in_place")
+        auth = _fake_auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+
+        with mock.patch.object(RD, "_postgres_query") as query, \
+             mock.patch.object(RD, "_ensure_postgres_target") as ensure_target, \
+             mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaisesRegex(
+                RestoreError, "--clean and --if-exists.*no target was changed"
+            ) as raised:
+                RD._restore_postgresql(
+                    SimpleNamespace(),
+                    backup,
+                    restore,
+                    auth,
+                    OrderedDict({"source_db": ["/tmp/source.sql"]}),
+                    {"source_db": "source_db"},
+                    {"source_db": []},
+                    "dbuser",
+                    "db-password",
+                )
+
+        query.assert_not_called()
+        ensure_target.assert_not_called()
+        run.assert_not_called()
+        self.assertNotIn("db-password", str(raised.exception))
+
+    def test_postgresql_in_place_compatible_dump_replays_crashed_transaction(self):
+        backup = _fake_backup(option_postgres="-w --clean --if-exists")
+        auth = _fake_auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        sql = b"CREATE TABLE restored(id integer);\n"
+        with open(sql_path, "wb") as output:
+            output.write(sql)
+        source_digests = {
+            "source_db": [{
+                "file": "source_db.sql",
+                "bytes": len(sql),
+                "sha256": hashlib.sha256(sql).hexdigest(),
+            }]
+        }
+        digest = RD._source_digest(source_digests, "source_db")
+        target = "source_db"
+        restore = _FakeRestore(
+            mode="in_place",
+            metadata={
+                "source_to_target": {"source_db": target},
+                "source_digests": source_digests,
+                "target_checkpoints": {
+                    target: {
+                        "source": "source_db",
+                        "source_digest": digest,
+                        "status": "importing",
+                        "files": {
+                            "source_db.sql": {
+                                **source_digests["source_db"][0],
+                                "status": "in_progress",
+                            }
+                        },
+                    }
+                },
+            },
+        )
+        importing = _marker(restore, backup, "source_db", target, digest, "importing")
+        complete = _marker(restore, backup, "source_db", target, digest, "complete")
+
+        # The first delivery crashed after the atomic import rolled back.  The
+        # retry sees the exact importing marker, replays the verified dump, and
+        # adopts the completion marker in the same fenced workflow.
+        with mock.patch.object(
+            RD,
+            "_postgres_query",
+            side_effect=["1\n", importing, "1\n", complete],
+        ), mock.patch.object(RD, "_run_direct", return_value="") as run:
+            RD._restore_postgresql(
+                SimpleNamespace(),
+                backup,
+                restore,
+                auth,
+                OrderedDict({"source_db": [sql_path]}),
+                {"source_db": target},
+                source_digests,
+                "dbuser",
+                "password",
+            )
+
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("--single-transaction", run.call_args.args[2])
+        self.assertEqual(
+            restore.execution_metadata["target_checkpoints"][target]["status"],
+            "complete",
+        )
+        self.assertEqual(
+            restore.execution_metadata["target_checkpoints"][target]["transaction_replay_count"],
+            1,
+        )
 
     def test_postgresql_uses_one_stop_transaction_and_adopts_exact_marker(self):
         backup = _fake_backup()
