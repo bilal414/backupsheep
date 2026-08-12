@@ -26,6 +26,7 @@ from apps.console.node.models import (
     CoreAWS,
     CoreDigitalOcean,
     CoreNode,
+    _backup_provider_response_error,
     _restore_http_class,
 )
 from apps.console.utils.models import UtilBackup
@@ -155,6 +156,41 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
             )
             self.assertEqual(error.code, expected_code)
             self.assertNotIn("credential-secret", str(error))
+
+        quota_response = response(
+            403,
+            {
+                "error": {
+                    "code": "resource_limit_exceeded",
+                    "message": "provider-secret",
+                }
+            },
+        )
+        restore_error = _restore_http_class(quota_response, mutation=True)
+        backup_error = _backup_provider_response_error(
+            quota_response, mutation=True
+        )
+        self.assertEqual(restore_error.code, "QUOTA_EXCEEDED")
+        self.assertEqual(backup_error.code, "QUOTA_EXCEEDED")
+        self.assertFalse(restore_error.retryable)
+        self.assertFalse(backup_error.retryable)
+        self.assertNotIn("provider-secret", str(restore_error))
+        self.assertNotIn("provider-secret", str(backup_error))
+
+        maintenance_response = response(
+            403,
+            {"error": {"code": "maintenance", "message": "provider-secret"}},
+        )
+        restore_error = _restore_http_class(maintenance_response, mutation=True)
+        backup_error = _backup_provider_response_error(
+            maintenance_response, mutation=True
+        )
+        self.assertEqual(restore_error.code, "PROVIDER_TRANSIENT_OUTAGE")
+        self.assertEqual(backup_error.code, "PROVIDER_TRANSIENT_OUTAGE")
+        self.assertTrue(restore_error.retryable)
+        self.assertTrue(backup_error.retryable)
+        self.assertTrue(restore_error.unknown_outcome)
+        self.assertTrue(backup_error.unknown_outcome)
 
     def test_digitalocean_timeout_is_fenced_then_exact_tag_match_is_adopted(self):
         node, backup = self._digitalocean()

@@ -68,6 +68,7 @@ class _RestoreProviderError(ValueError):
 _RESTORE_ERROR_MESSAGES = {
     "PROVIDER_NOT_FOUND": "The provider could not find the restore source or target.",
     "PROVIDER_AUTH_FAILED": "The provider rejected the restore credentials. Reconnect the cloud account.",
+    "QUOTA_EXCEEDED": "The provider resource quota prevented this restore. Free capacity or request a quota increase.",
     "PROVIDER_RATE_LIMIT": "The provider rate-limited the restore request. We will retry shortly.",
     "PROVIDER_TIMEOUT": "The provider restore request timed out. Its outcome is being reconciled before retrying.",
     "PROVIDER_TRANSIENT_OUTAGE": "The provider is temporarily unavailable. We will retry the restore.",
@@ -106,6 +107,7 @@ _BACKUP_NOTIFICATION_MESSAGES = {
     "SOURCE_EXPORT_FAILED": "The source export failed.",
     "PROVIDER_NOT_FOUND": "The provider could not find the backup source or target.",
     "PROVIDER_AUTH_FAILED": "The provider rejected the configured credentials or permissions.",
+    "QUOTA_EXCEEDED": "The provider resource quota was exceeded.",
     "PROVIDER_RATE_LIMIT": "The provider rate limit was reached.",
     "PROVIDER_TIMEOUT": "The provider request timed out.",
     "PROVIDER_TRANSIENT_OUTAGE": "The provider is temporarily unavailable.",
@@ -153,6 +155,7 @@ _BACKUP_NOTIFICATION_REMEDIATIONS = {
     "SOURCE_EXPORT_FAILED": "Review secured diagnostics using the correlation ID and retry the source export.",
     "PROVIDER_NOT_FOUND": "Confirm the source or target still exists and retry after provider recovery.",
     "PROVIDER_AUTH_FAILED": "Reconnect the cloud account with the minimum required permissions.",
+    "QUOTA_EXCEEDED": "Delete an owned resource or request a provider quota increase before retrying.",
     "PROVIDER_RATE_LIMIT": "Wait for the provider retry window and allow the durable task to resume.",
     "PROVIDER_TIMEOUT": "Wait for provider recovery and reconcile the durable operation before retrying.",
     "PROVIDER_TRANSIENT_OUTAGE": "Wait for provider recovery; the durable operation can be reconciled before retrying.",
@@ -758,12 +761,37 @@ def _restore_source_matches(resource, source_id, *keys):
     return not values or expected in values
 
 
+def _provider_response_error_code(response):
+    """Read only a provider's bounded machine error code, never its message."""
+    try:
+        payload = response.json()
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    raw_code = error.get("code") if isinstance(error, dict) else payload.get("code")
+    code = str(raw_code or "").strip().casefold()
+    if not re.fullmatch(r"[a-z0-9_.:-]{1,64}", code):
+        return ""
+    return code
+
+
 def _restore_http_class(response, *, mutation=False):
     if response is None or not hasattr(response, "status_code"):
         return _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
     status = int(getattr(response, "status_code", 0) or 0)
     if 200 <= status < 300:
         return None
+    provider_code = _provider_response_error_code(response)
+    if provider_code in {"resource_limit_exceeded", "quota_exceeded"}:
+        return _RestoreProviderError("QUOTA_EXCEEDED")
+    if provider_code == "maintenance":
+        return _RestoreProviderError(
+            "PROVIDER_TRANSIENT_OUTAGE",
+            retryable=True,
+            unknown_outcome=mutation,
+        )
     if status in {401, 403}:
         return _RestoreProviderError("PROVIDER_AUTH_FAILED")
     if status == 404:
@@ -1015,6 +1043,15 @@ def _backup_provider_response_error(response, *, mutation=False):
     status = int(getattr(response, "status_code", 0) or 0)
     if 200 <= status < 300:
         return None
+    provider_code = _provider_response_error_code(response)
+    if provider_code in {"resource_limit_exceeded", "quota_exceeded"}:
+        return _BackupProviderError("QUOTA_EXCEEDED")
+    if provider_code == "maintenance":
+        return _BackupProviderError(
+            "PROVIDER_TRANSIENT_OUTAGE",
+            retryable=True,
+            unknown_outcome=mutation,
+        )
     if status in {401, 403}:
         return _BackupProviderError("PROVIDER_AUTH_FAILED")
     if status == 404:
