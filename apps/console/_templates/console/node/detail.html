@@ -3036,7 +3036,6 @@
                     return window.BackupSheepExecutionStatus.humanize(String(phase));
                 },
                 nativeRestoreStatusError(item) {
-                    if (item && typeof item.error === 'string' && item.error.trim()) return item.error;
                     const view = this.executionStatusView(item);
                     return view && view.errorMessage ? view.errorMessage : '';
                 },

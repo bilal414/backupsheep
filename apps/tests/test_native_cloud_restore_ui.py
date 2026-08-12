@@ -128,6 +128,13 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
             with self.subTest(label=label):
                 self.assertIn(label, self.source)
 
+        error_block = self.source.split("nativeRestoreStatusError(item)", 1)[1].split(
+            "nativeRestoreStatusIsTerminal(item)", 1
+        )[0]
+        self.assertIn("view.errorMessage", error_block)
+        self.assertNotIn("item.error", error_block)
+        self.assertIn("QUOTA_EXCEEDED", self.source)
+
     def test_safe_defaults_and_no_arbitrary_provider_json(self):
         self.assertIn("nativeRestoreDefaultName(backupUuid)", self.source)
         self.assertIn("nativeRestoreConfig.sourceName", self.source)
