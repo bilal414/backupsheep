@@ -459,7 +459,9 @@ class LogicalRestoreCrashSafetyTests(RestoreBackendBase):
             "_postgres_query",
             side_effect=[
                 "1\n",
+                "1\n",
                 self._marker_text(importing),
+                "1\n",
                 "1\n",
                 self._marker_text(complete),
             ],

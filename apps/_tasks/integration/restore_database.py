@@ -1210,13 +1210,12 @@ def _parse_marker_row(text, fields):
 
 
 def _postgres_marker_result(text, fields):
-    """Parse a safe marker lookup and report whether the relation exists.
+    """Parse a legacy combined marker lookup response.
 
-    ``_postgres_marker_query`` emits a sentinel only after ``to_regclass`` has
-    proven that the marker relation exists.  The boolean-prefix handling keeps
-    the parser tolerant of psql versions/configurations that echo the
-    ``\\gset`` query result, and also preserves compatibility with old worker
-    deliveries whose provider-side response contains only the marker row.
+    Current workers use separate pure-SQL relation and row queries because
+    ``psql --command`` cannot safely mix SQL with ``\\gset``/``\\if`` meta
+    commands. Keep this parser for rolling-worker compatibility and old test
+    responses that contain a sentinel or boolean prefix.
     """
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
     relation_exists = False
@@ -2276,6 +2275,56 @@ def _postgres_query(
     )
 
 
+def _read_postgres_marker(
+    node,
+    backup,
+    restore,
+    auth,
+    pg_env,
+    username,
+    target,
+    fields,
+    what,
+    *,
+    ssh=None,
+    remote_pgpass=None,
+):
+    """Read a marker using two bounded, read-only SQL statements.
+
+    ``psql --command`` accepts SQL, not conditional psql meta-commands. If the
+    relation disappears between these queries, the row query fails closed.
+    """
+    exists_text = _postgres_query(
+        node,
+        backup,
+        auth,
+        pg_env,
+        username,
+        target,
+        _postgres_marker_exists_query(),
+        f"{what} relation",
+        ssh=ssh,
+        remote_pgpass=remote_pgpass,
+        restore=restore,
+    )
+    if not _postgres_relation_exists(exists_text):
+        return None, False
+    row_text = _postgres_query(
+        node,
+        backup,
+        auth,
+        pg_env,
+        username,
+        target,
+        _postgres_marker_query(),
+        what,
+        ssh=ssh,
+        remote_pgpass=remote_pgpass,
+        restore=restore,
+    )
+    return _parse_marker_row(row_text, fields), True
+
+
 def _preflight_postgresql_fork_permissions(
     node,
     backup,
@@ -2476,18 +2525,36 @@ def _postgres_marker_sql(marker):
     )
 
 
-def _postgres_marker_query():
+def _postgres_marker_exists_query():
     table = f"{_postgres_identifier(POSTGRES_MARKER_SCHEMA)}.{_postgres_identifier(POSTGRES_MARKER_TABLE)}"
     table_literal = _sql_literal(table)
+    return f"SELECT to_regclass({table_literal}) IS NOT NULL;"
+
+
+def _postgres_marker_query():
+    table = f"{_postgres_identifier(POSTGRES_MARKER_SCHEMA)}.{_postgres_identifier(POSTGRES_MARKER_TABLE)}"
     return (
-        f"SELECT to_regclass({table_literal}) IS NOT NULL AS "
-        "backupsheep_marker_exists \\gset\n"
-        "\\if :backupsheep_marker_exists\n"
-        f"\\echo {POSTGRES_MARKER_RELATION_SENTINEL}\n"
         "SELECT marker_version, correlation_id, backup_uuid, source_database, "
-        f"target_database, source_digest, state FROM {table} ORDER BY marker_key;\n"
-        "\\endif"
+        f"target_database, source_digest, state FROM {table} ORDER BY marker_key;"
     )
+
+
+def _postgres_relation_exists(text):
+    values = [
+        line.strip().lower()
+        for line in str(text or "").splitlines()
+        if line.strip()
+    ]
+    if len(values) != 1 or values[0] not in {
+        "t",
+        "true",
+        "1",
+        "f",
+        "false",
+        "0",
+    }:
+        raise RestoreError("PostgreSQL marker relation lookup was malformed.")
+    return values[0] in {"t", "true", "1"}
 
 
 def _postgres_in_place_dump_is_safe(backup):
@@ -2638,37 +2705,35 @@ def _ensure_postgres_target(
             ).strip()
             if not exists_after:
                 raise error from None
-            row_text = _postgres_query(
+            row, marker_relation_exists = _read_postgres_marker(
                 node,
                 backup,
+                restore,
                 auth,
                 pg_env,
                 username,
                 target,
-                _postgres_marker_query(),
+                fields,
                 "reconcile PostgreSQL marker",
                 ssh=ssh,
                 remote_pgpass=remote_pgpass,
-                restore=restore,
             )
-            row, marker_relation_exists = _postgres_marker_result(row_text, fields)
             if not row or not _marker_matches(row, expected):
                 raise RestoreError("PostgreSQL target ownership is ambiguous; no changes were retried.") from None
     else:
-        row_text = _postgres_query(
+        row, marker_relation_exists = _read_postgres_marker(
             node,
             backup,
+            restore,
             auth,
             pg_env,
             username,
             target,
-            _postgres_marker_query(),
+            fields,
             "check PostgreSQL restore marker",
             ssh=ssh,
             remote_pgpass=remote_pgpass,
-            restore=restore,
         )
-        row, marker_relation_exists = _postgres_marker_result(row_text, fields)
     if row is None:
         if marker_relation_exists:
             raise RestoreError(

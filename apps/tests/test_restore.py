@@ -1572,7 +1572,7 @@ class DatabaseRestoreEngineTests(RestoreBackendBase):
         restore = self._db_restore(backup, {"appdb.sql": "CREATE TABLE t(id int);"})
         calls = []
         fake = self._recorded_run(calls, [(0, b"", b"")])
-        with mock.patch.object(RD, "_postgres_query", side_effect=["1\n", ""]):
+        with mock.patch.object(RD, "_postgres_query", side_effect=["1\n", "0\n"]):
             with self.assertRaisesRegex(RestoreError, "not BackupSheep-owned"):
                 self._run_engine(backup, restore, fake)
         self.assertEqual(calls, [])

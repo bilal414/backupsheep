@@ -495,7 +495,7 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
         with mock.patch.object(
             RD,
             "_postgres_query",
-            side_effect=["", "", "1\n", complete],
+            side_effect=["", "", "1\n", "1\n", complete],
         ), mock.patch.object(RD, "_run_direct", return_value="") as run, \
              mock.patch.object(RD, "_verify_source_files"):
             RD._restore_postgresql(
@@ -523,7 +523,7 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
         with mock.patch.object(
             RD,
             "_postgres_query",
-            side_effect=["1\n", importing],
+            side_effect=["1\n", "1\n", importing],
         ), mock.patch.object(RD, "_run_direct") as reimport:
             with self.assertRaisesRegex(RestoreError, "import outcome is ambiguous"):
                 RD._restore_postgresql(
@@ -1246,7 +1246,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         auth = _fake_auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
 
         with mock.patch.object(
-            RD, "_postgres_query", side_effect=["1\n", "", ""]
+            RD, "_postgres_query", side_effect=["1\n", "0\n", ""]
         ) as query:
             result = RD._ensure_postgres_target(
                 SimpleNamespace(),
@@ -1266,7 +1266,8 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(query.call_count, 3)
         marker_lookup = query.call_args_list[1].args[6]
         self.assertIn("to_regclass", marker_lookup)
-        self.assertIn("\\if :backupsheep_marker_exists", marker_lookup)
+        self.assertNotIn("\\gset", marker_lookup)
+        self.assertNotIn("\\if", marker_lookup)
         self.assertIn("CREATE SCHEMA", query.call_args_list[2].args[6])
 
     def test_postgresql_foreign_marker_blocks_in_place_without_mutation(self):
@@ -1296,7 +1297,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         ) + "\n"
 
         with mock.patch.object(
-            RD, "_postgres_query", side_effect=["1\n", foreign_text]
+            RD, "_postgres_query", side_effect=["1\n", "1\n", foreign_text]
         ) as query, mock.patch.object(RD, "_run_direct") as run:
             with self.assertRaisesRegex(RestoreError, "marker does not belong"):
                 RD._ensure_postgres_target(
@@ -1314,7 +1315,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
                 )
 
         run.assert_not_called()
-        self.assertEqual(query.call_count, 2)
+        self.assertEqual(query.call_count, 3)
         self.assertFalse(
             any("CREATE SCHEMA" in call.args[6] for call in query.call_args_list)
         )
@@ -1392,7 +1393,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         with mock.patch.object(
             RD,
             "_postgres_query",
-            side_effect=["1\n", importing, "1\n", complete],
+            side_effect=["1\n", "1\n", importing, "1\n", "1\n", complete],
         ), mock.patch.object(RD, "_run_direct", return_value="") as run:
             RD._restore_postgresql(
                 SimpleNamespace(),
@@ -1431,6 +1432,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         marker = _marker(restore, backup, "source_db", "bs_restore_owned", digest, "complete")
         query_results = [
             "1\n",  # target exists
+            "1\n",  # marker relation exists
             marker,  # exact marker; adoption must not import
         ]
         with mock.patch.object(RD, "_postgres_query", side_effect=query_results) as query, \
@@ -1448,7 +1450,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
             )
         run.assert_not_called()
         self.assertEqual(restore.progress_completed, 1)
-        self.assertEqual(query.call_count, 2)
+        self.assertEqual(query.call_count, 3)
         checkpoint = restore.execution_metadata["target_checkpoints"][
             "bs_restore_owned"
         ]
@@ -1482,7 +1484,11 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
                 )
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-        with mock.patch.object(RD, "_postgres_query", side_effect=["", "", "1\n", complete]), \
+        with mock.patch.object(
+            RD,
+            "_postgres_query",
+            side_effect=["", "", "1\n", "1\n", complete],
+        ), \
              mock.patch.object(RD, "_run_direct", side_effect=fake_run):
             RD._restore_postgresql(
                 SimpleNamespace(),
@@ -1552,7 +1558,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         with mock.patch.object(
             RD,
             "_postgres_query",
-            side_effect=["1\n", importing, "1\n", complete],
+            side_effect=["1\n", "1\n", importing, "1\n", "1\n", complete],
         ), mock.patch.object(RD, "_run_direct", return_value="") as run:
             RD._restore_postgresql(
                 SimpleNamespace(),
@@ -1574,6 +1580,25 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(checkpoint["transaction_replay_count"], 1)
         self.assertEqual(restore.execution_phase, "database_complete")
         self.assertEqual(restore.progress_completed, 1)
+
+    def test_postgresql_marker_queries_are_pure_sql_and_boolean_is_strict(self):
+        exists_query = RD._postgres_marker_exists_query()
+        row_query = RD._postgres_marker_query()
+
+        self.assertIn("to_regclass", exists_query)
+        self.assertIn("ORDER BY marker_key", row_query)
+        self.assertNotIn("\\", exists_query)
+        self.assertNotIn("\\", row_query)
+        for value in ("t\n", "true\n", "1\n"):
+            self.assertTrue(RD._postgres_relation_exists(value))
+        for value in ("f\n", "false\n", "0\n"):
+            self.assertFalse(RD._postgres_relation_exists(value))
+        for value in ("", "yes\n", "1\n0\n", "t\textra\n"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    RestoreError, "marker relation lookup was malformed"
+                ):
+                    RD._postgres_relation_exists(value)
 
     def test_postgresql_marker_queries_pin_tab_delimited_wire_format(self):
         auth = _fake_auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
