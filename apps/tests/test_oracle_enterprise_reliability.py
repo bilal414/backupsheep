@@ -338,6 +338,121 @@ class OracleEnterpriseReliabilityTests(BaseTestCase):
             source_details=None,
         )
 
+    def _run_shared_oracle_create_and_poll(
+        self, backup, adapter, resource, make_available
+    ):
+        """Exercise the Celery create boundary before the adapter poller."""
+
+        with mock.patch.object(helper_tasks.current_app, "send_task") as resume:
+            result = helper_tasks.run_provider_create(
+                backup,
+                backup.celery_task_id,
+                adapter.create_or_adopt_backup,
+            )
+
+        self.assertIsNotNone(result)
+        backup.refresh_from_db()
+        execution = backup.get_execution_state(create=False)
+        expected_token = oracle_retry_token(backup.uuid_str)
+        self.assertEqual(execution.provider_idempotency_key, expected_token)
+        self.assertNotEqual(
+            execution.provider_idempotency_key,
+            backup.uuid_str,
+        )
+        resume.assert_not_called()
+
+        make_available(resource)
+        self.assertEqual(adapter.poll_backup(backup), UtilBackup.Status.COMPLETE)
+        execution.refresh_from_db()
+        self.assertNotEqual(
+            execution.last_error_code,
+            "PROVIDER_RECONCILIATION_REQUIRED",
+        )
+
+    def test_shared_create_preserves_compute_retry_token_for_polling(self):
+        _node, integration, backup = self._compute_fixture()
+        client = mock.MagicMock()
+        client.get_instance.return_value = response(self._compute_source())
+        client.list_images.return_value = response([])
+        image = self._compute_image(backup.uuid_str)
+        client.create_image.return_value = response(image, status=202)
+        adapter = OracleComputeAdapter(integration, client=client)
+        client.get_image.return_value = response(image)
+
+        self._run_shared_oracle_create_and_poll(
+            backup,
+            adapter,
+            image,
+            lambda resource: setattr(resource, "lifecycle_state", "AVAILABLE"),
+        )
+        client.create_image.assert_called_once()
+
+    def test_shared_create_preserves_boot_volume_retry_token_for_polling(self):
+        _node, integration, backup = self._boot_fixture()
+        client = mock.MagicMock()
+        source = model(
+            id=integration.unique_id,
+            display_name="source-boot-volume",
+            compartment_id="ocid1.compartment.test.backupsheep",
+            availability_domain="AD-1",
+            lifecycle_state="AVAILABLE",
+            size_in_gbs=50,
+            freeform_tags={},
+            source_details=None,
+        )
+        token = oracle_retry_token(backup.uuid_str)
+        boot_backup = model(
+            id="ocid1.bootvolumebackup.test.shared-create",
+            display_name=backup.uuid_str,
+            compartment_id=source.compartment_id,
+            boot_volume_id=integration.unique_id,
+            lifecycle_state="CREATING",
+            size_in_gbs=50,
+            freeform_tags={
+                ORACLE_BACKUP_TAG: backup.uuid_str,
+                ORACLE_SOURCE_TAG: integration.unique_id,
+                ORACLE_KIND_TAG: "boot",
+                ORACLE_REQUEST_TAG: token,
+            },
+            source_details=None,
+        )
+        client.get_boot_volume.return_value = response(source)
+        client.list_boot_volume_backups.return_value = response([])
+        client.create_boot_volume_backup.return_value = response(
+            boot_backup, status=202
+        )
+        client.get_boot_volume_backup.return_value = response(boot_backup)
+        adapter = OracleVolumeAdapter(integration, client=client)
+
+        self._run_shared_oracle_create_and_poll(
+            backup,
+            adapter,
+            boot_backup,
+            lambda resource: setattr(resource, "lifecycle_state", "AVAILABLE"),
+        )
+        client.create_boot_volume_backup.assert_called_once()
+
+    def test_shared_create_preserves_block_volume_retry_token_for_polling(self):
+        backup = self._backup()
+        client = self._volume_client()
+        volume_backup = self._backup_resource(
+            backup.uuid_str,
+            resource_id="ocid1.volumebackup.test.shared-create",
+        )
+        client.create_volume_backup.return_value = response(
+            volume_backup, status=202
+        )
+        client.get_volume_backup.return_value = response(volume_backup)
+        adapter = OracleVolumeAdapter(self.integration, client=client)
+
+        self._run_shared_oracle_create_and_poll(
+            backup,
+            adapter,
+            volume_backup,
+            lambda resource: setattr(resource, "lifecycle_state", "AVAILABLE"),
+        )
+        client.create_volume_backup.assert_called_once()
+
     def test_volume_create_persists_exact_provider_identity_before_polling(self):
         backup = self._backup()
         client = self._volume_client()

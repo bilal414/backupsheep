@@ -726,6 +726,14 @@ def run_provider_create(backup, task_id, create_callback):
                 _provider_create_delay(state, retain_lease=True),
             )
             return None
+        # Provider adapters may persist a provider-native idempotency witness
+        # while creating the resource.  Keep that value intact: OCI polling
+        # validates the durable opc-retry-token against the witness it stored
+        # before the create request.  Older adapters do not write one, so the
+        # shared backup marker/UUID remains the compatibility fallback.
+        provider_idempotency_key = str(
+            current_state.provider_idempotency_key or ""
+        ).strip()
         claimed.record_provider_reference(
             operation_id=(
                 getattr(claimed, "action_id", None)
@@ -736,7 +744,9 @@ def run_provider_create(backup, task_id, create_callback):
                 or getattr(claimed, "provider_backup_id", None)
             ),
             idempotency_key=(
-                getattr(claimed, "provider_marker", None) or claimed.uuid_str
+                provider_idempotency_key
+                or getattr(claimed, "provider_marker", None)
+                or claimed.uuid_str
             ),
             lease_owner=task_id,
             lease_token=lease_token,
