@@ -12472,15 +12472,214 @@ class CoreCloudRestore(BaseRestoreExecution):
     def node_type_object(self):
         return self.node._integration_object()
 
+    def _upcloud_server_verification_resume_safe(
+        self,
+        *,
+        params,
+        identity,
+        generic,
+        backup,
+        source_id,
+        source_server_id,
+        digest,
+    ):
+        """Validate a pointerless UpCloud server state-machine resume."""
+        execution = backup.get_execution_state(create=False)
+        provider_metadata = (
+            dict(execution.provider_metadata or {}) if execution else {}
+        )
+        witness = provider_metadata.get("witness")
+        resource = provider_metadata.get("resource")
+        scope = witness.get("scope") if isinstance(witness, dict) else None
+        source_storage_id = (
+            str(witness.get("source_id") or "")
+            if isinstance(witness, dict)
+            else ""
+        )
+        server_marker = f"backupsheep-upcloud-server-{self.pk}-{digest}"[:128]
+        storage_marker = f"backupsheep-upcloud-storage-{self.pk}-{digest}"[:128]
+        hostname = f"bs-upcloud-{self.pk}-{digest[:16]}"[:63]
+        expected_identity = {
+            "source_id": source_id,
+            "source_origin_id": source_storage_id,
+            "source_server_id": source_server_id,
+            "target_type": "server",
+            "marker": server_marker,
+            "server_marker": server_marker,
+            "storage_marker": storage_marker,
+            "hostname": hostname,
+            "marker_digest": digest,
+            "marker_source_bound": True,
+            "account_id": str(self.node.connection.account_id),
+            "connection_id": str(self.node.connection_id),
+        }
+        if any(
+            identity.get(key) != value
+            for key, value in expected_identity.items()
+        ):
+            return False
+        expected_generic = {
+            "provider": "upcloud",
+            "source_id": source_id,
+            "target_kind": "server",
+            "target_name": server_marker,
+            "marker": server_marker,
+        }
+        if any(
+            str(generic.get(key) or "") != value
+            for key, value in expected_generic.items()
+        ):
+            return False
+        if any(
+            (
+                str(params.get("_bs_provider_name") or "") != server_marker,
+                str(self.restore_marker or "") != server_marker,
+                not re.fullmatch(
+                    r"[0-9a-f]{64}", str(self.request_fingerprint or "")
+                ),
+            )
+        ):
+            return False
+
+        if not all(
+            (
+                execution,
+                isinstance(witness, dict),
+                isinstance(scope, dict),
+                isinstance(resource, dict),
+                str(witness.get("provider") or "") == "upcloud",
+                str(witness.get("resource_type") or "")
+                == "server_boot_storage",
+                str(witness.get("marker") or "") == str(backup.uuid_str),
+                str(resource.get("uuid") or "") == source_id,
+                str(resource.get("type") or "") == "backup",
+                str(resource.get("title") or "") == str(backup.uuid_str),
+                str(resource.get("origin") or "")
+                == str(witness.get("source_id") or ""),
+                resource.get("_bs_ownership_verified") is True,
+                str(resource.get("_bs_provider") or "") == "upcloud",
+                str(resource.get("_bs_marker") or "")
+                == str(backup.uuid_str),
+                str(resource.get("_bs_source_id") or "")
+                == str(witness.get("source_id") or ""),
+                str(execution.provider_resource_id or "") == source_id,
+                str(scope.get("server_id") or "") == source_server_id,
+                str(scope.get("account_id") or "")
+                == str(self.node.connection.account_id),
+                str(scope.get("connection_id") or "")
+                == str(self.node.connection_id),
+            )
+        ):
+            return False
+        try:
+            backup_size = int(resource.get("size"))
+            stored_size = identity.get("boot_storage_size")
+            if stored_size not in (None, "") and int(stored_size) != backup_size:
+                return False
+        except (TypeError, ValueError):
+            return False
+        if backup_size <= 0:
+            return False
+
+        zone = str(identity.get("target_zone") or "")
+        tier = str(identity.get("boot_storage_tier") or "").casefold()
+        encrypted = str(identity.get("boot_storage_encrypted") or "").casefold()
+        config = identity.get("server_config")
+        firewall = identity.get("server_firewall")
+        if (
+            not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", zone)
+            or zone != str(scope.get("zone") or "")
+            or tier not in {"standard", "maxiops"}
+            or tier != str(scope.get("tier") or "").casefold()
+            or encrypted not in {"yes", "no"}
+            or encrypted != str(scope.get("encrypted") or "").casefold()
+            or not isinstance(config, dict)
+            or not isinstance(firewall, dict)
+        ):
+            return False
+        config_fingerprint = hashlib.sha256(
+            json.dumps(
+                config,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        firewall_rules = firewall.get("rules")
+        if not isinstance(firewall_rules, list) or not firewall_rules:
+            return False
+        firewall_fingerprint = hashlib.sha256(
+            json.dumps(
+                firewall_rules,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        if any(
+            (
+                str(identity.get("server_config_fingerprint") or "")
+                != config_fingerprint,
+                str(scope.get("server_config_fingerprint") or "")
+                != config_fingerprint,
+                witness.get("upcloud_server_config") != config,
+                str(witness.get("upcloud_server_config_fingerprint") or "")
+                != config_fingerprint,
+                witness.get("upcloud_firewall") != firewall,
+                str(identity.get("firewall_fingerprint") or "")
+                != firewall_fingerprint,
+                str(firewall.get("fingerprint") or "")
+                != firewall_fingerprint,
+                str(params.get("_bs_upcloud_firewall_fingerprint") or "")
+                != firewall_fingerprint,
+                str(scope.get("firewall_fingerprint") or "")
+                != firewall_fingerprint,
+            )
+        ):
+            return False
+
+        uuid_pattern = (
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}"
+        )
+        target_storage_id = str(identity.get("target_storage_id") or "")
+        candidate_server_id = str(identity.get("candidate_server_id") or "")
+        if (
+            target_storage_id
+            and not re.fullmatch(uuid_pattern, target_storage_id)
+        ) or (
+            candidate_server_id
+            and not re.fullmatch(uuid_pattern, candidate_server_id)
+        ):
+            return False
+
+        stage = str(identity.get("stage") or "")
+        active = str(identity.get("active_mutation") or "")
+        stage_contracts = {
+            "storage_create_requested": {"storage"},
+            "storage_adopted": {""},
+            "server_create_requested": {"server"},
+            "server_candidate_received": {"server"},
+            "firewall_replace_requested": {"firewall"},
+            "firewall_verified": {""},
+            "firewall_stabilizing": {""},
+            "public_ip_assign_requested": {
+                value
+                for value in (active,)
+                if re.fullmatch(r"public_ip:[0-9]+:IPv[46]", value)
+            },
+        }
+        return stage in stage_contracts and active in stage_contracts[stage]
+
     @property
     def verification_resume_mode(self):
         """Return the safe operator-resume mode, or an empty string.
 
         Most manual resumes require a committed provider pointer and can only
-        poll that exact target. UpCloud volume clones have one additional safe
-        recovery path: its clone API may accept the request before the worker
-        persists the returned UUID. In that crash window, allow the UI to
-        enqueue the read-only ``check_restore`` reconciliation pass only when
+        poll that exact target. UpCloud volume/server state machines have one
+        additional safe recovery path: a provider mutation may be accepted
+        before the worker persists the returned UUID. In that crash window,
+        allow the UI to enqueue ``check_restore`` reconciliation only when
         every durable source-bound identity field is internally consistent.
         """
         if not (
@@ -12493,10 +12692,7 @@ class CoreCloudRestore(BaseRestoreExecution):
 
         try:
             node = self.node
-            if (
-                node.type != node.Type.VOLUME
-                or node.connection.integration.code != "upcloud"
-            ):
+            if node.connection.integration.code != "upcloud":
                 return ""
             params = self.params if isinstance(self.params, dict) else {}
             identity = params.get("_bs_upcloud_restore")
@@ -12521,6 +12717,20 @@ class CoreCloudRestore(BaseRestoreExecution):
                     "utf-8"
                 )
             ).hexdigest()[:24]
+            if node.type == node.Type.CLOUD:
+                if self._upcloud_server_verification_resume_safe(
+                    params=params,
+                    identity=identity,
+                    generic=generic,
+                    backup=backup,
+                    source_id=source_id,
+                    source_server_id=source_origin_id,
+                    digest=digest,
+                ):
+                    return "provider_reconciliation"
+                return ""
+            if node.type != node.Type.VOLUME:
+                return ""
             marker = f"backupsheep-upcloud-{self.pk}-{digest}"[:128]
             expected_identity = {
                 "source_id": source_id,

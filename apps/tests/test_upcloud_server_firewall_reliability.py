@@ -420,6 +420,7 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         lost=False,
         lost_firewall=False,
         lost_ip=False,
+        target_storage_overrides=None,
     ):
         lease_token = uuid4()
         restore.lease_owner = "upcloud-firewall-test"
@@ -436,9 +437,11 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
             "origin": backup.unique_id,
             "zone": "us-chi1",
             "state": "online",
+            "size": 10,
             "tier": "standard",
             "encrypted": "yes",
         }
+        target_storage.update(target_storage_overrides or {})
         target_server, ids = self._target_server(
             integration, backup, restore, target_storage["uuid"]
         )
@@ -812,6 +815,126 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         self.assertEqual(put_mock.call_count, 0)
         self.assertTrue(state["firewall_replaced"])
         self.assertTrue(state["ip_assigned"])
+
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
+    def test_server_boot_clone_without_origin_uses_durable_backup_size(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="server-storage-origin-omitted",
+            params={"zone": "us-chi1"},
+        )
+        get, post, put, _state, target = self._restore_http(
+            integration,
+            backup,
+            restore,
+            rules,
+            target_storage_overrides={"origin": None},
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps._tasks.integration.upcloud.requests.get", side_effect=get
+        ), mock.patch(
+            "apps._tasks.integration.upcloud.requests.post", side_effect=post
+        ), mock.patch(
+            "apps._tasks.integration.upcloud.requests.put", side_effect=put
+        ):
+            integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, target["uuid"])
+        self.assertEqual(
+            restore.params["_bs_upcloud_restore"]["boot_storage_size"], 10
+        )
+
+    def test_server_boot_clone_rejects_conflicting_origin_or_size(self):
+        for field, value in (("origin", "foreign-backup"), ("size", 11)):
+            with self.subTest(field=field):
+                integration, backup, rules = self._complete_server_backup()
+                restore = CoreCloudRestore.objects.create(
+                    node=integration.node,
+                    backup_id=backup.id,
+                    name=f"server-storage-invalid-{field}",
+                    params={"zone": "us-chi1"},
+                )
+                get, post, put, _state, _target = self._restore_http(
+                    integration,
+                    backup,
+                    restore,
+                    rules,
+                    target_storage_overrides={field: value},
+                )
+                auth_cls = integration.node.connection.auth_upcloud.__class__
+                with mock.patch.object(
+                    auth_cls, "get_verified_client", return_value=mock.Mock()
+                ), mock.patch(
+                    "apps._tasks.integration.upcloud.requests.get", side_effect=get
+                ), mock.patch(
+                    "apps._tasks.integration.upcloud.requests.post", side_effect=post
+                ), mock.patch(
+                    "apps._tasks.integration.upcloud.requests.put", side_effect=put
+                ):
+                    with self.assertRaises(_RestoreProviderError):
+                        integration.restore_snapshot(backup, restore)
+
+                restore.refresh_from_db()
+                self.assertEqual(
+                    restore.params["_bs_last_error_code"],
+                    "PROVIDER_MALFORMED_RESPONSE",
+                )
+                self.assertIsNone(restore.resource_id)
+
+    def test_pointerless_server_restore_resume_requires_exact_durable_contract(self):
+        integration, backup, _rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="server-pointerless-resume",
+            status=CoreCloudRestore.Status.FAILED,
+            operation_phase=CoreCloudRestore.OperationPhase.MANUAL_REVIEW,
+            execution_phase="manual_review",
+        )
+        identity = integration._prepare_upcloud_server_restore(backup, restore)
+        params = dict(restore.params)
+        identity = dict(identity)
+        identity.update(
+            {
+                "stage": "storage_create_requested",
+                "active_mutation": "storage",
+            }
+        )
+        params["_bs_create_outcome_unknown"] = True
+        params["_bs_upcloud_restore"] = identity
+        restore.params = params
+        restore.status = CoreCloudRestore.Status.FAILED
+        restore.operation_phase = CoreCloudRestore.OperationPhase.MANUAL_REVIEW
+        restore.save(
+            update_fields=[
+                "params",
+                "status",
+                "operation_phase",
+                "modified",
+            ]
+        )
+
+        self.assertTrue(restore.can_resume_verification)
+        self.assertEqual(
+            restore.verification_resume_mode, "provider_reconciliation"
+        )
+
+        params = dict(restore.params)
+        identity = dict(params["_bs_upcloud_restore"])
+        identity["boot_storage_size"] = 11
+        params["_bs_upcloud_restore"] = identity
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+        self.assertFalse(restore.can_resume_verification)
 
     @mock.patch(
         "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0

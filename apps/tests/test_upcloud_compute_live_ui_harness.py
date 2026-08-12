@@ -549,6 +549,56 @@ class UpCloudComputeLiveUIHarnessSafetyTests(SimpleTestCase):
             )
         harness.control.request.assert_not_called()
 
+    def test_normal_clone_may_omit_origin_but_not_size_tier_or_encryption(self):
+        harness = self.harness()
+        marker = "backupsheep-upcloud-storage-restore"
+        clone = self.storage(
+            RESTORE_VOLUME_ID,
+            title=marker,
+            origin="",
+        )
+        with mock.patch.object(
+            harness, "_compute_inventory", return_value=[clone]
+        ), mock.patch.object(harness, "_storage_read", return_value=clone):
+            verified = harness._verify_ui_storage(
+                kind="ui_volume_restore",
+                resource_id=RESTORE_VOLUME_ID,
+                marker=marker,
+                storage_type="normal",
+                origin="01a00000-0000-4000-8000-000000000010",
+                allow_omitted_origin=True,
+                expected_size=10,
+                expected_tier="standard",
+                expected_encrypted="yes",
+            )
+        self.assertEqual(verified["uuid"], RESTORE_VOLUME_ID)
+        entry = harness._one_active("ui_volume_restore")
+        self.assertTrue(entry["ownership"]["origin_may_be_omitted"])
+        self.assertTrue(harness._storage_entry_owned(entry, clone))
+
+        for field, value in (
+            ("origin", "foreign-backup"),
+            ("size", 11),
+            ("tier", "maxiops"),
+            ("encrypted", "no"),
+        ):
+            changed = dict(clone, **{field: value})
+            with self.subTest(field=field), mock.patch.object(
+                harness, "_compute_inventory", return_value=[changed]
+            ), mock.patch.object(harness, "_storage_read", return_value=changed):
+                with self.assertRaises(live_harness.HarnessError):
+                    harness._verify_ui_storage(
+                        kind="ui_volume_restore",
+                        resource_id=RESTORE_VOLUME_ID,
+                        marker=marker,
+                        storage_type="normal",
+                        origin="01a00000-0000-4000-8000-000000000010",
+                        allow_omitted_origin=True,
+                        expected_size=10,
+                        expected_tier="standard",
+                        expected_encrypted="yes",
+                    )
+
     def test_compute_runtime_is_0600_and_credentials_never_enter_ledger(self):
         harness = self.harness()
         path = live_harness._compute_runtime_path(

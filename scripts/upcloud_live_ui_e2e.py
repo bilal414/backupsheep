@@ -5663,6 +5663,10 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
         storage_type: str,
         origin: str,
         expected_servers=(),
+        allow_omitted_origin=False,
+        expected_size=None,
+        expected_tier=None,
+        expected_encrypted=None,
     ) -> dict:
         self._assert_unique_storage_marker(
             storage_type=storage_type,
@@ -5670,14 +5674,29 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
             marker=marker,
         )
         storage = self._storage_read(resource_id)
+        actual_origin = str(storage.get("origin") or "") if isinstance(storage, dict) else ""
+        origin_matches = actual_origin == origin or (
+            allow_omitted_origin and not actual_origin
+        )
+        try:
+            actual_size = int(storage.get("size")) if isinstance(storage, dict) else -1
+        except (TypeError, ValueError):
+            actual_size = -1
         if not isinstance(storage, dict) or any(
             (
                 str(storage.get("uuid") or "") != resource_id,
                 str(storage.get("title") or "") != marker,
                 str(storage.get("type") or "") != storage_type,
-                str(storage.get("origin") or "") != origin,
+                not origin_matches,
                 str(storage.get("zone") or "") != self.config.zone,
                 str(storage.get("state") or "").casefold() != "online",
+                expected_size is not None and actual_size != int(expected_size),
+                expected_tier is not None
+                and str(storage.get("tier") or "").casefold()
+                != str(expected_tier).casefold(),
+                expected_encrypted is not None
+                and str(storage.get("encrypted") or "").casefold()
+                != str(expected_encrypted).casefold(),
             )
         ):
             raise HarnessError("UpCloud UI storage ownership verification failed.")
@@ -5697,6 +5716,11 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
                 "marker": marker,
                 "type": storage_type,
                 "origin": origin,
+                "provider_origin": actual_origin,
+                "origin_may_be_omitted": bool(allow_omitted_origin),
+                "size": actual_size,
+                "tier": str(storage.get("tier") or "").casefold(),
+                "encrypted": str(storage.get("encrypted") or "").casefold(),
                 "verified_server_ids": attached_server_ids,
             },
             source_witness=origin,
@@ -6057,6 +6081,14 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
             marker=volume["restore_marker"],
             storage_type="normal",
             origin=str(volume_backup["uuid"]),
+            allow_omitted_origin=True,
+            expected_size=int(volume_backup["size"]),
+            expected_tier=(source_volume_entry.get("ownership") or {}).get(
+                "tier"
+            ),
+            expected_encrypted=(
+                source_volume_entry.get("ownership") or {}
+            ).get("encrypted"),
         )
         server_backup = self._verify_ui_storage(
             kind="ui_server_backup",
@@ -6072,6 +6104,14 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
             storage_type="normal",
             origin=str(server_backup["uuid"]),
             expected_servers=[server["restore_server_id"]],
+            allow_omitted_origin=True,
+            expected_size=int(server_backup["size"]),
+            expected_tier=(source_boot_entry.get("ownership") or {}).get(
+                "tier"
+            ),
+            expected_encrypted=(
+                source_boot_entry.get("ownership") or {}
+            ).get("encrypted"),
         )
         restored_server = self._verify_ui_server(
             resource_id=server["restore_server_id"],
@@ -6156,12 +6196,29 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
             "ui_server_backup",
             "ui_server_restore_storage",
         }:
+            expected_origin = str(ownership.get("origin") or "")
+            actual_origin = str(storage.get("origin") or "")
+            origin_matches = actual_origin == expected_origin or (
+                ownership.get("origin_may_be_omitted") is True
+                and not actual_origin
+            )
+            try:
+                size_matches = int(storage.get("size")) == int(
+                    ownership.get("size")
+                )
+            except (TypeError, ValueError):
+                size_matches = False
             return all(
                 (
                     str(storage.get("title") or "") == ownership.get("marker"),
                     str(storage.get("type") or "") == ownership.get("type"),
-                    str(storage.get("origin") or "") == ownership.get("origin"),
+                    origin_matches,
                     str(storage.get("zone") or "") == ownership.get("zone"),
+                    size_matches,
+                    str(storage.get("tier") or "").casefold()
+                    == str(ownership.get("tier") or "").casefold(),
+                    str(storage.get("encrypted") or "").casefold()
+                    == str(ownership.get("encrypted") or "").casefold(),
                 )
             )
         return False

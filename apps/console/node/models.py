@@ -4596,6 +4596,7 @@ class CoreUpCloud(UtilCloud):
             raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
         provider_metadata = dict(execution.provider_metadata or {})
         witness = provider_metadata.get("witness")
+        backup_resource = provider_metadata.get("resource")
         if not isinstance(witness, dict):
             raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
         witness = dict(witness)
@@ -4624,6 +4625,12 @@ class CoreUpCloud(UtilCloud):
         source_storage_id = str(witness.get("source_id") or "")
         source_server_id = str(scope.get("server_id") or "")
         marker = str(witness.get("marker") or "")
+        if not isinstance(backup_resource, dict):
+            raise _RestoreProviderError("PROVIDER_RECONCILIATION_REQUIRED")
+        try:
+            backup_size = int(backup_resource.get("size"))
+        except (TypeError, ValueError):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from None
         fingerprint = str(
             witness.get("upcloud_server_config_fingerprint")
             or scope.get("server_config_fingerprint")
@@ -4660,6 +4667,20 @@ class CoreUpCloud(UtilCloud):
                 != source_server_id,
                 str(witness.get("upcloud_source_storage_id") or "")
                 != source_storage_id,
+                str(backup_resource.get("uuid") or "")
+                != str(backup.unique_id or ""),
+                str(backup_resource.get("title") or "") != marker,
+                str(backup_resource.get("type") or "") != "backup",
+                str(backup_resource.get("origin") or "")
+                != source_storage_id,
+                str(backup_resource.get("zone") or "")
+                != str(scope.get("zone") or ""),
+                str(backup_resource.get("_bs_provider") or "") != "upcloud",
+                backup_resource.get("_bs_ownership_verified") is not True,
+                str(backup_resource.get("_bs_source_id") or "")
+                != source_storage_id,
+                str(backup_resource.get("_bs_marker") or "") != marker,
+                backup_size <= 0,
                 str(execution.provider_resource_id or "")
                 != str(backup.unique_id or ""),
                 str(execution.provider_idempotency_key or "") != marker,
@@ -4671,6 +4692,7 @@ class CoreUpCloud(UtilCloud):
         ):
             raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
         witness["upcloud_firewall"] = firewall
+        witness["upcloud_backup_size"] = backup_size
         return witness
 
     def _prepare_upcloud_server_restore(self, backup, restore):
@@ -4732,6 +4754,7 @@ class CoreUpCloud(UtilCloud):
             "firewall_fingerprint": firewall["fingerprint"],
             "boot_storage_tier": boot_storage_tier,
             "boot_storage_encrypted": boot_storage_encrypted,
+            "boot_storage_size": int(witness["upcloud_backup_size"]),
             "account_id": str(self.node.connection.account_id),
             "connection_id": str(self.node.connection_id),
         }
@@ -4789,6 +4812,12 @@ class CoreUpCloud(UtilCloud):
         actual_id = str(storage.get("uuid") or "")
         expected_id = str(resource_id or actual_id)
         state = str(storage.get("state") or "").casefold()
+        origin = str(storage.get("origin") or "")
+        try:
+            size = int(storage.get("size"))
+            expected_size = int(identity.get("boot_storage_size"))
+        except (TypeError, ValueError):
+            return False
         return all(
             (
                 actual_id,
@@ -4799,11 +4828,12 @@ class CoreUpCloud(UtilCloud):
                 },
                 str(storage.get("title") or "")
                 == str(identity["storage_marker"]),
-                str(storage.get("origin") or "")
-                == str(identity["source_id"]),
+                not origin or origin == str(identity["source_id"]),
                 str(storage.get("zone") or "")
                 == str(identity["target_zone"]),
                 str(storage.get("type") or "") == "normal",
+                size > 0,
+                size == expected_size,
                 str(storage.get("tier") or "").strip().casefold()
                 == str(identity.get("boot_storage_tier") or ""),
                 str(storage.get("encrypted") or "").strip().casefold()
