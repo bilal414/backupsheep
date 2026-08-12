@@ -23,7 +23,11 @@ from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.backup.models import CoreCloudRestore
 from apps.console.connection.models import CoreAuthUpCloud, CoreIntegration
 from apps.console.node.models import CoreNode
-from apps.console.node.models import CoreUpCloud, _BackupProviderError
+from apps.console.node.models import (
+    CoreUpCloud,
+    _BackupProviderError,
+    _RestoreProviderError,
+)
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -151,6 +155,7 @@ def source_storage(storage_id=SOURCE_BOOT_ID, *, source_server_id="source-server
         "type": "normal",
         "zone": "us-chi1",
         "state": "online",
+        "size": 10,
         "tier": "standard",
         "encrypted": "yes",
         "servers": {"server": [{"uuid": source_server_id}]},
@@ -165,6 +170,7 @@ def backup_storage(storage_id, marker, *, origin=SOURCE_BOOT_ID, include_attribu
         "origin": origin,
         "zone": "us-chi1",
         "state": "online",
+        "size": 10,
     }
     if include_attributes:
         value.update({"tier": "standard", "encrypted": "yes"})
@@ -296,6 +302,7 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
             "origin": backup.unique_id,
             "zone": "us-chi1",
             "state": "online",
+            "size": 10,
             "tier": "standard",
             "encrypted": "yes",
         }
@@ -1060,6 +1067,65 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
             post_mock.call_args.kwargs["json"]["storage"]["encrypted"], "yes"
         )
         self.assertFalse(restore.params.get("_bs_create_outcome_unknown"))
+
+    def test_volume_clone_without_provider_origin_uses_exact_durable_contract(self):
+        integration, backup = self._complete_volume_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="volume-origin-omitted",
+            params={"zone": "us-chi1"},
+        )
+        get, post, target = self._volume_restore_http(integration, backup, restore)
+        target.pop("origin")
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ) as post_mock:
+            integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, target["uuid"])
+        self.assertEqual(post_mock.call_count, 1)
+        identity = restore.params["_bs_upcloud_restore"]
+        self.assertEqual(identity["source_size"], 10)
+        self.assertEqual(identity["target_size"], 10)
+
+    def test_volume_clone_rejects_nonempty_conflicting_origin_or_size(self):
+        for field, value in (("origin", "foreign-backup"), ("size", 11)):
+            with self.subTest(field=field):
+                integration, backup = self._complete_volume_backup()
+                restore = CoreCloudRestore.objects.create(
+                    node=integration.node,
+                    backup_id=backup.id,
+                    name=f"volume-invalid-{field}",
+                    params={"zone": "us-chi1"},
+                )
+                get, post, target = self._volume_restore_http(
+                    integration, backup, restore
+                )
+                target[field] = value
+                auth_cls = integration.node.connection.auth_upcloud.__class__
+                with mock.patch.object(
+                    auth_cls, "get_verified_client", return_value=mock.Mock()
+                ), mock.patch(
+                    "apps.console.node.models.requests.get", side_effect=get
+                ), mock.patch(
+                    "apps.console.node.models.requests.post", side_effect=post
+                ):
+                    with self.assertRaises(_RestoreProviderError):
+                        integration.restore_snapshot(backup, restore)
+
+                restore.refresh_from_db()
+                self.assertEqual(
+                    restore.params["_bs_last_error_code"],
+                    "PROVIDER_OWNERSHIP_MISMATCH",
+                )
+                self.assertIsNone(restore.resource_id)
 
     def test_volume_provider_conflict_is_definitive_and_never_blindly_replayed(self):
         integration, backup = self._complete_volume_backup()

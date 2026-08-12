@@ -224,6 +224,17 @@ object key.
 
 ## Offline test evidence
 
+Live clone readback confirmed an important UpCloud contract detail: a cloned
+normal storage can remain `origin=null` after reaching `online`, matching the
+official clone response, which does not expose source linkage. BackupSheep
+therefore treats a non-empty conflicting origin as an ownership failure but does
+not require an absent field. Lost-response adoption instead requires the
+unpredictable source-bound restore marker, one exact match from a complete
+inventory, immutable durable request fingerprint, and exact normal type, zone,
+size, tier, encryption, and provider ID. This is the strongest provider-backed
+contract available without inventing an origin relationship UpCloud does not
+persist.
+
 - Named regression:
   `OVHUpCloudReliabilityTests.test_upcloud_restore_page_two_adoption_duplicate_and_no_post`
   passed. Its mock now gives the exact backup-source GET separately and drives

@@ -4344,6 +4344,12 @@ class CoreUpCloud(UtilCloud):
         source_configuration = self._upcloud_restore_storage_configuration(
             restore.backup, source_storage
         )
+        try:
+            source_size = int(source_storage.get("size"))
+        except (TypeError, ValueError):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from None
+        if source_size <= 0:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
         requested_tier = self._upcloud_storage_attribute(
             params.get("tier"), self._UPCLOUD_STORAGE_TIERS
         )
@@ -4363,8 +4369,10 @@ class CoreUpCloud(UtilCloud):
             "target_zone": target_zone,
             "source_tier": source_configuration["tier"],
             "source_encrypted": source_configuration["encrypted"],
+            "source_size": source_size,
             "target_tier": source_configuration["tier"],
             "target_encrypted": source_configuration["encrypted"],
+            "target_size": source_size,
         }
         for key, value in expected.items():
             current = identity.get(key)
@@ -4400,8 +4408,21 @@ class CoreUpCloud(UtilCloud):
             != str(identity.get("target_zone") or "")
         ):
             raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
-        origin = resource.get("origin")
-        if str(origin or "") != str(source_id):
+        # UpCloud's clone response and normal-storage readback do not preserve
+        # an origin field. If a future response supplies one it must agree, but
+        # an absent origin cannot be treated as an ownership failure. The
+        # source-bound marker, complete unique inventory, immutable request
+        # fingerprint, and exact type/zone/size/tier/encryption contract are the
+        # provider-supported lost-response adoption witness.
+        origin = str(resource.get("origin") or "").strip()
+        if origin and origin != str(source_id):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+        try:
+            size = int(resource.get("size"))
+            target_size = int(identity.get("target_size"))
+        except (TypeError, ValueError):
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from None
+        if size <= 0 or target_size <= 0 or size != target_size:
             raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
         tier = str(identity.get("target_tier") or "")
         if not tier or str(resource.get("tier") or "").strip().casefold() != tier:

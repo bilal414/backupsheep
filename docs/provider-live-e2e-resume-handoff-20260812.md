@@ -288,9 +288,8 @@ version IDs.
 ### Native volume result and local remediation status
 
 Volume backup row `2` completed and created the exact online backup above. UI
-restore row `25` was initiated on the deployed candidate. No target was created;
-the provider returned a definite conflict and the row remains visibly in
-reconciliation.
+restore row `25` was initiated on the deployed candidate. The initial provider
+response looked like a definite conflict and the row entered manual review.
 
 Live evidence explained the contract gap: UpCloud's backup response omits the
 source tier (`null`), while the original exact data volume is `tier=standard`,
@@ -298,8 +297,17 @@ source tier (`null`), while the original exact data volume is `tier=standard`,
 and encryption in the volume witness before backup mutation, sends both exact
 values on clone, and requires both on target readback. A definite provider 409
 is classified as `PROVIDER_CONFLICT`, durably marked `clone_rejected`, and is
-not blindly replayed. A fresh volume backup is still required because row 25's
-old durable witness is incomplete.
+not blindly replayed.
+
+After deploying `9ab26d3`, recovery persisted tier/encryption from the exact
+source and UpCloud accepted exactly one clone for row `25`. The provider target
+appeared after the earlier visibility window and reached `online`, but normal
+storage readback retained `origin=null`; UpCloud's official clone response also
+omits origin. The follow-up hotfix binds adoption to exact
+type/zone/size/tier/encryption plus the unpredictable source-bound marker,
+complete unique inventory, durable request fingerprint, and exact provider ID.
+Any non-empty conflicting origin still fails closed. Resume row `25` against
+that exact target before creating another volume restore.
 
 ### Native server result and local remediation status
 
