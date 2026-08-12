@@ -421,6 +421,70 @@ class HetznerSnapshotTests(BaseTestCase):
 
 
 class HetznerRestoreTests(BaseTestCase):
+    def test_restore_fingerprint_survives_lost_response_adoption(self):
+        node = make_hetzner_node(self.account, self.member)
+        backup = make_backup(
+            node, status=UtilBackup.Status.COMPLETE, unique_id="789"
+        )
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored",
+            params={"server_type": "cx22", "location": "fsn1"},
+        )
+        no_match = response(
+            200,
+            {"servers": [], "meta": {"pagination": {"next_page": None}}},
+        )
+        with mock.patch.object(
+            CoreAuthHetzner,
+            "get_client",
+            return_value={"Authorization": "Bearer test"},
+        ), mock.patch(
+            "apps.console.node.models.requests.get", return_value=no_match
+        ), mock.patch(
+            "apps.console.node.models.requests.post",
+            side_effect=requests.exceptions.Timeout("lost provider response"),
+        ):
+            result = node.hetzner.restore_snapshot(backup, restore)
+
+        self.assertEqual(result, CoreCloudRestore.Status.IN_PROGRESS)
+        restore.refresh_from_db()
+        original_fingerprint = restore.request_fingerprint
+        self.assertEqual(len(original_fingerprint), 64)
+        self.assertTrue(restore.params["_bs_create_outcome_unknown"])
+
+        owned = response(
+            200,
+            {
+                "servers": [
+                    {
+                        "id": 901,
+                        "status": "initializing",
+                        "image": {"id": 789},
+                        "labels": {
+                            CoreHetzner.RESTORE_LABEL_KEY: str(restore.id),
+                            "backupsheep.source": "789",
+                        },
+                    }
+                ],
+                "meta": {"pagination": {"next_page": None}},
+            },
+        )
+        with mock.patch.object(
+            CoreAuthHetzner,
+            "get_client",
+            return_value={"Authorization": "Bearer test"},
+        ), mock.patch(
+            "apps.console.node.models.requests.get", return_value=owned
+        ), mock.patch("apps.console.node.models.requests.post") as post:
+            node.hetzner.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, "901")
+        self.assertEqual(restore.request_fingerprint, original_fingerprint)
+        post.assert_not_called()
+
     def test_restore_zero_match_waits_then_fails_without_duplicate_create(self):
         node = make_hetzner_node(self.account, self.member)
         backup = make_backup(node, status=UtilBackup.Status.COMPLETE, unique_id="789")

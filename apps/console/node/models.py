@@ -237,31 +237,51 @@ def _prepare_cloud_restore(restore, *, provider, source_id, target_kind, target_
     # row, but never rely on a caller-chosen display name for crash recovery.
     params.setdefault("_bs_provider_name", marker)
     identity = dict(params.get("_backupsheep_restore") or {})
-    identity.update(
-        {
-            "provider": str(provider),
-            "source_id": str(source_id),
-            "target_kind": str(target_kind),
-            # When an adapter has already derived the provider's real target
-            # identifier, preserve it as the reconciliation identity. The
-            # separate provider-name marker remains the cross-provider
-            # idempotency/ownership tag and must not replace an explicit target.
-            "target_name": str(target_name or params.get("_bs_provider_name") or restore.name),
-            "marker": marker,
-        }
-    )
+    expected_identity = {
+        "provider": str(provider),
+        "source_id": str(source_id),
+        "target_kind": str(target_kind),
+        # When an adapter has already derived the provider's real target
+        # identifier, preserve it as the reconciliation identity. The
+        # separate provider-name marker remains the cross-provider
+        # idempotency/ownership tag and must not replace an explicit target.
+        "target_name": str(
+            target_name or params.get("_bs_provider_name") or restore.name
+        ),
+        "marker": marker,
+    }
+    for key, expected in expected_identity.items():
+        existing = identity.get(key)
+        if existing not in (None, "") and str(existing) != expected:
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+    identity.update(expected_identity)
     params["_backupsheep_restore"] = identity
     params.setdefault("_bs_create_outcome_unknown", False)
     # New restore requests must prove the marker/source relationship when the
     # provider exposes those fields. Legacy rows without this flag retain their
     # exact resource-id polling compatibility.
     params["_bs_marker_required"] = True
-    fingerprint = _restore_fingerprint(provider, source_id, target_kind, restore, params)
+    # Runtime reconciliation fields are intentionally appended to ``params`` after
+    # the provider request starts. Re-hashing that mutable dictionary on redelivery
+    # made the durable request fingerprint change after a worker crash, even though
+    # the source, target, marker, and provider request were identical. The first
+    # valid fingerprint is the immutable witness; retries validate the durable
+    # identity above and must preserve it byte-for-byte.
+    existing_fingerprint = str(
+        getattr(restore, "request_fingerprint", "") or ""
+    ).strip()
+    if existing_fingerprint and not re.fullmatch(
+        r"[0-9a-f]{64}", existing_fingerprint
+    ):
+        raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+    fingerprint = existing_fingerprint or _restore_fingerprint(
+        provider, source_id, target_kind, restore, params
+    )
     fields = []
     if getattr(restore, "restore_marker", "") != marker:
         restore.restore_marker = marker
         fields.append("restore_marker")
-    if getattr(restore, "request_fingerprint", "") != fingerprint:
+    if not existing_fingerprint:
         restore.request_fingerprint = fingerprint
         fields.append("request_fingerprint")
     if restore.params != params:
