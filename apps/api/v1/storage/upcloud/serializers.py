@@ -1,5 +1,3 @@
-import time
-import boto3
 import pytz
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
@@ -19,6 +17,7 @@ from apps.console.backup.models import (
     CoreDatabaseBackupStoragePoints,
 )
 from apps.console.storage.models import CoreStorageUpCloud, CoreStorage
+from apps._tasks.integration.storage.upcloud import normalize_upcloud_endpoint
 
 
 class CoreStorageUpCloudReadSerializer(StorageCredentialReadSerializerMixin, serializers.ModelSerializer):
@@ -61,6 +60,7 @@ class CoreStorageUpCloudWriteSerializer(StorageCredentialWriteSerializerMixin, s
 
     def validate(self, data):
         try:
+            data["endpoint"] = normalize_upcloud_endpoint(data["endpoint"])
             storage = CoreStorageUpCloud()
             if not storage.validate(data):
                 raise ValueError("Please check bucket name and permissions.")

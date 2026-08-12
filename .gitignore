@@ -5,3 +5,4 @@
 *.pyc
 /.env
 /node_modules
+/scripts/.upcloud-runtime/

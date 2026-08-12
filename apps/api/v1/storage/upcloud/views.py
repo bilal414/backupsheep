@@ -12,8 +12,8 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
-from apps.console.connection.models import CoreDoSpacesRegion, CoreFilebaseRegion
 from apps.console.storage.models import CoreStorage
+from apps._tasks.integration.storage.upcloud import normalize_upcloud_endpoint
 from .filters import CoreStorageUpCloudFilter
 from .permissions import CoreStorageUpCloudPermissions
 from .serializers import CoreStorageReadSerializer, CoreStorageWriteSerializer
@@ -67,6 +67,7 @@ class CoreStorageUpCloudView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     def validate(self, request, pk=None):
         try:
             storage = self.get_object()
+            normalize_upcloud_endpoint(storage.storage_upcloud.endpoint)
             validation = storage.storage_upcloud.validate()
             if validation:
                 return Response(

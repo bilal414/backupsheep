@@ -371,9 +371,13 @@ class ProviderPollStatusResilienceTests(BaseTestCase):
                 "test-token", self.account.get_encryption_key()
             ),
         )
-        not_found = SimpleNamespace(status_code=404, json=lambda: {})
+        not_found = SimpleNamespace(
+            status_code=404,
+            json=lambda: {},
+            close=lambda: None,
+        )
         with mock.patch(
-            "apps.console.connection.models.CoreAuthDigitalOcean.get_client",
+            "apps.console.connection.models.CoreAuthDigitalOcean.get_verified_client",
             return_value={},
         ), mock.patch(
             "apps.console.backup.models.requests.get",
@@ -408,15 +412,37 @@ class DigitalOceanSnapshotCreateTests(BaseTestCase):
         empty_catalog = SimpleNamespace(
             status_code=200,
             json=lambda: {"snapshots": None, "meta": {"total": 0}},
+            close=lambda: None,
+        )
+        source_volume = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "volume": {"id": str(node.digitalocean.unique_id)}
+            },
+            close=lambda: None,
         )
         created_snapshot = SimpleNamespace(
             status_code=201,
             json=lambda: {
-                "snapshot": {"id": "volume-snapshot-1", "min_disk_size": 1}
+                "snapshot": {
+                    "id": "volume-snapshot-1",
+                    "name": backup.uuid_str,
+                    "resource_id": str(node.digitalocean.unique_id),
+                    "resource_type": "volume",
+                    "min_disk_size": 1,
+                }
             },
+            close=lambda: None,
         )
-        with mock.patch(
-            "apps.console.node.models.requests.get", return_value=empty_catalog
+        with mock.patch.object(
+            CoreAuthDigitalOcean,
+            "get_verified_client",
+            return_value={"Authorization": "Bearer test-token"},
+        ), mock.patch(
+            "apps.api.v1.connection.digitalocean.client.requests.request",
+            return_value=empty_catalog,
+        ), mock.patch(
+            "apps.console.node.models.requests.get", return_value=source_volume
         ), mock.patch(
             "apps.console.node.models.requests.post", return_value=created_snapshot
         ):

@@ -139,6 +139,11 @@ class NodeDetailView(LoginRequiredMixin, DetailView):
         context["backup_count"] = (
             self.get_object().list_backups(list_all_backups).count()
         )
+        node = self.get_object()
+        context["is_vultr_managed_database"] = (
+            node.connection.integration.code == "vultr"
+            and hasattr(node, "vultr_database")
+        )
         return context
 
     def get_queryset(self, **kwargs):

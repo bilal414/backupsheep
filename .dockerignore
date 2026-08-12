@@ -28,6 +28,7 @@ node_modules
 # Collected/generated static and runtime working dirs (regenerated in-container)
 /static
 _storage
+scripts/.upcloud-runtime/
 
 # Test artifacts and local notes
 _upload_test_files

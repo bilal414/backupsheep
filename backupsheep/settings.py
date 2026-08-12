@@ -719,6 +719,76 @@ if AWS_RESTORE_ACCEPTANCE_FAULT_ENABLED:
             "AWS restore acceptance fault injection requires an exact mode, "
             "positive restore id, UUID correlation id, and s3/dynamodb resource type."
         )
+
+# Oracle native compute/volume acceptance hooks are disabled by default. When
+# enabled, every selector is mandatory: a stable provider marker, one exact
+# database row, the exact Celery task id, and a concrete resource type. This
+# keeps an isolated-worker crash test from becoming a broad production fault
+# injector by configuration drift.
+_ORACLE_FAULT_MARKER_RE = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
+_ORACLE_FAULT_TASK_RE = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}"
+
+for _oracle_fault_prefix, _oracle_fault_resource_types in (
+    (
+        "ORACLE_BACKUP_ACCEPTANCE_FAULT",
+        {"compute_image", "boot_volume", "volume"},
+    ),
+    (
+        "ORACLE_RESTORE_ACCEPTANCE_FAULT",
+        {"instance", "boot_volume", "volume"},
+    ),
+):
+    globals()[f"{_oracle_fault_prefix}_ENABLED"] = _as_bool(
+        config.get(f"{_oracle_fault_prefix}_ENABLED", "false")
+    )
+    globals()[f"{_oracle_fault_prefix}_MODE"] = str(
+        config.get(f"{_oracle_fault_prefix}_MODE", "") or ""
+    ).strip().lower()
+    globals()[f"{_oracle_fault_prefix}_MARKER"] = str(
+        config.get(f"{_oracle_fault_prefix}_MARKER", "") or ""
+    ).strip()
+    globals()[f"{_oracle_fault_prefix}_ROW_ID"] = str(
+        config.get(f"{_oracle_fault_prefix}_ROW_ID", "") or ""
+    ).strip()
+    globals()[f"{_oracle_fault_prefix}_TASK_ID"] = str(
+        config.get(f"{_oracle_fault_prefix}_TASK_ID", "") or ""
+    ).strip()
+    globals()[f"{_oracle_fault_prefix}_RESOURCE_TYPE"] = str(
+        config.get(f"{_oracle_fault_prefix}_RESOURCE_TYPE", "") or ""
+    ).strip().lower()
+    try:
+        _oracle_hold_seconds = int(
+            config.get(f"{_oracle_fault_prefix}_HOLD_SECONDS", 30)
+        )
+    except (TypeError, ValueError):
+        raise ImproperlyConfigured(
+            f"{_oracle_fault_prefix}_HOLD_SECONDS must be an integer."
+        ) from None
+    if not 1 <= _oracle_hold_seconds <= 600:
+        raise ImproperlyConfigured(
+            f"{_oracle_fault_prefix}_HOLD_SECONDS must be between 1 and 600."
+        )
+    globals()[f"{_oracle_fault_prefix}_HOLD_SECONDS"] = _oracle_hold_seconds
+    if globals()[f"{_oracle_fault_prefix}_ENABLED"]:
+        if (
+            globals()[f"{_oracle_fault_prefix}_MODE"] not in {"drop_response", "hold"}
+            or not re.fullmatch(
+                _ORACLE_FAULT_MARKER_RE,
+                globals()[f"{_oracle_fault_prefix}_MARKER"],
+            )
+            or not globals()[f"{_oracle_fault_prefix}_ROW_ID"].isdigit()
+            or int(globals()[f"{_oracle_fault_prefix}_ROW_ID"]) < 1
+            or not re.fullmatch(
+                _ORACLE_FAULT_TASK_RE,
+                globals()[f"{_oracle_fault_prefix}_TASK_ID"],
+            )
+            or globals()[f"{_oracle_fault_prefix}_RESOURCE_TYPE"]
+            not in _oracle_fault_resource_types
+        ):
+            raise ImproperlyConfigured(
+                f"{_oracle_fault_prefix} requires an exact mode, marker, positive row id, "
+                "task id, and supported resource type."
+            )
 # Lease the provider-create phase separately from polling. This closes the race in
 # which a duplicate delivery or recovery sweep enters the same create call while the
 # first worker is still waiting on the provider API.
@@ -836,6 +906,13 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_in_progress_backups",
         "schedule": 60.0,
     },
+    # API-triggered Oracle snapshot deletes enqueue immediately. This independent
+    # sweep re-publishes DELETE_IN_PROGRESS rows after broker loss, worker crash,
+    # or a server reboot; the provider adapter keeps the exact delete checkpoint.
+    "reconcile-oracle-backup-deletions": {
+        "task": "reconcile_oracle_backup_deletions",
+        "schedule": 60.0,
+    },
     "resume-in-progress-restores": {
         "task": "resume_in_progress_restores",
         "schedule": 60.0,
@@ -918,6 +995,8 @@ CELERY_TASK_ROUTES = {
     "backup_ovh_us": {"queue": "cloud"},
     # Async snapshot status polling (re-queues itself); API-only, no local disk.
     "poll_cloud_backup": {"queue": "cloud"},
+    "reconcile_oracle_backup_deletion": {"queue": "cloud"},
+    "reconcile_oracle_backup_deletions": {"queue": "cloud"},
     "resume_in_progress_backups": {"queue": "default"},
     "resume_in_progress_restores": {"queue": "default"},
     "resume_pending_backup_requests": {"queue": "default"},

@@ -7,14 +7,24 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
-from apps.console.connection.models import CoreConnection, CoreConnectionLocation, CoreIntegration
-from apps.api.v1.utils.api_permissions import MemberPermissions
+
+from apps._tasks.exceptions import (
+    IntegrationValidationError,
+    NodeConnectionErrorEligibleObjects,
+)
+from apps._tasks.integration.oracle import (
+    OracleProviderError,
+    discover_oracle_objects,
+)
+from apps.console.connection.models import CoreConnection, CoreConnectionLocation
 from apps.console.node.models import CoreOracle, CoreNode
+
 from .filters import CoreOracleFilter
 from .permissions import CoreOracleViewPermissions
-from .serializers import CoreOracleConnectionReadSerializer, CoreOracleConnectionWriteSerializer
-from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
-    IntegrationValidationError
+from .serializers import (
+    CoreOracleConnectionReadSerializer,
+    CoreOracleConnectionWriteSerializer,
+)
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
 from ..view_helpers import safe_connection_action
@@ -93,8 +103,9 @@ class CoreOracleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     def objects(self, request, pk=None):
         try:
             connection = self.get_object()
-            eligible_objects = connection.auth_oracle.get_eligible_objects(
-                object_type=self.request.query_params.get("object_type")
+            eligible_objects = discover_oracle_objects(
+                connection.auth_oracle,
+                self.request.query_params.get("object_type"),
             )
             for eligible_object in eligible_objects:
                 query = Q(unique_id=eligible_object["id"], node__connection=connection)
@@ -102,5 +113,9 @@ class CoreOracleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 if CoreOracle.objects.filter(query).exists():
                     eligible_object["_bs_attached"] = True
             return Response(eligible_objects)
-        except Exception as e:
-            raise NodeConnectionErrorEligibleObjects(e.__str__())
+        except OracleProviderError as error:
+            raise NodeConnectionErrorEligibleObjects(str(error))
+        except Exception:
+            raise NodeConnectionErrorEligibleObjects(
+                "Oracle Cloud discovery failed safely. Verify the region, permissions, and compartment access."
+            )

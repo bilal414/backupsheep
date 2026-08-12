@@ -2,10 +2,12 @@ import hashlib
 import io
 import os
 import uuid
+from datetime import timedelta
 from unittest import mock
 
 from botocore.exceptions import ClientError
 from django.test import override_settings
+from django.utils import timezone
 
 from apps._tasks.exceptions import StorageVultrUploadFailedError
 from apps._tasks.integration.storage.vultr import (
@@ -73,6 +75,7 @@ class VultrStorageIntegrityTests(BaseTestCase):
             "ETag": etag,
             "VersionId": version_id,
             "Metadata": {
+                "backupsheep-backup-id": str(self.point.backup_id),
                 "backupsheep-sha256": sha256 or self.sha256,
                 "backupsheep-bytes": str(len(self.payload)),
             },
@@ -112,6 +115,7 @@ class VultrStorageIntegrityTests(BaseTestCase):
 
         self.point.refresh_from_db()
         state = self.point.metadata[VULTR_OBJECT_METADATA_KEY]
+        self.assertEqual(state["bucket"], "test-bucket")
         self.assertEqual(state["object_key"], self.point.storage_file_id)
         self.assertEqual(state["sha256"], self.sha256)
         self.assertEqual(state["size_bytes"], len(self.payload))
@@ -127,6 +131,16 @@ class VultrStorageIntegrityTests(BaseTestCase):
         self.assertEqual(config.connect_timeout, 10)
         self.assertEqual(config.read_timeout, 60)
         self.assertEqual(config.retries["max_attempts"], 5)
+
+    def test_unavailable_version_id_is_persisted_canonically(self):
+        client = self._client(_not_found(), self._head(version_id=None))
+
+        self._run(client)
+
+        self.point.refresh_from_db()
+        state = self.point.metadata[VULTR_OBJECT_METADATA_KEY]
+        self.assertEqual(state["version_id"], "")
+        self.assertIn("version_id", state)
 
     def test_multipart_etag_is_identity_metadata_not_content_checksum(self):
         client = self._client(_not_found(), self._head(etag='"abc-7"'))
@@ -150,15 +164,19 @@ class VultrStorageIntegrityTests(BaseTestCase):
         self.point.storage_file_id = key
         self.point.metadata = {
             VULTR_OBJECT_METADATA_KEY: {
+                "bucket": "test-bucket",
+                "phase": "committed",
                 "object_key": key,
                 "sha256": self.sha256,
                 "size_bytes": len(self.payload),
+                "checksum_algorithm": "sha256",
+                "ownership_marker": str(self.point.backup_id),
                 "version_id": "version-1",
             }
         }
         self.point.save()
         head = self._head()
-        head["Metadata"] = {}
+        head["Metadata"] = {"backupsheep-backup-id": str(self.point.backup_id)}
         client = self._client(head)
         client.get_object.return_value = {"Body": io.BytesIO(self.payload)}
         self._run(client)
@@ -173,6 +191,7 @@ class VultrStorageIntegrityTests(BaseTestCase):
         original_size = len(self.payload)
         self.point.metadata = {
             VULTR_OBJECT_METADATA_KEY: {
+                "bucket": "test-bucket",
                 "object_key": "backups/in-progress.zip",
                 "sha256": original_sha,
                 "size_bytes": original_size,
@@ -197,6 +216,10 @@ class VultrStorageIntegrityTests(BaseTestCase):
     def test_worker_crash_resumes_persisted_multipart_upload(self):
         self._write_payload((b"a" * (5 * 1024 * 1024)) + (b"b" * 1024))
         client = self._client(_not_found(), _not_found(), self._head())
+        client.list_multipart_uploads.return_value = {
+            "Uploads": [],
+            "IsTruncated": False,
+        }
         client.create_multipart_upload.return_value = {"UploadId": "upload-1"}
         client.list_parts.side_effect = [
             {"Parts": [], "IsTruncated": False},
@@ -238,14 +261,49 @@ class VultrStorageIntegrityTests(BaseTestCase):
     def test_duplicate_unfinished_uploads_stop_automatic_recreation(self):
         client = self._client(_not_found())
         client.create_multipart_upload.side_effect = TimeoutError("response lost")
-        client.list_multipart_uploads.return_value = {
-            "Uploads": [
-                {"Key": self.point.backup.uuid + ".zip", "UploadId": "wrong"},
-                {"Key": f"backups/{self.point.backup.uuid}.zip", "UploadId": "one"},
-                {"Key": f"backups/{self.point.backup.uuid}.zip", "UploadId": "two"},
-            ],
-            "IsTruncated": False,
+        key = f"backups/{self.point.backup.uuid}.zip"
+        initiated = timezone.now()
+        identity = {
+            "Owner": {"ID": "owner-1"},
+            "Initiator": {"ID": "initiator-1"},
+            "StorageClass": "STANDARD",
         }
+        client.list_multipart_uploads.side_effect = [
+            {
+                "Uploads": [
+                    {
+                        "Key": key,
+                        "UploadId": "stale",
+                        "Initiated": initiated - timedelta(days=1),
+                        **identity,
+                    }
+                ],
+                "IsTruncated": False,
+            },
+            {
+                "Uploads": [
+                    {
+                        "Key": key,
+                        "UploadId": "stale",
+                        "Initiated": initiated - timedelta(days=1),
+                        **identity,
+                    },
+                    {
+                        "Key": key,
+                        "UploadId": "one",
+                        "Initiated": initiated,
+                        **identity,
+                    },
+                    {
+                        "Key": key,
+                        "UploadId": "two",
+                        "Initiated": initiated,
+                        **identity,
+                    },
+                ],
+                "IsTruncated": False,
+            },
+        ]
         with self.assertRaises(StorageVultrUploadFailedError) as raised:
             self._run(client)
         self.assertIn("Multiple unfinished uploads", str(raised.exception))

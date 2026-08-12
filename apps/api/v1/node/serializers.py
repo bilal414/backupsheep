@@ -5,7 +5,7 @@ from apps.console.account.models import CoreAccount
 from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.api.v1.connection.serializers import CoreConnectionSerializer
 from apps.api.v1.utils.api_helpers import CurrentMemberDefault, CurrentAccountDefault
-from apps.console.backup.models import CoreCloudRestore
+from apps.console.backup.models import CoreCloudRestore, CoreVultrDatabaseRestore
 from apps.console.connection.models import CoreConnection
 from apps.api.v1.backup.serializers import RestoreExecutionStatusMixin
 from apps.console.node.models import (
@@ -60,6 +60,10 @@ class CoreNodeSerializer(serializers.ModelSerializer):
             return {"name": "ovh_us", "id": obj.ovh_us.id}
         elif hasattr(obj, "digitalocean"):
             return {"name": "digitalocean", "id": obj.digitalocean.id}
+        elif hasattr(obj, "upcloud"):
+            return {"name": "upcloud", "id": obj.upcloud.id}
+        elif hasattr(obj, "oracle"):
+            return {"name": "oracle", "id": obj.oracle.id}
 
     @staticmethod
     def get_created_display(obj):
@@ -268,3 +272,43 @@ class CoreCloudRestoreSerializer(RestoreExecutionStatusMixin, serializers.ModelS
         timezone = pytz.timezone(timezone)
         date_time = obj.modified.astimezone(timezone).strftime("%b %d %Y - %I:%M%p")
         return date_time
+
+
+class CoreVultrDatabaseRestoreSerializer(
+    RestoreExecutionStatusMixin, serializers.ModelSerializer
+):
+    """Expose Vultr fork restores through the same safe UI status contract."""
+
+    status_display = serializers.SerializerMethodField(read_only=True)
+    created_display = serializers.SerializerMethodField()
+    modified_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CoreVultrDatabaseRestore
+        fields = "__all__"
+        read_only_fields = (
+            "backup",
+            "resource_id",
+            "provider_job_id",
+            "provider_marker",
+            "provider_status",
+            "provider_http_status",
+            "status",
+            "error",
+            "celery_task_id",
+        )
+        datatables_always_serialize = ("id",)
+
+    @staticmethod
+    def get_status_display(obj):
+        return obj.get_status_display()
+
+    @staticmethod
+    def get_created_display(obj):
+        timezone = pytz.timezone(str(get_current_timezone()))
+        return obj.created.astimezone(timezone).strftime("%b %d %Y - %I:%M%p")
+
+    @staticmethod
+    def get_modified_display(obj):
+        timezone = pytz.timezone(str(get_current_timezone()))
+        return obj.modified.astimezone(timezone).strftime("%b %d %Y - %I:%M%p")

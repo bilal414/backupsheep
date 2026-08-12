@@ -328,132 +328,257 @@ class CoreAuthDigitalOcean(TimeStampedModel):
         db_table = "core_auth_digitalocean"
 
     def refresh_auth_token(self):
-        from apps._tasks.helper.tasks import send_postmark_email
         from datetime import datetime, timezone
+        from urllib.parse import urlsplit
+
         from ..node.models import CoreNode
+        from apps.api.v1.connection.digitalocean.client import DigitalOceanAPIError
 
+        # Personal access-token connections do not use OAuth refresh tokens.
+        if self.api_key:
+            return True
+
+        if not self.refresh_token:
+            return False
         encryption_key = self.connection.account.get_encryption_key()
-
         refresh_token_decrypted = bs_decrypt(self.refresh_token, encryption_key)
+        if not refresh_token_decrypted:
+            return False
 
-        if refresh_token_decrypted:
-            token_request_url = (
-                f"{settings.DIGITALOCEAN_TOKEN_URL}?"
-                f"grant_type=refresh_token"
-                f"&refresh_token={refresh_token_decrypted}"
+        token_url = str(settings.DIGITALOCEAN_TOKEN_URL or "").strip()
+        try:
+            parsed = urlsplit(token_url)
+            has_port = parsed.port is not None
+        except ValueError as error:
+            raise DigitalOceanAPIError("PROVIDER_REQUEST_FAILED") from error
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or has_port
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise DigitalOceanAPIError("PROVIDER_REQUEST_FAILED")
+
+        form = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token_decrypted,
+        }
+        if settings.DIGITALOCEAN_APP_CLIENT_ID:
+            form["client_id"] = settings.DIGITALOCEAN_APP_CLIENT_ID
+        if settings.DIGITALOCEAN_APP_CLIENT_SECRET:
+            form["client_secret"] = settings.DIGITALOCEAN_APP_CLIENT_SECRET
+
+        result = None
+        try:
+            result = requests.post(
+                token_url,
+                data=form,
+                headers={"Accept": "application/json"},
+                verify=True,
+                timeout=request_timeout(),
             )
-
-            result = requests.post(token_request_url)
-            if result.status_code == 200:
+            if result.status_code in {400, 401}:
+                self.token_refresh_failed = True
+                self.save(update_fields=["token_refresh_failed", "modified"])
+                self.connection.status = CoreConnection.Status.TOKEN_REFRESH_FAIL
+                self.connection.save(update_fields=["status", "modified"])
+                return False
+            if result.status_code == 429:
+                raise DigitalOceanAPIError(
+                    "PROVIDER_RATE_LIMIT", retryable=True, status_code=429
+                )
+            if result.status_code in {408, 425} or result.status_code >= 500:
+                raise DigitalOceanAPIError(
+                    "PROVIDER_TRANSIENT_OUTAGE",
+                    retryable=True,
+                    status_code=result.status_code,
+                )
+            if result.status_code != 200:
+                raise DigitalOceanAPIError(
+                    "PROVIDER_REQUEST_FAILED", status_code=result.status_code
+                )
+            try:
                 do_tokens = result.json()
-                self.access_token = bs_encrypt(do_tokens["access_token"], encryption_key)
-                self.refresh_token = bs_encrypt(do_tokens["refresh_token"], encryption_key)
-                self.expiry = datetime.fromtimestamp((int(time.time()) + int(do_tokens["expires_in"])), tz=timezone.utc)
-                if do_tokens.get("info"):
-                    self.info_name = do_tokens["info"].get("name")
-                    self.info_email = do_tokens["info"].get("email")
-                    self.info_uuid = do_tokens["info"].get("uuid")
-                self.save()
-                self.connection.status = CoreConnection.Status.ACTIVE
-                self.connection.save()
-                # activate all paused nodes.
-                for node in self.connection.nodes.filter(status=CoreNode.Status.PAUSED_MAX_RETRIES):
-                    node.status = CoreNode.Status.ACTIVE
-                    node.save()
-            elif result.status_code == 401:
-                if result.json().get("error") == "invalid_grant":
-                    # Configure this to send new email. DigitalOcean doesn't use these tokens anymore
-                    pass
-                    # self.connection.status = CoreConnection.Status.TOKEN_REFRESH_FAIL
-                    # self.connection.save()
-                    # member = self.connection.account.get_primary_member()
-                    # to_email = member.user.email
-                    # send_postmark_email.delay(
-                    #     to_email,
-                    #     23780797,
-                    #     "TOKEN_REFRESH_FAIL",
-                    #     {
-                    #         "connection_name": self.connection.name,
-                    #         "connection_info_name": self.info_name,
-                    #         "connection_info_email": self.info_email,
-                    #         "connection_status": self.connection.get_status_display(),
-                    #         "action_url": "https://backupsheep.com/console/setup/digitalocean/",
-                    #         "help_url": "https://support.backupsheep.com",
-                    #         "sender_name": "BackupSheep - Notification Bot",
-                    #     },
-                    # )
-            elif result.status_code == 429:
-                if result.json()["id"] == "too_many_requests":
-                    print(result.json()["message"])
-            else:
-                print("other error")
+                access_token = str(do_tokens["access_token"])
+                next_refresh_token = str(
+                    do_tokens.get("refresh_token") or refresh_token_decrypted
+                )
+                expires_in = int(do_tokens["expires_in"])
+            except (KeyError, TypeError, ValueError):
+                raise DigitalOceanAPIError("PROVIDER_MALFORMED_RESPONSE") from None
+            if (
+                not access_token
+                or not next_refresh_token
+                or expires_in <= 0
+                or any(char in access_token for char in "\r\n")
+                or any(char in next_refresh_token for char in "\r\n")
+            ):
+                raise DigitalOceanAPIError("PROVIDER_MALFORMED_RESPONSE")
+
+            self.access_token = bs_encrypt(access_token, encryption_key)
+            self.refresh_token = bs_encrypt(next_refresh_token, encryption_key)
+            self.token_type = "Bearer"
+            self.expiry = datetime.fromtimestamp(
+                int(time.time()) + expires_in, tz=timezone.utc
+            )
+            self.token_refresh_failed = False
+            self.save(
+                update_fields=[
+                    "access_token",
+                    "refresh_token",
+                    "token_type",
+                    "expiry",
+                    "token_refresh_failed",
+                    "modified",
+                ]
+            )
+        except requests.exceptions.Timeout as error:
+            raise DigitalOceanAPIError(
+                "PROVIDER_TIMEOUT", retryable=True
+            ) from error
+        except requests.exceptions.RequestException as error:
+            raise DigitalOceanAPIError(
+                "PROVIDER_TRANSIENT_OUTAGE", retryable=True
+            ) from error
+        finally:
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+
+        # Re-read the account only through the pinned-identity path.  In
+        # particular, a rotated token must never silently replace an existing
+        # team witness when the provider account has changed.
+        self.get_verified_client()
+        self.connection.status = CoreConnection.Status.ACTIVE
+        self.connection.save(update_fields=["status", "modified"])
+        self.connection.nodes.filter(
+            status=CoreNode.Status.PAUSED_MAX_RETRIES
+        ).update(status=CoreNode.Status.ACTIVE)
+        return True
 
     def get_client(self):
+        from apps.api.v1.connection.digitalocean.client import DigitalOceanAPIError
+
         encryption_key = self.connection.account.get_encryption_key()
 
         if self.api_key:
-            client = {
-                "content-type": "application/json",
-                "Authorization": f"Bearer {bs_decrypt(self.api_key, encryption_key)}",
-            }
+            credential = bs_decrypt(self.api_key, encryption_key)
         # Legacy method. We switched to API Access Token in 2022
         else:
-            client = {
-                "content-type": "application/json",
-                "Authorization": f"{self.token_type} {bs_decrypt(self.access_token, encryption_key)}",
-            }
-        return client
+            if str(self.token_type or "Bearer").casefold() != "bearer":
+                raise DigitalOceanAPIError("PROVIDER_AUTH_FAILED")
+            if not self.access_token:
+                raise DigitalOceanAPIError("PROVIDER_AUTH_FAILED")
+            credential = bs_decrypt(self.access_token, encryption_key)
+        credential = str(credential or "")
+        if not credential or any(char in credential for char in "\r\n"):
+            raise DigitalOceanAPIError("PROVIDER_AUTH_FAILED")
+        return {
+            "content-type": "application/json",
+            "Authorization": f"Bearer {credential}",
+        }
+
+    @staticmethod
+    def _account_identity(payload):
+        """Return a validated, non-secret DigitalOcean account identity."""
+        from apps.api.v1.connection.digitalocean.client import DigitalOceanAPIError
+
+        if not isinstance(payload, dict):
+            raise DigitalOceanAPIError("PROVIDER_MALFORMED_RESPONSE")
+        account = payload.get("account")
+        if not isinstance(account, dict):
+            raise DigitalOceanAPIError("PROVIDER_MALFORMED_RESPONSE")
+        status = account.get("status")
+        if not isinstance(status, str):
+            raise DigitalOceanAPIError("PROVIDER_MALFORMED_RESPONSE")
+        if status != "active":
+            raise DigitalOceanAPIError("PROVIDER_AUTH_FAILED")
+
+        raw_team = account.get("team")
+        if raw_team is not None and not isinstance(raw_team, dict):
+            raise DigitalOceanAPIError("PROVIDER_MALFORMED_RESPONSE")
+        team = raw_team or {}
+        provider_uuid = team.get("uuid") or account.get("uuid")
+        if not isinstance(provider_uuid, str) or not provider_uuid.strip():
+            raise DigitalOceanAPIError("PROVIDER_MALFORMED_RESPONSE")
+
+        for value in (
+            team.get("name"),
+            account.get("name"),
+            account.get("email"),
+        ):
+            if value not in (None, "") and not isinstance(value, str):
+                raise DigitalOceanAPIError("PROVIDER_MALFORMED_RESPONSE")
+
+        return {
+            "info_uuid": provider_uuid.strip(),
+            "info_name": team.get("name") or account.get("name"),
+            "info_email": account.get("email"),
+        }
+
+    def get_verified_client(self):
+        """Return the local client only after verifying the pinned account.
+
+        ``get_client`` intentionally remains a decryption-only operation.  This
+        method is the explicit network boundary for workers and validation paths:
+        it reads the current account, requires an active account, and adopts a
+        missing legacy witness once.  A populated witness is immutable unless a
+        credential replacement serializer has already completed a successful
+        validation and written the new witness.
+        """
+        from django.db import transaction
+
+        from apps.api.v1.connection.digitalocean.client import get_json
+
+        headers = self.get_client()
+        identity = self._account_identity(get_json("/v2/account", headers=headers))
+
+        with transaction.atomic():
+            current = type(self).objects.select_for_update().get(pk=self.pk)
+            pinned_uuid = str(current.info_uuid or "").strip()
+            if pinned_uuid and pinned_uuid != identity["info_uuid"]:
+                from apps.api.v1.connection.digitalocean.client import DigitalOceanAPIError
+
+                raise DigitalOceanAPIError("PROVIDER_OWNERSHIP_MISMATCH")
+
+            changed = []
+            if not pinned_uuid:
+                current.info_uuid = identity["info_uuid"]
+                changed.append("info_uuid")
+            # These fields are descriptive only.  They may refresh after the
+            # UUID has matched (or has been adopted for a legacy row), but an
+            # incomplete provider response never erases a known value.
+            for field in ("info_name", "info_email"):
+                value = identity[field]
+                if value not in (None, "") and getattr(current, field) != value:
+                    setattr(current, field, value)
+                    changed.append(field)
+            if changed:
+                current.save(update_fields=list(dict.fromkeys(changed + ["modified"])))
+
+        return current.get_client()
 
     def get_eligible_objects(self, object_type="cloud"):
-        eligible_objects = []
-        client = self.get_client()
-        payload = {"per_page": 200}
+        from apps.api.v1.connection.digitalocean.client import (
+            DigitalOceanAPIError,
+            list_eligible_objects,
+        )
 
-        if object_type == "cloud":
-            result = requests.get(
-                settings.DIGITALOCEAN_API + "/v2/droplets",
-                headers=client,
-                params=payload,
-                verify=True,
+        try:
+            return list_eligible_objects(
+                headers=self.get_verified_client(), object_type=object_type
             )
-            if result.status_code == 200:
-                droplets = result.json()["droplets"]
-                for droplet in droplets:
-                    droplet["_bs_unique_id"] = droplet.get("id", None)
-                    droplet["_bs_name"] = droplet.get("name", None)
-                    droplet["_bs_region"] = droplet.get("region", {}).get("name", None)
-                    droplet["_bs_size"] = droplet.get("size", {}).get("disk", None)
-                    eligible_objects.append(droplet)
-            else:
-                raise APIException(detail=result.json()["message"])
-            result.close()
-        elif object_type == "volume":
-            result = requests.get(
-                settings.DIGITALOCEAN_API + "/v2/volumes",
-                headers=client,
-                params=payload,
-                verify=True,
-            )
-            if result.status_code == 200:
-                droplets = result.json()["volumes"]
-                for droplet in droplets:
-                    droplet["_bs_unique_id"] = droplet.get("id", None)
-                    droplet["_bs_name"] = droplet.get("name", None)
-                    droplet["_bs_region"] = droplet.get("region", {}).get("name", None)
-                    droplet["_bs_size"] = droplet.get("size_gigabytes", None)
-                    eligible_objects.append(droplet)
-            else:
-                raise APIException(detail=result.json()["message"])
-            result.close()
-        return eligible_objects
+        except ValueError as error:
+            raise APIException(detail=str(error)) from error
+        except DigitalOceanAPIError as error:
+            raise APIException(detail=str(error)) from error
 
     def validate(self, check_errors=None, raise_exp=None):
-        client = self.get_client()
-        result = requests.get(settings.DIGITALOCEAN_API + "/v2/account", headers=client, verify=True)
-        if result.status_code == 200:
-            return True
-        else:
-            return None
+        self.get_verified_client()
+        return True
 
 
 class CoreAuthHetzner(TimeStampedModel):
@@ -587,54 +712,171 @@ class CoreAuthUpCloud(TimeStampedModel):
     connection = models.OneToOneField("CoreConnection", related_name="auth_upcloud", on_delete=models.CASCADE)
     username = models.BinaryField(null=True)
     password = models.BinaryField(null=True)
+    api_token = models.BinaryField(null=True)
     token_refresh_failed = models.BooleanField(default=False)
     encryption_updated = models.BooleanField(default=False)
 
     class Meta:
         db_table = "core_auth_upcloud"
 
+    @staticmethod
+    def token_client(api_token):
+        """Build a redacted requests auth object for UpCloud bearer tokens."""
+        from requests.auth import AuthBase
+
+        token = str(api_token or "").strip()
+        if not token or any(character in token for character in "\r\n"):
+            raise ValueError("The UpCloud API token is invalid.")
+
+        class _UpCloudBearerAuth(AuthBase):
+            __slots__ = ("_token",)
+
+            def __init__(self, value):
+                self._token = value
+
+            def __call__(self, request):
+                request.headers["Authorization"] = f"Bearer {self._token}"
+                return request
+
+            def __repr__(self):
+                return "<UpCloudBearerAuth redacted>"
+
+        return _UpCloudBearerAuth(token)
+
     def get_client(self):
         from requests.auth import HTTPBasicAuth
 
         encryption_key = self.connection.account.get_encryption_key()
+        if self.api_token:
+            return self.token_client(bs_decrypt(self.api_token, encryption_key))
 
-        client = HTTPBasicAuth(bs_decrypt(self.username, encryption_key), bs_decrypt(self.password, encryption_key))
-        return client
+        username = bs_decrypt(self.username, encryption_key) if self.username else ""
+        password = bs_decrypt(self.password, encryption_key) if self.password else ""
+        if not username or not password:
+            raise ValueError("UpCloud credentials are not configured.")
+        return HTTPBasicAuth(username, password)
 
-    # Todo: deal with more than 50 items later
-    def get_eligible_objects(self, object_type="cloud"):
-        eligible_objects = []
-        client = self.get_client()
+    @staticmethod
+    def _account_username(payload):
+        """Return the validated UpCloud account username without provider text."""
+        from apps.console.node.models import _BackupProviderError
 
-        if object_type == "volume":
-            result = requests.get(
-                settings.UPCLOUD_API + "/storage/normal",
+        if not isinstance(payload, dict):
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        account = payload.get("account")
+        if not isinstance(account, dict):
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        username = account.get("username")
+        if (
+            not isinstance(username, str)
+            or not username.strip()
+            or any(character in username for character in "\r\n")
+        ):
+            raise _BackupProviderError(
+                "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+            )
+        return username.strip()
+
+    def get_verified_client(self):
+        """Return the local client only after verifying the pinned username."""
+        from django.db import transaction
+
+        from apps._tasks.integration.upcloud import _upcloud_json
+        from apps.console.node.models import _BackupProviderError
+
+        try:
+            client = self.get_client()
+        except Exception:
+            raise _BackupProviderError("PROVIDER_AUTH_FAILED") from None
+
+        response = None
+        try:
+            response = requests.get(
+                settings.UPCLOUD_API + "/account",
                 auth=client,
                 verify=True,
-                headers={"content-type": "application/json"},
+                timeout=request_timeout(),
+                headers={"accept": "application/json"},
+                allow_redirects=False,
             )
-            if result.status_code == 200:
-                servers = result.json()["storages"]["storage"]
-                for server in servers:
-                    server["_bs_unique_id"] = server.get("uuid", None)
-                    server["_bs_name"] = server.get("title", None)
-                    server["_bs_region"] = server.get("zone", None)
-                    server["_bs_size"] = server.get("size", None)
-                    eligible_objects.append(server)
-            else:
-                raise APIException(detail=result.json()["error"]["error_message"])
-            result.close()
+            provider_username = self._account_username(_upcloud_json(response))
+        except requests.exceptions.Timeout as error:
+            raise _BackupProviderError(
+                "PROVIDER_TIMEOUT", retryable=True
+            ) from error
+        except requests.exceptions.RequestException as error:
+            raise _BackupProviderError(
+                "PROVIDER_TRANSIENT_OUTAGE", retryable=True
+            ) from error
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+
+        encryption_key = self.connection.account.get_encryption_key()
+        with transaction.atomic():
+            current = type(self).objects.select_for_update().get(pk=self.pk)
+            stored_username = (
+                bs_decrypt(current.username, encryption_key)
+                if current.username
+                else ""
+            )
+            stored_username = str(stored_username or "").strip()
+            if stored_username and stored_username != provider_username:
+                raise _BackupProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+            if not stored_username:
+                current.username = bs_encrypt(provider_username, encryption_key)
+                current.save(update_fields=["username", "modified"])
+
+        return current.get_client()
+
+    def get_eligible_objects(self, object_type="cloud"):
+        """Return a complete, bounded UpCloud server or storage inventory."""
+        object_type = object_type or "cloud"
+        if object_type not in {"cloud", "volume"}:
+            return []
+
+        from apps._tasks.integration.upcloud import (
+            _BackupProviderError,
+            list_upcloud_servers,
+            list_upcloud_storages,
+        )
+
+        try:
+            resources = (
+                list_upcloud_servers(self.get_verified_client())
+                if object_type == "cloud"
+                else list_upcloud_storages(
+                    self.get_verified_client(), storage_type="normal"
+                )
+            )
+        except _BackupProviderError as error:
+            raise APIException(
+                detail=f"UpCloud resource discovery failed ({error.code})."
+            ) from None
+
+        eligible_objects = []
+        for resource in resources:
+            item = dict(resource)
+            item["_bs_unique_id"] = item.get("uuid")
+            item["_bs_name"] = item.get("title")
+            item["_bs_region"] = item.get("zone")
+            item["_bs_size"] = (
+                item.get("size")
+                if object_type == "volume"
+                else None
+            )
+            item["_bs_resource_type"] = object_type
+            eligible_objects.append(item)
         return eligible_objects
 
     def validate(self, check_errors=None, raise_exp=None):
-        client = self.get_client()
-        result = requests.get(
-            settings.UPCLOUD_API + "/account", auth=client, verify=True, headers={"content-type": "application/json"}
-        )
-        if result.status_code == 200:
-            return True
-        else:
-            return None
+        self.get_verified_client()
+        return True
 
 
 class CoreAuthAWS(TimeStampedModel):
@@ -1269,13 +1511,68 @@ class CoreAuthOracle(TimeStampedModel):
         # identity = oci.identity.IdentityClient(config)
         return config
 
+    def get_verified_client(self, data=None):
+        """Return an OCI config only after pinning its tenancy identity.
+
+        The configured tenancy OCID is the durable identity witness for legacy
+        Oracle rows.  A first use safely adopts that existing value only after
+        ``get_tenancy`` returns the exact same OCID; every later use performs
+        the same read-back, so credentials cannot silently drift to another
+        tenancy.  No provider response body or credential is persisted.
+        """
+        import oci
+
+        from apps._tasks.integration.oracle import (
+            OracleProviderError,
+            classify_oracle_error,
+        )
+
+        try:
+            config = self.get_client(data=data)
+            identity = oci.identity.IdentityClient(
+                config, **_oci_client_kwargs()
+            )
+            response = identity.get_tenancy(config["tenancy"])
+            status = getattr(response, "status", None)
+            if status != 200:
+                synthetic = type(
+                    "OracleIdentityResponseError",
+                    (),
+                    {
+                        "status": status,
+                        "code": "",
+                        "headers": getattr(response, "headers", {}) or {},
+                    },
+                )()
+                raise classify_oracle_error(synthetic)
+
+            payload = getattr(response, "data", None)
+            if isinstance(payload, dict):
+                observed_id = payload.get("id")
+                lifecycle_state = payload.get("lifecycle_state")
+            else:
+                observed_id = getattr(payload, "id", None)
+                lifecycle_state = getattr(payload, "lifecycle_state", None)
+            expected_id = str(config.get("tenancy") or "").strip()
+            if not expected_id or str(observed_id or "").strip() != expected_id:
+                raise OracleProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+            if lifecycle_state not in (None, "") and str(
+                lifecycle_state
+            ).upper() != "ACTIVE":
+                raise OracleProviderError("PROVIDER_AUTH_FAILED")
+            return config
+        except OracleProviderError:
+            raise
+        except Exception as error:
+            raise classify_oracle_error(error) from error
+
     def get_eligible_objects(self, object_type="cloud"):
         import oci
         from oci.identity.models import Compartment
 
         eligible_objects = []
         per_page = 1000
-        config = self.get_client()
+        config = self.get_verified_client()
 
         if object_type == "cloud":
             pass
@@ -1348,12 +1645,20 @@ class CoreAuthOracle(TimeStampedModel):
         else:
             user = self.user
         try:
-            config = self.get_client(data=data)
+            config = self.get_verified_client(data=data)
             identity = oci.identity.IdentityClient(
                 config, **_oci_client_kwargs()
             )
-            oracle_user = identity.get_user(config["user"]).data
-            return oracle_user.id == user
+            response = identity.get_user(config["user"])
+            if getattr(response, "status", None) != 200:
+                return False
+            oracle_user = response.data
+            observed_id = (
+                oracle_user.get("id")
+                if isinstance(oracle_user, dict)
+                else getattr(oracle_user, "id", None)
+            )
+            return str(observed_id or "") == str(user or "")
         except Exception as e:
             if check_errors:
                 raise ValueError(f"Validation failed. Please check your integration details. Error: {e.__str__()}")

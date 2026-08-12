@@ -18,6 +18,7 @@ from apps.console.node.models import CoreDigitalOcean, CoreNode
 from .filters import CoreDigitalOceanFilter
 from .permissions import CoreDigitalOceanViewPermissions
 from .serializers import CoreDigitalOceanConnectionReadSerializer, CoreDigitalOceanConnectionWriteSerializer
+from .client import DigitalOceanAPIError, list_eligible_objects
 from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed, \
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
@@ -108,14 +109,33 @@ class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     @safe_connection_action(stage="object_discovery")
     def objects(self, request, pk=None):
+        object_type = self.request.query_params.get("object_type", "cloud")
+        if object_type not in {"cloud", "volume"}:
+            return Response(
+                {"detail": "object_type must be either cloud or volume."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             connection = self.get_object()
-            eligible_objects = connection.auth_digitalocean.get_eligible_objects(object_type=self.request.query_params.get("object_type"))
+            eligible_objects = list_eligible_objects(
+                headers=connection.auth_digitalocean.get_verified_client(),
+                object_type=object_type,
+            )
+            attached_ids = {
+                str(value)
+                for value in CoreDigitalOcean.objects.filter(
+                    node__connection=connection,
+                )
+                .exclude(node__status=CoreNode.Status.DELETE_REQUESTED)
+                .values_list("unique_id", flat=True)
+            }
             for eligible_object in eligible_objects:
-                query = Q(unique_id=eligible_object["id"], node__connection=connection)
-                query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-                if CoreDigitalOcean.objects.filter(query).exists():
+                if str(eligible_object["id"]) in attached_ids:
                     eligible_object["_bs_attached"] = True
             return Response(eligible_objects)
-        except Exception as e:
-            raise NodeConnectionErrorEligibleObjects(e.__str__())
+        except DigitalOceanAPIError as error:
+            raise NodeConnectionErrorEligibleObjects(str(error)) from error
+        except Exception as error:
+            raise NodeConnectionErrorEligibleObjects(
+                "DigitalOcean object discovery could not be completed."
+            ) from error

@@ -317,10 +317,15 @@ class VultrLiveE2ELedgerSafetyTests(TestCase):
             "object_buckets": [],
             "object_keys": [],
         }
-        harness.report = {"ledger": [], "cleanup": {"status": "NOT_RUN", "errors": []}}
+        harness.report = {
+            "ledger": [],
+            "tests": {},
+            "cleanup": {"status": "NOT_RUN", "errors": []},
+        }
         harness.account = None
         harness.member = None
         harness.user = None
+        harness.local_ids = {}
         harness.object_client = None
         harness.object_credentials = {}
         return harness
@@ -613,6 +618,34 @@ class VultrLiveE2ELedgerSafetyTests(TestCase):
         self.assertEqual(create_calls, ["create"])
         self.assertIsNone(resumed.intents.get("source-instance"))
         self.assertEqual(resumed.ledger.get("instance", "i-owned")["ownership"]["run_id"], RUN_ID)
+
+    def test_successful_create_is_verified_and_ledgered_before_intent_is_cleared(self):
+        candidate = {
+            "id": "i-created",
+            "label": f"{RUN_ID}-source-instance",
+            "hostname": f"{RUN_ID}-source",
+            "tags": [RUN_ID],
+            "region": "ewr",
+            "plan": "vc2-1c-1gb",
+            "os_id": 2284,
+        }
+        harness = self._harness()
+        args = self._provider_resource_args(
+            candidate,
+            create=lambda: {"instance": {"id": candidate["id"]}},
+        )
+        args["candidates"] = lambda: []
+
+        resource_id, resource = harness._ensure_provider_resource(**args)
+
+        self.assertEqual(resource_id, candidate["id"])
+        self.assertEqual(resource, candidate)
+        entry = harness.ledger.get("instance", candidate["id"])
+        self.assertEqual(
+            entry["ownership"]["request_fingerprint"],
+            _request_fingerprint(args["request"]),
+        )
+        self.assertIsNone(harness.intents.get(args["role"]))
 
     def test_pending_provider_reconciliation_adopts_exact_match_with_request_witness(self):
         harness = self._harness()
@@ -1746,3 +1779,156 @@ class VultrLiveE2ELedgerSafetyTests(TestCase):
         harness.request = lambda method, path, **kwargs: next(pages)
         with self.assertRaises(HarnessError):
             harness.collection("/instances", "instances")
+
+    def test_collection_accepts_complete_total_only_provider_response(self):
+        harness = self._harness()
+        harness.request = lambda method, path, **kwargs: {
+            "databases": [{"id": "db-one"}],
+            "meta": {"total": 1},
+        }
+
+        self.assertEqual(
+            harness.collection("/databases", "databases"),
+            [{"id": "db-one"}],
+        )
+
+    def test_collection_rejects_partial_total_without_cursor(self):
+        harness = self._harness()
+        harness.request = lambda method, path, **kwargs: {
+            "databases": [{"id": "db-one"}],
+            "meta": {"total": 2},
+        }
+
+        with self.assertRaisesRegex(HarnessError, "without a continuation cursor"):
+            harness.collection("/databases", "databases")
+
+    def test_object_storage_ownership_accepts_omitted_tier_but_not_mismatch(self):
+        harness = self._harness()
+        harness.object_tier_id = 2
+        harness.object_cluster_id = 2
+        resource = {
+            "id": "object-one",
+            "label": f"{RUN_ID}-object-storage",
+            "region": "ewr",
+            "cluster_id": 2,
+            "tier_id": None,
+            "s3_hostname": "ewr1.vultrobjects.com",
+        }
+
+        proof = harness._object_storage_ownership(resource)
+
+        self.assertNotIn("tier_id", proof)
+        self.assertEqual(proof["cluster_id"], 2)
+        resource["tier_id"] = 3
+        with self.assertRaisesRegex(HarnessError, "different tier"):
+            harness._object_storage_ownership(resource)
+
+    def test_provider_ownership_normalizes_only_region_case(self):
+        harness = self._harness()
+        resource = {
+            "id": "database-one",
+            "label": f"{RUN_ID}-database",
+            "region": "EWR",
+            "plan": "database-plan",
+            "database_engine": "pg",
+            "database_engine_version": "16",
+        }
+        entry = {
+            "resource_id": "database-one",
+            "ownership": {
+                "request_fingerprint": "a" * 64,
+                "label": f"{RUN_ID}-database",
+                "region": "ewr",
+                "plan": "database-plan",
+                "database_engine": "pg",
+                "database_engine_version": "16",
+            },
+        }
+
+        self.assertTrue(harness._resource_matches_entry(resource, entry))
+        harness._assert_poll_ownership(
+            resource,
+            provider_id="database-one",
+            expected={"region": "ewr", "plan": "database-plan"},
+        )
+        resource["plan"] = "different-plan"
+        self.assertFalse(harness._resource_matches_entry(resource, entry))
+
+    def test_failed_live_case_is_recorded_and_fails_closed(self):
+        harness = self._harness()
+
+        with self.assertRaisesRegex(HarnessError, "VUL-TEST"):
+            harness.record_test("VUL-TEST", "FAIL", reason="identity mismatch")
+
+        self.assertEqual(harness.report["tests"]["VUL-TEST"]["status"], "FAIL")
+
+    def test_database_cleanup_422_requires_complete_zero_match_inventory(self):
+        harness = self._harness()
+        harness.session = _SequenceSession(
+            [
+                _FakeResponse(status_code=422, payload={"error": "deleting"}),
+                _FakeResponse(payload={"databases": [], "meta": {"total": 0}}),
+            ]
+        )
+        entry = {"kind": "database", "resource_id": "database-one"}
+
+        self.assertIsNone(
+            harness._read_cleanup_resource(
+                entry, "/databases/database-one", "database"
+            )
+        )
+        self.assertEqual(len(harness.session.calls), 2)
+
+    def test_database_cleanup_422_returns_exact_inventory_match(self):
+        database = {
+            "id": "database-one",
+            "label": f"{RUN_ID}-database",
+            "region": "EWR",
+        }
+        harness = self._harness()
+        harness.session = _SequenceSession(
+            [
+                _FakeResponse(status_code=422, payload={"error": "deleting"}),
+                _FakeResponse(
+                    payload={"databases": [database], "meta": {"total": 1}}
+                ),
+            ]
+        )
+
+        self.assertEqual(
+            harness._read_cleanup_resource(
+                {"kind": "database", "resource_id": "database-one"},
+                "/databases/database-one",
+                "database",
+            ),
+            database,
+        )
+
+    def test_restore_block_cleanup_accepts_only_ledgered_omitted_snapshot(self):
+        harness = self._harness()
+        resource = {
+            "id": "block-one",
+            "label": "backupsheep-restore-41",
+            "region": "ewr",
+            "size_gb": 10,
+            "snapshot_id": "",
+        }
+        entry = {
+            "resource_id": "block-one",
+            "source_witness": "snapshot-one",
+            "ownership": {
+                "request_fingerprint": "a" * 64,
+                "role": "restore-block",
+                "label": "backupsheep-restore-41",
+                "region": "ewr",
+                "size_gb": 10,
+                "snapshot_id": "snapshot-one",
+            },
+        }
+
+        self.assertTrue(harness._resource_matches_entry(resource, entry))
+        entry["source_witness"] = "different-snapshot"
+        self.assertFalse(harness._resource_matches_entry(resource, entry))
+        entry["source_witness"] = "snapshot-one"
+        resource["snapshot_id"] = "different-snapshot"
+        self.assertFalse(harness._resource_matches_entry(resource, entry))

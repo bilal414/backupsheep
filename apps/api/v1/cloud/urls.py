@@ -23,6 +23,8 @@ urlpatterns += [
                 path("", include("apps.api.v1.cloud.lightsail_database.urls")),
                 path("", include("apps.api.v1.cloud.lightsail_bucket_replication.urls")),
                 path("", include("apps.api.v1.cloud.hetzner.urls")),
+                path("", include("apps.api.v1.cloud.upcloud.urls")),
+                path("", include("apps.api.v1.cloud.oracle.urls")),
                 path("", include("apps.api.v1.cloud.google_cloud.urls")),
             ]
         ),

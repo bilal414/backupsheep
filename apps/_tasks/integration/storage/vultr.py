@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from apps._tasks.exceptions import StorageVultrUploadFailedError
 from apps._tasks.integration.storage.s3_verified import (
     S3ObjectIntegrityError,
+    S3UploadOutcomePending,
     S3UploadReconciliationRequired,
     upload_verified_s3,
 )
@@ -143,6 +144,13 @@ def _safe_s3_failure(error):
                 "The uploaded object failed integrity verification; the local backup changed after this upload operation started or the provider copy did not match.",
                 False,
             )
+        if isinstance(current, S3UploadOutcomePending):
+            return _SafeS3Failure(
+                "STORAGE_RECONCILIATION_PENDING",
+                "The provider upload outcome is pending visibility; verification will resume automatically.",
+                True,
+                _declared_retry_after(error),
+            )
         if isinstance(current, S3UploadReconciliationRequired):
             return _SafeS3Failure(
                 "STORAGE_RECONCILIATION_REQUIRED",
@@ -153,6 +161,7 @@ def _safe_s3_failure(error):
     declared_code = _declared_code(error)
     if declared_code in {
         "STORAGE_INTEGRITY_FAILED",
+        "STORAGE_RECONCILIATION_PENDING",
         "STORAGE_RECONCILIATION_REQUIRED",
         "STORAGE_AUTH_FAILED",
         "STORAGE_DESTINATION_NOT_FOUND",
@@ -165,6 +174,7 @@ def _safe_s3_failure(error):
     }:
         messages = {
             "STORAGE_INTEGRITY_FAILED": "The uploaded object failed integrity verification.",
+            "STORAGE_RECONCILIATION_PENDING": "The provider upload outcome is pending visibility; verification will resume automatically.",
             "STORAGE_RECONCILIATION_REQUIRED": "The provider returned ambiguous upload state; automatic writes were stopped safely.",
             "STORAGE_AUTH_FAILED": "The storage destination rejected its configured credentials.",
             "STORAGE_DESTINATION_NOT_FOUND": "The configured storage destination or object was not found.",
@@ -176,6 +186,7 @@ def _safe_s3_failure(error):
             "PROVIDER_MALFORMED_RESPONSE": "The provider returned a malformed response; automatic writes were stopped safely.",
         }
         retryable = declared_code in {
+            "STORAGE_RECONCILIATION_PENDING",
             "STORAGE_RATE_LIMITED",
             "STORAGE_TIMEOUT",
             "PROVIDER_TIMEOUT",

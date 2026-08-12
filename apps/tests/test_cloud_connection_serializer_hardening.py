@@ -456,7 +456,18 @@ class CloudConnectionSerializerHardeningTests(BaseTestCase):
 
     @patch("apps.api.v1.connection.digitalocean.serializers.requests.get")
     def test_direct_http_validation_uses_bounded_facade_and_encrypts(self, get):
-        get.return_value = Mock(status_code=200)
+        get.return_value = Mock(
+            status_code=200,
+            json=Mock(
+                return_value={
+                    "account": {
+                        "status": "active",
+                        "uuid": "account-uuid",
+                        "team": {"uuid": "team-uuid", "name": "Personal"},
+                    }
+                }
+            ),
+        )
         api_key = self._secret("do-replacement")
         serializer = CoreAuthDigitalOceanWriteSerializer(
             data={"api_key": api_key}, context=self.context

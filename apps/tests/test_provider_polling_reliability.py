@@ -87,7 +87,7 @@ class DigitalOceanProviderReliabilityTests(BaseTestCase):
 
     def poll(self, backup, provider_response=None, side_effect=None):
         with mock.patch(
-            "apps.console.connection.models.CoreAuthDigitalOcean.get_client",
+            "apps.console.connection.models.CoreAuthDigitalOcean.get_verified_client",
             return_value={"Authorization": "Bearer redacted"},
         ), mock.patch(
             "apps.console.backup.models.requests.get",
@@ -223,7 +223,7 @@ class DigitalOceanProviderReliabilityTests(BaseTestCase):
         )
 
         with mock.patch(
-            "apps.console.connection.models.CoreAuthDigitalOcean.get_client",
+            "apps.console.connection.models.CoreAuthDigitalOcean.get_verified_client",
             return_value={"Authorization": "Bearer redacted"},
         ), mock.patch(
             "apps.console.backup.models.requests.get", return_value=foreign
@@ -242,14 +242,17 @@ class DigitalOceanProviderReliabilityTests(BaseTestCase):
         _, unproven = self.make_backup(unique_id="snapshot-unproven")
         _, proven = self.make_backup(
             unique_id="snapshot-proven",
-            metadata={"_provider_ownership_verified": True},
+            metadata={
+                "_provider_ownership_verified": True,
+                "_provider_source_id": "droplet-1",
+            },
         )
         for backup in (unproven, proven):
             backup.status = UtilBackup.Status.DELETE_REQUESTED
             backup.save(update_fields=["status", "modified"])
 
         with mock.patch(
-            "apps.console.connection.models.CoreAuthDigitalOcean.get_client",
+            "apps.console.connection.models.CoreAuthDigitalOcean.get_verified_client",
             return_value={"Authorization": "Bearer redacted"},
         ), mock.patch(
             "apps.console.backup.models.requests.get", return_value=response(404)

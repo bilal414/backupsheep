@@ -485,7 +485,7 @@
                                     <td class="px-4 py-3">
                                         <div x-data="executionStatusCard" class="min-w-[13rem]" data-execution-status-card
                                              data-backup-id="{{ backup.id }}"
-                                             data-integration-code="{{ object.connection.integration.code|lower }}"
+                                             data-integration-code="{% if is_vultr_managed_database %}vultr_database{% else %}{{ object.connection.integration.code|lower }}{% endif %}"
                                              data-fallback-status="{{ backup.get_status_display }}">
                                             <div x-show="!loaded">
                                                 {% if backup.status == 3 %}
@@ -588,27 +588,27 @@
                                     <td class="whitespace-nowrap px-4 py-3 text-right">
                                         <div class="inline-flex items-center gap-2">
                                             {% if backup.status == 3 %}
-                                                {% if object.type == 3 or object.type == 4 or object.type == 5 %}
+                                                {% if object.type == 3 or object.type == 5 or object.type == 4 and not is_vultr_managed_database %}
                                                     <button @click="openBackupDownloadModal('{{ backup.id }}', '{{ backup.uuid }}')"
                                                             type="button"
                                                             class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                                                         Download
                                                     </button>
                                                 {% endif %}
-                                                {% if object.type == 3 or object.type == 4 %}
+                                                {% if object.type == 3 or object.type == 4 and not is_vultr_managed_database %}
                                                     <button @click="openBackupRestoreModal('{{ backup.id }}', '{{ backup.uuid }}')"
                                                             type="button"
                                                             class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                                                         Restore
                                                     </button>
-                                                {% elif object.type == 1 or object.type == 2 %}
+                                                {% elif object.type == 1 or object.type == 2 or is_vultr_managed_database %}
                                                     <button @click="openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid }}', '{{ backup.status }}')"
                                                             type="button"
                                                             class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                                                         Restore
                                                     </button>
                                                 {% endif %}
-                                                <button @click="openBackupDeleteModal('{{ object.connection.integration.code }}', '{{ backup.id }}', '{{ backup.uuid }}')"
+                                                <button @click="openBackupDeleteModal('{% if is_vultr_managed_database %}vultr_database{% else %}{{ object.connection.integration.code }}{% endif %}', '{{ backup.id }}', '{{ backup.uuid }}')"
                                                         type="button"
                                                         class="inline-flex items-center justify-center rounded-lg border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">
                                                     Delete
@@ -1397,6 +1397,52 @@
                                         BackupSheep derives a deterministic provider-safe name from this source and backup. Provider defaults such as size, zone, plan, and instance class are inferred from the source or snapshot.
                                     </p>
                                 </div>
+                            {% endif %}
+
+                            {% if object.connection.integration.code == "oracle" %}
+                                <div class="grid gap-4 sm:grid-cols-2">
+                                    <div>
+                                        <label for="native-restore-oracle-compartment" class="block text-sm font-medium text-slate-700">Compartment OCID</label>
+                                        <input id="native-restore-oracle-compartment" type="text" readonly
+                                               x-model="nativeRestore.compartmentId"
+                                               class="mt-1.5 block w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs text-slate-600 shadow-sm"
+                                               aria-describedby="native-restore-oracle-scope-help">
+                                    </div>
+                                    <div>
+                                        <label for="native-restore-oracle-ad" class="block text-sm font-medium text-slate-700">Availability domain</label>
+                                        <input id="native-restore-oracle-ad" type="text" readonly
+                                               x-model="nativeRestore.availabilityDomain"
+                                               class="mt-1.5 block w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600 shadow-sm">
+                                    </div>
+                                </div>
+                                {% if object.type != 2 %}
+                                    <div class="grid gap-4 sm:grid-cols-2">
+                                        <div>
+                                            <label for="native-restore-oracle-shape" class="block text-sm font-medium text-slate-700">Compute shape <span class="text-red-600" aria-hidden="true">*</span></label>
+                                            <input id="native-restore-oracle-shape" type="text" required maxlength="255"
+                                                   pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off"
+                                                   x-model.trim="nativeRestore.shape"
+                                                   class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
+                                                   placeholder="VM.Standard.E4.Flex">
+                                        </div>
+                                        <div>
+                                            <label for="native-restore-oracle-subnet" class="block text-sm font-medium text-slate-700">Subnet OCID <span class="text-red-600" aria-hidden="true">*</span></label>
+                                            <input id="native-restore-oracle-subnet" type="text" required maxlength="255"
+                                                   pattern="ocid1\.subnet\.[A-Za-z0-9._:-]+" autocomplete="off"
+                                                   x-model.trim="nativeRestore.subnetId"
+                                                   class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 shadow-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
+                                                   placeholder="ocid1.subnet.oc1..example">
+                                        </div>
+                                    </div>
+                                    <label class="flex items-start gap-3 text-sm font-medium text-slate-700">
+                                        <input type="checkbox" x-model="nativeRestore.assignPublicIp"
+                                               class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                                        Assign a public IP to the new instance
+                                    </label>
+                                {% endif %}
+                                <p id="native-restore-oracle-scope-help" class="text-xs leading-5 text-slate-500">
+                                    Oracle restores are fork-only. The compartment and availability domain are locked to the discovered source scope; the new target is checked against the exact backup witness before creation.
+                                </p>
                             {% endif %}
 
                             <div class="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="alert">
@@ -2330,10 +2376,16 @@
         const nativeRestoreConfig = {
             nodeId: '{{ object.id|escapejs }}',
             provider: '{{ object.connection.integration.code|lower|escapejs }}',
-            resourceKind: '{% if object.connection.integration.code == "aws" %}{% if object.aws.resource_type == "s3" %}aws_s3{% elif object.aws.resource_type == "dynamodb" %}aws_dynamodb{% elif object.aws.resource_type == "volume" %}aws_volume{% else %}aws_instance{% endif %}{% elif object.connection.integration.code == "aws_rds" %}aws_rds{% else %}native_cloud{% endif %}',
-            resourceLabel: '{% if object.connection.integration.code == "aws" %}{% if object.aws.resource_type == "s3" %}S3 bucket{% elif object.aws.resource_type == "dynamodb" %}DynamoDB table{% elif object.aws.resource_type == "volume" %}EBS volume{% elif object.aws.resource_type == "instance" %}EC2 instance{% else %}Cloud resource{% endif %}{% elif object.connection.integration.code == "aws_rds" %}RDS database{% elif object.type == 2 %}cloud volume{% else %}cloud server{% endif %}',
+            resourceKind: '{% if object.connection.integration.code == "aws" %}{% if object.aws.resource_type == "s3" %}aws_s3{% elif object.aws.resource_type == "dynamodb" %}aws_dynamodb{% elif object.aws.resource_type == "volume" %}aws_volume{% else %}aws_instance{% endif %}{% elif object.connection.integration.code == "aws_rds" %}aws_rds{% elif is_vultr_managed_database %}vultr_database{% else %}native_cloud{% endif %}',
+            resourceLabel: '{% if object.connection.integration.code == "aws" %}{% if object.aws.resource_type == "s3" %}S3 bucket{% elif object.aws.resource_type == "dynamodb" %}DynamoDB table{% elif object.aws.resource_type == "volume" %}EBS volume{% elif object.aws.resource_type == "instance" %}EC2 instance{% else %}Cloud resource{% endif %}{% elif object.connection.integration.code == "aws_rds" %}RDS database{% elif is_vultr_managed_database %}managed database cluster{% elif object.type == 2 %}cloud volume{% else %}cloud server{% endif %}',
+            oracleResourceType: '{% if object.connection.integration.code == "oracle" and object.type == 2 %}volume{% else %}compute{% endif %}',
+            oracleCompartmentId: '{% if object.connection.integration.code == "oracle" %}{{ object.oracle.native_restore_compartment_id|escapejs }}{% endif %}',
+            oracleAvailabilityDomain: '{% if object.connection.integration.code == "oracle" %}{{ object.oracle.native_restore_availability_domain|escapejs }}{% endif %}',
+            oracleShape: '{% if object.connection.integration.code == "oracle" %}{{ object.oracle.native_restore_shape|escapejs }}{% endif %}',
+            oracleSubnetId: '{% if object.connection.integration.code == "oracle" %}{{ object.oracle.native_restore_subnet_id|escapejs }}{% endif %}',
             sourceName: '{{ object.name|escapejs }}',
         };
+        const backupApiCode = '{% if is_vultr_managed_database %}vultr_database{% else %}{{ object.connection.integration.code|lower|escapejs }}{% endif %}';
 
         /*
          * The API is the source of truth for durable execution state.  Keep all
@@ -2667,6 +2719,11 @@
                     backupUuid: null,
                     name: '',
                     destinationBucketName: '',
+                    compartmentId: '',
+                    availabilityDomain: '',
+                    shape: '',
+                    subnetId: '',
+                    assignPublicIp: false,
                     confirm: false,
                     requestId: null,
                     requestTargetName: '',
@@ -2737,7 +2794,7 @@
                     let url = new URL(window.location.href);
                     let params = new URLSearchParams(url.search.slice(1));
 
-                    {% if object.type == 1 or object.type == 2 %}
+                    {% if object.type == 1 or object.type == 2 or is_vultr_managed_database %}
                         this.validateNode();
                     {% endif %}
                 },
@@ -2961,6 +3018,16 @@
                     if (this.nativeRestoreLoading || this.nativeRestoreSubmitting || this.nativeRestoreStarted || !this.nativeRestore.confirm) {
                         return false;
                     }
+                    if (nativeRestoreConfig.provider === 'oracle') {
+                        const oracleScopeValid = Boolean(
+                            this.nativeRestore.compartmentId &&
+                            this.nativeRestore.availabilityDomain
+                        );
+                        const oracleTargetValid = nativeRestoreConfig.oracleResourceType === 'volume'
+                            ? true
+                            : Boolean(this.nativeRestore.shape && this.nativeRestore.subnetId);
+                        return this.nativeRestoreNameValid() && oracleScopeValid && oracleTargetValid;
+                    }
                     return this.nativeRestoreResourceKind === 'aws_s3'
                         ? this.nativeRestoreDestinationBucketValid()
                         : this.nativeRestoreNameValid();
@@ -2972,6 +3039,14 @@
                         params.destination_bucket_name = targetName;
                     } else if (this.nativeRestoreResourceKind === 'aws_dynamodb') {
                         params.target_table_name = targetName;
+                    } else if (nativeRestoreConfig.provider === 'oracle') {
+                        params.compartment_id = this.nativeRestore.compartmentId;
+                        params.availability_domain = this.nativeRestore.availabilityDomain;
+                        if (nativeRestoreConfig.oracleResourceType === 'compute') {
+                            params.shape = this.nativeRestore.shape;
+                            params.subnet_id = this.nativeRestore.subnetId;
+                            params.assign_public_ip = Boolean(this.nativeRestore.assignPublicIp);
+                        }
                     }
                     return {
                         backup_id: Number(this.nativeRestore.backupId),
@@ -3135,6 +3210,11 @@
                         backupUuid: backupUuid,
                         name: this.nativeRestoreDefaultName(backupUuid),
                         destinationBucketName: '',
+                        compartmentId: nativeRestoreConfig.oracleCompartmentId,
+                        availabilityDomain: nativeRestoreConfig.oracleAvailabilityDomain,
+                        shape: nativeRestoreConfig.oracleShape,
+                        subnetId: nativeRestoreConfig.oracleSubnetId,
+                        assignPublicIp: false,
                         confirm: false,
                         requestId: null,
                         requestTargetName: '',
@@ -3158,6 +3238,11 @@
                         backupUuid: null,
                         name: '',
                         destinationBucketName: '',
+                        compartmentId: '',
+                        availabilityDomain: '',
+                        shape: '',
+                        subnetId: '',
+                        assignPublicIp: false,
                         confirm: false,
                         requestId: null,
                         requestTargetName: '',
@@ -3357,7 +3442,7 @@
                     }, 5000);
                 },
                 async getBackupRestores(showErrors) {
-                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + this.backup.id + "/restores/";
+                    let url = "/api/v1/backups/" + backupApiCode + "/" + this.backup.id + "/restores/";
 
                     let response = await fetch(url, {
                         headers: {
@@ -3410,7 +3495,7 @@
                 async startRestore() {
                     this.loading = true;
 
-                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + this.backup.id + "/restore/";
+                    let url = "/api/v1/backups/" + backupApiCode + "/" + this.backup.id + "/restore/";
 
                     let data = {
                         storage_point_id: this.restore.storage_point_id,
@@ -3904,7 +3989,7 @@
                 async cancelBackup(backupID) {
                     Alpine.store('showLoading').toggle();
 
-                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + backupID + "/cancel" + "/?" + new URLSearchParams({
+                    let url = "/api/v1/backups/" + backupApiCode + "/" + backupID + "/cancel" + "/?" + new URLSearchParams({
                         location: this.location_id,
                     });
 
@@ -3960,7 +4045,7 @@
                 async retryBackup(backupID) {
                     Alpine.store('showLoading').toggle();
 
-                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + backupID + "/retry" + "/?" + new URLSearchParams({
+                    let url = "/api/v1/backups/" + backupApiCode + "/" + backupID + "/retry" + "/?" + new URLSearchParams({
                         location: this.location_id,
                     });
 
@@ -4013,7 +4098,7 @@
                 async getBackupStoragePoints() {
                     this.loading = true;
 
-                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + this.backup.id + "/storage_points/";
+                    let url = "/api/v1/backups/" + backupApiCode + "/" + this.backup.id + "/storage_points/";
 
                     let response = await fetch(url, {
                         headers: {
@@ -4056,7 +4141,7 @@
                 async downloadTransferLog(backup_id) {
                     Alpine.store('showLoading').toggle();
 
-                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + backup_id + "/download_transfer_log/";
+                    let url = "/api/v1/backups/" + backupApiCode + "/" + backup_id + "/download_transfer_log/";
 
                     let response = await fetch(url, {
                         headers: {
@@ -4099,7 +4184,7 @@
                 async downloadDirTree(backup_id) {
                     Alpine.store('showLoading').toggle();
 
-                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + backup_id + "/download_dir_tree/";
+                    let url = "/api/v1/backups/" + backupApiCode + "/" + backup_id + "/download_dir_tree/";
 
                     let response = await fetch(url, {
                         headers: {
@@ -4141,7 +4226,7 @@
                 async downloadBackup(storagePoint, type) {
                     Alpine.store('showLoading').toggle();
 
-                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + this.backup.id + "/download/?" + new URLSearchParams({
+                    let url = "/api/v1/backups/" + backupApiCode + "/" + this.backup.id + "/download/?" + new URLSearchParams({
                         storage_point_id: storagePoint.id,
                     });
 
@@ -4217,7 +4302,7 @@
                 async transferBackupRequest() {
                     Alpine.store('showLoading').toggle();
 
-                    let url = "/api/v1/backups/{{object.connection.integration.code|lower}}/" + this.backup.id + "/transfer_backup/";
+                    let url = "/api/v1/backups/" + backupApiCode + "/" + this.backup.id + "/transfer_backup/";
 
                     let data = {
                         storage_point_id: this.transferBackup.storagePoint.id,

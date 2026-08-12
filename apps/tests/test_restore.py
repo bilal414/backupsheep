@@ -15,6 +15,7 @@ from apps.console.connection.models import CoreAuthDatabase
 from apps.console.connection.models import CoreAuthLightsail, CoreLightsailRegion
 from apps.console.node.models import CoreNode
 from apps.console.node.models import CoreLightsail
+from apps.console.node.models import _prepare_cloud_restore
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -145,9 +146,43 @@ class DigitalOceanRestoreTests(BaseTestCase):
 
         return mock.patch.object(
             CoreAuthDigitalOcean,
-            "get_client",
+            "get_verified_client",
             return_value={"Authorization": "Bearer test-token"},
         )
+
+    @staticmethod
+    def _restore_identity(node, backup, restore):
+        marker, _params = _prepare_cloud_restore(
+            restore,
+            provider="digitalocean",
+            source_id=backup.unique_id,
+            target_kind="droplet",
+            target_name=restore.name,
+        )
+        identity, _params = node.digitalocean._prepare_digitalocean_restore_identity(
+            restore,
+            marker=marker,
+            source_id=backup.unique_id,
+            target_kind="droplet",
+        )
+        return identity
+
+    @staticmethod
+    def _owned_droplet(node, backup, restore, *, resource_id, status="new"):
+        identity = DigitalOceanRestoreTests._restore_identity(
+            node, backup, restore
+        )
+        return {
+            "id": resource_id,
+            "name": identity["target_name"],
+            "tags": [
+                identity["marker"],
+                identity["source_tag"],
+                identity["kind_tag"],
+            ],
+            "image": {"id": int(backup.unique_id)},
+            "status": status,
+        }
 
     def test_restore_snapshot_cloud_creates_droplet_from_snapshot(self):
         node = self._make_node_with_auth()
@@ -157,7 +192,11 @@ class DigitalOceanRestoreTests(BaseTestCase):
         )
 
         post_resp = mock.MagicMock(status_code=202)
-        post_resp.json.return_value = {"droplet": {"id": 777}}
+        post_resp.json.return_value = {
+            "droplet": self._owned_droplet(
+                node, backup, restore, resource_id=777
+            )
+        }
         with self._patch_client(), \
                 mock.patch("apps.console.node.models.requests.post", return_value=post_resp) as post:
             node.digitalocean.restore_snapshot(backup, restore)
@@ -175,9 +214,18 @@ class DigitalOceanRestoreTests(BaseTestCase):
         restore = CoreCloudRestore.objects.create(node=node, backup_id=backup.id, name="restored")
 
         get_resp = mock.MagicMock(status_code=200)
-        get_resp.json.return_value = {"droplet": {"size_slug": "s-2vcpu-2gb"}}
+        get_resp.json.return_value = {
+            "droplet": {
+                "id": node.digitalocean.unique_id,
+                "size_slug": "s-2vcpu-2gb",
+            }
+        }
         post_resp = mock.MagicMock(status_code=202)
-        post_resp.json.return_value = {"droplet": {"id": 778}}
+        post_resp.json.return_value = {
+            "droplet": self._owned_droplet(
+                node, backup, restore, resource_id=778
+            )
+        }
         with self._patch_client(), \
                 mock.patch("apps.console.node.models.requests.get", return_value=get_resp), \
                 mock.patch("apps.console.node.models.requests.post", return_value=post_resp) as post:
@@ -199,16 +247,26 @@ class DigitalOceanRestoreTests(BaseTestCase):
 
     def test_check_restore_maps_droplet_states(self):
         node = self._make_node_with_auth()
+        backup = make_completed_backup(node)
         restore = CoreCloudRestore.objects.create(
-            node=node, backup_id=1, name="r", resource_id="777"
+            node=node, backup_id=backup.id, name="r", resource_id="777"
         )
+        self._restore_identity(node, backup, restore)
         for droplet_status, expected in (
             ("active", CoreCloudRestore.Status.COMPLETE),
             ("new", CoreCloudRestore.Status.IN_PROGRESS),
-            ("off", CoreCloudRestore.Status.IN_PROGRESS),
+            ("off", CoreCloudRestore.Status.COMPLETE),
         ):
             get_resp = mock.MagicMock(status_code=200)
-            get_resp.json.return_value = {"droplet": {"status": droplet_status}}
+            get_resp.json.return_value = {
+                "droplet": self._owned_droplet(
+                    node,
+                    backup,
+                    restore,
+                    resource_id=777,
+                    status=droplet_status,
+                )
+            }
             with self._patch_client(), \
                     mock.patch("apps.console.node.models.requests.get", return_value=get_resp):
                 self.assertEqual(node.digitalocean.check_restore(restore), expected)
@@ -729,6 +787,7 @@ class FetchBackupZipTests(RestoreBackendBase):
         stored.metadata = {
             "aws_s3_object": {
                 "phase": "committed",
+                "bucket": storage_config.bucket_name,
                 "object_key": stored.storage_file_id,
                 "size_bytes": len(payload),
                 "sha256": digest,

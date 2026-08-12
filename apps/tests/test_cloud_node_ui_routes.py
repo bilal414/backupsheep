@@ -32,6 +32,15 @@ class CloudNodeUIRouteTests(SimpleTestCase):
             source,
         )
 
+    def test_oracle_exposes_server_linking_in_the_normal_connection_ui(self):
+        source = CONNECTION_TEMPLATE.read_text(encoding="utf-8")
+
+        self.assertNotIn('{% if integration.code != "oracle" %}', source)
+        self.assertIn(
+            "integration_create_node' integration.code connection.id 'cloud'",
+            source,
+        )
+
     def test_vultr_managed_database_link_uses_cloud_collection_route(self):
         connection_source = CONNECTION_TEMPLATE.read_text(encoding="utf-8")
         node_template = CONNECTION_TEMPLATE.with_name("_setup_cloud_node.html")

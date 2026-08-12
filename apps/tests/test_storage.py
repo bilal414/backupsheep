@@ -176,6 +176,7 @@ class S3ImmutabilityTests(BaseTestCase):
             "VersionId": "version-1",
             "ETag": '"etag-1"',
             "Metadata": {
+                "backupsheep-backup-id": str(point.backup_id),
                 "backupsheep-sha256": digest.hexdigest(),
                 "backupsheep-bytes": str(len(payload)),
             },

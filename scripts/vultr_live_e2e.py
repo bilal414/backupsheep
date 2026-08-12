@@ -82,8 +82,10 @@ def _prefer_ipv6_for_live_provider_egress() -> None:
 _prefer_ipv6_for_live_provider_egress()
 django.setup()
 
-from apps.api.v1.utils.api_helpers import bs_encrypt  # noqa: E402
+from apps.api.v1.utils.api_helpers import bs_decrypt, bs_encrypt  # noqa: E402
+from django.contrib.auth import get_user_model  # noqa: E402
 from django.conf import settings as django_settings  # noqa: E402
+from apps.console.account.models import CoreAccount  # noqa: E402
 from apps.console.backup.models import (  # noqa: E402
     CoreCloudRestore,
     CoreVultrBackup,
@@ -797,6 +799,18 @@ class LiveVultrHarness:
             values = [values]
         return {str(value) for value in values}
 
+    @staticmethod
+    def _ownership_value_matches(field: str, observed: Any, expected: Any) -> bool:
+        if observed in (None, ""):
+            return False
+        # Vultr returns managed-database region slugs in uppercase even though
+        # create requests and other resource families use lowercase slugs.
+        # Region identifiers are case-insensitive; every other ownership field
+        # remains byte-for-byte strict.
+        if field == "region":
+            return str(observed).strip().casefold() == str(expected).strip().casefold()
+        return str(observed) == str(expected)
+
     def _resource_matches_entry(self, resource: dict[str, Any], entry: dict[str, Any]) -> bool:
         if not isinstance(resource, dict):
             return False
@@ -816,7 +830,6 @@ class LiveVultrHarness:
             "plan",
             "size_gb",
             "endpoint",
-            "snapshot_id",
             "os_id",
             "cluster_id",
             "tier_id",
@@ -825,7 +838,29 @@ class LiveVultrHarness:
             "engine",
             "version",
         ):
-            if field in ownership and str(resource.get(field) or "") != str(ownership[field]):
+            if field in ownership and not self._ownership_value_matches(
+                field, resource.get(field), ownership[field]
+            ):
+                return False
+        if "snapshot_id" in ownership:
+            observed_snapshot = resource.get("snapshot_id")
+            expected_snapshot = ownership["snapshot_id"]
+            # Vultr clears snapshot_id from a restored block after it becomes
+            # active. Exact ID, restore label, region, size, request fingerprint,
+            # and the durable source witness remain mandatory; a contradictory
+            # non-empty snapshot ID is always rejected.
+            if observed_snapshot not in (None, "") and str(observed_snapshot) != str(
+                expected_snapshot
+            ):
+                return False
+            if (
+                observed_snapshot in (None, "")
+                and (
+                    str(ownership.get("role") or "") != "restore-block"
+                    or str(entry.get("source_witness") or "")
+                    != str(expected_snapshot)
+                )
+            ):
                 return False
         expected_tags = {str(value) for value in ownership.get("tags") or []}
         if expected_tags and not expected_tags.issubset(self._tags(resource)):
@@ -962,7 +997,12 @@ class LiveVultrHarness:
             raise AmbiguousMutation(f"Vultr {role} was not visible after create.")
         expected_entry = {
             "resource_id": resource_id,
-            "ownership": {"run_id": self.prefix, "role": role, **ownership(resource)},
+            "ownership": {
+                "run_id": self.prefix,
+                "role": role,
+                "request_fingerprint": _request_fingerprint(request),
+                **ownership(resource),
+            },
         }
         if not self._resource_matches_entry(resource, expected_entry):
             raise AmbiguousMutation(f"Vultr {role} failed ownership read-back.")
@@ -1190,6 +1230,40 @@ class LiveVultrHarness:
         value = payload.get(key)
         return value if isinstance(value, dict) else None
 
+    def _read_cleanup_resource(
+        self,
+        entry: dict[str, Any],
+        path: str,
+        response_key: str,
+    ) -> dict[str, Any] | None:
+        """Read one cleanup target with explicit Vultr database semantics.
+
+        A managed-database detail endpoint returns HTTP 422 once deletion has
+        been accepted. That response alone is not absence proof. Only a full,
+        bounded inventory with zero occurrences of the durable provider ID may
+        turn it into an absent result.
+        """
+
+        try:
+            return self._read_detail(path, response_key)
+        except ProviderTerminalFailure as error:
+            if (
+                str(entry.get("kind") or "") != "database"
+                or getattr(error, "status_code", None) != 422
+            ):
+                raise
+        provider_id = str(entry.get("resource_id") or "")
+        matches = [
+            item
+            for item in self.collection("/databases", "databases")
+            if self._resource_id(item) == provider_id
+        ]
+        if len(matches) > 1:
+            raise HarnessError(
+                "Vultr database cleanup inventory returned duplicate provider IDs."
+            )
+        return matches[0] if matches else None
+
     def _poll_detail(self, path: str, key: str) -> dict[str, Any]:
         """Read a provider detail without converting a 404 into an empty state."""
 
@@ -1276,9 +1350,11 @@ class LiveVultrHarness:
                     raise ProviderTransientFailure(
                         f"Vultr {method} {path} is temporarily unavailable and resumable."
                     )
-                raise ProviderTerminalFailure(
+                failure = ProviderTerminalFailure(
                     f"Vultr {method} {path} was rejected with HTTP {response.status_code}."
                 )
+                failure.status_code = response.status_code
+                raise failure
             if response.status_code == 204 or not response.content:
                 return None
             try:
@@ -1321,11 +1397,25 @@ class LiveVultrHarness:
             if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
                 raise HarnessError(f"Malformed Vultr {path} inventory")
             meta = payload.get("meta")
-            links = meta.get("links") if isinstance(meta, dict) else None
-            if not isinstance(meta, dict) or not isinstance(links, dict):
+            if not isinstance(meta, dict):
                 raise HarnessError(f"Malformed Vultr {path} pagination metadata")
-            if "next" not in links or "prev" not in links:
-                raise HarnessError(f"Incomplete Vultr {path} pagination links")
+            total = meta.get("total")
+            if total is not None and (
+                isinstance(total, bool) or not isinstance(total, int) or total < 0
+            ):
+                raise HarnessError(f"Malformed Vultr {path} pagination total")
+            links = meta.get("links")
+            if links is None:
+                # Vultr currently returns only ``meta.total`` for some
+                # unpaginated managed-database endpoints.  That shape is safe
+                # only when the current response proves the inventory is
+                # complete; a larger total without a continuation cursor must
+                # fail closed.
+                if total is None:
+                    raise HarnessError(f"Malformed Vultr {path} pagination metadata")
+                links = {}
+            if not isinstance(links, dict):
+                raise HarnessError(f"Malformed Vultr {path} pagination links")
             for link_name in ("next", "prev"):
                 link = links.get(link_name)
                 if link not in (None, "") and (
@@ -1349,7 +1439,13 @@ class LiveVultrHarness:
                 raise HarnessError(f"Vultr {path} inventory exceeded the bounded item limit")
             next_cursor = links.get("next")
             if next_cursor in (None, ""):
+                if total is not None and len(items) != total:
+                    raise HarnessError(
+                        f"Incomplete Vultr {path} inventory without a continuation cursor"
+                    )
                 return items
+            if total is not None and len(items) >= total:
+                raise HarnessError(f"Inconsistent Vultr {path} pagination metadata")
             if not isinstance(next_cursor, str) or not next_cursor.strip() or next_cursor in seen:
                 raise HarnessError(f"Repeated or malformed Vultr {path} cursor")
             seen.add(next_cursor)
@@ -1380,7 +1476,9 @@ class LiveVultrHarness:
             raise HarnessError("Vultr polling returned a different provider resource.")
         for field, expected_value in expected.items():
             observed = value.get(field)
-            if observed in (None, "") or str(observed) != str(expected_value):
+            if not LiveVultrHarness._ownership_value_matches(
+                field, observed, expected_value
+            ):
                 raise HarnessError(
                     f"Vultr polling ownership verification failed for {field}."
                 )
@@ -1588,10 +1686,91 @@ class LiveVultrHarness:
 
     def record_test(self, test_id: str, status: str, **evidence: Any) -> None:
         self.report["tests"][test_id] = {"status": status, **evidence}
+        if status != "PASS":
+            raise HarnessError(f"Vultr live acceptance case {test_id} failed.")
 
     # ---------- local BackupSheep graph ----------
 
+    def _discard_exact_previous_local_fixture(self) -> None:
+        """Remove only this run's exact local graph before replaying the harness.
+
+        Provider resources remain governed by the external durable ledger.  A
+        prior process can fail after creating local rows, and the deterministic
+        provider markers must then be replayed without colliding on the test
+        user or creating different restore markers from stale rows.  Deleting
+        the whole account is safe only after proving the unique run identity,
+        membership graph, Vultr credential, and durable provider intent/ledger.
+        """
+
+        email = f"{self.prefix}@example.invalid"
+        User = get_user_model()
+        users = list(User.objects.filter(username=email, email=email))
+        accounts = list(CoreAccount.objects.filter(name=self.prefix))
+        locations = list(CoreConnectionLocation.objects.filter(code=self.prefix))
+        if not users and not accounts:
+            if locations:
+                if len(locations) != 1 or locations[0].connections.exists():
+                    raise HarnessError(
+                        "A conflicting local Vultr E2E location exists for this run."
+                    )
+                if not (self.ledger.entries() or self.intents.pending()):
+                    raise HarnessError(
+                        "An unledgered local Vultr E2E location collision exists."
+                    )
+                locations[0].delete()
+            return
+        if not (self.ledger.entries() or self.intents.pending()):
+            raise HarnessError(
+                "A local Vultr E2E account collision exists without durable provider state."
+            )
+        if len(users) != 1 or len(accounts) != 1 or len(locations) > 1:
+            raise HarnessError("The prior local Vultr E2E graph is ambiguous.")
+        user = users[0]
+        account = accounts[0]
+        try:
+            member = user.member
+        except Exception as error:
+            raise HarnessError("The prior local Vultr E2E user has no exact member.") from error
+        memberships = list(member.memberships.filter(account=account))
+        if (
+            len(memberships) != 1
+            or member.memberships.exclude(account=account).exists()
+            or account.memberships.exclude(member=member).exists()
+            or not memberships[0].current
+            or not memberships[0].primary
+        ):
+            raise HarnessError("The prior local Vultr E2E membership graph changed.")
+        vultr_connections = list(
+            account.connections.filter(
+                integration__code="vultr", name=self.prefix, added_by=member
+            )
+        )
+        if len(vultr_connections) != 1:
+            raise HarnessError("The prior local Vultr E2E connection is ambiguous.")
+        connection = vultr_connections[0]
+        auth = getattr(connection, "auth_vultr", None)
+        if auth is None or bs_decrypt(
+            auth.api_key, account.get_encryption_key()
+        ) != self.token:
+            raise HarnessError("The prior local Vultr E2E credential witness changed.")
+        if locations and connection.location_id != locations[0].id:
+            raise HarnessError("The prior local Vultr E2E location witness changed.")
+        account_id = account.id
+        user_id = user.id
+        location_id = locations[0].id if locations else None
+        account.delete()
+        user.delete()
+        if locations and not locations[0].connections.exists():
+            locations[0].delete()
+        self.report["local_restart_recovery"] = {
+            "discarded_account_id": account_id,
+            "discarded_user_id": user_id,
+            "discarded_location_id": location_id,
+            "provider_state_retained": True,
+        }
+
     def setup_local(self) -> None:
+        self._discard_exact_previous_local_fixture()
         self.account, self.member, self.user = factories.make_account(
             email=f"{self.prefix}@example.invalid"
         )
@@ -2338,6 +2517,33 @@ class LiveVultrHarness:
             ),
         )
 
+    def _object_storage_ownership(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Build a read-back proof while tolerating Vultr's omitted tier field.
+
+        The selected tier remains immutable in the durable request fingerprint.
+        Vultr's current detail response returns ``tier_id: null`` even when the
+        accepted create request included a tier.  A non-empty provider value is
+        still required to match exactly; an omitted value is not fabricated as
+        provider evidence.
+        """
+
+        observed_tier = item.get("tier_id")
+        if observed_tier not in (None, "") and str(observed_tier) != str(
+            self.object_tier_id
+        ):
+            raise HarnessError("Vultr Object Storage returned a different tier.")
+        proof = {
+            "label": f"{self.prefix}-object-storage",
+            "region": str(item.get("region") or self.region),
+            "cluster_id": self.object_cluster_id,
+            "s3_hostname": _validate_vultr_object_storage_hostname(
+                item.get("s3_hostname")
+            ),
+        }
+        if observed_tier not in (None, ""):
+            proof["tier_id"] = observed_tier
+        return proof
+
     @staticmethod
     def _object_marker_body(prefix: str) -> bytes:
         return json.dumps(
@@ -2901,15 +3107,7 @@ class LiveVultrHarness:
                 },
             ),
             id_from_response=lambda payload: (payload.get("object_storage") or {}).get("id"),
-            ownership=lambda item: {
-                "label": label,
-                "region": str(item.get("region") or self.region),
-                "cluster_id": self.object_cluster_id,
-                "tier_id": self.object_tier_id,
-                "s3_hostname": _validate_vultr_object_storage_hostname(
-                    item.get("s3_hostname")
-                ),
-            },
+            ownership=self._object_storage_ownership,
             request={
                 "resource_type": "object_storage",
                 "cluster_id": self.object_cluster_id,
@@ -2928,14 +3126,16 @@ class LiveVultrHarness:
             timeout_seconds=900,
             interval_seconds=15,
             provider=True,
-            ownership=lambda item: self._assert_poll_ownership(
-                item,
-                provider_id=storage_id,
-                expected={
-                    "region": self.region,
-                    "cluster_id": self.object_cluster_id,
-                    "tier_id": self.object_tier_id,
-                },
+            ownership=lambda item: (
+                self._object_storage_ownership(item),
+                self._assert_poll_ownership(
+                    item,
+                    provider_id=storage_id,
+                    expected={
+                        "region": self.region,
+                        "cluster_id": self.object_cluster_id,
+                    },
+                ),
             ),
         )
         client = self._object_client(object_storage)
@@ -3001,7 +3201,11 @@ class LiveVultrHarness:
                 raise AmbiguousMutation(
                     "Vultr Object Storage provider identity differs from adapter metadata."
                 )
-            first_identity = (metadata.get("etag"), metadata.get("version_id"), point.storage_file_id)
+            first_identity = (
+                metadata.get("etag"),
+                self._normalise_object_version(metadata.get("version_id")),
+                point.storage_file_id,
+            )
             if not object_entry:
                 self._remember_resource(
                     kind="object_key",
@@ -3051,7 +3255,11 @@ class LiveVultrHarness:
             self.intents.clear("object-key-replay")
             point.refresh_from_db()
             second_metadata = (point.metadata or {}).get(VULTR_OBJECT_METADATA_KEY) or {}
-            second_identity = (second_metadata.get("etag"), second_metadata.get("version_id"), point.storage_file_id)
+            second_identity = (
+                second_metadata.get("etag"),
+                self._normalise_object_version(second_metadata.get("version_id")),
+                point.storage_file_id,
+            )
             self.record_test(
                 "VUL-10",
                 "PASS" if point.status == point.Status.UPLOAD_COMPLETE and hashlib.sha256(body).hexdigest() == expected_hash and first_identity == second_identity else "FAIL",
@@ -3323,7 +3531,7 @@ class LiveVultrHarness:
         deadline = time.monotonic() + max(0, timeout_seconds)
         while True:
             try:
-                resource = self._read_detail(path, response_key)
+                resource = self._read_cleanup_resource(entry, path, response_key)
             except ProviderNotFound:
                 return
             if resource is None:
@@ -4111,7 +4319,7 @@ class LiveVultrHarness:
             return "unresolved"
         path = path_template.format(resource_id=provider_id)
         try:
-            resource = self._read_detail(path, response_key)
+            resource = self._read_cleanup_resource(entry, path, response_key)
             if resource is None:
                 self.intents.clear(key)
                 self.ledger.mark_cleanup(kind, provider_id, state="absent")
@@ -4369,7 +4577,7 @@ class LiveVultrHarness:
             return
         path = path_template.format(resource_id=provider_id)
         try:
-            resource = self._read_detail(path, response_key)
+            resource = self._read_cleanup_resource(entry, path, response_key)
             if resource is None:
                 self.ledger.mark_cleanup(kind, provider_id, state="absent")
                 return
@@ -4611,6 +4819,11 @@ class LiveVultrHarness:
             self.report["error"] = self._safe_error(error)
         finally:
             self.cleanup()
+            if (
+                self.cleanup_requested
+                and self.report["cleanup"].get("status") != "PASS"
+            ):
+                self.report["result"] = "FAIL"
             report = self.render_report()
             if self.report_path:
                 self.report_path.parent.mkdir(parents=True, exist_ok=True)

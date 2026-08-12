@@ -75,6 +75,8 @@ from apps._tasks.integration.storage.lease import (
 )
 from apps._tasks.integration.storage.s3_verified import (
     S3ObjectIntegrityError,
+    S3UploadInventoryFailure,
+    S3UploadOutcomePending,
     S3UploadReconciliationRequired,
 )
 from apps.console.backup.models import (
@@ -141,6 +143,43 @@ def _caused_by(error, exception_types):
     return False
 
 
+def _declared_retry_after(error):
+    current = error
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        value = getattr(current, "retry_after", None)
+        try:
+            if value is not None:
+                return max(1, min(int(value), 86400))
+        except (TypeError, ValueError):
+            pass
+        current = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
+    return None
+
+
+def _declared_error_code(error):
+    current = error
+    seen = set()
+    fallback = ""
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        value = getattr(current, "error_code", None) or getattr(
+            current, "code", None
+        )
+        if isinstance(value, str) and value:
+            if isinstance(current, S3UploadInventoryFailure):
+                return value.upper()
+            if not fallback:
+                fallback = value.upper()
+        current = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
+    return fallback
+
+
 def _chain_has_class_name(error, class_name):
     current = error
     seen = set()
@@ -203,6 +242,13 @@ def _storage_error_outcome(error, point):
             point.Status.STORAGE_VALIDATION_FAILED,
             False,
         )
+    if _caused_by(error, (S3UploadOutcomePending,)):
+        return (
+            "STORAGE_RECONCILIATION_PENDING",
+            "The provider upload outcome is pending visibility; verification will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        )
     if _caused_by(error, (S3UploadReconciliationRequired,)):
         return (
             "STORAGE_RECONCILIATION_REQUIRED",
@@ -225,9 +271,7 @@ def _storage_error_outcome(error, point):
             True,
         )
 
-    declared_code = str(
-        getattr(error, "error_code", None) or getattr(error, "code", None) or ""
-    ).upper()
+    declared_code = _declared_error_code(error)
     declared_outcomes = {
         "STORAGE_AUTH_FAILED": (
             "STORAGE_AUTH_FAILED",
@@ -495,11 +539,7 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
         retry_after = None
         retry_at = None
         if retryable:
-            retry_after = getattr(error, "retry_after", None)
-            try:
-                retry_after = max(1, min(int(retry_after), 86400))
-            except (TypeError, ValueError):
-                retry_after = 900
+            retry_after = _declared_retry_after(error) or 900
             retry_at = timezone.now() + timedelta(seconds=retry_after)
         backup.record_execution_error(
             code=code,

@@ -990,6 +990,41 @@ def _recoverable_backup_queryset(model, *, cutoff, now, batch_size):
     )
 
 
+def _recoverable_oracle_delete_queryset(*, cutoff, now, batch_size):
+    """Select Oracle deletes due for a read-only reconciliation attempt."""
+    from django.contrib.contenttypes.models import ContentType
+    from apps.console.backup.models import CoreBackupExecution, CoreOracleBackup
+
+    content_type = ContentType.objects.get_for_model(
+        CoreOracleBackup, for_concrete_model=False
+    )
+    states = CoreBackupExecution.objects.filter(backup_content_type=content_type)
+    live_ids = states.filter(
+        lease_token__isnull=False,
+        lease_expires_at__gt=now,
+    ).values("backup_object_id")
+    due_ids = states.filter(
+        Q(next_retry_at__isnull=True) | Q(next_retry_at__lte=now)
+    ).values("backup_object_id")
+    stale_ids = states.filter(
+        Q(lease_expires_at__lte=now)
+        | Q(lease_expires_at__isnull=True, lease_owner__gt="")
+    ).values("backup_object_id")
+    return (
+        CoreOracleBackup.objects.filter(
+            status=UtilBackup.Status.DELETE_IN_PROGRESS,
+            unique_id__gt="",
+        )
+        .exclude(pk__in=live_ids)
+        .filter(
+            Q(pk__in=due_ids)
+            | Q(pk__in=stale_ids)
+            | Q(modified__lt=cutoff)
+        )
+        .order_by("modified")[:batch_size]
+    )
+
+
 @current_app.task(name="resume_in_progress_backups", bind=True, ignore_result=True)
 def resume_in_progress_backups(self):
     """Requeue work left behind by a worker or server restart.
@@ -1120,6 +1155,95 @@ def resume_in_progress_backups(self):
                 # One malformed/removed row must not prevent recovery of the rest of
                 # the provider catalog. The next sweep can retry this row.
                 capture_exception(error)
+
+
+@current_app.task(
+    name="reconcile_oracle_backup_deletion",
+    bind=True,
+    ignore_result=True,
+)
+def reconcile_oracle_backup_deletion(self, backup_id):
+    """Reconcile one Oracle DELETE_IN_PROGRESS row without replaying DELETE."""
+    from apps.console.backup.models import CoreOracleBackup
+    from apps.console.utils.models import BackupExecutionLeaseLostError
+    from apps._tasks.integration.oracle import (
+        claim_oracle_delete_reconciliation,
+        release_oracle_delete_reconciliation,
+    )
+
+    try:
+        backup = CoreOracleBackup.objects.get(pk=backup_id)
+    except CoreOracleBackup.DoesNotExist:
+        return
+
+    interval = max(60, int(getattr(settings, "BACKUP_POLL_INTERVAL", 120)))
+    owner = self.request.id or f"oracle-delete-{backup_id}-{uuid.uuid4().hex}"
+    claimed = claim_oracle_delete_reconciliation(
+        backup,
+        owner,
+        lease_seconds=max(interval * 2, 300),
+    )
+    if claimed is None:
+        return
+    claimed, lease_token = claimed
+    try:
+        claimed.soft_delete(
+            enqueue_reconciliation=False,
+            execution_owner=owner,
+            execution_token=lease_token,
+        )
+    except BackupExecutionLeaseLostError:
+        # A replacement worker owns the row now. It will reconcile it under its
+        # own fence; the stale worker must not alter status or issue provider I/O.
+        return
+    except Exception as error:
+        # Keep an ambiguous provider operation resumable. The lease expiry and
+        # beat sweep provide the next handoff even if this worker dies here.
+        capture_exception(error)
+    finally:
+        claimed.unbind_execution_fence()
+
+    released = release_oracle_delete_reconciliation(
+        claimed,
+        owner,
+        lease_token,
+        retry_seconds=interval,
+    )
+    if released is not None and released.status == UtilBackup.Status.DELETE_IN_PROGRESS:
+        try:
+            reconcile_oracle_backup_deletion.apply_async(
+                args=[released.pk],
+                countdown=interval,
+            )
+        except Exception as error:
+            # ``next_retry_at`` was committed before this publish attempt. The
+            # beat sweep will enqueue the same row if the broker is unavailable.
+            capture_exception(error)
+
+
+@current_app.task(
+    name="reconcile_oracle_backup_deletions",
+    bind=True,
+    ignore_result=True,
+)
+def reconcile_oracle_backup_deletions(self):
+    """Beat sweep for Oracle deletes whose task/message/worker disappeared."""
+    stale_seconds = int(getattr(settings, "BACKUP_RECOVERY_STALE_SECONDS", 900))
+    batch_size = int(getattr(settings, "BACKUP_RECOVERY_BATCH_SIZE", 100))
+    now = timezone.now()
+    candidates = _recoverable_oracle_delete_queryset(
+        cutoff=now - datetime.timedelta(seconds=stale_seconds),
+        now=now,
+        batch_size=batch_size,
+    )
+    for backup in candidates:
+        try:
+            reconcile_oracle_backup_deletion.apply_async(
+                args=[backup.pk],
+                countdown=0,
+            )
+        except Exception as error:
+            capture_exception(error)
 
 
 @current_app.task(
@@ -1266,6 +1390,16 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
 
     backup = node.get_cloud_backup(backup_id)
     if backup is None:
+        return
+
+    # Deletion is a separate provider protocol.  A legacy poll delivery may
+    # arrive after the API changed the row to DELETE_IN_PROGRESS; hand it to the
+    # Oracle reconciler instead of treating that status as terminal.
+    if (
+        backup.status == UtilBackup.Status.DELETE_IN_PROGRESS
+        and node.connection.integration.code == "oracle"
+    ):
+        backup._enqueue_delete_reconciliation()
         return
 
     # Stop polling once the backup has reached any terminal state (completed elsewhere,
@@ -1629,6 +1763,15 @@ def node_delete_requested(self, node_id):
                     query = ~Q(status=UtilBackup.Status.DELETE_COMPLETED)
                     pending_backups = node_type_object.backups.filter(query).order_by("created")
                     for backup in pending_backups:
+                        if (
+                            backup.status == UtilBackup.Status.DELETE_IN_PROGRESS
+                            and node.connection.integration.code == "oracle"
+                        ):
+                            # Oracle deletion is owned by the durable reconciler
+                            # lease. Node/connection cleanup must not perform an
+                            # unfenced provider read or terminal status write.
+                            backup._enqueue_delete_reconciliation()
+                            continue
                         backup.soft_delete()
 
                     # A node row owns the backup catalog.  Never cascade-delete it

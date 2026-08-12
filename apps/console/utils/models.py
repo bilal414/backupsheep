@@ -710,6 +710,7 @@ class UtilBackup(TimeStampedModel):
         reconciliation_metadata=None,
         lease_owner=None,
         lease_token=None,
+        require_live=False,
         now=None,
     ):
         """Persist a categorized, public-safe error, optionally worker-fenced.
@@ -724,7 +725,7 @@ class UtilBackup(TimeStampedModel):
             backup = self.__class__.objects.select_for_update().get(pk=self.pk)
             state = self._locked_execution_state(backup)
             if lease_token is not None and not state.lease_matches(
-                lease_owner, lease_token, now=now, require_live=False
+                lease_owner, lease_token, now=now, require_live=require_live
             ):
                 return None
             safe_code = str(code or "UNKNOWN")[:64]
@@ -763,13 +764,14 @@ class UtilBackup(TimeStampedModel):
         metadata=None,
         lease_owner=None,
         lease_token=None,
+        require_live=False,
     ):
         """Persist provider recovery pointers before later phases are dispatched."""
         with transaction.atomic():
             backup = self.__class__.objects.select_for_update().get(pk=self.pk)
             state = self._locked_execution_state(backup)
             if lease_token is not None and not state.lease_matches(
-                lease_owner, lease_token, require_live=False
+                lease_owner, lease_token, require_live=require_live
             ):
                 return None
             if operation_id is not None:

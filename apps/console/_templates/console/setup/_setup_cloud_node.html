@@ -3,11 +3,9 @@
         <!-- Object type tabs -->
         <div class="border-b border-slate-200">
             <nav class="-mb-px flex gap-4 overflow-x-auto sm:gap-6" aria-label="Tabs">
-                {% if integration.code != "upcloud" and integration.code != "oracle" %}
-                    <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
-                       x-bind:class="object_type === 'cloud' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
-                       class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">Servers</a>
-                {% endif %}
+                <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
+                   x-bind:class="object_type === 'cloud' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"
+                   class="whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition">Servers</a>
                 {% if integration.code != "aws_rds" and integration.code != "hetzner" %}
                     <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
                        x-bind:class="object_type === 'volume' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'"

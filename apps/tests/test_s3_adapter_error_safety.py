@@ -7,6 +7,7 @@ from django.test import SimpleTestCase
 
 from apps._tasks.integration.storage.s3_verified import (
     S3ObjectIntegrityError,
+    S3UploadOutcomePending,
     S3UploadReconciliationRequired,
 )
 from apps.tests.test_s3_compatible_storage_adapters import (
@@ -113,6 +114,48 @@ class S3CompatibleAdapterErrorSafetyTests(SimpleTestCase):
                     self.assertEqual(wrapped.code, expected_code)
                     self.assertEqual(wrapped.retryable, expected_retryable)
                     self.assertIs(wrapped.__cause__, original)
+
+    def test_vultr_preserves_retryable_outcome_pending_contract(self):
+        from apps._tasks.integration.storage.vultr import _safe_s3_failure
+
+        pending = S3UploadOutcomePending(CANARY, retry_after=23)
+
+        failure = _safe_s3_failure(pending)
+
+        self.assertNotIn(CANARY, failure.message)
+        self.assertEqual(failure.code, "STORAGE_RECONCILIATION_PENDING")
+        self.assertTrue(failure.retryable)
+        self.assertEqual(failure.retry_after, 23)
+
+    def test_task_classifies_pending_as_retry_and_conflicts_as_manual_review(self):
+        from apps._tasks.integration.storage.tasks import _storage_error_outcome
+
+        point = SimpleNamespace(
+            Status=SimpleNamespace(
+                UPLOAD_RETRY="upload_retry",
+                STORAGE_VALIDATION_FAILED="storage_validation_failed",
+            )
+        )
+        pending = S3UploadOutcomePending("zero new uploads are visible yet")
+
+        code, _message, status, retryable = _storage_error_outcome(pending, point)
+
+        self.assertEqual(code, "STORAGE_RECONCILIATION_PENDING")
+        self.assertEqual(status, point.Status.UPLOAD_RETRY)
+        self.assertTrue(retryable)
+
+        for message in (
+            "multiple new uploads matched the baseline",
+            "the new upload has a foreign owner identity",
+        ):
+            with self.subTest(message=message):
+                conflict = S3UploadReconciliationRequired(message)
+                code, _message, status, retryable = _storage_error_outcome(
+                    conflict, point
+                )
+                self.assertEqual(code, "STORAGE_RECONCILIATION_REQUIRED")
+                self.assertEqual(status, point.Status.STORAGE_VALIDATION_FAILED)
+                self.assertFalse(retryable)
 
     def test_bad_provider_request_is_fail_closed_as_malformed_response(self):
         for spec in ADAPTERS:

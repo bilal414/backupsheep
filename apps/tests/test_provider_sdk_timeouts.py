@@ -90,6 +90,7 @@ class ProviderSDKTimeoutPolicyTests(SimpleTestCase):
         )
         auth = CoreAuthOracle(tenancy="tenancy-ocid")
         auth.get_client = mock.Mock(return_value={"region": "us-chicago-1"})
+        auth.get_verified_client = mock.Mock(return_value={"region": "us-chicago-1"})
 
         self.assertEqual(auth.get_eligible_objects("volume"), [])
 

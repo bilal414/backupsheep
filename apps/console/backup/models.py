@@ -41,7 +41,7 @@ from apps.api.v1.utils.boto import (
     bounded_boto3_client,
     bounded_ibm_boto3_client,
 )
-from ..utils.models import UtilBackup
+from ..utils.models import BackupExecutionLeaseLostError, UtilBackup
 from apps._tasks.helper.tasks import delete_from_disk
 from backupsheep.celery import app
 from botocore.config import Config
@@ -128,6 +128,27 @@ class HetznerDeleteUnprovenNotFound(RuntimeError):
 
 class HetznerDeleteAmbiguous(RuntimeError):
     """A Hetzner delete response was lost and must be reconciled read-only."""
+
+
+class UpCloudDeleteLeaseLost(RuntimeError):
+    """A stale UpCloud deletion worker lost its durable checkpoint lease."""
+
+
+class UpCloudDeleteOwnershipError(RuntimeError):
+    """An UpCloud backup storage did not match its immutable witness."""
+
+
+class UpCloudDeleteUnprovenNotFound(RuntimeError):
+    """UpCloud reported absence before an owned delete intent was durable."""
+
+
+class UpCloudDeleteRetryable(RuntimeError):
+    """An UpCloud delete check or mutation needs bounded reconciliation."""
+
+    def __init__(self, code, *, ambiguous=False):
+        super().__init__(str(code or "PROVIDER_TRANSIENT_OUTAGE"))
+        self.code = str(code or "PROVIDER_TRANSIENT_OUTAGE")[:64]
+        self.ambiguous = bool(ambiguous)
 
 
 class RDSLeaseLost(RuntimeError):
@@ -230,23 +251,42 @@ def _record_provider_outcome(
     operation_id=None,
 ):
     """Persist only bounded, non-sensitive provider outcome evidence."""
+    fence = {}
+    lease_owner = getattr(backup, "_required_backup_lease_owner", "")
+    lease_token = getattr(backup, "_required_backup_lease_token", "")
+    if lease_owner and lease_token:
+        fence = {
+            "lease_owner": lease_owner,
+            "lease_token": lease_token,
+            "require_live": True,
+        }
     safe_metadata = {"provider": provider, "operation": operation}
     if http_status is not None:
         safe_metadata["http_status"] = int(http_status)
-    backup.record_provider_reference(
+    saved = backup.record_provider_reference(
         operation_id=operation_id,
         resource_id=resource_id,
         provider_status=provider_status or category,
         metadata=safe_metadata,
+        **fence,
     )
+    if fence and saved is None:
+        raise BackupExecutionLeaseLostError(
+            "The backup worker lost its execution lease while recording provider outcome."
+        )
     if error_code:
-        backup.record_execution_error(
+        saved = backup.record_execution_error(
             code=error_code,
             message=backup.EXECUTION_ERROR_MESSAGES.get(
                 error_code, "The provider operation failed."
             ),
             retry_at=retry_at,
+            **fence,
         )
+        if fence and saved is None:
+            raise BackupExecutionLeaseLostError(
+                "The backup worker lost its execution lease while recording provider error."
+            )
 
 
 def _provider_http_outcome(backup, response, *, provider, operation="poll"):
@@ -1026,6 +1066,24 @@ class CoreAWSRDSBackupStatus(TimeStampedModel):
 
 
 class CoreDigitalOceanBackup(UtilBackup):
+    DELETE_STATE_KEY = "_digitalocean_delete"
+    DELETE_LEASE_SECONDS = 300
+    DELETE_MAX_ATTEMPTS = 3
+    DELETE_RETRY_GRACE_SECONDS = 60
+    RECONCILIATION_MAX_OBSERVATIONS = 12
+
+    class DeleteLeaseLost(RuntimeError):
+        pass
+
+    class DeleteOwnershipError(RuntimeError):
+        pass
+
+    class DeleteUnprovenNotFound(RuntimeError):
+        pass
+
+    class DeleteAmbiguous(RuntimeError):
+        pass
+
     digitalocean = models.ForeignKey(
         "CoreDigitalOcean", related_name="backups", on_delete=models.CASCADE
     )
@@ -1043,29 +1101,296 @@ class CoreDigitalOceanBackup(UtilBackup):
     class Meta:
         db_table = "core_digitalocean_backup"
 
-    def poll_status(self):
-        """Perform one categorized, ownership-checked DigitalOcean status check."""
+    @staticmethod
+    def _bounded_setting(name, default, *, minimum=0, maximum=10_000):
+        try:
+            value = int(getattr(settings, name, default))
+        except (TypeError, ValueError):
+            value = default
+        return min(max(value, minimum), maximum)
+
+    def _digitalocean_witness(self):
         from ..node.models import CoreNode
 
-        try:
-            client = self.digitalocean.node.connection.auth_digitalocean.get_client()
-            resource_type = (
-                "droplet"
-                if CoreNode.Type.CLOUD == self.digitalocean.node.type
-                else "volume"
+        resource_type = (
+            "droplet"
+            if self.digitalocean.node.type == CoreNode.Type.CLOUD
+            else "volume"
+            if self.digitalocean.node.type == CoreNode.Type.VOLUME
+            else ""
+        )
+        if not resource_type:
+            raise self.DeleteOwnershipError()
+        expected = {
+            "provider": "digitalocean",
+            "marker": str(self.uuid_str),
+            "source_id": str(self.digitalocean.unique_id),
+            "resource_type": resource_type,
+            "scope": {
+                "account_id": str(self.digitalocean.node.connection.account_id),
+                "connection_id": str(self.digitalocean.node.connection_id),
+            },
+        }
+        execution = self.get_execution_state(create=True)
+        provider_metadata = dict(execution.provider_metadata or {})
+        stored = provider_metadata.get("witness")
+        stored = dict(stored) if isinstance(stored, dict) else {}
+        for key in ("provider", "marker", "source_id", "resource_type"):
+            value = stored.get(key, provider_metadata.get(key))
+            if value not in (None, "") and str(value) != expected[key]:
+                raise self.DeleteOwnershipError()
+        stored_scope = stored.get("scope")
+        if stored_scope is not None and (
+            not isinstance(stored_scope, dict)
+            or any(
+                str(stored_scope.get(key) or "") != value
+                for key, value in expected["scope"].items()
             )
-            source_id = self.digitalocean.unique_id
+        ):
+            raise self.DeleteOwnershipError()
+        request = (self.metadata or {}).get("_digitalocean_request")
+        if request is not None:
+            if not isinstance(request, dict):
+                raise self.DeleteOwnershipError()
+            request_expected = {
+                "marker": expected["marker"],
+                "source_id": expected["source_id"],
+                "resource_type": expected["resource_type"],
+                "account_id": expected["scope"]["account_id"],
+                "connection_id": expected["scope"]["connection_id"],
+            }
+            if any(
+                str(request.get(key) or "") != value
+                for key, value in request_expected.items()
+            ):
+                raise self.DeleteOwnershipError()
+        return execution, expected
+
+    @staticmethod
+    def _snapshot_owned(snapshot, witness, *, resource_id=None):
+        if not isinstance(snapshot, dict):
+            return False
+        if resource_id is not None and str(snapshot.get("id") or "") != str(
+            resource_id
+        ):
+            return False
+        return (
+            str(snapshot.get("name") or "") == witness["marker"]
+            and str(snapshot.get("resource_id") or "") == witness["source_id"]
+            and str(snapshot.get("resource_type") or "")
+            == witness["resource_type"]
+        )
+
+    @staticmethod
+    def _action_owned(action, witness, action_id):
+        return (
+            isinstance(action, dict)
+            and str(action.get("id") or "") == str(action_id)
+            and str(action.get("type") or "") == "snapshot"
+            and str(action.get("resource_id") or "") == witness["source_id"]
+            and str(action.get("resource_type") or "") == "droplet"
+        )
+
+    def _adopt_snapshot(self, snapshot, witness):
+        if not self._snapshot_owned(snapshot, witness):
+            raise self.DeleteOwnershipError()
+        safe_snapshot = {
+            key: snapshot.get(key)
+            for key in (
+                "id",
+                "name",
+                "resource_id",
+                "resource_type",
+                "min_disk_size",
+                "size_gigabytes",
+                "status",
+                "state",
+                "created_at",
+            )
+            if isinstance(snapshot.get(key), (str, int, float, bool))
+            or snapshot.get(key) is None
+        }
+        resource_id = str(snapshot["id"])
+        with transaction.atomic():
+            locked = self.__class__.objects.select_for_update().get(pk=self.pk)
+            if locked.unique_id not in (None, "") and str(locked.unique_id) != resource_id:
+                raise self.DeleteOwnershipError()
+            metadata = dict(locked.metadata or {})
+            metadata.update(
+                {
+                    "_provider_ownership_verified": True,
+                    "_provider_source_id": witness["source_id"],
+                    "_provider_resource_type": witness["resource_type"],
+                    "_provider_marker": witness["marker"],
+                    "_digitalocean_snapshot": safe_snapshot,
+                }
+            )
+            locked.unique_id = resource_id
+            locked.size_gigabytes = snapshot.get(
+                "min_disk_size", snapshot.get("size_gigabytes")
+            )
+            locked.metadata = metadata
+            locked.save(
+                update_fields=[
+                    "unique_id",
+                    "size_gigabytes",
+                    "metadata",
+                    "modified",
+                ]
+            )
+        self.unique_id = resource_id
+        self.size_gigabytes = locked.size_gigabytes
+        self.metadata = metadata
+        self.record_provider_reference(
+            resource_id=resource_id,
+            operation_id=self.action_id,
+            idempotency_key=witness["marker"],
+            provider_status=str(
+                snapshot.get("state") or snapshot.get("status") or "visible"
+            ),
+            metadata={
+                "witness": witness,
+                "resource": safe_snapshot,
+                "create_attempted": True,
+                "outcome_unknown": False,
+                "adopted": True,
+            },
+        )
+
+    def _digitalocean_api_error_outcome(self, error, *, operation="poll"):
+        code = str(getattr(error, "code", "PROVIDER_REQUEST_FAILED"))
+        mapping = {
+            "PROVIDER_NOT_FOUND": ("not_found", UtilBackup.Status.FAILED, None),
+            "PROVIDER_AUTH_FAILED": ("auth_failed", UtilBackup.Status.FAILED, None),
+            "PROVIDER_RATE_LIMIT": (
+                "rate_limited",
+                UtilBackup.Status.IN_PROGRESS,
+                _provider_retry_at(),
+            ),
+            "PROVIDER_TIMEOUT": (
+                "timeout",
+                UtilBackup.Status.IN_PROGRESS,
+                _provider_retry_at(),
+            ),
+            "PROVIDER_TRANSIENT_OUTAGE": (
+                "transient_outage",
+                UtilBackup.Status.IN_PROGRESS,
+                _provider_retry_at(),
+            ),
+            "PROVIDER_DUPLICATE_MATCH": (
+                "duplicate_matches",
+                UtilBackup.Status.FAILED,
+                None,
+            ),
+            "PROVIDER_OWNERSHIP_MISMATCH": (
+                "ownership_mismatch",
+                UtilBackup.Status.FAILED,
+                None,
+            ),
+            "PROVIDER_MALFORMED_RESPONSE": (
+                "malformed_provider_response",
+                UtilBackup.Status.FAILED,
+                None,
+            ),
+        }
+        category, result, retry_at = mapping.get(
+            code, ("request_failed", UtilBackup.Status.FAILED, None)
+        )
+        _record_provider_outcome(
+            self,
+            provider="digitalocean",
+            category=category,
+            operation=operation,
+            error_code=code,
+            retry_at=retry_at,
+            http_status=getattr(error, "status_code", None),
+            resource_id=self.unique_id,
+            operation_id=self.action_id,
+        )
+        return result
+
+    def _observe_missing_snapshot(self, execution):
+        metadata = dict(execution.provider_metadata or {})
+        reconciliation = metadata.get("digitalocean_reconciliation")
+        reconciliation = (
+            dict(reconciliation) if isinstance(reconciliation, dict) else {}
+        )
+        observations = int(reconciliation.get("missing_observations") or 0) + 1
+        maximum = self._bounded_setting(
+            "DIGITALOCEAN_RECONCILIATION_MAX_OBSERVATIONS",
+            self.RECONCILIATION_MAX_OBSERVATIONS,
+            minimum=1,
+            maximum=100,
+        )
+        reconciliation.update(
+            {
+                "missing_observations": observations,
+                "maximum_observations": maximum,
+                "last_observed_at": timezone.now().isoformat(),
+            }
+        )
+        if observations >= maximum:
+            self.record_provider_reference(
+                provider_status="reconciliation_required",
+                metadata={"digitalocean_reconciliation": reconciliation},
+            )
+            self.set_reconciliation_state(
+                reconciliation_state=CoreBackupExecution.ReconciliationState.MANUAL_REVIEW,
+                reason="PROVIDER_RECONCILIATION_REQUIRED",
+                metadata=reconciliation,
+            )
+            return _provider_failed(
+                self,
+                provider="digitalocean",
+                state="reconciliation_required",
+                code="PROVIDER_RECONCILIATION_REQUIRED",
+            )
+        self.record_provider_reference(
+            provider_status="snapshot_not_visible",
+            metadata={"digitalocean_reconciliation": reconciliation},
+        )
+        self.record_execution_error(
+            code="PROVIDER_CREATE_OUTCOME_UNKNOWN",
+            retryable=True,
+            retry_at=_provider_retry_at(),
+            reconciliation_reason="digitalocean_snapshot_visibility",
+            reconciliation_metadata=reconciliation,
+        )
+        return UtilBackup.Status.IN_PROGRESS
+
+    def poll_status(self):
+        """Perform one bounded, categorized, ownership-checked status check."""
+        from ..node.models import CoreNode
+        from apps.api.v1.connection.digitalocean.client import (
+            DigitalOceanAPIError,
+            find_exact_snapshot,
+        )
+
+        try:
+            execution, witness = self._digitalocean_witness()
+            client = self.digitalocean.node.connection.auth_digitalocean.get_verified_client()
+            persisted_resource_ids = {
+                str(value)
+                for value in (self.unique_id, execution.provider_resource_id)
+                if value not in (None, "")
+            }
+            persisted_action_ids = {
+                str(value)
+                for value in (self.action_id, execution.provider_operation_id)
+                if value not in (None, "")
+            }
+            if len(persisted_resource_ids) > 1 or len(persisted_action_ids) > 1:
+                raise self.DeleteOwnershipError()
+            resource_id = str(
+                self.unique_id or execution.provider_resource_id or ""
+            )
+            action_id = str(
+                self.action_id or execution.provider_operation_id or ""
+            )
 
             def record_snapshot(snapshot):
-                state = str(snapshot.get("state") or snapshot.get("status") or "").lower()
-                if not _provider_owned(
-                    snapshot,
-                    resource_id=self.unique_id if self.unique_id else None,
-                    marker=self.uuid_str,
-                    source_fields=(("resource_id", source_id),),
-                ) or (
-                    snapshot.get("resource_type")
-                    and snapshot.get("resource_type") != resource_type
+                if not self._snapshot_owned(
+                    snapshot, witness, resource_id=resource_id or None
                 ):
                     return _provider_failed(
                         self,
@@ -1073,153 +1398,169 @@ class CoreDigitalOceanBackup(UtilBackup):
                         state="ownership_mismatch",
                         code="PROVIDER_OWNERSHIP_MISMATCH",
                     )
-                if snapshot.get("id"):
-                    self.unique_id = str(snapshot["id"])
-                if snapshot.get("size_gigabytes") is not None:
-                    self.size_gigabytes = snapshot["size_gigabytes"]
-                metadata = dict(self.metadata or {})
-                metadata["_provider_ownership_verified"] = True
-                metadata["_provider_source_id"] = str(source_id)
-                self.metadata = metadata
-                if state in {"error", "errored", "failed", "canceled", "cancelled"}:
-                    self.save(
-                        update_fields=[
-                            "unique_id",
-                            "size_gigabytes",
-                            "metadata",
-                            "modified",
-                        ]
-                    )
+                self._adopt_snapshot(snapshot, witness)
+                state = str(
+                    snapshot.get("state") or snapshot.get("status") or ""
+                ).lower()
+                if state in {
+                    "error",
+                    "errored",
+                    "failed",
+                    "canceled",
+                    "cancelled",
+                    "deleted",
+                }:
                     return _provider_failed(
                         self, provider="digitalocean", state=state
                     )
-                if state and state not in {"available", "completed", "complete"}:
-                    self.save(
-                        update_fields=[
-                            "unique_id",
-                            "size_gigabytes",
-                            "metadata",
-                            "modified",
-                        ]
-                    )
+                if state in {"new", "pending", "creating", "in-progress", "processing"}:
                     return _provider_in_progress(
                         self,
                         provider="digitalocean",
                         state=state,
                         resource_id=self.unique_id,
-                        operation_id=self.action_id,
+                        operation_id=action_id or None,
+                    )
+                # Snapshot objects do not always expose a status. Exact visibility
+                # from the snapshots endpoint is itself DigitalOcean's completion
+                # witness; any non-empty unrecognized state fails closed.
+                if state not in {"", "available", "completed", "complete"}:
+                    return _provider_failed(
+                        self,
+                        provider="digitalocean",
+                        state="malformed_provider_state",
+                        code="PROVIDER_MALFORMED_RESPONSE",
                     )
                 self.status = UtilBackup.Status.COMPLETE
-                self.save()
+                self.save(update_fields=["status", "modified"])
                 _record_provider_outcome(
                     self,
                     provider="digitalocean",
                     category="complete",
-                    provider_status=state or "complete",
+                    provider_status=state or "visible",
                     resource_id=self.unique_id,
-                    operation_id=self.action_id,
+                    operation_id=action_id or None,
                 )
                 return UtilBackup.Status.COMPLETE
 
             # A persisted snapshot id is the strongest recovery pointer. This also
             # handles a worker dying after the provider returned the id but before
             # action_id/metadata was written locally.
-            if self.unique_id:
+            if resource_id:
                 result = requests.get(
-                    f"{settings.DIGITALOCEAN_API}/v2/snapshots/{self.unique_id}",
+                    f"{settings.DIGITALOCEAN_API}/v2/snapshots/{resource_id}",
                     headers=client,
                     verify=True,
+                    timeout=request_timeout(),
                 )
-                if result.status_code == 200:
-                    payload = result.json()
-                    return record_snapshot(payload.get("snapshot", payload))
-                return _provider_http_outcome(
-                    self, result, provider="digitalocean"
-                )
-
-            if CoreNode.Type.CLOUD == self.digitalocean.node.type and self.action_id:
-                result = requests.get(
-                    f"{settings.DIGITALOCEAN_API}/v2/actions/{self.action_id}",
-                    headers=client,
-                    verify=True,
-                )
-                if result.status_code == 200:
-                    action = result.json().get("action", {})
-                    if not _provider_owned(
-                        action,
-                        resource_id=self.action_id,
-                        source_fields=(("resource_id", source_id),),
-                    ):
+                try:
+                    if result.status_code != 200:
+                        return _provider_http_outcome(
+                            self, result, provider="digitalocean"
+                        )
+                    try:
+                        payload = result.json()
+                    except Exception:
                         return _provider_failed(
                             self,
                             provider="digitalocean",
-                            state="ownership_mismatch",
-                            code="PROVIDER_OWNERSHIP_MISMATCH",
+                            state="malformed_provider_response",
+                            code="PROVIDER_MALFORMED_RESPONSE",
                         )
-                    action_status = str(action.get("status") or "").lower()
-                    if action_status in {"errored", "canceled"}:
-                        return _provider_failed(
-                            self, provider="digitalocean", state=action_status
-                        )
-                    if action_status != "completed":
-                        return _provider_in_progress(
-                            self,
-                            provider="digitalocean",
-                            state=action_status,
-                            operation_id=self.action_id,
-                        )
-                else:
-                    return _provider_http_outcome(
-                        self, result, provider="digitalocean"
-                    )
+                    snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+                    return record_snapshot(snapshot)
+                finally:
+                    result.close()
 
-            # The action may have completed while the worker was down and before its
-            # id was saved. Search by the deterministic name before declaring success.
-            params = {"resource_type": resource_type, "per_page": 200, "page": 1}
-            snapshots = []
-            while True:
+            action_completed = False
+            action_missing = False
+            if CoreNode.Type.CLOUD == self.digitalocean.node.type and action_id:
                 result = requests.get(
-                    f"{settings.DIGITALOCEAN_API}/v2/snapshots",
+                    f"{settings.DIGITALOCEAN_API}/v2/actions/{action_id}",
                     headers=client,
-                    params=params,
                     verify=True,
+                    timeout=request_timeout(),
                 )
-                if result.status_code != 200:
-                    return _provider_http_outcome(
-                        self, result, provider="digitalocean"
-                    )
-                payload = result.json()
-                # An empty DigitalOcean catalog may be encoded as null rather
-                # than an empty array. It is still a successful empty page.
-                snapshots.extend(payload.get("snapshots") or [])
-                total = (payload.get("meta") or {}).get("total", len(snapshots))
-                if len(snapshots) >= total:
-                    break
-                params["page"] += 1
-            matches = [
-                item for item in snapshots if item.get("name") == self.uuid_str
-            ]
-            if len(matches) > 1 or (
-                matches
-                and not _provider_owned(
-                    matches[0],
-                    marker=self.uuid_str,
-                    source_fields=(("resource_id", source_id),),
-                )
-            ):
-                return _provider_failed(
-                    self,
-                    provider="digitalocean",
-                    state="duplicate_matches",
-                    code="PROVIDER_OWNERSHIP_MISMATCH",
-                )
-            if matches:
-                return record_snapshot(matches[0])
-            return _provider_in_progress(
+                try:
+                    if result.status_code == 404:
+                        action_missing = True
+                    elif result.status_code != 200:
+                        return _provider_http_outcome(
+                            self, result, provider="digitalocean"
+                        )
+                    else:
+                        try:
+                            payload = result.json()
+                        except Exception:
+                            return _provider_failed(
+                                self,
+                                provider="digitalocean",
+                                state="malformed_provider_response",
+                                code="PROVIDER_MALFORMED_RESPONSE",
+                            )
+                        action = payload.get("action") if isinstance(payload, dict) else None
+                        if not self._action_owned(action, witness, action_id):
+                            return _provider_failed(
+                                self,
+                                provider="digitalocean",
+                                state="ownership_mismatch",
+                                code="PROVIDER_OWNERSHIP_MISMATCH",
+                            )
+                        action_status = str(action.get("status") or "").lower()
+                        if action_status == "errored":
+                            return _provider_failed(
+                                self, provider="digitalocean", state=action_status
+                            )
+                        if action_status == "in-progress":
+                            return _provider_in_progress(
+                                self,
+                                provider="digitalocean",
+                                state=action_status,
+                                operation_id=action_id,
+                            )
+                        if action_status != "completed":
+                            return _provider_failed(
+                                self,
+                                provider="digitalocean",
+                                state="malformed_provider_state",
+                                code="PROVIDER_MALFORMED_RESPONSE",
+                            )
+                        action_completed = True
+                finally:
+                    result.close()
+
+            snapshot = find_exact_snapshot(
+                headers=client,
+                marker=witness["marker"],
+                source_id=witness["source_id"],
+                resource_type=witness["resource_type"],
+            )
+            if snapshot:
+                return record_snapshot(snapshot)
+            provider_metadata = dict(execution.provider_metadata or {})
+            create_uncertain = bool(
+                provider_metadata.get("create_attempted")
+                or provider_metadata.get("outcome_unknown")
+                or action_id
+            )
+            if create_uncertain and not action_missing:
+                return self._observe_missing_snapshot(execution)
+            if action_completed:
+                return self._observe_missing_snapshot(execution)
+            return _provider_failed(
                 self,
                 provider="digitalocean",
-                state="snapshot_not_visible",
-                operation_id=self.action_id,
+                state="not_found",
+                code="PROVIDER_NOT_FOUND",
+            )
+        except DigitalOceanAPIError as error:
+            return self._digitalocean_api_error_outcome(error)
+        except self.DeleteOwnershipError:
+            return _provider_failed(
+                self,
+                provider="digitalocean",
+                state="ownership_mismatch",
+                code="PROVIDER_OWNERSHIP_MISMATCH",
             )
         except Exception as error:
             return _provider_exception_outcome(
@@ -1234,114 +1575,379 @@ class CoreDigitalOceanBackup(UtilBackup):
     def node(self):
         return self.digitalocean.node
 
+    def _claim_digitalocean_delete(self, witness):
+        now = timezone.now()
+        lease_seconds = self._bounded_setting(
+            "DIGITALOCEAN_DELETE_LEASE_SECONDS",
+            self.DELETE_LEASE_SECONDS,
+            minimum=30,
+            maximum=3600,
+        )
+        resource_id = str(self.unique_id or "")
+        if not resource_id:
+            raise self.DeleteOwnershipError()
+        expected = {
+            "resource_id": resource_id,
+            "source_id": witness["source_id"],
+            "marker": witness["marker"],
+            "resource_type": witness["resource_type"],
+            "account_id": witness["scope"]["account_id"],
+            "connection_id": witness["scope"]["connection_id"],
+        }
+        with transaction.atomic():
+            locked = self.__class__.objects.select_for_update().get(pk=self.pk)
+            metadata = dict(locked.metadata or {})
+            raw = metadata.get(self.DELETE_STATE_KEY)
+            if raw is not None and not isinstance(raw, dict):
+                raise self.DeleteOwnershipError()
+            state = dict(raw or {})
+            for key, value in expected.items():
+                if state.get(key) not in (None, "") and str(state[key]) != str(value):
+                    raise self.DeleteOwnershipError()
+            try:
+                lease_expires_at = float(state.get("lease_expires_at") or 0)
+            except (TypeError, ValueError):
+                raise self.DeleteOwnershipError() from None
+            if state.get("lease_token") and lease_expires_at > now.timestamp():
+                return None, None
+            token = str(uuid.uuid4())
+            state.update(expected)
+            state.update(
+                {
+                    "schema": 1,
+                    "lease_token": token,
+                    "lease_expires_at": now.timestamp() + lease_seconds,
+                    "legacy_ownership_verified": bool(
+                        metadata.get("_provider_ownership_verified")
+                        and str(metadata.get("_provider_source_id") or "")
+                        == witness["source_id"]
+                    ),
+                    "updated_at": now.isoformat(),
+                }
+            )
+            metadata[self.DELETE_STATE_KEY] = state
+            locked.metadata = metadata
+            locked.status = UtilBackup.Status.DELETE_IN_PROGRESS
+            locked.save(update_fields=["metadata", "status", "modified"])
+        self.metadata = metadata
+        self.status = UtilBackup.Status.DELETE_IN_PROGRESS
+        return state, token
+
+    def _checkpoint_digitalocean_delete(self, state, token, *, release=False):
+        lease_seconds = self._bounded_setting(
+            "DIGITALOCEAN_DELETE_LEASE_SECONDS",
+            self.DELETE_LEASE_SECONDS,
+            minimum=30,
+            maximum=3600,
+        )
+        with transaction.atomic():
+            locked = self.__class__.objects.select_for_update().get(pk=self.pk)
+            metadata = dict(locked.metadata or {})
+            raw = metadata.get(self.DELETE_STATE_KEY)
+            if not isinstance(raw, dict):
+                raise self.DeleteLeaseLost()
+            current = dict(raw)
+            if str(current.get("lease_token") or "") != str(token or ""):
+                raise self.DeleteLeaseLost()
+            immutable = (
+                "resource_id",
+                "source_id",
+                "marker",
+                "resource_type",
+                "account_id",
+                "connection_id",
+            )
+            if any(
+                str(current.get(key) or "") != str(state.get(key) or "")
+                for key in immutable
+            ):
+                raise self.DeleteOwnershipError()
+            checkpoint = dict(state)
+            checkpoint["updated_at"] = timezone.now().isoformat()
+            if release:
+                checkpoint.pop("lease_token", None)
+                checkpoint.pop("lease_expires_at", None)
+            else:
+                checkpoint["lease_token"] = token
+                checkpoint["lease_expires_at"] = (
+                    timezone.now().timestamp() + lease_seconds
+                )
+            metadata[self.DELETE_STATE_KEY] = checkpoint
+            locked.metadata = metadata
+            locked.save(update_fields=["metadata", "modified"])
+        self.metadata = metadata
+        return checkpoint
+
     def soft_delete(self):
-        from ..node.models import CoreNode
+        from ..node.models import CoreDigitalOcean
 
         msg = (
             f"Backup {self.uuid_str} of node {self.digitalocean.node.name} "
             f"is being deleted using connection {self.digitalocean.node.connection.name}"
         )
-
+        state = token = None
         try:
-            client = self.digitalocean.node.connection.auth_digitalocean.get_client()
-            resource_type = (
-                "droplet"
-                if CoreNode.Type.CLOUD == self.digitalocean.node.type
-                else "volume"
-            )
+            _execution, witness = self._digitalocean_witness()
+            state, token = self._claim_digitalocean_delete(witness)
+            if state is None:
+                return False
+            client = self.digitalocean.node.connection.auth_digitalocean.get_verified_client()
+            resource_id = state["resource_id"]
             result = requests.get(
-                f"{settings.DIGITALOCEAN_API}/v2/snapshots/{self.unique_id}",
+                f"{settings.DIGITALOCEAN_API}/v2/snapshots/{resource_id}",
                 headers=client,
                 verify=True,
+                timeout=request_timeout(),
             )
-            if result.status_code == 404:
-                if (self.metadata or {}).get("_provider_ownership_verified"):
+            try:
+                if result.status_code == 404:
+                    if not (
+                        state.get("ownership_verified")
+                        and state.get("delete_started")
+                    ) and not state.get("legacy_ownership_verified"):
+                        raise self.DeleteUnprovenNotFound()
+                    state.update(
+                        {
+                            "delete_completed": True,
+                            "delete_outcome_unknown": False,
+                            "phase": "complete",
+                        }
+                    )
+                    state = self._checkpoint_digitalocean_delete(state, token)
                     _record_provider_outcome(
                         self,
                         provider="digitalocean",
                         category="already_absent",
                         operation="delete",
                         provider_status="not_found_after_ownership_proof",
-                        resource_id=self.unique_id,
+                        resource_id=resource_id,
                     )
-                    self.status = UtilBackup.Status.DELETE_COMPLETED
-                else:
-                    _provider_http_outcome(
+                elif result.status_code != 200:
+                    outcome = _provider_http_outcome(
                         self, result, provider="digitalocean", operation="delete"
                     )
-                    self.status = UtilBackup.Status.DELETE_FAILED_NOT_FOUND
-                self.save()
-                return
-            if result.status_code != 200:
-                _provider_http_outcome(
-                    self, result, provider="digitalocean", operation="delete"
-                )
-                self.status = UtilBackup.Status.DELETE_FAILED
-                self.save()
-                return
+                    state.update(
+                        {
+                            "phase": "preflight_retry"
+                            if outcome == UtilBackup.Status.IN_PROGRESS
+                            else "preflight_failed",
+                            "last_http_status": int(result.status_code),
+                        }
+                    )
+                    self._checkpoint_digitalocean_delete(state, token)
+                    self.status = UtilBackup.Status.DELETE_FAILED
+                    self.save(update_fields=["status", "modified"])
+                    return False
+                else:
+                    try:
+                        payload = result.json()
+                    except Exception:
+                        raise self.DeleteOwnershipError() from None
+                    snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+                    if not self._snapshot_owned(
+                        snapshot, witness, resource_id=resource_id
+                    ):
+                        raise self.DeleteOwnershipError()
+                    state.update(
+                        {
+                            "ownership_verified": True,
+                            "phase": "ownership_verified",
+                        }
+                    )
+                    state = self._checkpoint_digitalocean_delete(state, token)
+            finally:
+                result.close()
 
-            payload = result.json()
-            snapshot = payload.get("snapshot", payload)
-            if not _provider_owned(
-                snapshot,
-                resource_id=self.unique_id,
-                marker=self.uuid_str,
-                source_fields=(("resource_id", self.digitalocean.unique_id),),
-            ) or (
-                snapshot.get("resource_type")
-                and snapshot.get("resource_type") != resource_type
-            ):
-                _provider_failed(
-                    self,
-                    provider="digitalocean",
-                    state="ownership_mismatch",
-                    code="PROVIDER_OWNERSHIP_MISMATCH",
+            if not state.get("delete_completed"):
+                now = timezone.now()
+                attempts = int(state.get("delete_attempts") or 0)
+                maximum_attempts = self._bounded_setting(
+                    "DIGITALOCEAN_DELETE_MAX_ATTEMPTS",
+                    self.DELETE_MAX_ATTEMPTS,
+                    minimum=1,
+                    maximum=10,
                 )
-                self.status = UtilBackup.Status.DELETE_FAILED
-                self.save()
-                return
+                retry_grace = self._bounded_setting(
+                    "DIGITALOCEAN_DELETE_RETRY_GRACE_SECONDS",
+                    self.DELETE_RETRY_GRACE_SECONDS,
+                    minimum=0,
+                    maximum=3600,
+                )
+                if state.get("delete_started") and not state.get("delete_completed"):
+                    if attempts >= maximum_attempts:
+                        state["phase"] = "manual_review"
+                        self._checkpoint_digitalocean_delete(state, token)
+                        raise self.DeleteAmbiguous()
+                    try:
+                        last_attempt_epoch = float(
+                            state.get("last_attempt_epoch") or 0
+                        )
+                    except (TypeError, ValueError):
+                        raise self.DeleteOwnershipError() from None
+                    if now.timestamp() - last_attempt_epoch < retry_grace:
+                        state["phase"] = "reconciliation_wait"
+                        self._checkpoint_digitalocean_delete(state, token)
+                        self.status = UtilBackup.Status.DELETE_FAILED
+                        self.save(update_fields=["status", "modified"])
+                        return False
 
-            metadata = dict(self.metadata or {})
-            metadata["_provider_ownership_verified"] = True
-            self.metadata = metadata
-            self.save(update_fields=["metadata", "modified"])
-            result = requests.delete(
-                f"{settings.DIGITALOCEAN_API}/v2/snapshots/{self.unique_id}",
-                headers=client,
-                verify=True,
-            )
-            if result.status_code not in {200, 204, 404}:
-                _provider_http_outcome(
-                    self, result, provider="digitalocean", operation="delete"
+                state.update(
+                    {
+                        "delete_started": True,
+                        "delete_outcome_unknown": True,
+                        "delete_attempts": attempts + 1,
+                        "last_attempt_epoch": now.timestamp(),
+                        "phase": "delete_requested",
+                    }
                 )
-                self.status = UtilBackup.Status.DELETE_FAILED
-                self.save()
-                return
+                state = self._checkpoint_digitalocean_delete(state, token)
+                try:
+                    delete_result = requests.delete(
+                        f"{settings.DIGITALOCEAN_API}/v2/snapshots/{resource_id}",
+                        headers=client,
+                        verify=True,
+                        timeout=request_timeout(),
+                    )
+                    try:
+                        if delete_result.status_code in {200, 202, 204}:
+                            CoreDigitalOcean._fault_after_provider_accept(
+                                operation="delete-snapshot",
+                                marker=witness["marker"],
+                            )
+                        if delete_result.status_code in {200, 204, 404}:
+                            state.update(
+                                {
+                                    "delete_completed": True,
+                                    "delete_outcome_unknown": False,
+                                    "phase": "complete",
+                                }
+                            )
+                            state = self._checkpoint_digitalocean_delete(
+                                state, token
+                            )
+                        elif delete_result.status_code == 202:
+                            state["phase"] = "delete_accepted"
+                            self._checkpoint_digitalocean_delete(state, token)
+                            raise self.DeleteAmbiguous()
+                        elif (
+                            delete_result.status_code in {408, 425}
+                            or delete_result.status_code >= 500
+                        ):
+                            state["phase"] = "delete_outcome_unknown"
+                            self._checkpoint_digitalocean_delete(state, token)
+                            raise self.DeleteAmbiguous()
+                        else:
+                            _provider_http_outcome(
+                                self,
+                                delete_result,
+                                provider="digitalocean",
+                                operation="delete",
+                            )
+                            state.update(
+                                {
+                                    "delete_started": False,
+                                    "delete_outcome_unknown": False,
+                                    "phase": "delete_rejected",
+                                    "last_http_status": int(
+                                        delete_result.status_code
+                                    ),
+                                }
+                            )
+                            self._checkpoint_digitalocean_delete(state, token)
+                            self.status = UtilBackup.Status.DELETE_FAILED
+                            self.save(update_fields=["status", "modified"])
+                            return False
+                    finally:
+                        delete_result.close()
+                except (
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError,
+                ) as error:
+                    state["phase"] = "delete_outcome_unknown"
+                    self._checkpoint_digitalocean_delete(state, token)
+                    raise self.DeleteAmbiguous() from error
+
             self.status = UtilBackup.Status.DELETE_COMPLETED
-            self.save()
+            self.save(update_fields=["status", "modified"])
             _record_provider_outcome(
                 self,
                 provider="digitalocean",
                 category="delete_completed",
                 operation="delete",
-                resource_id=self.unique_id,
+                resource_id=state["resource_id"],
             )
             msg = (
                 f"Backup {self.uuid_str} of node {self.digitalocean.node.name} "
                 f"deleted successfully using connection {self.digitalocean.node.connection.name}"
             )
+            return True
+        except self.DeleteLeaseLost:
+            return False
+        except self.DeleteAmbiguous as error:
+            capture_exception(error)
+            _record_provider_outcome(
+                self,
+                provider="digitalocean",
+                category="reconciliation_required",
+                operation="delete",
+                error_code="PROVIDER_RECONCILIATION_REQUIRED",
+                resource_id=self.unique_id,
+            )
+            self.status = UtilBackup.Status.DELETE_FAILED
+            self.save(update_fields=["status", "modified"])
+            msg = "DigitalOcean snapshot deletion requires read-only reconciliation."
+            return False
+        except self.DeleteUnprovenNotFound as error:
+            capture_exception(error)
+            _record_provider_outcome(
+                self,
+                provider="digitalocean",
+                category="not_found",
+                operation="delete",
+                error_code="PROVIDER_NOT_FOUND",
+                resource_id=self.unique_id,
+            )
+            self.status = UtilBackup.Status.DELETE_FAILED_NOT_FOUND
+            self.save(update_fields=["status", "modified"])
+            msg = "DigitalOcean snapshot was absent before ownership could be proven."
+            return False
+        except self.DeleteOwnershipError as error:
+            capture_exception(error)
+            _provider_failed(
+                self,
+                provider="digitalocean",
+                state="ownership_mismatch",
+                code="PROVIDER_OWNERSHIP_MISMATCH",
+            )
+            self.status = UtilBackup.Status.DELETE_FAILED
+            self.save(update_fields=["status", "modified"])
+            msg = "DigitalOcean snapshot ownership could not be verified."
+            return False
         except Exception as error:
             _provider_exception_outcome(
                 self, error, provider="digitalocean", operation="delete"
             )
             self.status = UtilBackup.Status.DELETE_FAILED
-            self.save()
+            self.save(update_fields=["status", "modified"])
             msg = (
                 f"Backup {self.uuid_str} of node {self.digitalocean.node.name} "
                 f"could not be deleted using connection {self.digitalocean.node.connection.name}."
             )
+            return False
         finally:
-            self.digitalocean.node.connection.account.create_backup_log(msg, self.digitalocean.node, self)
+            if state is not None and token is not None:
+                try:
+                    self._checkpoint_digitalocean_delete(
+                        state, token, release=True
+                    )
+                except (self.DeleteLeaseLost, self.DeleteOwnershipError):
+                    pass
+            try:
+                self.digitalocean.node.connection.account.create_backup_log(
+                    msg, self.digitalocean.node, self
+                )
+            except Exception as error:
+                capture_exception(error)
 
     def cancel(self):
         app.control.revoke(self.celery_task_id, terminate=True)
@@ -1929,68 +2535,335 @@ class CoreUpCloudBackup(UtilBackup):
     class Meta:
         db_table = "core_upcloud_backup"
 
+    _UPCLOUD_TRANSITIONAL_STATES = frozenset(
+        {"backuping", "cloning", "maintenance", "offline", "syncing"}
+    )
+    _UPCLOUD_KNOWN_STATES = _UPCLOUD_TRANSITIONAL_STATES | {
+        "online",
+        "error",
+    }
+    _UPCLOUD_DELETE_MAX_ATTEMPTS = 3
+
+    def _upcloud_witness(self):
+        """Return one immutable source/scope identity for poll and delete."""
+        from ..node.models import CoreNode, _backup_scope_fingerprint
+
+        execution = self.get_execution_state(create=False)
+        execution_metadata = (
+            dict(execution.provider_metadata or {}) if execution is not None else {}
+        )
+        stored = execution_metadata.get("witness")
+        if isinstance(stored, dict):
+            witness = dict(stored)
+        else:
+            metadata = dict(self.metadata or {})
+            scope = metadata.get("_bs_scope")
+            if not (
+                metadata.get("_bs_ownership_verified")
+                and metadata.get("_bs_provider") == "upcloud"
+                and isinstance(scope, dict)
+            ):
+                raise UpCloudDeleteOwnershipError()
+            resource_type = (
+                "server_boot_storage"
+                if self.upcloud.node.type == CoreNode.Type.CLOUD
+                else "storage"
+            )
+            witness = {
+                "provider": "upcloud",
+                "marker": metadata.get("_bs_marker"),
+                "source_id": metadata.get("_bs_source_id"),
+                "resource_type": resource_type,
+                "scope": dict(scope),
+                "scope_fingerprint": metadata.get("_bs_scope_fingerprint"),
+            }
+
+        resource_type = (
+            "server_boot_storage"
+            if self.upcloud.node.type == CoreNode.Type.CLOUD
+            else "storage"
+        )
+        expected = {
+            "provider": "upcloud",
+            "marker": self.uuid_str,
+            "resource_type": resource_type,
+        }
+        if any(
+            str(witness.get(key) or "") != str(value)
+            for key, value in expected.items()
+        ):
+            raise UpCloudDeleteOwnershipError()
+        source_id = str(witness.get("source_id") or "")
+        scope = witness.get("scope")
+        if not source_id or not isinstance(scope, dict):
+            raise UpCloudDeleteOwnershipError()
+        scope = {str(key): str(value) for key, value in scope.items()}
+        if (
+            str(scope.get("account_id") or "")
+            != str(self.upcloud.node.connection.account_id)
+            or str(scope.get("connection_id") or "")
+            != str(self.upcloud.node.connection_id)
+            or not re.fullmatch(
+                r"[a-z0-9][a-z0-9-]{0,63}", str(scope.get("zone") or "")
+            )
+        ):
+            raise UpCloudDeleteOwnershipError()
+        if self.upcloud.node.type == CoreNode.Type.VOLUME:
+            if source_id != str(self.upcloud.unique_id):
+                raise UpCloudDeleteOwnershipError()
+        elif self.upcloud.node.type == CoreNode.Type.CLOUD:
+            if (
+                source_id == str(self.upcloud.unique_id)
+                or str(scope.get("server_id") or "")
+                != str(self.upcloud.unique_id)
+            ):
+                raise UpCloudDeleteOwnershipError()
+        else:
+            raise UpCloudDeleteOwnershipError()
+
+        expected_fingerprint = _backup_scope_fingerprint(
+            "upcloud", source_id, resource_type, scope
+        )
+        if str(witness.get("scope_fingerprint") or "") != expected_fingerprint:
+            raise UpCloudDeleteOwnershipError()
+        witness["source_id"] = source_id
+        witness["scope"] = scope
+        witness["scope_fingerprint"] = expected_fingerprint
+
+        if execution is not None:
+            if execution.provider_idempotency_key and str(
+                execution.provider_idempotency_key
+            ) != self.uuid_str:
+                raise UpCloudDeleteOwnershipError()
+            if (
+                execution.provider_resource_id
+                and self.unique_id
+                and str(execution.provider_resource_id) != str(self.unique_id)
+            ):
+                raise UpCloudDeleteOwnershipError()
+        return execution, witness
+
+    def _upcloud_storage_owned(self, storage, witness, *, resource_id):
+        if not isinstance(storage, dict):
+            return False
+        state = str(storage.get("state") or "").casefold()
+        return all(
+            (
+                str(storage.get("uuid") or "") == str(resource_id),
+                str(storage.get("title") or "") == str(witness["marker"]),
+                str(storage.get("origin") or "") == str(witness["source_id"]),
+                str(storage.get("zone") or "")
+                == str(witness["scope"]["zone"]),
+                str(storage.get("type") or "") == "backup",
+                state in self._UPCLOUD_KNOWN_STATES,
+            )
+        )
+
+    @staticmethod
+    def _upcloud_safe_storage(storage):
+        return {
+            key: storage.get(key)
+            for key in (
+                "uuid",
+                "title",
+                "origin",
+                "zone",
+                "type",
+                "state",
+                "size",
+                "tier",
+                "encrypted",
+            )
+            if isinstance(storage.get(key), (str, int, float, bool))
+            or storage.get(key) is None
+        }
+
+    def _upcloud_adopt_backup(self, storage, witness):
+        from ..node.models import _backup_adopt_provider_resource
+
+        if not self._upcloud_storage_owned(
+            storage, witness, resource_id=storage.get("uuid")
+        ):
+            raise UpCloudDeleteOwnershipError()
+        _backup_adopt_provider_resource(
+            self,
+            storage,
+            witness=witness,
+            provider="upcloud",
+            id_keys=("uuid",),
+        )
+
+    def _upcloud_reconcile_backup(self, client, witness):
+        from apps._tasks.integration.upcloud import (
+            _owned_upcloud_candidate,
+            list_upcloud_storages,
+        )
+
+        resources = list_upcloud_storages(client, storage_type="backup")
+        return _owned_upcloud_candidate(
+            resources,
+            marker=witness["marker"],
+            source_id=witness["source_id"],
+            zone=witness["scope"]["zone"],
+            storage_type="backup",
+        )
+
     def poll_status(self):
-        """Perform one categorized, ownership-checked UpCloud status check."""
-        from ..node.models import CoreNode
+        """Perform one typed, exact-ownership UpCloud backup observation."""
+        from apps._tasks.integration.upcloud import classify_upcloud_response
+        from ..node.models import CoreNode, _BackupProviderError
 
-        if CoreNode.Type.VOLUME == self.upcloud.node.type:
-            try:
-                client = self.upcloud.node.connection.auth_upcloud.get_client()
-                result = requests.get(
-                    f"{settings.UPCLOUD_API}/storage/{self.unique_id}",
-                    auth=client,
-                    verify=True,
-                    headers={"content-type": "application/json"},
+        if self.upcloud.node.type not in {
+            CoreNode.Type.CLOUD,
+            CoreNode.Type.VOLUME,
+        }:
+            return _provider_failed(
+                self, provider="upcloud", state="unsupported_resource"
+            )
+        try:
+            execution, witness = self._upcloud_witness()
+            client = self.upcloud.node.connection.auth_upcloud.get_verified_client()
+            resource_id = str(
+                self.unique_id
+                or (
+                    execution.provider_resource_id
+                    if execution is not None
+                    else ""
                 )
-                if result.status_code == 200:
-                    storage = result.json()["storage"]
-
-                    if not _provider_owned(
-                        storage,
-                        resource_id=self.unique_id,
-                        marker=self.uuid_str,
-                        source_fields=(("origin", self.upcloud.unique_id),),
-                    ):
-                        return _provider_failed(
-                            self,
-                            provider="upcloud",
-                            state="ownership_mismatch",
-                            code="PROVIDER_OWNERSHIP_MISMATCH",
-                        )
-
-                    if storage["state"] == "online":
-                        self.size_gigabytes = storage["size"]
-                        self.status = UtilBackup.Status.COMPLETE
-                        self.set_provider_metadata(storage)
-                        self.save()
-                        _record_provider_outcome(
-                            self,
-                            provider="upcloud",
-                            category="complete",
-                            provider_status="online",
-                            resource_id=self.unique_id,
-                        )
-                        return UtilBackup.Status.COMPLETE
-                    elif storage["state"] == "error":
-                        return _provider_failed(
-                            self, provider="upcloud", state="error"
-                        )
-                    return _provider_in_progress(
+                or ""
+            )
+            if not resource_id:
+                provider_metadata = (
+                    dict(execution.provider_metadata or {})
+                    if execution is not None
+                    else {}
+                )
+                if not (
+                    provider_metadata.get("create_attempted")
+                    or provider_metadata.get("outcome_unknown")
+                ):
+                    return _provider_failed(
                         self,
                         provider="upcloud",
-                        state=storage.get("state"),
-                        resource_id=self.unique_id,
+                        state="missing_provider_identifier",
+                        code="PROVIDER_MALFORMED_RESPONSE",
                     )
-                return _provider_http_outcome(
-                    self, result, provider="upcloud"
+                candidate = self._upcloud_reconcile_backup(client, witness)
+                if candidate is None:
+                    _record_provider_outcome(
+                        self,
+                        provider="upcloud",
+                        category="reconciling_not_visible",
+                        provider_status="not_visible",
+                        error_code="PROVIDER_CREATE_OUTCOME_UNKNOWN",
+                    )
+                    return UtilBackup.Status.IN_PROGRESS
+                self._upcloud_adopt_backup(candidate, witness)
+                resource_id = str(self.unique_id or "")
+
+            result = requests.get(
+                f"{settings.UPCLOUD_API}/storage/{resource_id}",
+                auth=client,
+                verify=True,
+                timeout=request_timeout(),
+                headers={"accept": "application/json"},
+            )
+            problem = classify_upcloud_response(result)
+            if problem is not None:
+                if problem.retryable:
+                    _record_provider_outcome(
+                        self,
+                        provider="upcloud",
+                        category=(
+                            "rate_limited"
+                            if problem.code == "PROVIDER_RATE_LIMIT"
+                            else "transient_outage"
+                        ),
+                        error_code=problem.code,
+                        http_status=result.status_code,
+                        resource_id=resource_id,
+                    )
+                    return UtilBackup.Status.IN_PROGRESS
+                return _provider_failed(
+                    self,
+                    provider="upcloud",
+                    state=problem.code.casefold(),
+                    code=problem.code,
                 )
-            except Exception as error:
-                return _provider_exception_outcome(
-                    self, error, provider="upcloud"
+            try:
+                payload = result.json()
+            except Exception:
+                return _provider_failed(
+                    self,
+                    provider="upcloud",
+                    state="malformed_provider_response",
+                    code="PROVIDER_MALFORMED_RESPONSE",
                 )
-        return _provider_failed(
-            self, provider="upcloud", state="unsupported_resource"
-        )
+            storage = payload.get("storage") if isinstance(payload, dict) else None
+            if not self._upcloud_storage_owned(
+                storage, witness, resource_id=resource_id
+            ):
+                return _provider_failed(
+                    self,
+                    provider="upcloud",
+                    state="ownership_mismatch",
+                    code="PROVIDER_OWNERSHIP_MISMATCH",
+                )
+            self._upcloud_adopt_backup(storage, witness)
+            state = str(storage.get("state") or "").casefold()
+            if state == "online":
+                self.status = UtilBackup.Status.COMPLETE
+                self.save(update_fields=["status", "modified"])
+                _record_provider_outcome(
+                    self,
+                    provider="upcloud",
+                    category="complete",
+                    provider_status=state,
+                    resource_id=resource_id,
+                )
+                return UtilBackup.Status.COMPLETE
+            if state == "error":
+                return _provider_failed(self, provider="upcloud", state=state)
+            if state in self._UPCLOUD_TRANSITIONAL_STATES:
+                return _provider_in_progress(
+                    self,
+                    provider="upcloud",
+                    state=state,
+                    resource_id=resource_id,
+                )
+            return _provider_failed(
+                self,
+                provider="upcloud",
+                state="malformed_provider_state",
+                code="PROVIDER_MALFORMED_RESPONSE",
+            )
+        except UpCloudDeleteOwnershipError:
+            return _provider_failed(
+                self,
+                provider="upcloud",
+                state="ownership_mismatch",
+                code="PROVIDER_OWNERSHIP_MISMATCH",
+            )
+        except _BackupProviderError as error:
+            if error.retryable:
+                _record_provider_outcome(
+                    self,
+                    provider="upcloud",
+                    category="reconciliation_retry",
+                    error_code=error.code,
+                    resource_id=self.unique_id,
+                )
+                return UtilBackup.Status.IN_PROGRESS
+            return _provider_failed(
+                self,
+                provider="upcloud",
+                state=error.code.casefold(),
+                code=error.code,
+            )
+        except Exception as error:
+            return _provider_exception_outcome(
+                self, error, provider="upcloud"
+            )
 
     def delete_requested(self):
         self.status = self.Status.DELETE_REQUESTED
@@ -2000,79 +2873,316 @@ class CoreUpCloudBackup(UtilBackup):
     def node(self):
         return self.upcloud.node
 
+    def _claim_upcloud_delete(self):
+        now = timezone.now()
+        with transaction.atomic():
+            locked = self.__class__.objects.select_for_update().get(pk=self.pk)
+            metadata = dict(locked.metadata or {})
+            state = metadata.get("_upcloud_delete")
+            state = dict(state) if isinstance(state, dict) else {}
+            try:
+                expires_at = float(state.get("lease_expires_at") or 0)
+            except (TypeError, ValueError):
+                expires_at = 0
+            if state.get("lease_token") and expires_at > now.timestamp():
+                return None, None
+            token = str(uuid.uuid4())
+            state.update(
+                {
+                    "schema": 1,
+                    "lease_token": token,
+                    "lease_expires_at": now.timestamp() + 300,
+                }
+            )
+            metadata["_upcloud_delete"] = state
+            locked.metadata = metadata
+            locked.save(update_fields=["metadata", "modified"])
+        self.metadata = metadata
+        return state, token
+
+    def _checkpoint_upcloud_delete(self, state, token, *, release=False):
+        with transaction.atomic():
+            locked = self.__class__.objects.select_for_update().get(pk=self.pk)
+            metadata = dict(locked.metadata or {})
+            current = metadata.get("_upcloud_delete")
+            current = dict(current) if isinstance(current, dict) else {}
+            if str(current.get("lease_token") or "") != str(token or ""):
+                raise UpCloudDeleteLeaseLost()
+            checkpoint = dict(current if release else state)
+            if release:
+                checkpoint.pop("lease_token", None)
+                checkpoint.pop("lease_expires_at", None)
+            else:
+                checkpoint["lease_token"] = token
+                checkpoint["lease_expires_at"] = (
+                    timezone.now().timestamp() + 300
+                )
+            checkpoint["updated_at"] = timezone.now().isoformat()
+            metadata["_upcloud_delete"] = checkpoint
+            locked.metadata = metadata
+            locked.save(update_fields=["metadata", "modified"])
+        self.metadata = metadata
+        return checkpoint
+
     def soft_delete(self):
+        from apps._tasks.integration.upcloud import classify_upcloud_response
         from ..node.models import CoreNode
 
         msg = (
             f"Backup {self.uuid_str} of node {self.upcloud.node.name} "
             f"is being deleted using connection {self.upcloud.node.connection.name}"
         )
-
+        state, token = self._claim_upcloud_delete()
+        if state is None:
+            return False
         try:
-            client = self.upcloud.node.connection.auth_upcloud.get_client()
-            if CoreNode.Type.VOLUME == self.upcloud.node.type:
+            if self.upcloud.node.type not in {
+                CoreNode.Type.CLOUD,
+                CoreNode.Type.VOLUME,
+            }:
+                raise UpCloudDeleteOwnershipError()
+            _execution, witness = self._upcloud_witness()
+            resource_id = str(self.unique_id or "")
+            if not resource_id:
+                raise UpCloudDeleteOwnershipError()
+            expected = {
+                "resource_id": resource_id,
+                "source_id": witness["source_id"],
+                "marker": witness["marker"],
+                "zone": witness["scope"]["zone"],
+                "scope_fingerprint": witness["scope_fingerprint"],
+                "account_id": str(self.upcloud.node.connection.account_id),
+                "connection_id": str(self.upcloud.node.connection_id),
+            }
+            for key, value in expected.items():
+                if state.get(key) not in (None, "") and str(
+                    state[key]
+                ) != str(value):
+                    raise UpCloudDeleteOwnershipError()
+            state.update(expected)
+            state = self._checkpoint_upcloud_delete(state, token)
+            client = self.upcloud.node.connection.auth_upcloud.get_verified_client()
+            try:
                 verification = requests.get(
-                    f"{settings.UPCLOUD_API}/storage/{self.unique_id}",
+                    f"{settings.UPCLOUD_API}/storage/{resource_id}",
                     auth=client,
                     verify=True,
-                    headers={"content-type": "application/json"},
+                    timeout=request_timeout(),
+                    headers={"accept": "application/json"},
                 )
-                if verification.status_code != 200:
-                    _provider_http_outcome(
-                        self, verification, provider="upcloud", operation="delete"
-                    )
-                    self.status = UtilBackup.Status.DELETE_FAILED_NOT_FOUND if verification.status_code == 404 else UtilBackup.Status.DELETE_FAILED
-                    self.save()
-                    return
-                storage = verification.json().get("storage") or {}
-                if not _provider_owned(
-                    storage,
-                    resource_id=self.unique_id,
-                    marker=self.uuid_str,
-                    source_fields=(("origin", self.upcloud.unique_id),),
+            except requests.exceptions.Timeout as error:
+                raise UpCloudDeleteRetryable("PROVIDER_TIMEOUT") from error
+            except requests.exceptions.ConnectionError as error:
+                raise UpCloudDeleteRetryable(
+                    "PROVIDER_TRANSIENT_OUTAGE"
+                ) from error
+
+            if verification.status_code == 404:
+                if state.get("ownership_verified") and state.get(
+                    "delete_started"
                 ):
-                    _provider_failed(
-                        self, provider="upcloud", state="ownership_mismatch",
-                        code="PROVIDER_OWNERSHIP_MISMATCH",
+                    state.update(
+                        {
+                            "delete_completed": True,
+                            "phase": "complete",
+                        }
                     )
-                    self.status = UtilBackup.Status.DELETE_FAILED
-                    self.save()
-                    return
-                result = requests.delete(
-                    f"{settings.UPCLOUD_API}/storage/{self.unique_id}",
-                    auth=client,
-                    verify=True,
-                    headers={"content-type": "application/json"},
-                )
-                if result.status_code != 204:
+                    self._checkpoint_upcloud_delete(state, token)
+                else:
+                    raise UpCloudDeleteUnprovenNotFound()
+            else:
+                problem = classify_upcloud_response(verification)
+                if problem is not None:
+                    if problem.retryable:
+                        raise UpCloudDeleteRetryable(problem.code)
                     _provider_http_outcome(
-                        self, result, provider="upcloud", operation="delete"
+                        self,
+                        verification,
+                        provider="upcloud",
+                        operation="delete",
                     )
-                    self.status = UtilBackup.Status.DELETE_FAILED
-                    self.save()
-                    return
+                    raise RuntimeError("UpCloud delete preflight failed safely.")
+                try:
+                    payload = verification.json()
+                except Exception:
+                    raise UpCloudDeleteOwnershipError() from None
+                storage = (
+                    payload.get("storage") if isinstance(payload, dict) else None
+                )
+                if not self._upcloud_storage_owned(
+                    storage, witness, resource_id=resource_id
+                ):
+                    raise UpCloudDeleteOwnershipError()
+                state.update(
+                    {
+                        "ownership_verified": True,
+                        "phase": "ownership_verified",
+                    }
+                )
+                state = self._checkpoint_upcloud_delete(state, token)
+                try:
+                    attempts = int(state.get("delete_attempts") or 0)
+                except (TypeError, ValueError):
+                    raise UpCloudDeleteOwnershipError() from None
+                if attempts >= self._UPCLOUD_DELETE_MAX_ATTEMPTS:
+                    raise UpCloudDeleteRetryable(
+                        "PROVIDER_RECONCILIATION_REQUIRED"
+                    )
+                state.update(
+                    {
+                        "delete_started": True,
+                        "delete_attempts": attempts + 1,
+                        "phase": "delete_requested",
+                    }
+                )
+                state = self._checkpoint_upcloud_delete(state, token)
+                try:
+                    result = requests.delete(
+                        f"{settings.UPCLOUD_API}/storage/{resource_id}",
+                        auth=client,
+                        verify=True,
+                        timeout=request_timeout(),
+                        headers={"accept": "application/json"},
+                    )
+                except requests.exceptions.Timeout as error:
+                    state["phase"] = "delete_outcome_unknown"
+                    self._checkpoint_upcloud_delete(state, token)
+                    raise UpCloudDeleteRetryable(
+                        "PROVIDER_TIMEOUT", ambiguous=True
+                    ) from error
+                except requests.exceptions.ConnectionError as error:
+                    state["phase"] = "delete_outcome_unknown"
+                    self._checkpoint_upcloud_delete(state, token)
+                    raise UpCloudDeleteRetryable(
+                        "PROVIDER_TRANSIENT_OUTAGE", ambiguous=True
+                    ) from error
+
+                problem = classify_upcloud_response(result, mutation=True)
+                if problem is None or result.status_code == 404:
+                    state.update(
+                        {
+                            "delete_completed": True,
+                            "phase": "complete",
+                        }
+                    )
+                    self._checkpoint_upcloud_delete(state, token)
+                elif problem.retryable:
+                    if problem.unknown_outcome:
+                        state["phase"] = "delete_outcome_unknown"
+                    else:
+                        state.update(
+                            {
+                                "delete_started": False,
+                                "phase": "delete_rejected_retryable",
+                            }
+                        )
+                    self._checkpoint_upcloud_delete(state, token)
+                    raise UpCloudDeleteRetryable(
+                        problem.code,
+                        ambiguous=problem.unknown_outcome,
+                    )
+                else:
+                    state.update(
+                        {
+                            "delete_started": False,
+                            "phase": "delete_rejected",
+                        }
+                    )
+                    self._checkpoint_upcloud_delete(state, token)
+                    _provider_http_outcome(
+                        self,
+                        result,
+                        provider="upcloud",
+                        operation="delete",
+                    )
+                    raise RuntimeError("UpCloud rejected the delete request safely.")
+
             self.status = UtilBackup.Status.DELETE_COMPLETED
-            self.save()
+            self.save(update_fields=["status", "modified"])
             _record_provider_outcome(
-                self, provider="upcloud", category="delete_completed",
-                operation="delete", resource_id=self.unique_id,
+                self,
+                provider="upcloud",
+                category="delete_completed",
+                operation="delete",
+                resource_id=resource_id,
             )
             msg = (
                 f"Backup {self.uuid_str} of node {self.upcloud.node.name} "
                 f"deleted successfully using connection {self.upcloud.node.connection.name}"
             )
+            return True
+        except UpCloudDeleteLeaseLost:
+            return False
+        except UpCloudDeleteRetryable as error:
+            _record_provider_outcome(
+                self,
+                provider="upcloud",
+                category=(
+                    "reconciliation_required"
+                    if error.ambiguous
+                    or error.code == "PROVIDER_RECONCILIATION_REQUIRED"
+                    else "retryable_delete_failure"
+                ),
+                operation="delete",
+                error_code=error.code,
+                resource_id=self.unique_id,
+            )
+            self.status = (
+                UtilBackup.Status.DELETE_FAILED
+                if error.code == "PROVIDER_RECONCILIATION_REQUIRED"
+                else UtilBackup.Status.DELETE_IN_PROGRESS
+            )
+            self.save(update_fields=["status", "modified"])
+            msg = "UpCloud deletion is waiting for exact reconciliation."
+            return False
+        except UpCloudDeleteUnprovenNotFound:
+            _record_provider_outcome(
+                self,
+                provider="upcloud",
+                category="not_found",
+                operation="delete",
+                error_code="PROVIDER_NOT_FOUND",
+                resource_id=self.unique_id,
+            )
+            self.status = UtilBackup.Status.DELETE_FAILED_NOT_FOUND
+            self.save(update_fields=["status", "modified"])
+            msg = "UpCloud backup was absent before ownership could be proven."
+            return False
+        except UpCloudDeleteOwnershipError:
+            _record_provider_outcome(
+                self,
+                provider="upcloud",
+                category="ownership_mismatch",
+                operation="delete",
+                error_code="PROVIDER_OWNERSHIP_MISMATCH",
+                resource_id=self.unique_id,
+            )
+            self.status = UtilBackup.Status.DELETE_FAILED
+            self.save(update_fields=["status", "modified"])
+            msg = "UpCloud backup ownership could not be verified."
+            return False
         except Exception as error:
             _provider_exception_outcome(
                 self, error, provider="upcloud", operation="delete"
             )
             self.status = UtilBackup.Status.DELETE_FAILED
-            self.save()
+            self.save(update_fields=["status", "modified"])
             msg = (
                 f"Backup {self.uuid_str} of node {self.upcloud.node.name} "
                 f"could not be deleted using connection {self.upcloud.node.connection.name}."
             )
+            return False
         finally:
-            self.upcloud.node.connection.account.create_backup_log(msg, self.upcloud.node, self)
+            try:
+                self._checkpoint_upcloud_delete(state, token, release=True)
+            except UpCloudDeleteLeaseLost:
+                pass
+            try:
+                self.upcloud.node.connection.account.create_backup_log(
+                    msg, self.upcloud.node, self
+                )
+            except Exception as error:
+                capture_exception(error)
 
     def cancel(self):
         app.control.revoke(self.celery_task_id, terminate=True)
@@ -2105,133 +3215,32 @@ class CoreOracleBackup(UtilBackup):
         db_table = "core_oracle_backup"
 
     def poll_status(self):
-        """Perform one categorized Oracle volume-backup status check."""
-        import oci
-        from oci.core.models import BootVolumeBackup, VolumeBackup
-        from ..node.models import CoreNode
+        """Perform one exact, categorized Oracle backup observation."""
+        from apps._tasks.integration.oracle import (
+            OracleProviderError,
+            oracle_backup_adapter,
+        )
 
-        if CoreNode.Type.VOLUME == self.oracle.node.type:
-            try:
-                config = self.oracle.node.connection.auth_oracle.get_client()
-                block_storage_client = oci.core.BlockstorageClient(config)
-
-                if (self.oracle.metadata or {}).get("_bs_vol_type") == "boot":
-                    request = block_storage_client.get_boot_volume_backup(boot_volume_backup_id=self.unique_id)
-                    if request.status == 200:
-                        if str(getattr(request.data, "id", self.unique_id)) != str(
-                            self.unique_id
-                        ) or (
-                            getattr(request.data, "boot_volume_id", None)
-                            and str(request.data.boot_volume_id)
-                            != str(self.oracle.unique_id)
-                        ):
-                            return _provider_failed(
-                                self,
-                                provider="oracle",
-                                state="ownership_mismatch",
-                                code="PROVIDER_OWNERSHIP_MISMATCH",
-                            )
-                        if request.data.lifecycle_state == BootVolumeBackup.LIFECYCLE_STATE_AVAILABLE:
-                            self.size_gigabytes = request.data.size_in_gbs
-                            self.status = UtilBackup.Status.COMPLETE
-                            self.set_provider_metadata({
-                                "_bs_name": request.data.display_name,
-                                "_bs_size": request.data.size_in_gbs,
-                                "_bs_vol_type": "boot",
-                            })
-                            self.save()
-                            _record_provider_outcome(
-                                self,
-                                provider="oracle",
-                                category="complete",
-                                provider_status=request.data.lifecycle_state,
-                                resource_id=self.unique_id,
-                            )
-                            return UtilBackup.Status.COMPLETE
-                        elif request.data.lifecycle_state in (
-                            BootVolumeBackup.LIFECYCLE_STATE_FAULTY,
-                            BootVolumeBackup.LIFECYCLE_STATE_TERMINATED,
-                            BootVolumeBackup.LIFECYCLE_STATE_TERMINATING,
-                        ):
-                            return _provider_failed(
-                                self,
-                                provider="oracle",
-                                state=request.data.lifecycle_state,
-                            )
-                        return _provider_in_progress(
-                            self,
-                            provider="oracle",
-                            state=request.data.lifecycle_state,
-                            resource_id=self.unique_id,
-                        )
-                    return _provider_http_outcome(
-                        self, request, provider="oracle"
-                    )
-                elif (self.oracle.metadata or {}).get("_bs_vol_type") == "block":
-                    request = block_storage_client.get_volume_backup(volume_backup_id=self.unique_id)
-                    if request.status == 200:
-                        if str(getattr(request.data, "id", self.unique_id)) != str(
-                            self.unique_id
-                        ) or (
-                            getattr(request.data, "volume_id", None)
-                            and str(request.data.volume_id)
-                            != str(self.oracle.unique_id)
-                        ):
-                            return _provider_failed(
-                                self,
-                                provider="oracle",
-                                state="ownership_mismatch",
-                                code="PROVIDER_OWNERSHIP_MISMATCH",
-                            )
-                        if request.data.lifecycle_state == VolumeBackup.LIFECYCLE_STATE_AVAILABLE:
-                            self.size_gigabytes = request.data.size_in_gbs
-                            self.status = UtilBackup.Status.COMPLETE
-                            self.set_provider_metadata({
-                                "_bs_name": request.data.display_name,
-                                "_bs_size": request.data.size_in_gbs,
-                                "_bs_vol_type": "block",
-                            })
-                            self.save()
-                            _record_provider_outcome(
-                                self,
-                                provider="oracle",
-                                category="complete",
-                                provider_status=request.data.lifecycle_state,
-                                resource_id=self.unique_id,
-                            )
-                            return UtilBackup.Status.COMPLETE
-                        elif request.data.lifecycle_state in (
-                            VolumeBackup.LIFECYCLE_STATE_FAULTY,
-                            VolumeBackup.LIFECYCLE_STATE_TERMINATED,
-                            VolumeBackup.LIFECYCLE_STATE_TERMINATING,
-                        ):
-                            return _provider_failed(
-                                self,
-                                provider="oracle",
-                                state=request.data.lifecycle_state,
-                            )
-                        return _provider_in_progress(
-                            self,
-                            provider="oracle",
-                            state=request.data.lifecycle_state,
-                            resource_id=self.unique_id,
-                        )
-                    return _provider_http_outcome(
-                        self, request, provider="oracle"
-                    )
-                return _provider_failed(
+        try:
+            return oracle_backup_adapter(self.oracle).poll_backup(self)
+        except OracleProviderError as error:
+            if error.retryable or error.unknown_outcome:
+                return _provider_in_progress(
                     self,
                     provider="oracle",
-                    state="missing_volume_type",
-                    code="PROVIDER_MALFORMED_RESPONSE",
+                    state=error.code,
+                    resource_id=self.unique_id,
                 )
-            except Exception as error:
-                return _provider_exception_outcome(
-                    self, error, provider="oracle"
-                )
-        return _provider_failed(
-            self, provider="oracle", state="unsupported_resource"
-        )
+            return _provider_failed(
+                self,
+                provider="oracle",
+                state=error.code,
+                code=error.code,
+            )
+        except Exception as error:
+            return _provider_exception_outcome(
+                self, error, provider="oracle", operation="poll"
+            )
 
     def delete_requested(self):
         self.status = self.Status.DELETE_REQUESTED
@@ -2241,103 +3250,201 @@ class CoreOracleBackup(UtilBackup):
     def node(self):
         return self.oracle.node
 
-    def soft_delete(self):
-        import oci
-        from ..node.models import CoreNode
+    def _enqueue_delete_reconciliation(self):
+        """Queue one immediate read-only follow-up; beat remains the fallback."""
+        try:
+            from apps._tasks.helper.tasks import reconcile_oracle_backup_deletion
 
+            reconcile_oracle_backup_deletion.apply_async(
+                args=[self.pk],
+                countdown=0,
+            )
+        except Exception as error:
+            # The durable DELETE_IN_PROGRESS row is intentionally left intact.
+            # The 60-second beat sweep will republish it if the broker is down.
+            capture_exception(error)
+
+    def soft_delete(
+        self,
+        *,
+        enqueue_reconciliation=True,
+        execution_owner=None,
+        execution_token=None,
+    ):
+        owns_api_lease = False
+        lease_owner = execution_owner
+        lease_token = execution_token
+        release_oracle_lease = None
+        enqueue_after_release = False
         msg = (
             f"Backup {self.uuid_str} of node {self.oracle.node.name} "
             f"is being deleted using integration {self.oracle.node.connection.name}"
         )
 
         try:
-            if CoreNode.Type.VOLUME == self.oracle.node.type:
-                config = self.oracle.node.connection.auth_oracle.get_client()
-                block_storage_client = oci.core.BlockstorageClient(config)
+            from apps._tasks.integration.oracle import (
+                OracleProviderError,
+                claim_oracle_delete_reconciliation,
+                oracle_backup_adapter,
+                release_oracle_delete_reconciliation,
+            )
+            release_oracle_lease = release_oracle_delete_reconciliation
 
-                if (self.oracle.metadata or {}).get("_bs_vol_type") == "boot":
-                    owned = block_storage_client.get_boot_volume_backup(
-                        boot_volume_backup_id=self.unique_id
+            if execution_owner and execution_token:
+                self.bind_execution_fence(execution_owner, execution_token)
+                self.ensure_execution_fence()
+            else:
+                lease_owner = (
+                    f"oracle-api-delete-{self.pk}-{uuid.uuid4().hex}"
+                )
+                claimed = claim_oracle_delete_reconciliation(
+                    self,
+                    lease_owner,
+                    getattr(settings, "BACKUP_DELETE_LEASE_SECONDS", 300),
+                    allow_initial=True,
+                )
+                if claimed is None:
+                    current_status = (
+                        self.__class__.objects.filter(pk=self.pk)
+                        .values_list("status", flat=True)
+                        .first()
                     )
                     if (
-                        str(getattr(owned.data, "id", "")) != str(self.unique_id)
-                        or (
-                            getattr(owned.data, "boot_volume_id", None)
-                            and str(owned.data.boot_volume_id)
-                            != str(self.oracle.unique_id)
-                        )
+                        current_status == UtilBackup.Status.DELETE_IN_PROGRESS
+                        and enqueue_reconciliation
                     ):
-                        _provider_failed(
-                            self, provider="oracle", state="ownership_mismatch",
-                            code="PROVIDER_OWNERSHIP_MISMATCH",
-                        )
-                        self.status = UtilBackup.Status.DELETE_FAILED
-                        self.save()
-                        return
-                    response = block_storage_client.delete_boot_volume_backup(boot_volume_backup_id=self.unique_id)
-                    if response.status == 204:
-                        self.status = UtilBackup.Status.DELETE_COMPLETED
-                    else:
-                        self.status = UtilBackup.Status.DELETE_FAILED
-                elif (self.oracle.metadata or {}).get("_bs_vol_type") == "block":
-                    owned = block_storage_client.get_volume_backup(
-                        volume_backup_id=self.unique_id
-                    )
-                    if (
-                        str(getattr(owned.data, "id", "")) != str(self.unique_id)
-                        or (
-                            getattr(owned.data, "volume_id", None)
-                            and str(owned.data.volume_id)
-                            != str(self.oracle.unique_id)
-                        )
-                    ):
-                        _provider_failed(
-                            self, provider="oracle", state="ownership_mismatch",
-                            code="PROVIDER_OWNERSHIP_MISMATCH",
-                        )
-                        self.status = UtilBackup.Status.DELETE_FAILED
-                        self.save()
-                        return
-                    response = block_storage_client.delete_volume_backup(volume_backup_id=self.unique_id)
-                    if response.status == 204:
-                        self.status = UtilBackup.Status.DELETE_COMPLETED
-                    else:
-                        self.status = UtilBackup.Status.DELETE_FAILED
-                self.save()
-
-                if self.status == UtilBackup.Status.DELETE_COMPLETED:
-                    _record_provider_outcome(
-                        self, provider="oracle", category="delete_completed",
-                        operation="delete", resource_id=self.unique_id,
-                    )
-                else:
-                    _provider_http_outcome(
-                        self, response, provider="oracle", operation="delete"
-                    )
-
-                if self.status == UtilBackup.Status.DELETE_COMPLETED:
+                        self._enqueue_delete_reconciliation()
                     msg = (
                         f"Backup {self.uuid_str} of node {self.oracle.node.name} "
-                        f"deleted successfully using integration {self.oracle.node.connection.name}"
+                        "is already owned by another Oracle delete worker."
                     )
-                else:
-                    msg = (
-                        f"Invalid response from Oracle API. The backup {self.uuid_str} "
-                        f"is marked {self.get_status_display()}. "
-                        f"Please check your Oracle Cloud account."
-                    )
-        except Exception as error:
-            _provider_exception_outcome(
-                self, error, provider="oracle", operation="delete"
-            )
+                    return False
+                self, lease_token = claimed
+                owns_api_lease = True
+                self.bind_execution_fence(lease_owner, lease_token)
+                self.ensure_execution_fence()
+
+            result = oracle_backup_adapter(self.oracle).delete_backup(self)
+            # OCI's 202/204 response only accepts an asynchronous delete.  The
+            # adapter may not report completion until a later read proves that
+            # the exact owned resource is absent.
+            if result == "already_absent":
+                self.status = UtilBackup.Status.DELETE_COMPLETED
+                _record_provider_outcome(
+                    self,
+                    provider="oracle",
+                    category="delete_completed",
+                    operation="delete",
+                    resource_id=self.unique_id,
+                )
+                msg = (
+                    f"Backup {self.uuid_str} of node {self.oracle.node.name} "
+                    f"deleted successfully using integration {self.oracle.node.connection.name}"
+                )
+                self.save(update_fields=["status", "modified"])
+                return True
+            if result in {UtilBackup.Status.IN_PROGRESS, "delete_accepted"}:
+                self.status = UtilBackup.Status.DELETE_IN_PROGRESS
+                self.save(update_fields=["status", "modified"])
+                msg = (
+                    f"Backup {self.uuid_str} of node {self.oracle.node.name} "
+                    "is still being reconciled by Oracle Cloud."
+                )
+                if owns_api_lease:
+                    enqueue_after_release = enqueue_reconciliation
+                elif enqueue_reconciliation:
+                    self._enqueue_delete_reconciliation()
+                return False
             self.status = UtilBackup.Status.DELETE_FAILED
-            self.save()
+            self.save(update_fields=["status", "modified"])
             msg = (
                 f"Invalid response from Oracle API. The backup {self.uuid_str} "
                 f"is marked {self.get_status_display()}. "
                 "Please check your Oracle Cloud account."
             )
+            if (
+                self.status == UtilBackup.Status.DELETE_IN_PROGRESS
+                and owns_api_lease
+            ):
+                enqueue_after_release = enqueue_reconciliation
+            elif self.status == UtilBackup.Status.DELETE_IN_PROGRESS and enqueue_reconciliation:
+                self._enqueue_delete_reconciliation()
+            return False
+        except OracleProviderError as error:
+            if error.retryable or error.unknown_outcome:
+                self.status = UtilBackup.Status.DELETE_IN_PROGRESS
+            elif error.code == "PROVIDER_NOT_FOUND":
+                self.status = UtilBackup.Status.DELETE_FAILED_NOT_FOUND
+            else:
+                self.status = UtilBackup.Status.DELETE_FAILED
+            if error.retryable or error.unknown_outcome:
+                _provider_in_progress(
+                    self,
+                    provider="oracle",
+                    state=error.code,
+                    resource_id=self.unique_id,
+                )
+            else:
+                _provider_failed(
+                    self,
+                    provider="oracle",
+                    state=error.code,
+                    code=error.code,
+                )
+            self.save(update_fields=["status", "modified"])
+            msg = (
+                f"Invalid response from Oracle API. The backup {self.uuid_str} "
+                f"is marked {self.get_status_display()}. "
+                "Please check your Oracle Cloud account."
+            )
+            if (
+                self.status == UtilBackup.Status.DELETE_IN_PROGRESS
+                and owns_api_lease
+            ):
+                enqueue_after_release = enqueue_reconciliation
+            elif self.status == UtilBackup.Status.DELETE_IN_PROGRESS and enqueue_reconciliation:
+                self._enqueue_delete_reconciliation()
+            return False
+        except Exception as error:
+            _provider_exception_outcome(
+                self, error, provider="oracle", operation="delete"
+            )
+            self.status = UtilBackup.Status.DELETE_FAILED
+            self.save(update_fields=["status", "modified"])
+            msg = (
+                f"Invalid response from Oracle API. The backup {self.uuid_str} "
+                f"is marked {self.get_status_display()}. "
+                "Please check your Oracle Cloud account."
+            )
+            return False
         finally:
+            if owns_api_lease:
+                try:
+                    release_oracle_lease(
+                        self,
+                        lease_owner,
+                        lease_token,
+                        retry_seconds=(
+                            0
+                            if enqueue_after_release
+                            else max(
+                                60,
+                                int(
+                                    getattr(
+                                        settings, "BACKUP_POLL_INTERVAL", 120
+                                    )
+                                ),
+                            )
+                        ),
+                    )
+                except Exception as error:
+                    # The lease expiry and beat sweep remain the durable fallback
+                    # if the API process dies while releasing its handoff.
+                    capture_exception(error)
+                finally:
+                    self.unbind_execution_fence()
+                if enqueue_after_release:
+                    self._enqueue_delete_reconciliation()
             self.oracle.node.connection.account.create_backup_log(msg, self.oracle.node, self)
 
     def cancel(self):
@@ -4461,12 +5568,13 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         delete_args["VersionId"] = version_id
                     self.delete_owned_s3_object(s3_client, **delete_args)
                 elif self.storage.type.code == "upcloud":
-                    s3_client = bounded_boto3_client(
-                        "s3",
-                        endpoint_url=f"https://{self.storage.storage_upcloud.endpoint}",
-                        aws_access_key_id=bs_decrypt(self.storage.storage_upcloud.access_key, encryption_key),
-                        aws_secret_access_key=bs_decrypt(self.storage.storage_upcloud.secret_key, encryption_key),
-                        region_name=self.storage.storage_upcloud.endpoint.split(".")[1],
+                    # Reuse the exact normalized endpoint and SigV4 settings
+                    # used by uploads.  In particular, an UpCloud endpoint is
+                    # not an AWS region and must never be parsed with split().
+                    from apps._tasks.integration.storage.upcloud import _s3_client
+
+                    s3_client = _s3_client(
+                        self.storage.storage_upcloud, encryption_key
                     )
                     self.delete_owned_s3_object(s3_client,
                         Bucket=self.storage.storage_upcloud.bucket_name,

@@ -3,7 +3,10 @@ from unittest import mock
 
 import requests
 from django.test import SimpleTestCase
+from rest_framework.test import APIRequestFactory, force_authenticate
 
+from apps.api.v1.node.views import CoreNodeView
+from apps.api.v1.backup.vultr_database.views import CoreVultrDatabaseBackupView
 from apps.console.vultr_database import (
     VultrDatabaseCapabilities,
     VultrDatabaseDuplicateError,
@@ -14,6 +17,7 @@ from apps.console.vultr_database import (
 from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.backup.models import (
     CoreBackupRequest,
+    CoreCloudRestore,
     CoreVultrDatabaseBackup,
     CoreVultrDatabaseRestore,
 )
@@ -186,6 +190,131 @@ class VultrManagedDatabaseModelTests(BaseTestCase):
             task_name="backup_vultr_database",
             node=self.database.node,
         )
+
+    def _post_node_restore(self, backup, request_id, **overrides):
+        payload = {
+            "backup_id": backup.id,
+            "name": "restored-managed-database",
+            "params": {},
+            "confirm": True,
+            "request_id": request_id,
+        }
+        payload.update(overrides)
+        request = APIRequestFactory().post(
+            f"/api/v1/nodes/{self.database.node_id}/restore_backup/",
+            payload,
+            format="json",
+        )
+        force_authenticate(request, user=self.user)
+        return CoreNodeView.as_view({"post": "restore_backup"})(
+            request, pk=self.database.node_id
+        )
+
+    def test_node_restore_api_uses_durable_vultr_database_request(self):
+        backup = self._backup()
+        backup.status = UtilBackup.Status.COMPLETE
+        backup.save(update_fields=["status", "modified"])
+
+        with mock.patch(
+            "apps._tasks.integration.vultr_database.restore_vultr_database.apply_async"
+        ) as dispatch:
+            with self.captureOnCommitCallbacks(execute=True):
+                first = self._post_node_restore(backup, "vultr-db-ui-request")
+            with self.captureOnCommitCallbacks(execute=True):
+                replay = self._post_node_restore(backup, "vultr-db-ui-request")
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(replay.status_code, 200)
+        self.assertFalse(first.data["idempotent_replay"])
+        self.assertTrue(replay.data["idempotent_replay"])
+        self.assertEqual(first.data["id"], replay.data["id"])
+        self.assertEqual(CoreCloudRestore.objects.count(), 0)
+        restore = CoreVultrDatabaseRestore.objects.get()
+        self.assertEqual(first.data["correlation_id"], str(restore.correlation_id))
+        self.assertEqual(first.data["backup"], backup.id)
+        self.assertEqual(first.data["execution_status"]["status"], "pending")
+        self.assertNotIn("vultr-db-ui-request", str(first.data))
+        dispatch.assert_called_once_with(
+            task_id=restore.celery_task_id,
+            args=[restore.id],
+        )
+
+        list_request = APIRequestFactory().get(
+            f"/api/v1/nodes/{self.database.node_id}/restores/"
+        )
+        force_authenticate(list_request, user=self.user)
+        listed = CoreNodeView.as_view({"get": "restores"})(
+            list_request, pk=self.database.node_id
+        )
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual([item["id"] for item in listed.data], [restore.id])
+
+    def test_node_restore_api_rejects_vultr_database_key_reuse(self):
+        backup = self._backup()
+        backup.status = UtilBackup.Status.COMPLETE
+        backup.save(update_fields=["status", "modified"])
+        with mock.patch(
+            "apps._tasks.integration.vultr_database.restore_vultr_database.apply_async"
+        ):
+            with self.captureOnCommitCallbacks(execute=True):
+                first = self._post_node_restore(backup, "vultr-db-conflict")
+            conflict = self._post_node_restore(
+                backup,
+                "vultr-db-conflict",
+                name="different-target",
+            )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.data["code"], "restore_idempotency_conflict")
+        self.assertEqual(CoreVultrDatabaseRestore.objects.count(), 1)
+
+    def test_legacy_restore_api_requires_and_replays_idempotency_key(self):
+        backup = self._backup()
+        backup.status = UtilBackup.Status.COMPLETE
+        backup.save(update_fields=["status", "modified"])
+        view = CoreVultrDatabaseBackupView.as_view({"post": "restore"})
+
+        missing_request = APIRequestFactory().post(
+            f"/api/v1/backups/vultr_database/{backup.id}/restore/",
+            {"name": "legacy-target", "confirm": True},
+            format="json",
+        )
+        force_authenticate(missing_request, user=self.user)
+        missing = view(missing_request, pk=backup.id)
+        self.assertEqual(missing.status_code, 503)
+        self.assertEqual(CoreVultrDatabaseRestore.objects.count(), 0)
+
+        payload = {
+            "name": "legacy-target",
+            "params": {},
+            "confirm": True,
+            "request_id": "legacy-safe-replay",
+        }
+        with mock.patch(
+            "apps._tasks.integration.vultr_database.restore_vultr_database.apply_async"
+        ) as dispatch:
+            first_request = APIRequestFactory().post(
+                f"/api/v1/backups/vultr_database/{backup.id}/restore/",
+                payload,
+                format="json",
+            )
+            force_authenticate(first_request, user=self.user)
+            with self.captureOnCommitCallbacks(execute=True):
+                first = view(first_request, pk=backup.id)
+            replay_request = APIRequestFactory().post(
+                f"/api/v1/backups/vultr_database/{backup.id}/restore/",
+                payload,
+                format="json",
+            )
+            force_authenticate(replay_request, user=self.user)
+            with self.captureOnCommitCallbacks(execute=True):
+                replay = view(replay_request, pk=backup.id)
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(first.data["id"], replay.data["id"])
+        dispatch.assert_called_once()
 
     def test_database_backup_delivery_claim_is_durable(self):
         request = self._request("db-task-claimed")

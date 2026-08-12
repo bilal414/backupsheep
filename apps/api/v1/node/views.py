@@ -3,6 +3,7 @@ import hmac
 import json
 import math
 import os
+import re
 import shutil
 import unicodedata
 import uuid
@@ -27,7 +28,11 @@ from apps.api.v1.utils.api_permissions import MemberGroupPermissions
 from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from .filters import CoreNodeFilter
-from .serializers import CoreCloudRestoreSerializer, CoreNodeSerializer
+from .serializers import (
+    CoreCloudRestoreSerializer,
+    CoreNodeSerializer,
+    CoreVultrDatabaseRestoreSerializer,
+)
 from apps._tasks.exceptions import (
     SnapshotCreateMissingParams,
     SnapshotCreateError,
@@ -165,6 +170,156 @@ def _normalize_cloud_restore_request(request):
     if params is None:
         return None
     return backup_id, name, params
+
+
+_ORACLE_RESTORE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}\Z")
+_ORACLE_RESTORE_SHAPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}\Z")
+_ORACLE_RESTORE_OCID_RE = re.compile(
+    r"ocid1\.[a-z0-9-]+\.[A-Za-z0-9._:-]{1,1000}\Z"
+)
+
+
+def _oracle_restore_rejected():
+    raise RestoreMissingParams(
+        "Oracle restore parameters must prove the exact source backup and stay "
+        "within the linked resource's discovered compartment and availability domain."
+    )
+
+
+def _oracle_restore_ocid(value, resource_type):
+    if not isinstance(value, str):
+        _oracle_restore_rejected()
+    value = value.strip()
+    if not _ORACLE_RESTORE_OCID_RE.fullmatch(value):
+        _oracle_restore_rejected()
+    if not value.startswith(f"ocid1.{resource_type}."):
+        _oracle_restore_rejected()
+    return value
+
+
+def _validate_oracle_restore_request(node, backup, name, params):
+    """Validate the immutable Oracle restore scope before creating a row.
+
+    OCI restore requests are deliberately narrower than the generic cloud
+    restore payload.  The linked node's discovery metadata is the scope
+    authority; a caller cannot redirect a restore to another compartment or
+    availability domain, nor forge the source backup witness that the worker
+    will use for provider reconciliation.
+    """
+
+    if node.connection.integration.code != "oracle":
+        return params
+    if node.type not in (CoreNode.Type.CLOUD, CoreNode.Type.VOLUME):
+        _oracle_restore_rejected()
+    if not isinstance(params, dict):
+        _oracle_restore_rejected()
+    oracle = getattr(node, "oracle", None)
+    oracle_metadata = dict(getattr(oracle, "metadata", None) or {})
+    expected_compartment = _oracle_restore_ocid(
+        oracle_metadata.get("_bs_compartment_id"), "compartment"
+    )
+    expected_ad = oracle_metadata.get("_bs_availability_domain")
+    if (
+        not isinstance(expected_ad, str)
+        or not expected_ad.strip()
+        or len(expected_ad.strip()) > 255
+        or any(ord(character) < 32 or ord(character) == 127 for character in expected_ad)
+    ):
+        _oracle_restore_rejected()
+    expected_ad = expected_ad.strip()
+
+    if (
+        not isinstance(name, str)
+        or not _ORACLE_RESTORE_NAME_RE.fullmatch(name)
+    ):
+        _oracle_restore_rejected()
+
+    required_fields = {"compartment_id", "availability_domain"}
+    if node.type == CoreNode.Type.CLOUD:
+        allowed_fields = required_fields | {
+            "shape",
+            "subnet_id",
+            "assign_public_ip",
+        }
+    else:
+        allowed_fields = required_fields
+    if set(params) - allowed_fields or not required_fields.issubset(params):
+        _oracle_restore_rejected()
+
+    supplied_compartment = _oracle_restore_ocid(
+        params.get("compartment_id"), "compartment"
+    )
+    supplied_ad = params.get("availability_domain")
+    if not isinstance(supplied_ad, str) or supplied_ad.strip() != expected_ad:
+        _oracle_restore_rejected()
+    if supplied_compartment != expected_compartment:
+        _oracle_restore_rejected()
+
+    if node.type == CoreNode.Type.CLOUD:
+        shape = params.get("shape")
+        subnet_id = _oracle_restore_ocid(params.get("subnet_id"), "subnet")
+        if not isinstance(shape, str) or not _ORACLE_RESTORE_SHAPE_RE.fullmatch(
+            shape.strip()
+        ):
+            _oracle_restore_rejected()
+        if "assign_public_ip" in params and not isinstance(
+            params["assign_public_ip"], bool
+        ):
+            _oracle_restore_rejected()
+        params = dict(params)
+        params["compartment_id"] = supplied_compartment
+        params["availability_domain"] = expected_ad
+        params["shape"] = shape.strip()
+        params["subnet_id"] = subnet_id
+    else:
+        params = dict(params)
+        params["compartment_id"] = supplied_compartment
+        params["availability_domain"] = expected_ad
+
+    from apps._tasks.integration.oracle import oracle_retry_token
+
+    state = backup.get_execution_state(create=False)
+    provider_metadata = dict(state.provider_metadata or {}) if state else {}
+    witness = provider_metadata.get("witness")
+    marker = str(getattr(backup, "uuid_str", "") or "").strip()
+    source_id = str(getattr(oracle, "unique_id", "") or "").strip()
+    request_token = oracle_retry_token(marker) if marker else ""
+    if (
+        not state
+        or not isinstance(witness, dict)
+        or witness.get("provider") != "oracle"
+        or str(witness.get("marker") or "") != marker
+        or str(witness.get("source_id") or "") != source_id
+        or str(witness.get("compartment_id") or "") != expected_compartment
+        or str(witness.get("request_token") or "") != request_token
+        or str(state.provider_resource_id or "") != str(backup.unique_id or "")
+        or str(state.provider_idempotency_key or "") != request_token
+    ):
+        _oracle_restore_rejected()
+
+    if node.type == CoreNode.Type.CLOUD:
+        if (
+            witness.get("resource_type") != "compute_image"
+            or not str(backup.unique_id or "").startswith("ocid1.image.")
+        ):
+            _oracle_restore_rejected()
+    else:
+        volume_type = str(witness.get("volume_type") or "")
+        expected_volume_type = str(
+            oracle_metadata.get("_bs_vol_type") or ""
+        ).casefold()
+        expected_backup_type = (
+            "bootvolumebackup" if volume_type == "boot" else "volumebackup"
+        )
+        if (
+            volume_type not in {"boot", "block"}
+            or volume_type != expected_volume_type
+            or not str(backup.unique_id or "").startswith(
+                f"ocid1.{expected_backup_type}."
+            )
+        ):
+            _oracle_restore_rejected()
+    return params
 
 
 def _cloud_restore_idempotency_key(request):
@@ -379,11 +534,22 @@ class CoreNodeView(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def restore_backup(self, request, pk=None):
-        from apps.console.backup.models import CoreCloudRestore
+        from apps.console.backup.models import (
+            CoreCloudRestore,
+            CoreVultrDatabaseRestore,
+        )
         from apps.console.utils.models import UtilBackup
         from apps._tasks.integration.restore import restore_cloud_backup
+        from apps.api.v1.backup.vultr_database.restore_requests import (
+            VultrDatabaseRestoreRequestConflict,
+            create_or_replay_vultr_database_restore,
+        )
 
         node = self.get_object()
+        is_vultr_managed_database = (
+            node.connection.integration.code == "vultr"
+            and hasattr(node, "vultr_database")
+        )
         if not isinstance(request.data, Mapping):
             raise RestoreMissingParams()
         normalized_request = _normalize_cloud_restore_request(request)
@@ -391,7 +557,10 @@ class CoreNodeView(viewsets.ModelViewSet):
             raise RestoreMissingParams()
         backup_id, name, params = normalized_request
 
-        if node.type not in (CoreNode.Type.CLOUD, CoreNode.Type.VOLUME):
+        if (
+            node.type not in (CoreNode.Type.CLOUD, CoreNode.Type.VOLUME)
+            and not is_vultr_managed_database
+        ):
             raise RestoreUnsupportedNode()
 
         if request.data.get("confirm") is not True:
@@ -403,6 +572,8 @@ class CoreNodeView(viewsets.ModelViewSet):
         backup = node.get_cloud_backup(backup_id)
         if backup is None or backup.status != UtilBackup.Status.COMPLETE:
             raise RestoreBackupNotFound()
+        if node.connection.integration.code == "oracle":
+            params = _validate_oracle_restore_request(node, backup, name, params)
 
         correlation_id, request_fingerprint, idempotency_key, key_source = (
             _cloud_restore_request_identity(
@@ -433,6 +604,70 @@ class CoreNodeView(viewsets.ModelViewSet):
                 ).hexdigest(),
             }
         }
+
+        if is_vultr_managed_database:
+            try:
+                restore, created = create_or_replay_vultr_database_restore(
+                    node=node,
+                    backup=backup,
+                    name=name,
+                    params=params,
+                    correlation_id=correlation_id,
+                    request_fingerprint=request_fingerprint,
+                    request_metadata=request_metadata,
+                )
+            except VultrDatabaseRestoreRequestConflict:
+                return Response(
+                    {
+                        "detail": (
+                            "This idempotency key belongs to a different restore request."
+                        ),
+                        "code": "restore_idempotency_conflict",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            except Exception:
+                try:
+                    request_was_saved = CoreVultrDatabaseRestore.objects.filter(
+                        correlation_id=correlation_id,
+                        celery_task_id__gt="",
+                    ).exists()
+                except Exception:
+                    request_was_saved = False
+                if request_was_saved:
+                    raise RestoreCreateError(
+                        "The restore request was saved and will be retried automatically."
+                    )
+                raise RestoreCreateError(
+                    "The restore request could not be accepted. Please retry safely."
+                )
+
+            if created:
+                _log_activity(
+                    request,
+                    CoreLog.Type.RESTORE,
+                    {
+                        "message": f"Restore '{restore.name}' requested for node '{node.name}'.",
+                        "action": "restore_create",
+                        "actor_email": request.user.email,
+                        "restore_id": restore.id,
+                        "restore_name": restore.name,
+                        "node_id": node.id,
+                        "node_name": node.name,
+                        "backup_id": backup.id,
+                        "backup_name": backup.name,
+                    },
+                )
+            response_data = dict(
+                CoreVultrDatabaseRestoreSerializer(restore).data
+            )
+            response_data["idempotent_replay"] = not created
+            return Response(
+                response_data,
+                status=(
+                    status.HTTP_201_CREATED if created else status.HTTP_200_OK
+                ),
+            )
 
         created = False
         dispatch_required = False
@@ -571,6 +806,183 @@ class CoreNodeView(viewsets.ModelViewSet):
             status=(status.HTTP_201_CREATED if created else status.HTTP_200_OK),
         )
 
+    def _resume_vultr_database_restore(self, request, node, restore_id):
+        """Resume read-only verification for one known Vultr fork target."""
+
+        from apps._tasks.integration.vultr_database import (
+            poll_vultr_database_restore,
+        )
+        from apps.console.backup.models import CoreVultrDatabaseRestore
+
+        queued = False
+        resume_sequence = None
+        restore = None
+        try:
+            with transaction.atomic():
+                restore = (
+                    CoreVultrDatabaseRestore.objects.select_for_update()
+                    .filter(
+                        pk=restore_id,
+                        backup__vultr_database__node=node,
+                    )
+                    .first()
+                )
+                if restore is None:
+                    return Response(
+                        {
+                            "code": "restore_not_found",
+                            "detail": "The restore was not found for this node.",
+                        },
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+                if restore.status == CoreVultrDatabaseRestore.Status.IN_PROGRESS:
+                    response_data = dict(
+                        CoreVultrDatabaseRestoreSerializer(restore).data
+                    )
+                    response_data.update(
+                        {
+                            "idempotent_replay": True,
+                            "manual_resume_enqueued": False,
+                            "code": "restore_resume_already_active",
+                        }
+                    )
+                    return Response(response_data, status=status.HTTP_200_OK)
+                if restore.status == CoreVultrDatabaseRestore.Status.COMPLETE:
+                    return Response(
+                        {
+                            "code": "restore_already_complete",
+                            "detail": "The restore is already complete and was not changed.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if not (
+                    restore.status == CoreVultrDatabaseRestore.Status.FAILED
+                    and restore.execution_phase == "manual_review"
+                ):
+                    return Response(
+                        {
+                            "code": "restore_not_manual_review",
+                            "detail": "Only failed restores awaiting manual review can be resumed.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if not str(
+                    restore.resource_id or restore.provider_job_id or ""
+                ).strip():
+                    return Response(
+                        {
+                            "code": "restore_provider_pointer_missing",
+                            "detail": "This failed restore has no provider target to verify safely.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                metadata = dict(restore.execution_metadata or {})
+                try:
+                    previous_count = max(
+                        0, int(metadata.get("manual_resume_count") or 0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    previous_count = 0
+                if previous_count >= _CLOUD_RESTORE_MANUAL_RESUME_MAX_COUNT:
+                    return Response(
+                        {
+                            "code": "restore_manual_resume_limit_reached",
+                            "detail": "This restore has reached its safe manual-resume limit.",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                resume_sequence = previous_count + 1
+                resumed_at = timezone.now().isoformat()
+                history = metadata.get("manual_resume_history")
+                if not isinstance(history, list):
+                    history = []
+                history = [item for item in history if isinstance(item, dict)]
+                history.append(
+                    {"sequence": resume_sequence, "requested_at": resumed_at}
+                )
+                metadata["manual_resume_count"] = resume_sequence
+                metadata["manual_resume_at"] = resumed_at
+                metadata["manual_resume_history"] = history[
+                    -_CLOUD_RESTORE_MANUAL_RESUME_HISTORY_LIMIT:
+                ]
+                if restore.celery_task_id and not metadata.get(
+                    "root_celery_task_id"
+                ):
+                    metadata["root_celery_task_id"] = restore.celery_task_id
+
+                task_id = f"vultr-db-restore-resume-{restore.id}-{resume_sequence}"
+                restore.execution_metadata = metadata
+                restore.status = CoreVultrDatabaseRestore.Status.IN_PROGRESS
+                restore.execution_phase = "vultr_database_poll"
+                restore.provider_status = "reconciling"
+                restore.error = None
+                restore.last_error_code = ""
+                restore.next_retry_at = None
+                restore.lease_owner = ""
+                restore.lease_token = None
+                restore.lease_expires_at = None
+                restore.heartbeat_at = None
+                restore.save(
+                    update_fields=[
+                        "execution_metadata",
+                        "status",
+                        "execution_phase",
+                        "provider_status",
+                        "error",
+                        "last_error_code",
+                        "next_retry_at",
+                        "lease_owner",
+                        "lease_token",
+                        "lease_expires_at",
+                        "heartbeat_at",
+                        "modified",
+                    ]
+                )
+                queued = True
+                transaction.on_commit(
+                    partial(
+                        poll_vultr_database_restore.apply_async,
+                        task_id=task_id,
+                        args=[restore.id],
+                    )
+                )
+        except Exception:
+            if queued and resume_sequence is not None:
+                durable = CoreVultrDatabaseRestore.objects.filter(
+                    pk=restore_id,
+                    backup__vultr_database__node=node,
+                    execution_metadata__manual_resume_count=resume_sequence,
+                ).first()
+                if durable is not None:
+                    response_data = dict(
+                        CoreVultrDatabaseRestoreSerializer(durable).data
+                    )
+                    response_data.update(
+                        {
+                            "idempotent_replay": False,
+                            "manual_resume_enqueued": False,
+                            "resume_sequence": resume_sequence,
+                            "code": "restore_resume_saved_for_recovery",
+                        }
+                    )
+                    return Response(
+                        response_data, status=status.HTTP_202_ACCEPTED
+                    )
+            raise RestoreCreateError(
+                "The restore resume request could not be accepted. Please retry safely."
+            )
+
+        response_data = dict(CoreVultrDatabaseRestoreSerializer(restore).data)
+        response_data.update(
+            {
+                "idempotent_replay": False,
+                "manual_resume_enqueued": True,
+                "resume_sequence": resume_sequence,
+            }
+        )
+        return Response(response_data, status=status.HTTP_202_ACCEPTED)
+
     @action(detail=True, methods=["post"])
     def resume_restore(self, request, pk=None):
         """Resume read-only provider verification for one existing target.
@@ -610,6 +1022,14 @@ class CoreNodeView(viewsets.ModelViewSet):
                     "detail": "A valid restore_id is required.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if (
+            node.connection.integration.code == "vultr"
+            and hasattr(node, "vultr_database")
+        ):
+            return self._resume_vultr_database_restore(
+                request, node, restore_id
             )
 
         queued = False
@@ -841,9 +1261,22 @@ class CoreNodeView(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"])
     def restores(self, request, pk=None):
-        from apps.console.backup.models import CoreCloudRestore
+        from apps.console.backup.models import (
+            CoreCloudRestore,
+            CoreVultrDatabaseRestore,
+        )
 
         node = self.get_object()
+        if (
+            node.connection.integration.code == "vultr"
+            and hasattr(node, "vultr_database")
+        ):
+            restores = CoreVultrDatabaseRestore.objects.filter(
+                backup__vultr_database__node=node
+            ).order_by("-created")
+            return Response(
+                CoreVultrDatabaseRestoreSerializer(restores, many=True).data
+            )
         restores = CoreCloudRestore.objects.filter(node=node).order_by("-created")
         return Response(CoreCloudRestoreSerializer(restores, many=True).data)
 

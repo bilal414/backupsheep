@@ -18,6 +18,7 @@ class DockerBuildContextSafetyTests(TestCase):
         self.assertIn("_docs/", rules)
         self.assertIn(".env", rules)
         self.assertIn(".env.*", rules)
+        self.assertIn("scripts/.upcloud-runtime/", rules)
 
     def test_dockerfile_does_not_copy_credentials_explicitly(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8").lower()

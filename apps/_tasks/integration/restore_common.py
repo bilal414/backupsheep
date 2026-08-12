@@ -10,7 +10,10 @@ A restore starts by materializing the stored backup zip onto the local disk:
     their durable object identity, ownership markers, and version/revision
     guards. The response is streamed through the atomic SHA-256/byte-count
     validator before publication.
-  * Other remote backends, plus pre-ledger legacy copies, use the historical
+  * S3-compatible DigitalOcean Spaces, UpCloud, Oracle Object Storage, and
+    Vultr copies committed by ``upload_verified_s3`` are fetched through the
+    same authenticated provider clients used for upload. Other remote
+    backends, plus pre-ledger legacy copies, use the historical
     ``stored_backup.generate_download_url()`` path explicitly and safely.
   * Glacier/Deep Archive copies are cold: generate_download_url() returns the
     "restore_requested" / "restore_in_progress" sentinels instead of a URL,
@@ -51,6 +54,7 @@ GLACIER_SENTINELS = ("restore_requested", "restore_in_progress")
 EXACT_PROVIDER_CODES = frozenset(
     {
         "aws_s3",
+        "do_spaces",
         "azure",
         "dropbox",
         "google_cloud",
@@ -58,6 +62,9 @@ EXACT_PROVIDER_CODES = frozenset(
         "onedrive",
         "pcloud",
         "idrive",
+        "oracle",
+        "upcloud",
+        "vultr",
     }
 )
 PROVIDER_STATE_KEYS = {
@@ -69,6 +76,22 @@ PROVIDER_STATE_KEYS = {
     "onedrive": "onedrive_upload",
     "idrive": "idrive_s3_object",
 }
+S3_COMPATIBLE_PROVIDER_STATE_KEYS = {
+    "do_spaces": "do_spaces_s3_object",
+    "upcloud": "upcloud_s3_object",
+    "oracle": "oracle_s3_object",
+    "vultr": "vultr_s3_object",
+}
+S3_COMPATIBLE_PROVIDER_LABELS = {
+    "do_spaces": "DigitalOcean Spaces",
+    "upcloud": "UpCloud Object Storage",
+    "oracle": "Oracle Object Storage",
+    "vultr": "Vultr Object Storage",
+}
+ALL_PROVIDER_STATE_KEYS = frozenset(
+    set(PROVIDER_STATE_KEYS.values())
+    | set(S3_COMPATIBLE_PROVIDER_STATE_KEYS.values())
+)
 
 
 class RestoreError(Exception):
@@ -396,7 +419,6 @@ def _provider_state(stored_backup, provider_code, expected):
             "UNCOMMITTED_PROVIDER_STATE",
             "the selected backup provider object was not durably committed.",
         )
-
     provider_id_fields = ["provider_id", "file_id", "fileid"]
     if provider_code in {"google_cloud", "azure"}:
         provider_id_fields.append("object_key")
@@ -1888,6 +1910,40 @@ def _normalise_s3_version(value):
     return "" if value.lower() == "null" else value
 
 
+def _persist_s3_bucket_binding(stored_backup, state_key, expected_state, bucket):
+    metadata = copy.deepcopy(getattr(stored_backup, "metadata", None) or {})
+    current = metadata.get(state_key) if isinstance(metadata, dict) else None
+    if not isinstance(current, dict) or not current:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_STATE_CONFLICT",
+            "the committed provider state changed during bucket verification.",
+        )
+    for field in (
+        "phase",
+        "object_key",
+        "sha256",
+        "size_bytes",
+        "ownership_marker",
+        "etag",
+        "version_id",
+    ):
+        if current.get(field) != expected_state.get(field):
+            raise _SafeProviderRestoreError(
+                "PROVIDER_STATE_CONFLICT",
+                "the committed provider state changed during bucket verification.",
+            )
+    existing = current.get("bucket")
+    if existing is not None and existing != bucket:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_STATE_CONFLICT",
+            "the committed storage bucket binding changed during verification.",
+        )
+    current["bucket"] = bucket
+    metadata[state_key] = current
+    stored_backup.metadata = metadata
+    stored_backup.save(update_fields=["metadata", "modified"])
+
+
 def _committed_s3_etag(stored_backup, state, provider):
     """Return one committed ETag for an exact S3-compatible object."""
     etags = set()
@@ -1924,6 +1980,334 @@ def _committed_s3_etag(stored_backup, state, provider):
             f"the committed {provider} object ETag records disagree.",
         )
     return next(iter(etags), "")
+
+
+def _s3_compatible_state(stored_backup, expected, provider_code):
+    """Load one committed ``upload_verified_s3`` identity.
+
+    The four S3-compatible adapters intentionally persist the same provider
+    state shape.  Keep this validation strict: a row with a destination ledger
+    but no complete provider state must stop, not become an unauthenticated
+    current-object download.
+    """
+    metadata = getattr(stored_backup, "metadata", None) or {}
+    if not isinstance(metadata, dict):
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "stored backup provider state is malformed; restore was stopped safely.",
+        )
+    state_key = S3_COMPATIBLE_PROVIDER_STATE_KEYS[provider_code]
+    if state_key not in metadata:
+        has_other_committed_state = any(
+            key in ALL_PROVIDER_STATE_KEYS
+            and isinstance(candidate, dict)
+            and str(candidate.get("phase") or "").lower() == "committed"
+            for key, candidate in metadata.items()
+        )
+        if _destination_ledger_exists(stored_backup) or has_other_committed_state:
+            raise _SafeProviderRestoreError(
+                "MISSING_PROVIDER_STATE",
+                "the committed backup has no provider identity for restore.",
+            )
+        return None
+
+    raw_state = metadata.get(state_key)
+    if not isinstance(raw_state, dict) or not raw_state:
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "stored backup provider state is malformed; restore was stopped safely.",
+        )
+    state = copy.deepcopy(raw_state)
+    provider = str(state.get("provider") or "")
+    if provider and provider != provider_code:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_STATE_CONFLICT",
+            "stored backup provider state belongs to a different provider.",
+        )
+    if str(state.get("phase") or "").lower() != "committed":
+        raise _SafeProviderRestoreError(
+            "UNCOMMITTED_PROVIDER_STATE",
+            "the selected backup provider object was not durably committed.",
+        )
+    bucket_is_unbound = "bucket" not in state
+    bucket = state.get("bucket")
+    if not bucket_is_unbound and (
+        not isinstance(bucket, str) or not bucket or bucket != bucket.strip()
+    ):
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the committed backup has a malformed exact bucket binding.",
+        )
+    if str(state.get("checksum_algorithm") or "sha256").lower() != "sha256":
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the selected backup has unsupported committed integrity metadata.",
+        )
+
+    object_key = str(state.get("object_key") or "")
+    storage_file_id = str(getattr(stored_backup, "storage_file_id", "") or "")
+    if not object_key or "\x00" in object_key or object_key != storage_file_id:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_STATE_CONFLICT",
+            "the committed object key disagrees with the storage point.",
+        )
+
+    ownership_marker = str(state.get("ownership_marker") or "")
+    if not ownership_marker or ownership_marker != str(stored_backup.backup_id):
+        raise _SafeProviderRestoreError(
+            "PROVIDER_OWNERSHIP_MISMATCH",
+            f"the committed {S3_COMPATIBLE_PROVIDER_LABELS[provider_code]} object is not owned by this backup.",
+        )
+
+    state_checksum = _normalise_sha256(state.get("sha256"))
+    try:
+        state_size = int(state.get("size_bytes"))
+    except (TypeError, ValueError):
+        state_size = -1
+    if state_checksum is None or state_size <= 0:
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the selected backup has invalid committed integrity metadata.",
+        )
+    if not expected or (
+        expected["sha256"] != state_checksum
+        or int(expected["size_bytes"]) != state_size
+    ):
+        raise _SafeProviderRestoreError(
+            "INTEGRITY_LEDGER_CONFLICT",
+            "the selected backup integrity records disagree; restore was stopped safely.",
+        )
+
+    state_etag = str(state.get("etag") or "").strip()
+    if not state_etag or state_etag.lower() == "null":
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the selected backup has no committed object ETag.",
+        )
+    committed_etag = _committed_s3_etag(
+        stored_backup,
+        state,
+        S3_COMPATIBLE_PROVIDER_LABELS[provider_code],
+    )
+    if not committed_etag or committed_etag != state_etag:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            "the committed object ETag records disagree.",
+        )
+
+    if "version_id" not in state:
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the selected backup has no committed object version record.",
+        )
+    state_version = _normalise_s3_version(state.get("version_id"))
+    try:
+        committed_version = _normalise_s3_version(
+            stored_backup.committed_version_id()
+        )
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            "the committed object version records disagree.",
+        ) from None
+    if state_version and committed_version and state_version != committed_version:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            "the committed object version records disagree.",
+        )
+
+    state.update(
+        {
+            "object_key": object_key,
+            "sha256": state_checksum,
+            "size_bytes": state_size,
+            "etag": state_etag,
+            "version_id": committed_version or state_version,
+            "ownership_marker": ownership_marker,
+            "bucket": bucket,
+            "_legacy_bucket_unbound": bucket_is_unbound,
+        }
+    )
+    return state
+
+
+def _s3_compatible_binding(stored_backup, provider_code, *, expected_bucket=None):
+    """Return the exact upload-time client, bucket, and safe provider label."""
+    storage = stored_backup.storage
+    encryption_key = storage.account.get_encryption_key()
+    if provider_code == "do_spaces":
+        from apps._tasks.integration.storage.do_spaces import _s3_client
+
+        config = storage.storage_do_spaces
+        client = _s3_client(config, encryption_key)
+    elif provider_code == "upcloud":
+        from apps._tasks.integration.storage.upcloud import _s3_client
+
+        config = storage.storage_upcloud
+        # This reuses normalize_upcloud_endpoint and the upload adapter's
+        # explicit SigV4 configuration; an UpCloud endpoint is not a region.
+        client = _s3_client(config, encryption_key)
+    elif provider_code == "oracle":
+        from apps._tasks.integration.storage.oracle import _s3_client
+
+        config = storage.storage_oracle
+        client = _s3_client(config, encryption_key)
+    elif provider_code == "vultr":
+        from apps._tasks.integration.storage.vultr import _s3_client
+
+        config = storage.storage_vultr
+        client = _s3_client(storage, encryption_key)
+    else:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_UNSUPPORTED",
+            "the selected storage provider does not support exact restore materialization.",
+        )
+    bucket = str(getattr(config, "bucket_name", "") or "").strip()
+    if not bucket:
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the selected storage provider has no configured backup bucket.",
+        )
+    if expected_bucket is not None and bucket != expected_bucket:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_STATE_CONFLICT",
+            "the configured storage bucket differs from the committed backup binding.",
+        )
+    return client, bucket, S3_COMPATIBLE_PROVIDER_LABELS[provider_code]
+
+
+def _validate_s3_compatible_head(
+    head,
+    state,
+    expected,
+    *,
+    provider,
+):
+    """Verify provider metadata for the exact committed object version."""
+    if not isinstance(head, dict):
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_RESPONSE",
+            f"{provider} returned malformed backup metadata.",
+        )
+    metadata = head.get("Metadata")
+    if not isinstance(metadata, dict):
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_RESPONSE",
+            f"{provider} returned malformed backup metadata.",
+        )
+    normalized = {
+        str(key).lower(): str(value)
+        for key, value in metadata.items()
+    }
+    if normalized.get("backupsheep-backup-id") != state["ownership_marker"]:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_OWNERSHIP_MISMATCH",
+            f"the committed {provider} object is not owned by this backup.",
+        )
+    if normalized.get("backupsheep-sha256") != expected["sha256"]:
+        raise _SafeProviderRestoreError(
+            "INTEGRITY_MISMATCH",
+            f"the committed {provider} object SHA-256 does not match the backup.",
+        )
+    try:
+        remote_bytes = int(normalized["backupsheep-bytes"])
+        content_length = int(head["ContentLength"])
+    except (KeyError, TypeError, ValueError):
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_RESPONSE",
+            f"{provider} returned malformed backup size metadata.",
+        ) from None
+    if remote_bytes != expected["size_bytes"] or content_length != expected["size_bytes"]:
+        raise _SafeProviderRestoreError(
+            "INTEGRITY_MISMATCH",
+            f"the committed {provider} object byte count does not match the backup.",
+        )
+
+    remote_etag = str(head.get("ETag") or "").strip()
+    if not remote_etag:
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_RESPONSE",
+            f"{provider} returned no object ETag.",
+        )
+    if remote_etag != state["etag"]:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            f"the committed {provider} object ETag changed.",
+        )
+
+    expected_version = _normalise_s3_version(state.get("version_id"))
+    remote_version = _normalise_s3_version(head.get("VersionId"))
+    if remote_version != expected_version:
+        raise _SafeProviderRestoreError(
+            "PROVIDER_VERSION_DRIFT",
+            f"the committed {provider} object version changed.",
+        )
+    return head
+
+
+def _s3_compatible_download(stored_backup, dest_zip_path, expected, state, provider_code):
+    """Download one exact committed S3-compatible object atomically."""
+    client = None
+    body = None
+    provider = S3_COMPATIBLE_PROVIDER_LABELS[provider_code]
+    try:
+        legacy_bucket_unbound = bool(state.get("_legacy_bucket_unbound"))
+        client, bucket, provider = _s3_compatible_binding(
+            stored_backup,
+            provider_code,
+            expected_bucket=None if legacy_bucket_unbound else state["bucket"],
+        )
+        request = {
+            "Bucket": bucket,
+            "Key": state["object_key"],
+        }
+        version_id = _normalise_s3_version(state.get("version_id"))
+        if version_id:
+            request["VersionId"] = version_id
+
+        def verified_head():
+            return _validate_s3_compatible_head(
+                client.head_object(**request),
+                state,
+                expected,
+                provider=provider,
+            )
+
+        verified_head()
+        if legacy_bucket_unbound:
+            _persist_s3_bucket_binding(
+                stored_backup,
+                S3_COMPATIBLE_PROVIDER_STATE_KEYS[provider_code],
+                state,
+                bucket,
+            )
+            state["bucket"] = bucket
+            state["_legacy_bucket_unbound"] = False
+        response = client.get_object(**request)
+        _validate_s3_compatible_head(
+            response,
+            state,
+            expected,
+            provider=provider,
+        )
+        body = response.get("Body") if isinstance(response, dict) else None
+        if body is None or not callable(getattr(body, "read", None)):
+            raise _SafeProviderRestoreError(
+                "MALFORMED_PROVIDER_RESPONSE",
+                f"{provider} returned no readable backup stream.",
+            )
+        _materialize_provider_stream(
+            iter(lambda: body.read(CHUNK_SIZE), b""),
+            dest_zip_path,
+            expected,
+            verified_head,
+        )
+    except RestoreError:
+        raise
+    except Exception as error:
+        raise _safe_provider_failure(provider, error) from None
+    finally:
+        _close_response(body)
 
 
 def _idrive_s3_state(stored_backup, expected):
@@ -2247,6 +2631,30 @@ def _aws_s3_committed_etag(stored_backup):
     return next(iter(etags), "")
 
 
+def _aws_s3_committed_bucket(stored_backup):
+    metadata = getattr(stored_backup, "metadata", None) or {}
+    state = metadata.get("aws_s3_object") if isinstance(metadata, dict) else None
+    if not isinstance(state, dict) or not state:
+        raise _SafeProviderRestoreError(
+            "MISSING_PROVIDER_STATE",
+            "the committed AWS S3 backup has no durable provider state.",
+        )
+    if str(state.get("phase") or "").lower() != "committed":
+        raise _SafeProviderRestoreError(
+            "UNCOMMITTED_PROVIDER_STATE",
+            "the selected AWS S3 object was not durably committed.",
+        )
+    if "bucket" not in state:
+        return None
+    bucket = state.get("bucket")
+    if not isinstance(bucket, str) or not bucket or bucket != bucket.strip():
+        raise _SafeProviderRestoreError(
+            "MALFORMED_PROVIDER_STATE",
+            "the committed AWS S3 backup has a malformed exact bucket binding.",
+        )
+    return bucket
+
+
 def _validate_aws_s3_head(stored_backup, head, expected, *, etag, version_id):
     if not isinstance(head, dict):
         raise _SafeProviderRestoreError(
@@ -2297,11 +2705,24 @@ def _aws_s3_download(stored_backup, dest_zip_path, expected):
     try:
         storage_config = stored_backup.storage.storage_aws_s3
         values = storage_config._connection_values()
+        committed_bucket = _aws_s3_committed_bucket(stored_backup)
+        current_bucket = str(values.get("bucket_name") or "")
+        if not current_bucket or current_bucket != current_bucket.strip():
+            raise _SafeProviderRestoreError(
+                "MALFORMED_PROVIDER_STATE",
+                "the configured AWS S3 backup bucket is invalid.",
+            )
+        if committed_bucket is not None and current_bucket != committed_bucket:
+            raise _SafeProviderRestoreError(
+                "PROVIDER_STATE_CONFLICT",
+                "the configured AWS S3 bucket differs from the committed backup binding.",
+            )
+        request_bucket = committed_bucket or current_bucket
         client = storage_config._s3_client(values)
         version_id = stored_backup.committed_version_id()
         etag = _aws_s3_committed_etag(stored_backup)
         request = {
-            "Bucket": values["bucket_name"],
+            "Bucket": request_bucket,
             "Key": object_key,
             **storage_config.expected_bucket_owner_kwargs(
                 values.get("expected_bucket_owner")
@@ -2321,6 +2742,19 @@ def _aws_s3_download(stored_backup, dest_zip_path, expected):
             )
 
         initial = verified_head()
+        if committed_bucket is None:
+            legacy_state = copy.deepcopy(
+                (getattr(stored_backup, "metadata", None) or {}).get(
+                    "aws_s3_object"
+                )
+                or {}
+            )
+            _persist_s3_bucket_binding(
+                stored_backup,
+                "aws_s3_object",
+                legacy_state,
+                request_bucket,
+            )
         if str(initial.get("StorageClass") or "") in {"GLACIER", "DEEP_ARCHIVE"}:
             if 'ongoing-request="false"' not in str(initial.get("Restore") or ""):
                 raise RestoreError(
@@ -2358,6 +2792,14 @@ def _aws_s3_download(stored_backup, dest_zip_path, expected):
 def _fetch_exact_provider(stored_backup, dest_zip_path, expected, provider_code, state):
     if provider_code == "aws_s3":
         return _aws_s3_download(stored_backup, dest_zip_path, expected)
+    if provider_code in S3_COMPATIBLE_PROVIDER_STATE_KEYS:
+        return _s3_compatible_download(
+            stored_backup,
+            dest_zip_path,
+            expected,
+            state,
+            provider_code,
+        )
     if provider_code == "idrive":
         return _idrive_s3_download(stored_backup, dest_zip_path, expected, state)
     if provider_code == "azure":
@@ -2405,6 +2847,12 @@ def fetch_backup_zip(stored_backup, dest_zip_path):
                 state = None
             elif provider_code == "idrive":
                 state = _idrive_s3_state(stored_backup, expected)
+            elif provider_code in S3_COMPATIBLE_PROVIDER_STATE_KEYS:
+                state = _s3_compatible_state(
+                    stored_backup,
+                    expected,
+                    provider_code,
+                )
             else:
                 state = _provider_state(stored_backup, provider_code, expected)
             if aws_s3_exact or state is not None:

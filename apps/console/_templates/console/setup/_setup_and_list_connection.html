@@ -87,12 +87,10 @@
                                             Create {{ integration.name }} Node
                                         </a>
                                     {% else %}
-                                        {% if integration.code != "upcloud" and integration.code != "oracle" %}
-                                            <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
-                                               class="inline-flex items-center rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                Create Server Node
-                                            </a>
-                                        {% endif %}
+                                        <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'cloud' %}"
+                                           class="inline-flex items-center rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                            Create Server Node
+                                        </a>
                                         {% if integration.code != "aws_rds" and integration.code != "hetzner" %}
                                             <a href="{% url 'console:setup:integration_create_node' integration.code connection.id 'volume' %}"
                                                class="inline-flex items-center rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
@@ -776,25 +774,26 @@
                         </div>
 
                         <div class="sm:col-span-6" x-show="integrationCode === 'upcloud'">
-                            <label for="username" class="block text-sm font-medium text-slate-700">
-                                API User Name
+                            <label for="upcloud_api_token" class="block text-sm font-medium text-slate-700">
+                                API Token
                             </label>
-                            <input x-model="selectedAuth.username" type="text" name="username" id="username"
-                                   autocomplete="username"
-                                   class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                            <p x-show="connectionErrors.auth?.username" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="access_key-error" x-text="connectionErrors.auth?.username"></p>
-                        </div>
-
-                        <div class="sm:col-span-6" x-show="integrationCode === 'upcloud'">
-                            <label for="password" class="block text-sm font-medium text-slate-700">
-                                API User Password
-                            </label>
-                            <input x-model="selectedAuth.password" type="password" name="password" id="password"
+                            <input x-model="selectedAuth.api_token" type="password" name="api_token" id="upcloud_api_token"
                                    autocomplete="new-password"
+                                   placeholder="Leave blank to keep configured credentials"
                                    class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                            <p x-show="connectionErrors.auth?.password" class="mt-1.5 text-xs font-medium text-red-600"
-                               id="password-error" x-text="connectionErrors.auth?.password"></p>
+                            <p x-show="selectedAuth.api_token_configured" class="mt-1.5 text-xs text-slate-500">
+                                An API token is configured. BackupSheep never displays it; leave this field blank to keep it unchanged.
+                            </p>
+                            <p x-show="!selectedAuth.api_token_configured && selectedAuth.password_configured" class="mt-1.5 text-xs text-amber-700">
+                                This connection uses legacy username/password authentication. Leave this field blank to preserve it, or enter an API token to migrate the connection.
+                            </p>
+                            <p x-show="!connection.id && !selectedAuth.api_token_configured && !selectedAuth.password_configured" class="mt-1.5 text-xs text-slate-500">
+                                New UpCloud connections use a bearer API token.
+                            </p>
+                            <p x-show="connectionErrors.auth?.api_token" class="mt-1.5 text-xs font-medium text-red-600"
+                               id="upcloud-api-token-error" x-text="connectionErrors.auth?.api_token"></p>
+                            <p x-show="connectionErrors.auth?.credentials" class="mt-1.5 text-xs font-medium text-red-600"
+                               id="upcloud-credentials-error" x-text="connectionErrors.auth?.credentials"></p>
                         </div>
 
                         <div class="sm:col-span-6"
@@ -2053,6 +2052,17 @@
                 };
 
                 data["auth_" + this.integrationCode] = JSON.parse(JSON.stringify(this.selectedAuth));
+
+                if (this.integrationCode === "upcloud") {
+                    const upcloudAuth = data.auth_upcloud;
+                    delete upcloudAuth.id;
+                    delete upcloudAuth.username;
+                    delete upcloudAuth.password_configured;
+                    delete upcloudAuth.api_token_configured;
+                    if (typeof upcloudAuth.api_token !== "string" || upcloudAuth.api_token.length === 0) {
+                        delete upcloudAuth.api_token;
+                    }
+                }
 
                 if (this.integrationCode === "aws" || this.integrationCode === "aws_rds" || this.integrationCode === "lightsail") {
                     data["auth_" + this.integrationCode].region = data["auth_" + this.integrationCode].region?.id;

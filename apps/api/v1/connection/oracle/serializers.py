@@ -1,4 +1,5 @@
 import pytz
+from django.db import transaction
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
@@ -173,6 +174,7 @@ class CoreOracleConnectionWriteSerializer(serializers.ModelSerializer):
         model = CoreConnection
         fields = "__all__"
 
+    @transaction.atomic
     def create(self, validated_data):
         auth_oracle = validated_data.pop("auth_oracle", [])
         instance = CoreConnection.objects.create(**validated_data)
@@ -180,6 +182,7 @@ class CoreOracleConnectionWriteSerializer(serializers.ModelSerializer):
         CoreAuthOracle.objects.create(**auth_oracle)
         return instance
 
+    @transaction.atomic
     def update(self, instance, validated_data):
         if validated_data.get("location"):
             if instance.location != validated_data["location"]:

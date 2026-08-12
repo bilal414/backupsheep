@@ -9,7 +9,11 @@ from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.console.connection.models import CoreConnection, CoreConnectionLocation, CoreIntegration
 from apps.api.v1.utils.api_permissions import MemberPermissions
-from apps.console.node.models import CoreUpCloud, CoreNode
+from apps.console.node.models import CoreUpCloud, CoreNode, _BackupProviderError
+from apps._tasks.integration.upcloud import (
+    list_upcloud_servers,
+    list_upcloud_storages,
+)
 from .filters import CoreUpCloudFilter
 from .permissions import CoreUpCloudViewPermissions
 from .serializers import CoreUpCloudConnectionReadSerializer, CoreUpCloudConnectionWriteSerializer
@@ -86,13 +90,47 @@ class CoreUpCloudView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         try:
             connection = self.get_object()
             object_type = self.request.query_params.get("object_type")
-            eligible_objects = connection.auth_upcloud.get_eligible_objects(object_type=object_type)
-            if object_type == "volume" or object_type is None:
-                for eligible_object in eligible_objects:
-                    query = Q(unique_id=eligible_object["uuid"], node__connection=connection)
-                    query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-                    if CoreUpCloud.objects.filter(query).exists():
-                        eligible_object["_bs_attached"] = True
+            object_type = object_type or "cloud"
+            if object_type not in ("cloud", "volume"):
+                return Response([])
+            eligible_objects = (
+                list_upcloud_servers(connection.auth_upcloud.get_verified_client())
+                if object_type == "cloud"
+                else list_upcloud_storages(
+                    connection.auth_upcloud.get_verified_client(), storage_type="normal"
+                )
+            )
+            for eligible_object in eligible_objects:
+                eligible_object["_bs_unique_id"] = eligible_object.get("uuid")
+                eligible_object["_bs_name"] = eligible_object.get("title")
+                eligible_object["_bs_region"] = eligible_object.get("zone")
+                eligible_object["_bs_size"] = (
+                    eligible_object.get("size")
+                    if object_type == "volume"
+                    else None
+                )
+                eligible_object["_bs_resource_type"] = object_type
+            node_type = (
+                CoreNode.Type.CLOUD
+                if object_type == "cloud"
+                else CoreNode.Type.VOLUME
+            )
+            for eligible_object in eligible_objects:
+                query = Q(
+                    unique_id=eligible_object["uuid"],
+                    node__connection=connection,
+                    node__type=node_type,
+                )
+                query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
+                if CoreUpCloud.objects.filter(query).exists():
+                    eligible_object["_bs_attached"] = True
             return Response(eligible_objects)
-        except Exception as e:
-            raise NodeConnectionErrorEligibleObjects(e.__str__())
+        except _BackupProviderError as error:
+            raise NodeConnectionErrorEligibleObjects(
+                f"UpCloud resource discovery failed ({error.code})."
+            ) from None
+        except Exception:
+            raise NodeConnectionErrorEligibleObjects(
+                "UpCloud resource discovery failed safely. Verify the token, "
+                "IP allow-list, and account permissions."
+            ) from None

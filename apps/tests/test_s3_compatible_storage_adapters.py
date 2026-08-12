@@ -16,6 +16,7 @@ from apps._tasks.exceptions import (
     StorageDOSpacesUploadFailedError,
     StorageFilebaseQuotaExceededError,
 )
+from apps.console.backup.models import CoreWebsiteBackupStoragePoints
 from apps.console.node.models import CoreNode
 
 
@@ -98,7 +99,7 @@ ADAPTERS = (
         "storage_upcloud",
         "storage_upcloud",
         "upcloud_s3_object",
-        "https://provider.example",
+        "https://safe1.upcloudobjects.com",
     ),
     AdapterSpec(
         "cloudflare",
@@ -179,6 +180,8 @@ def _provider(spec, prefix="backups"):
     endpoint = "provider.example"
     if spec.module == "alibaba":
         endpoint = "oss-region-1.aliyuncs.com"
+    elif spec.module == "upcloud":
+        endpoint = "safe1.upcloudobjects.com"
     return SimpleNamespace(
         access_key=b"encrypted-access",
         secret_key=b"encrypted-secret",
@@ -433,6 +436,52 @@ class S3CompatibleStorageAdapterContractTests(SimpleTestCase):
                     VersionId="version-1",
                 )
 
+    def test_upcloud_backup_delete_reuses_normalized_upload_client_factory(self):
+        spec = next(item for item in ADAPTERS if item.module == "upcloud")
+        provider = _provider(spec)
+        account = SimpleNamespace(
+            id=7,
+            get_encryption_key=lambda: b"encryption-key",
+            create_storage_log=mock.Mock(),
+        )
+        storage = SimpleNamespace(
+            id=11,
+            name="UpCloud storage",
+            type=SimpleNamespace(id=12, code="upcloud", name="UpCloud"),
+            account=account,
+            storage_upcloud=provider,
+            is_air_gapped=False,
+        )
+        backup = SimpleNamespace(
+            id=42,
+            uuid_str="backup-uuid",
+            node=SimpleNamespace(name="website-node"),
+        )
+        client = mock.Mock(name="upcloud-s3-client")
+        point = SimpleNamespace(
+            id=43,
+            backup=backup,
+            storage=storage,
+            storage_file_id="backups/backup-uuid.zip",
+            metadata={},
+            Status=CoreWebsiteBackupStoragePoints.Status,
+            save=mock.Mock(),
+            delete_owned_s3_object=mock.Mock(),
+        )
+
+        with mock.patch(
+            "apps._tasks.integration.storage.upcloud._s3_client",
+            return_value=client,
+        ) as factory:
+            self.assertTrue(CoreWebsiteBackupStoragePoints.soft_delete(point))
+
+        factory.assert_called_once_with(provider, b"encryption-key")
+        point.delete_owned_s3_object.assert_called_once_with(
+            client,
+            Bucket="test-bucket",
+            Key="backups/backup-uuid.zip",
+        )
+
 
 class DigitalOceanSpacesVerifiedUploadTests(SimpleTestCase):
     def setUp(self):
@@ -459,6 +508,7 @@ class DigitalOceanSpacesVerifiedUploadTests(SimpleTestCase):
             "ETag": '"provider-etag"',
             "VersionId": "version-1",
             "Metadata": {
+                "backupsheep-backup-id": str(self.point.backup_id),
                 "backupsheep-sha256": self.sha256,
                 "backupsheep-bytes": str(len(self.payload)),
             },
@@ -500,6 +550,10 @@ class DigitalOceanSpacesVerifiedUploadTests(SimpleTestCase):
             _not_found(),
             self._verified_head(),
         ]
+        client.list_multipart_uploads.return_value = {
+            "Uploads": [],
+            "IsTruncated": False,
+        }
         client.create_multipart_upload.return_value = {"UploadId": "upload-1"}
         client.list_parts.side_effect = [
             {"Parts": [], "IsTruncated": False},

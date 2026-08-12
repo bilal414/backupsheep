@@ -64,8 +64,14 @@ def ovh_restore_target(resource_id, marker, source_id="snapshot-1", region="GRA9
     }
 
 
-def upcloud_storage(storage_id, marker, source_id="source-1", zone="us-chi1"):
-    return {
+def upcloud_storage(
+    storage_id,
+    marker,
+    source_id="source-1",
+    zone="us-chi1",
+    storage_type=None,
+):
+    value = {
         "uuid": storage_id,
         "title": marker,
         "origin": source_id,
@@ -73,6 +79,9 @@ def upcloud_storage(storage_id, marker, source_id="source-1", zone="us-chi1"):
         "state": "cloning",
         "size": 10,
     }
+    if storage_type:
+        value["type"] = storage_type
+    return value
 
 
 class OVHUpCloudReliabilityTests(BaseTestCase):
@@ -389,7 +398,7 @@ class OVHUpCloudReliabilityTests(BaseTestCase):
             Response(200, {"storages": {"storage": [], "next_cursor": "cursor-2"}}),
             page_two,
         ]
-        with mock.patch.object(integration.node.connection.auth_upcloud.__class__, "get_client", return_value=client), mock.patch(
+        with mock.patch.object(integration.node.connection.auth_upcloud.__class__, "get_verified_client", return_value=client), mock.patch(
             "apps.console.node.models.requests.get", side_effect=client.get.side_effect
         ), mock.patch("apps.console.node.models.requests.post") as post:
             integration.create_snapshot(backup)
@@ -405,7 +414,7 @@ class OVHUpCloudReliabilityTests(BaseTestCase):
             Response(200, {"storages": {"storage": [], "next_cursor": "cursor-2"}}),
             Response(200, {"storages": {"storage": [], "next_cursor": "cursor-2"}}),
         ]
-        with mock.patch.object(integration.node.connection.auth_upcloud.__class__, "get_client", return_value=client), mock.patch(
+        with mock.patch.object(integration.node.connection.auth_upcloud.__class__, "get_verified_client", return_value=client), mock.patch(
             "apps.console.node.models.requests.get", side_effect=client.get.side_effect
         ), mock.patch("apps.console.node.models.requests.post") as post:
             with self.assertRaises(Exception):
@@ -424,7 +433,7 @@ class OVHUpCloudReliabilityTests(BaseTestCase):
                 "origin": "source-1",
             }]}}),
         ]
-        with mock.patch.object(integration.node.connection.auth_upcloud.__class__, "get_client", return_value=client), mock.patch(
+        with mock.patch.object(integration.node.connection.auth_upcloud.__class__, "get_verified_client", return_value=client), mock.patch(
             "apps.console.node.models.requests.get", side_effect=client.get.side_effect
         ), mock.patch("apps.console.node.models.requests.post") as post:
             with self.assertRaises(Exception):
@@ -441,7 +450,7 @@ class OVHUpCloudReliabilityTests(BaseTestCase):
         ]
         created = Response(201, {"storage": upcloud_storage("u-created", backup.uuid_str)})
         auth_cls = integration.node.connection.auth_upcloud.__class__
-        with mock.patch.object(auth_cls, "get_client", return_value=client), mock.patch(
+        with mock.patch.object(auth_cls, "get_verified_client", return_value=client), mock.patch(
             "apps.console.node.models.requests.get", side_effect=client.get.side_effect
         ), mock.patch("apps.console.node.models.requests.post", return_value=created) as post:
             integration.create_snapshot(backup)
@@ -461,20 +470,71 @@ class OVHUpCloudReliabilityTests(BaseTestCase):
             name="restore",
             params={"zone": "us-chi1", "_bs_create_outcome_unknown": True},
         )
-        marker = f"backupsheep-restore-{restore.pk}"
+        marker = (
+            f"backupsheep-upcloud-{restore.pk}-"
+            f"{integration._upcloud_restore_marker_digest(restore, backup.unique_id)}"
+        )[:128]
+        source = Response(
+            200,
+            {
+                "storage": {
+                    "uuid": backup.unique_id,
+                    "title": backup.uuid_str,
+                    "origin": integration.unique_id,
+                    "zone": "us-chi1",
+                    "type": "backup",
+                    "state": "online",
+                    "size": 10,
+                }
+            },
+        )
+        restored = upcloud_storage(
+            "restored",
+            marker,
+            "backup-storage-1",
+            storage_type="normal",
+        )
+        unrelated = upcloud_storage(
+            "unrelated",
+            "another-restore",
+            "another-backup",
+            storage_type="normal",
+        )
+
+        def page_two_get(url, **kwargs):
+            if str(url).endswith(f"/storage/{backup.unique_id}"):
+                return source
+            if str(url).endswith("/storage/normal"):
+                offset = kwargs.get("params", {}).get("offset")
+                page = [unrelated] if offset == 0 else [restored]
+                return Response(
+                    200,
+                    {"storages": {"storage": page}},
+                    headers={"UpCloud-Total-Count": "2"},
+                )
+            raise AssertionError("Unexpected UpCloud GET in restore test.")
+
         client = mock.MagicMock()
-        client.get.side_effect = [
-            Response(200, {"storages": {"storage": [], "page": 1, "limit": 1, "total": 2}}),
-            Response(200, {"storages": {"storage": [upcloud_storage("restored", marker, "backup-storage-1")]}}),
-        ]
         auth_cls = integration.node.connection.auth_upcloud.__class__
-        with mock.patch.object(auth_cls, "get_client", return_value=client), mock.patch(
-            "apps.console.node.models.requests.get", side_effect=client.get.side_effect
-        ):
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=client
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=page_two_get
+        ) as get, mock.patch(
+            "apps.console.node.models.requests.post"
+        ) as post:
             integration.restore_snapshot(backup, restore)
         restore.refresh_from_db()
         self.assertEqual(restore.resource_id, "restored")
-        client.post.assert_not_called()
+        self.assertEqual(
+            [
+                call.kwargs["params"]["offset"]
+                for call in get.call_args_list
+                if "params" in call.kwargs
+            ],
+            [0, 1],
+        )
+        post.assert_not_called()
 
         restore = CoreCloudRestore.objects.create(
             node=integration.node,
@@ -482,17 +542,56 @@ class OVHUpCloudReliabilityTests(BaseTestCase):
             name="duplicate",
             params={"zone": "us-chi1", "_bs_create_outcome_unknown": True},
         )
-        marker = f"backupsheep-restore-{restore.pk}"
-        client.get.side_effect = [
-            Response(200, {"storages": {"storage": [upcloud_storage("one", marker, "backup-storage-1"), upcloud_storage("two", marker, "backup-storage-1")]}}),
+        marker = (
+            f"backupsheep-upcloud-{restore.pk}-"
+            f"{integration._upcloud_restore_marker_digest(restore, backup.unique_id)}"
+        )[:128]
+        duplicate_candidates = [
+            upcloud_storage(
+                "one", marker, "backup-storage-1", storage_type="normal"
+            ),
+            upcloud_storage(
+                "two", marker, "backup-storage-1", storage_type="normal"
+            ),
         ]
-        client.post.reset_mock()
-        with mock.patch.object(auth_cls, "get_client", return_value=client), mock.patch(
-            "apps.console.node.models.requests.get", side_effect=client.get.side_effect
-        ):
+
+        def duplicate_page_get(url, **kwargs):
+            if str(url).endswith(f"/storage/{backup.unique_id}"):
+                return source
+            if str(url).endswith("/storage/normal"):
+                offset = kwargs.get("params", {}).get("offset")
+                if offset not in (0, 1):
+                    raise AssertionError("Unexpected UpCloud storage offset.")
+                return Response(
+                    200,
+                    {
+                        "storages": {
+                            "storage": [duplicate_candidates[offset]]
+                        }
+                    },
+                    headers={"UpCloud-Total-Count": "2"},
+                )
+            raise AssertionError("Unexpected UpCloud GET in restore test.")
+
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=client
+        ), mock.patch(
+            "apps.console.node.models.requests.get",
+            side_effect=duplicate_page_get,
+        ) as get, mock.patch(
+            "apps.console.node.models.requests.post"
+        ) as post:
             with self.assertRaises(ValueError):
                 integration.restore_snapshot(backup, restore)
-        client.post.assert_not_called()
+        post.assert_not_called()
+        self.assertEqual(
+            [
+                call.kwargs["params"]["offset"]
+                for call in get.call_args_list
+                if "params" in call.kwargs
+            ],
+            [0, 1],
+        )
         restore.refresh_from_db()
         self.assertEqual(restore.params["_bs_last_error_code"], "PROVIDER_DUPLICATE_MATCH")
 

@@ -36,12 +36,17 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
             "Recent native restores",
             'role="dialog"',
             'aria-live="polite"',
-        ):
-            with self.subTest(marker=marker):
-                self.assertIn(marker, self.source)
+            ):
+                with self.subTest(marker=marker):
+                    self.assertIn(marker, self.source)
+        self.assertNotIn("object.oracle.metadata._bs_", self.source)
+        self.assertIn("object.oracle.native_restore_compartment_id", self.source)
 
     def test_restore_action_is_available_only_for_terminal_native_backups(self):
-        self.assertIn("{% elif object.type == 1 or object.type == 2 %}", self.source)
+        self.assertIn(
+            "{% elif object.type == 1 or object.type == 2 or is_vultr_managed_database %}",
+            self.source,
+        )
         self.assertIn(
             "openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid }}', '{{ backup.status }}')",
             self.source,
@@ -162,6 +167,28 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
         self.assertIn("execution.status", terminal_check)
         self.assertIn("raw.operation_phase", terminal_check)
         self.assertNotIn("this.nativeRestoreStatusCategory(item)", terminal_check)
+
+    def test_vultr_managed_database_uses_native_restore_contract(self):
+        self.assertIn(
+            "object.type == 1 or object.type == 2 or is_vultr_managed_database",
+            self.source,
+        )
+        self.assertIn(
+            "{% elif is_vultr_managed_database %}vultr_database",
+            self.source,
+        )
+        self.assertIn(
+            "{% elif is_vultr_managed_database %}managed database cluster",
+            self.source,
+        )
+        self.assertIn(
+            "const backupApiCode = '{% if is_vultr_managed_database %}vultr_database",
+            self.source,
+        )
+        self.assertIn(
+            "object.type == 4 and not is_vultr_managed_database",
+            self.source,
+        )
 
     def test_safe_defaults_and_no_arbitrary_provider_json(self):
         self.assertIn("nativeRestoreDefaultName(backupUuid)", self.source)

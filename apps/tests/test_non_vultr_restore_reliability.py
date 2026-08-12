@@ -202,7 +202,7 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         )
         with mock.patch.object(
             CoreAuthDigitalOcean,
-            "get_client",
+            "get_verified_client",
             return_value={"Authorization": "Bearer test-token"},
         ), mock.patch(
             "apps.console.node.models.requests.post",
@@ -224,7 +224,7 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
                     {
                         "id": 901,
                         "name": "do-restored",
-                        "tags": [marker],
+                        "tags": [marker, "backupsheep-restore-droplet"],
                         "image": {"id": 123456},
                         "status": "new",
                     }
@@ -234,10 +234,11 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         )
         with mock.patch.object(
             CoreAuthDigitalOcean,
-            "get_client",
+            "get_verified_client",
             return_value={"Authorization": "Bearer test-token"},
         ), mock.patch(
-            "apps.console.node.models.requests.get", return_value=candidate
+            "apps.api.v1.connection.digitalocean.client.requests.request",
+            return_value=candidate,
         ), mock.patch("apps.console.node.models.requests.post") as duplicate_create:
             node.digitalocean.restore_snapshot(backup, restore)
 
@@ -257,10 +258,10 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         )
         with mock.patch.object(
             CoreAuthDigitalOcean,
-            "get_client",
+            "get_verified_client",
             return_value={"Authorization": "Bearer test-token"},
         ), mock.patch(
-            "apps.console.node.models.requests.get",
+            "apps.api.v1.connection.digitalocean.client.requests.request",
             side_effect=raw_requests.Timeout("inventory-secret"),
         ) as inventory, mock.patch("apps.console.node.models.requests.post") as create:
             result = node.digitalocean.restore_snapshot(backup, restore)
@@ -283,10 +284,11 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         empty = response(200, {"droplets": [], "meta": {"total": 0}})
         with mock.patch.object(
             CoreAuthDigitalOcean,
-            "get_client",
+            "get_verified_client",
             return_value={"Authorization": "Bearer test-token"},
         ), mock.patch(
-            "apps.console.node.models.requests.get", return_value=empty
+            "apps.api.v1.connection.digitalocean.client.requests.request",
+            return_value=empty,
         ), mock.patch("apps.console.node.models.requests.post") as create:
             first = node.digitalocean.restore_snapshot(backup, restore)
             self.assertEqual(first, CoreCloudRestore.Status.IN_PROGRESS)
@@ -316,17 +318,30 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
             200,
             {
                 "droplets": [
-                    {"id": 1, "tags": [restore.restore_marker], "image": {"id": 123456}},
-                    {"id": 2, "tags": [restore.restore_marker], "image": {"id": 123456}},
+                    {
+                        "id": 1,
+                        "name": "do-duplicate",
+                        "tags": [restore.restore_marker, "backupsheep-restore-droplet"],
+                        "image": {"id": 123456},
+                    },
+                    {
+                        "id": 2,
+                        "name": "do-duplicate",
+                        "tags": [restore.restore_marker, "backupsheep-restore-droplet"],
+                        "image": {"id": 123456},
+                    },
                 ],
                 "meta": {"total": 2},
             },
         )
         with mock.patch.object(
             CoreAuthDigitalOcean,
-            "get_client",
+            "get_verified_client",
             return_value={"Authorization": "Bearer test-token"},
-        ), mock.patch("apps.console.node.models.requests.get", return_value=payload), mock.patch(
+        ), mock.patch(
+            "apps.api.v1.connection.digitalocean.client.requests.request",
+            return_value=payload,
+        ), mock.patch(
             "apps.console.node.models.requests.post"
         ) as create:
             with self.assertRaises(ValueError):
@@ -352,7 +367,7 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         )
         with mock.patch.object(
             CoreAuthDigitalOcean,
-            "get_client",
+            "get_verified_client",
             return_value={"Authorization": "Bearer test-token"},
         ), mock.patch(
             "apps.console.node.models.requests.get",
@@ -475,7 +490,7 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         )
         with mock.patch.object(
             CoreAuthDigitalOcean,
-            "get_client",
+            "get_verified_client",
             return_value={"Authorization": "Bearer test-token"},
         ), mock.patch(
             "apps.console.node.models.requests.get",
