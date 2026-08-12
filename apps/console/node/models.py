@@ -5528,6 +5528,7 @@ class CoreUpCloud(UtilCloud):
             "zone": identity["target_zone"],
             "title": identity["server_marker"],
             "hostname": identity["hostname"],
+            "boot_order": "disk",
             "plan": config["plan"],
             "firewall": config["firewall"],
             "metadata": config["metadata"],
@@ -5553,7 +5554,6 @@ class CoreUpCloud(UtilCloud):
                         "action": "attach",
                         "storage": identity["target_storage_id"],
                         "type": "disk",
-                        "boot_disk": "1",
                         "address": config.get("boot_address") or "virtio",
                     }
                 ]

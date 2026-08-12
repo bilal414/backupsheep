@@ -508,6 +508,23 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
                 state["storage_created"] = True
                 return Response(202, {"storage": target_storage})
             if str(url).endswith("/server"):
+                request_server = (kwargs.get("json") or {}).get("server") or {}
+                self.assertEqual(request_server.get("boot_order"), "disk")
+                request_devices = (
+                    request_server.get("storage_devices", {}).get(
+                        "storage_device", []
+                    )
+                )
+                self.assertEqual(len(request_devices), 1)
+                self.assertEqual(request_devices[0].get("action"), "attach")
+                self.assertEqual(
+                    request_devices[0].get("storage"), target_storage["uuid"]
+                )
+                self.assertEqual(request_devices[0].get("type"), "disk")
+                self.assertEqual(request_devices[0].get("address"), "virtio:0")
+                # UpCloud's live create endpoint rejects boot_disk in a
+                # storage-device request even though readback exposes it.
+                self.assertNotIn("boot_disk", request_devices[0])
                 state["server_created"] = True
                 response = Response(202, {"server": target_view()})
                 if lost:
