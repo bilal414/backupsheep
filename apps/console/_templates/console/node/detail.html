@@ -2433,9 +2433,24 @@
             }
 
             function categoryFor({status, phase, providerStatus, reconciliationState, errorCode, retryAt}) {
+                // Durable lifecycle state wins over a stale diagnostic rollup.
+                // A provider may temporarily publish RECONCILIATION_REQUIRED
+                // while an IN_PROGRESS row is still inside its visibility
+                // window; treating that code alone as terminal stops browser
+                // polling just before the automatic recovery succeeds.
+                if (status === 'partial') {
+                    return {key: 'complete', label: 'Partially complete', tone: 'amber'};
+                }
+                if (completeStatuses.has(status) || phase === 'complete') {
+                    return {key: 'complete', label: 'Complete', tone: 'emerald'};
+                }
+                const terminalFailure = phase === 'failed' || terminalStatuses.has(status);
                 if (reconciliationState === 'manual_review' || phase === 'manual_review' ||
-                    (errorCode && manualReviewErrorPattern.test(errorCode))) {
+                    (terminalFailure && errorCode && manualReviewErrorPattern.test(errorCode))) {
                     return {key: 'manual_review', label: 'Manual review required', tone: 'orange'};
+                }
+                if (terminalFailure) {
+                    return {key: 'terminal_failure', label: 'Terminal failure', tone: 'red'};
                 }
                 if (reconciliationState === 'required' || reconciliationState === 'in_progress' ||
                     phase === 'reconciling' || providerStatus === 'reconciling') {
@@ -2444,15 +2459,6 @@
                 if (retryAt || phase === 'retrying' || providerStatus === 'rate_limited' ||
                     (errorCode && retryErrorPattern.test(errorCode) && !terminalStatuses.has(status))) {
                     return {key: 'scheduled_retry', label: 'Scheduled retry', tone: 'amber'};
-                }
-                if (phase === 'failed' || terminalStatuses.has(status)) {
-                    return {key: 'terminal_failure', label: 'Terminal failure', tone: 'red'};
-                }
-                if (status === 'partial') {
-                    return {key: 'complete', label: 'Partially complete', tone: 'amber'};
-                }
-                if (completeStatuses.has(status) || phase === 'complete') {
-                    return {key: 'complete', label: 'Complete', tone: 'emerald'};
                 }
                 if (phase === 'polling' || (providerStatus && providerWaitStates.has(providerStatus))) {
                     return {key: 'provider_wait', label: 'Waiting for provider', tone: 'sky'};
@@ -2987,9 +2993,10 @@
                         : '';
                     const providerStatus = String(execution.provider_status || '').toLowerCase();
                     const errorCode = String(execution.last_error_code || '').toUpperCase();
+                    const terminalFailure = status === 'failed' || phase === 'failed' || status === 'cancelled' || status === 'canceled';
                     if (status === 'complete' || status === 'completed' || phase === 'complete') return 'complete';
-                    if (reconciliation === 'manual_review' || phase === 'manual_review' || /UNKNOWN|AMBIGUOUS|DUPLICATE|OWNERSHIP|RECONCILIATION_REQUIRED|RECONCILIATION_EXHAUSTED/.test(errorCode)) return 'manual_review';
-                    if (status === 'failed' || phase === 'failed' || status === 'cancelled' || status === 'canceled') return 'failed';
+                    if (reconciliation === 'manual_review' || phase === 'manual_review' || (terminalFailure && /UNKNOWN|AMBIGUOUS|DUPLICATE|OWNERSHIP|RECONCILIATION_REQUIRED|RECONCILIATION_EXHAUSTED/.test(errorCode))) return 'manual_review';
+                    if (terminalFailure) return 'failed';
                     if (execution.next_retry_at || phase === 'retrying' || providerStatus === 'rate_limited' || /RATE_LIMIT|TIMEOUT|TRANSIENT|OUTAGE|UNAVAILABLE/.test(errorCode)) return 'retry';
                     if (reconciliation === 'required' || reconciliation === 'in_progress' || phase === 'reconciling' || phase === 'create_unknown') return 'adopting';
                     if (status === 'pending' || status === 'queued' || phase === 'pending') return 'queued';
@@ -3040,7 +3047,14 @@
                     return view && view.errorMessage ? view.errorMessage : '';
                 },
                 nativeRestoreStatusIsTerminal(item) {
-                    return ['complete', 'failed', 'manual_review'].includes(this.nativeRestoreStatusCategory(item));
+                    const raw = item && typeof item === 'object' ? item : {};
+                    const execution = raw.execution_status && typeof raw.execution_status === 'object'
+                        ? raw.execution_status
+                        : {};
+                    const status = String(execution.status || raw.status_display || raw.status || '').toLowerCase().replace(/[_-]+/g, '_');
+                    const phase = String(execution.phase || raw.operation_phase || '').toLowerCase().replace(/[_-]+/g, '_');
+                    return ['complete', 'completed', 'failed', 'cancelled', 'canceled'].includes(status) ||
+                        ['complete', 'failed', 'manual_review'].includes(phase);
                 },
                 nativeRestoreId(value) {
                     const id = Number(value);

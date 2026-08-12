@@ -135,6 +135,34 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
         self.assertNotIn("item.error", error_block)
         self.assertIn("QUOTA_EXCEEDED", self.source)
 
+    def test_in_progress_reconciliation_does_not_stop_browser_polling(self):
+        shared_category = self.source.split(
+            "function categoryFor({status, phase, providerStatus, reconciliationState, errorCode, retryAt})",
+            1,
+        )[1].split("function toneClasses", 1)[0]
+        self.assertIn("const terminalFailure", shared_category)
+        self.assertIn(
+            "terminalFailure && errorCode && manualReviewErrorPattern.test(errorCode)",
+            shared_category,
+        )
+        self.assertNotIn(
+            "(errorCode && manualReviewErrorPattern.test(errorCode))",
+            shared_category,
+        )
+
+        native_category = self.source.split(
+            "nativeRestoreStatusCategory(item)", 1
+        )[1].split("nativeRestoreStatusLabel(item)", 1)[0]
+        self.assertIn("const terminalFailure", native_category)
+        self.assertIn("(terminalFailure && /UNKNOWN|AMBIGUOUS", native_category)
+
+        terminal_check = self.source.split(
+            "nativeRestoreStatusIsTerminal(item)", 1
+        )[1].split("nativeRestoreId(value)", 1)[0]
+        self.assertIn("execution.status", terminal_check)
+        self.assertIn("raw.operation_phase", terminal_check)
+        self.assertNotIn("this.nativeRestoreStatusCategory(item)", terminal_check)
+
     def test_safe_defaults_and_no_arbitrary_provider_json(self):
         self.assertIn("nativeRestoreDefaultName(backupUuid)", self.source)
         self.assertIn("nativeRestoreConfig.sourceName", self.source)
