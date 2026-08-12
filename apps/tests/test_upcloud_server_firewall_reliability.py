@@ -8,6 +8,8 @@ contacting UpCloud.
 from copy import deepcopy
 from unittest import mock
 from datetime import timedelta
+import hashlib
+import os
 from uuid import uuid4
 
 import requests as raw_requests
@@ -810,6 +812,63 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         self.assertEqual(put_mock.call_count, 0)
         self.assertTrue(state["firewall_replaced"])
         self.assertTrue(state["ip_assigned"])
+
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
+    def test_exact_acceptance_hold_persists_hash_only_witness_before_pointer(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="acceptance-hold",
+            params={"zone": "us-chi1"},
+        )
+        get, post, put, _state, target = self._restore_http(
+            integration, backup, restore, rules
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+        digest = integration._upcloud_restore_marker_digest(
+            restore, backup.unique_id
+        )
+        marker = f"backupsheep-upcloud-server-{restore.pk}-{digest}"[:128]
+        environment = {
+            "BACKUPSHEEP_UPCLOUD_FAULT_MODE": (
+                "restore-server-post-accept-pre-persist"
+            ),
+            "BACKUPSHEEP_UPCLOUD_FAULT_RESTORE_ID": str(restore.pk),
+            "BACKUPSHEEP_UPCLOUD_FAULT_RESTORE_MARKER": marker,
+            "BACKUPSHEEP_UPCLOUD_FAULT_ACTION": "hold",
+            "BACKUPSHEEP_UPCLOUD_FAULT_HOLD_SECONDS": "300",
+        }
+
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps._tasks.integration.upcloud.requests.get", side_effect=get
+        ), mock.patch(
+            "apps._tasks.integration.upcloud.requests.post", side_effect=post
+        ), mock.patch(
+            "apps._tasks.integration.upcloud.requests.put", side_effect=put
+        ), mock.patch.dict(os.environ, environment, clear=False), mock.patch(
+            "apps.console.node.models.time.sleep"
+        ) as hold:
+            integration.restore_snapshot(backup, restore)
+
+        hold.assert_called_once_with(300)
+        restore.refresh_from_db()
+        witness = restore.params["_bs_upcloud_restore"]["acceptance_fault"]
+        self.assertEqual(
+            witness,
+            {
+                "consumed": True,
+                "mode": "hold",
+                "stage": "server",
+                "marker_sha256": hashlib.sha256(marker.encode()).hexdigest(),
+                "triggered_at": witness["triggered_at"],
+            },
+        )
+        self.assertEqual(restore.resource_id, target["uuid"])
 
     def test_restore_duplicate_or_foreign_server_candidate_never_mutates(self):
         for candidate_count, foreign, expected_code in (

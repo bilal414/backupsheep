@@ -6,6 +6,7 @@ import humanfriendly
 import math
 import os
 import re
+import time
 import pytz
 from apps.api.v1.utils.http import request_timeout, requests
 import shutil
@@ -4525,7 +4526,13 @@ class CoreUpCloud(UtilCloud):
 
     @staticmethod
     def _upcloud_server_restore_fault_after_accept(restore, marker, stage):
-        """Crash only the exact explicitly armed server-restore stage."""
+        """Pause or crash only the exact explicitly armed restore stage.
+
+        Normal workers never set these environment variables. Acceptance
+        workers can hold at the provider-accepted/pointer-not-persisted boundary
+        so the container can be SIGKILLed without allowing Python ``finally``
+        blocks to release the durable execution lease.
+        """
         expected_mode = f"restore-{stage}-post-accept-pre-persist"
         if os.environ.get("BACKUPSHEEP_UPCLOUD_FAULT_MODE") != expected_mode:
             return
@@ -4537,6 +4544,43 @@ class CoreUpCloud(UtilCloud):
             marker
         ):
             return
+        action = str(
+            os.environ.get("BACKUPSHEEP_UPCLOUD_FAULT_ACTION") or "raise"
+        ).strip().casefold()
+        if action == "hold":
+            params = _restore_params(restore)
+            identity = dict(params.get("_bs_upcloud_restore") or {})
+            existing = identity.get("acceptance_fault")
+            if isinstance(existing, dict) and existing.get("consumed") is True:
+                return
+            try:
+                hold_seconds = int(
+                    os.environ.get("BACKUPSHEEP_UPCLOUD_FAULT_HOLD_SECONDS")
+                    or 300
+                )
+            except (TypeError, ValueError):
+                raise SystemExit(
+                    "Invalid UpCloud acceptance hold duration."
+                ) from None
+            if not 1 <= hold_seconds <= 600:
+                raise SystemExit("Invalid UpCloud acceptance hold duration.")
+            restore.assert_live_execution_fence()
+            identity["acceptance_fault"] = {
+                "consumed": True,
+                "mode": "hold",
+                "stage": str(stage),
+                "marker_sha256": hashlib.sha256(
+                    str(marker).encode("utf-8")
+                ).hexdigest(),
+                "triggered_at": timezone.now().isoformat(),
+            }
+            params["_bs_upcloud_restore"] = identity
+            restore.params = params
+            restore.save(update_fields=["params", "modified"])
+            time.sleep(hold_seconds)
+            return
+        if action != "raise":
+            raise SystemExit("Invalid UpCloud acceptance fault action.")
         raise SystemExit(
             "Deterministic UpCloud Cloud Server restore crash injection."
         )
