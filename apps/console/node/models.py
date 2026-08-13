@@ -4993,7 +4993,10 @@ class CoreUpCloud(UtilCloud):
         def readback():
             try:
                 return get_upcloud_server_firewall(
-                    str(server.get("uuid") or ""), client, enabled=True
+                    str(server.get("uuid") or ""),
+                    client,
+                    enabled=True,
+                    allow_empty=True,
                 )
             except _BackupProviderError as error:
                 raise _RestoreProviderError(

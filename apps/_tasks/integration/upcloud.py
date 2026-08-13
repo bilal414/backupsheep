@@ -903,7 +903,7 @@ def _upcloud_normalize_firewall_rule(rule, expected_position):
     return normalized, is_default
 
 
-def normalize_upcloud_firewall_rules(payload):
+def normalize_upcloud_firewall_rules(payload, *, allow_empty=False):
     """Return a strict, canonical UpCloud firewall chain.
 
     UpCloud returns positions as strings and may omit empty optional fields in
@@ -913,7 +913,13 @@ def normalize_upcloud_firewall_rules(payload):
     """
     container = payload.get("firewall_rules") if isinstance(payload, dict) else None
     rules = container.get("firewall_rule") if isinstance(container, dict) else None
-    if not isinstance(rules, list) or not rules:
+    if not isinstance(rules, list):
+        raise _BackupProviderError(
+            "PROVIDER_MALFORMED_RESPONSE", manual_review=True
+        )
+    if not rules:
+        if allow_empty:
+            return []
         raise _BackupProviderError(
             "PROVIDER_MALFORMED_RESPONSE", manual_review=True
         )
@@ -986,7 +992,9 @@ def validate_upcloud_firewall_witness(witness, *, enabled=None):
     }
 
 
-def get_upcloud_server_firewall(server_id, auth, *, enabled=True):
+def get_upcloud_server_firewall(
+    server_id, auth, *, enabled=True, allow_empty=False
+):
     if not enabled:
         rules = [{"position": 1, "direction": "in", "action": "drop"}]
         return {
@@ -1001,7 +1009,9 @@ def get_upcloud_server_firewall(server_id, auth, *, enabled=True):
         timeout=request_timeout(),
         headers={"accept": "application/json"},
     )
-    rules = normalize_upcloud_firewall_rules(_upcloud_json(response))
+    rules = normalize_upcloud_firewall_rules(
+        _upcloud_json(response), allow_empty=allow_empty
+    )
     return {
         "enabled": True,
         "rules": rules,

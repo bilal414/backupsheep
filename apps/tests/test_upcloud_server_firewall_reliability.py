@@ -445,7 +445,9 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         target_server, ids = self._target_server(
             integration, backup, restore, target_storage["uuid"]
         )
-        default_rules = [firewall_rule(1)]
+        # A newly created UpCloud server has an enabled but empty firewall
+        # chain until BackupSheep installs the immutable source witness.
+        default_rules = []
         isolated_target = deepcopy(target_server)
         isolated_target["networking"]["interfaces"]["interface"] = [
             interface
@@ -1251,6 +1253,17 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
                     ]
                 )
             )
+
+    def test_empty_firewall_chain_is_allowed_only_for_restore_preflight(self):
+        empty = firewall_payload([])
+        with self.assertRaises(_BackupProviderError) as raised:
+            normalize_upcloud_firewall_rules(empty)
+        self.assertEqual(
+            raised.exception.code, "PROVIDER_MALFORMED_RESPONSE"
+        )
+        self.assertEqual(
+            normalize_upcloud_firewall_rules(empty, allow_empty=True), []
+        )
 
     def test_multi_disk_boot_selector_accepts_unique_provider_os_device(self):
         server = source_server()
