@@ -45,9 +45,32 @@ Preserved pre-deployment database snapshots created during the final fixes:
 | `bcf5fbd` | `/var/backups/backupsheep/predeploy-bcf5fbd-20260812T233744Z.sql.gz` | 241755 | 0600 | `a414d07cbb0ada1f407827b961184316b44f34f724bac2cebd174d269869fd66` |
 | `ec3802f` | `/var/backups/backupsheep/predeploy-ec3802f-20260812T234028Z.sql.gz` | 241746 | 0600 | `b67094e8c1085e60dee793b29bdfcad05c00d9427e56fc2c5dbe680a34591c22` |
 | `c12f2cd` | `/var/backups/backupsheep/predeploy-c12f2cd-20260812T234655Z.sql.gz` | 242085 | 0600 | `bbd8208a10052aff07b351cd81b9c9c65d95588ea9d7083ce4fa7cb0286b9500` |
+| `3e07a08` | `/var/backups/backupsheep/predeploy-3e07a08-20260813T000144Z.sql.gz` | 243531 | 0600 | `13286e9785e1bb24509b82315565e6f3b2bfb8d0e0cc611446bdd266e74264cc` |
 
-All three passed `gzip -t`. Earlier snapshots are listed in the superseded
+All four passed `gzip -t`. Earlier snapshots are listed in the superseded
 handoff and remain available.
+
+### Final demo deployment receipt
+
+The code-bearing wrap-up commit `3e07a08b1a8f2ba9465d1a72c64ca225ca676035`
+was pushed to `origin/develop`, fast-forwarded on the demo, rebuilt, migrated,
+and verified before this receipt was recorded. The final documentation-only
+receipt commit must also be deployed so the authoritative demo SHA remains the
+commit containing this file.
+
+Verified after deployment:
+
+- migration container exit code `0`;
+- app container healthy and `python manage.py check` reported no issues;
+- `worker-cloud` restored to one running worker, alongside beat, database,
+  files, logs, and storage workers;
+- previously queued `cloud` and `default` broker messages drained to zero;
+- zero in-progress cloud, website, database, or Vultr managed-database restores;
+- cloud restore row `26` remained failed with no resource/job pointer and
+  `verification_resume_mode=provider_retry`;
+- signed-in UI showed `Retry same restore` for row `26`; it was not clicked;
+- `https://demo.backupsheep.com/healthz/` returned HTTP 200 over the configured
+  IPv6 address.
 
 ## What was implemented
 
