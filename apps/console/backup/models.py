@@ -12653,6 +12653,113 @@ class CoreCloudRestore(BaseRestoreExecution):
         ):
             return False
 
+        def witness_server_id_is_safe(witness):
+            """Return the exact provider target bound by a mutation witness.
+
+            A marker-adopted server may not have ``candidate_server_id``: the
+            worker can crash after the provider accepted create but before
+            that pointer was stored.  The witness UUID is still safe when it
+            is syntactically valid because the resumed worker must rediscover
+            and fully verify the unique marker-owned server before mutation.
+            When a candidate pointer does exist, require an exact match.
+            """
+            witness_server_id = str(witness.get("server_id") or "")
+            if not re.fullmatch(uuid_pattern, witness_server_id):
+                return ""
+            if candidate_server_id and witness_server_id != candidate_server_id:
+                return ""
+            return witness_server_id
+
+        def power_witness_is_safe(witness, *, expected_payload):
+            """Validate the exact durable witness for one power request.
+
+            These fields are written before the provider POST.  Manual resume
+            must therefore prove both the target identity and the exact
+            request that may already have been accepted; a merely plausible
+            server id or arbitrary hash is not sufficient.
+            """
+            required_keys = {
+                "server_id",
+                "request_fingerprint",
+                "requested_at",
+                "deadline_at",
+            }
+            if (
+                not isinstance(witness, dict)
+                or set(witness) != required_keys
+                or not witness_server_id_is_safe(witness)
+            ):
+                return False
+            expected_fingerprint = hashlib.sha256(
+                json.dumps(
+                    expected_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if witness.get("request_fingerprint") != expected_fingerprint:
+                return False
+
+            parsed = {}
+            for key in ("requested_at", "deadline_at"):
+                value = witness.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    return False
+                raw = value.strip()
+                if raw.endswith("Z"):
+                    raw = raw[:-1] + "+00:00"
+                try:
+                    timestamp = datetime.fromisoformat(raw)
+                except (TypeError, ValueError):
+                    return False
+                # The worker writes aware ISO-8601 values.  Reject naive
+                # values instead of assigning a timezone during resume.
+                if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                    return False
+                parsed[key] = timestamp.astimezone(datetime_timezone.utc)
+            duration = parsed["deadline_at"] - parsed["requested_at"]
+            return timedelta(0) < duration <= timedelta(hours=1)
+
+        def public_ip_witness_is_safe(witness):
+            """Validate one exact durable public-IP assignment request."""
+            required_keys = {
+                "server_id",
+                "ordinal",
+                "family",
+                "request_fingerprint",
+            }
+            if not isinstance(witness, dict) or set(witness) != required_keys:
+                return False
+            server_id = witness_server_id_is_safe(witness)
+            ordinal = witness.get("ordinal")
+            family = str(witness.get("family") or "")
+            public_ip_families = (
+                config.get("public_ip_families")
+                if isinstance(config, dict)
+                else None
+            )
+            if (
+                not server_id
+                or type(ordinal) is not int
+                or not isinstance(public_ip_families, list)
+                or ordinal < 0
+                or ordinal >= len(public_ip_families)
+                or family != public_ip_families[ordinal]
+                or active != f"public_ip:{ordinal}:{family}"
+            ):
+                return False
+            expected_payload = {
+                "ip_address": {"family": family, "server": server_id}
+            }
+            expected_fingerprint = hashlib.sha256(
+                json.dumps(
+                    expected_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            return witness.get("request_fingerprint") == expected_fingerprint
+
         stage = str(identity.get("stage") or "")
         active = str(identity.get("active_mutation") or "")
         stage_contracts = {
@@ -12668,8 +12775,46 @@ class CoreCloudRestore(BaseRestoreExecution):
                 for value in (active,)
                 if re.fullmatch(r"public_ip:[0-9]+:IPv[46]", value)
             },
+            "server_stop_requested": {"server_stop"},
+            "server_start_requested": {"server_start"},
         }
-        return stage in stage_contracts and active in stage_contracts[stage]
+        if stage not in stage_contracts or active not in stage_contracts[stage]:
+            return False
+
+        power_contracts = {
+            "server_stop_requested": (
+                "server_stop_request",
+                {"stop_server": {"stop_type": "soft"}},
+            ),
+            "server_start_requested": (
+                "server_start_request",
+                {"server": {"start_type": "async"}},
+            ),
+        }
+        if stage == "public_ip_assign_requested":
+            witness_key = "public_ip_assignment"
+            if not public_ip_witness_is_safe(identity.get(witness_key)):
+                return False
+        else:
+            power_contract = power_contracts.get(stage)
+            if power_contract is None:
+                return True
+            witness_key, expected_payload = power_contract
+            if not power_witness_is_safe(
+                identity.get(witness_key), expected_payload=expected_payload
+            ):
+                return False
+        if any(
+            identity.get(other_key) is not None
+            for other_key in (
+                "server_stop_request",
+                "public_ip_assignment",
+                "server_start_request",
+            )
+            if other_key != witness_key
+        ):
+            return False
+        return True
 
     def _upcloud_server_definite_retry_safe(self, *, params, identity):
         """Prove that one rejected server create may retry the same row.

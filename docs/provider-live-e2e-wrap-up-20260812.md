@@ -1,9 +1,15 @@
 # BackupSheep UpCloud, Oracle Cloud, and DigitalOcean live E2E wrap-up — 2026-08-12
 
-This is the authoritative continuation document for the provider work stopped on
-2026-08-12. It supersedes the status sections in
-`provider-live-e2e-resume-handoff-20260812.md` and
-`upcloud-enterprise-reliability-20260812.md` where they disagree with this file.
+> **Superseded:** Continue from
+> `provider-live-e2e-final-handoff-20260813.md`. That document records the
+> completed UpCloud row-26 SIGKILL recovery, power-safe public-network restore,
+> final live evidence, and current DigitalOcean/Oracle artifact gaps.
+
+This file is historical evidence for the provider work stopped on 2026-08-12;
+it is not the current status or resume authority. The final handoff is
+authoritative and supersedes this file wherever they disagree. This file also
+supersedes the status sections in `provider-live-e2e-resume-handoff-20260812.md`
+and `upcloud-enterprise-reliability-20260812.md` for this historical checkpoint.
 It intentionally contains no API tokens, object-storage secrets, database
 passwords, private keys, browser cookies, or decrypted application credentials.
 
@@ -34,9 +40,9 @@ passwords, private keys, browser cookies, or decrypted application credentials.
 - Demo checkout: `/opt/backupsheep`
 - Public URL: `https://demo.backupsheep.com`
 - Base commit before the final wrap-up commit: `c12f2cd13abad147ee2b3a58556e007d71a6583f`
-- The final authoritative code/deployment SHA is the commit containing this file.
-  Resolve it with `git log -1 --format=%H -- docs/provider-live-e2e-wrap-up-20260812.md`
-  and require the demo checkout to equal `origin/develop` before continuing.
+- Historical code/deployment provenance is recorded by the commit containing
+  this file. For current authoritative provenance, use the final handoff and
+  require the demo checkout to equal `origin/develop` before continuing.
 
 Preserved pre-deployment database snapshots created during the final fixes:
 
@@ -54,9 +60,8 @@ handoff and remain available.
 
 The code-bearing wrap-up commit `3e07a08b1a8f2ba9465d1a72c64ca225ca676035`
 was pushed to `origin/develop`, fast-forwarded on the demo, rebuilt, migrated,
-and verified before this receipt was recorded. The final documentation-only
-receipt commit must also be deployed so the authoritative demo SHA remains the
-commit containing this file.
+and verified before this historical receipt was recorded. Current deployment
+provenance is governed by the final handoff.
 
 Verified after deployment:
 
@@ -130,6 +135,12 @@ The final working tree passed:
 - 1,564/1,564 tests in the complete `apps.tests` Docker suite after all final
   code changes (`196.788s`, `OK`);
 - Python compilation and `git diff --check`.
+
+A later pre-review receipt recorded 1,570/1,570 tests in the complete
+`apps.tests` Docker suite. GPT-5.6 Sol Max subsequently found blockers, and
+GPT-5.6 Luna Max implemented the accepted fixes. The authoritative handoff
+records the later final result: 70/70 focused tests and 1,583/1,583 complete
+`apps.tests` tests passed after those fixes.
 
 The full-suite output included intentional negative-path logging for lost broker
 acknowledgements, duplicate suppression, and provider-cleanup refusal. The run
@@ -419,8 +430,11 @@ claimed. Remaining work is:
    wherever old ledgers lack current ownership fingerprints; never infer cleanup
    authority.
 4. Rotate exposed credentials and remove or re-key the UpCloud fixture host.
-5. Obtain the requested GPT-5.6 Sol Max final review after live gates are complete,
-   then apply accepted feedback with GPT-5.6 Luna Max and rerun all tests.
+5. At this historical checkpoint, obtain the requested GPT-5.6 Sol Max final
+   review after live gates are complete, then apply accepted feedback with
+   GPT-5.6 Luna Max and rerun all tests. The review has since found blockers and
+   the accepted fixes have been implemented; use the final handoff for the
+   current post-fix gates.
 6. Rerun final focused and full Docker suites after any review fixes.
 7. Confirm zero active/stranded work, all intended cleanup, exact deployed SHA,
    migration success, healthy containers, and public HTTPS health.

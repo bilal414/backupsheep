@@ -206,6 +206,35 @@ def _restore_params(restore):
     return dict(restore.params) if isinstance(restore.params, dict) else {}
 
 
+_UPCLOUD_RESTORE_MUTATION_WITNESS_KEYS = (
+    "server_stop_request",
+    "public_ip_assignment",
+    "server_start_request",
+)
+
+
+def _restore_has_unresolved_upcloud_witness(restore_or_params):
+    """Return whether an UpCloud server mutation still needs reconciliation.
+
+    A provider read can fail after a write was accepted.  The durable request
+    witness is therefore authoritative until the exact owned target proves the
+    requested state.  This helper deliberately treats a present witness as
+    unresolved even when its value is malformed so an error path cannot clear
+    the unknown-outcome fence and fall through to another server create.
+    """
+    params = (
+        _restore_params(restore_or_params)
+        if not isinstance(restore_or_params, dict)
+        else restore_or_params
+    )
+    identity = params.get("_bs_upcloud_restore")
+    if not isinstance(identity, dict):
+        return False
+    return bool(str(identity.get("active_mutation") or "").strip()) or any(
+        key in identity for key in _UPCLOUD_RESTORE_MUTATION_WITNESS_KEYS
+    )
+
+
 def _restore_marker_value(restore):
     """Return a stable provider marker without putting secrets in provider data."""
     existing = str(getattr(restore, "restore_marker", "") or "").strip()
@@ -320,7 +349,14 @@ def _restore_unknown_outcome(restore, *, code="PROVIDER_UNKNOWN_OUTCOME"):
 
 def _restore_safe_failure(restore, code, *, manual_review=False):
     params = _restore_params(restore)
-    if code in {
+    unresolved_upcloud_witness = _restore_has_unresolved_upcloud_witness(params)
+    if unresolved_upcloud_witness:
+        # A failed exact read after a power/network POST is not proof that the
+        # provider rejected the mutation.  Keep the exact witness and fence
+        # every future server create until a successor worker reconciles it.
+        params["_bs_create_outcome_unknown"] = True
+        params["_bs_last_error_category"] = "manual_review"
+    elif code in {
         "PROVIDER_AUTH_FAILED",
         "PROVIDER_NOT_FOUND",
         "PROVIDER_RATE_LIMIT",
@@ -332,11 +368,14 @@ def _restore_safe_failure(restore, code, *, manual_review=False):
     else:
         params["_bs_create_outcome_unknown"] = bool(params.get("_bs_create_outcome_unknown"))
     params["_bs_last_error_code"] = code
-    params["_bs_last_error_category"] = "manual_review" if manual_review else "terminal"
+    if not unresolved_upcloud_witness:
+        params["_bs_last_error_category"] = "manual_review" if manual_review else "terminal"
     restore.params = params
     restore.error = _restore_message(code)
     restore.status = _restore_status("FAILED")
-    restore.operation_phase = _restore_phase("MANUAL_REVIEW" if manual_review else "FAILED")
+    restore.operation_phase = _restore_phase(
+        "MANUAL_REVIEW" if manual_review or unresolved_upcloud_witness else "FAILED"
+    )
     if hasattr(restore, "last_error_code"):
         restore.last_error_code = code
     fields = ["params", "error", "status", "operation_phase", "modified"]
@@ -352,7 +391,8 @@ def _restore_adopt(restore, resource_id, *, provider_status=None, params_update=
         raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE", unknown_outcome=True)
     params = _restore_params(restore)
     params.update(params_update or {})
-    params["_bs_create_outcome_unknown"] = False
+    if not _restore_has_unresolved_upcloud_witness(params):
+        params["_bs_create_outcome_unknown"] = False
     params["_bs_marker_verified"] = bool(marker_verified)
     if provider_status is not None:
         params["_bs_provider_status"] = str(provider_status)[:64]
@@ -395,6 +435,7 @@ _RESTORE_RECONCILIATION_MAX_OBSERVATIONS = 20
 _AWS_RESTORE_RECONCILIATION_MAX_PAGES = 100
 _AWS_RESTORE_RECONCILIATION_MAX_ITEMS = 100_000
 _UPCLOUD_FIREWALL_STABILIZATION_SECONDS = 120
+_UPCLOUD_POWER_TRANSITION_SECONDS = 5 * 60
 
 
 def _restore_reconciliation_seconds():
@@ -584,13 +625,16 @@ def _restore_resolve_reconciliation(restore):
     if reconciliation:
         reconciliation["resolved_at"] = timezone.now().isoformat()
         params["_bs_restore_reconciliation"] = reconciliation
-    params["_bs_create_outcome_unknown"] = False
-    params["_bs_last_error_category"] = ""
-    params["_bs_last_provider_error_code"] = ""
-    params["_bs_last_error_code"] = ""
+    if not _restore_has_unresolved_upcloud_witness(params):
+        params["_bs_create_outcome_unknown"] = False
+        params["_bs_last_error_category"] = ""
+        params["_bs_last_provider_error_code"] = ""
+        params["_bs_last_error_code"] = ""
+    unresolved = _restore_has_unresolved_upcloud_witness(params)
     restore.params = params
-    restore.last_error_code = ""
-    restore.error = ""
+    if not unresolved:
+        restore.last_error_code = ""
+        restore.error = ""
     restore.next_retry_at = None
     restore.save(
         update_fields=[
@@ -875,7 +919,11 @@ def _restore_exception(error, *, mutation=False):
 def _restore_handle_error(restore, error, *, mutation=False, raise_terminal=True):
     classified = _restore_exception(error, mutation=mutation)
     if classified.retryable:
-        if classified.unknown_outcome or mutation:
+        if (
+            classified.unknown_outcome
+            or mutation
+            or _restore_has_unresolved_upcloud_witness(restore)
+        ):
             _restore_unknown_outcome(restore, code=classified.code)
         else:
             params = _restore_params(restore)
@@ -5155,6 +5203,10 @@ class CoreUpCloud(UtilCloud):
             ).hexdigest()
 
         def persist(current, *, phase=None):
+            # ``save()`` also enforces the fence, but keep the explicit check at
+            # every durable transition so a successor cannot be shadowed by a
+            # stale worker between a provider read and a state write.
+            restore.assert_live_execution_fence()
             params = _restore_params(restore)
             params["_bs_upcloud_restore"] = current
             restore.params = params
@@ -5164,6 +5216,13 @@ class CoreUpCloud(UtilCloud):
                 restore.operation_phase = phase
                 fields.append("operation_phase")
             restore.save(update_fields=fields)
+
+        def durable_identity():
+            params = _restore_params(restore)
+            current_identity = params.get("_bs_upcloud_restore")
+            if not isinstance(current_identity, dict):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            return dict(current_identity)
 
         def exact_read(*, mutation=False):
             try:
@@ -5180,16 +5239,28 @@ class CoreUpCloud(UtilCloud):
                 response, mutation=mutation
             )
             if problem is not None:
-                if mutation and problem.code == "PROVIDER_NOT_FOUND":
+                if mutation and not problem.unknown_outcome:
+                    # A successful POST followed by any failed exact read is
+                    # unresolved, including 400/401/404/409/429 responses.
+                    # The request witness must survive until a later exact
+                    # owned read proves the provider state.
                     raise _RestoreProviderError(
                         problem.code,
-                        retryable=True,
+                        retryable=problem.retryable,
                         unknown_outcome=True,
                     )
                 raise problem
-            return self._upcloud_restore_response_server(
+            current_server = self._upcloud_restore_response_server(
                 response, mutation=mutation
             )
+            current_identity = durable_identity()
+            if not self._upcloud_server_restore_owned(
+                current_server, current_identity, resource_id=server_id
+            ):
+                raise _RestoreProviderError(
+                    "PROVIDER_OWNERSHIP_MISMATCH", unknown_outcome=mutation
+                )
+            return current_server
 
         def clear_mutation(current, *, active, witness, stage):
             existing_active = str(current.get("active_mutation") or "")
@@ -5200,7 +5271,9 @@ class CoreUpCloud(UtilCloud):
             current["stage"] = stage
             params = _restore_params(restore)
             params["_bs_upcloud_restore"] = current
-            params["_bs_create_outcome_unknown"] = False
+            params["_bs_create_outcome_unknown"] = (
+                _restore_has_unresolved_upcloud_witness(params)
+            )
             restore.params = params
             restore.status = _restore_status("IN_PROGRESS")
             restore.operation_phase = _restore_phase("RECONCILING")
@@ -5233,7 +5306,48 @@ class CoreUpCloud(UtilCloud):
                     "PROVIDER_RECONCILIATION_REQUIRED", unknown_outcome=True
                 )
 
-        def post_mutation(path, payload, *, active, witness, stage, rejected_stage):
+        def power_request_deadline(request):
+            if not isinstance(request, dict):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            requested_at = _restore_reconciliation_timestamp(
+                request.get("requested_at")
+            )
+            deadline_at = _restore_reconciliation_timestamp(
+                request.get("deadline_at")
+            )
+            if (
+                deadline_at < requested_at
+                or deadline_at - requested_at
+                > datetime.timedelta(seconds=_RESTORE_RECONCILIATION_MAX_SECONDS)
+            ):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+            return deadline_at
+
+        def power_request_expired(request):
+            return (
+                timezone.now().astimezone(datetime.timezone.utc)
+                >= power_request_deadline(request)
+            )
+
+        def post_mutation(
+            path,
+            payload,
+            *,
+            active,
+            witness,
+            stage,
+            rejected_stage,
+            expected_states=(),
+        ):
+            restore.assert_live_execution_fence()
+            # Re-read the exact provider object using the current durable
+            # identity immediately before every power/network POST.  This
+            # closes the gap where labels, source, boot storage, zone, plan, or
+            # UUID drifted after the witness was persisted.
+            pre_server = exact_read()
+            pre_state = str(pre_server.get("state") or "").casefold()
+            if expected_states and pre_state not in set(expected_states):
+                raise _RestoreProviderError("PROVIDER_CONFLICT", retryable=True)
             restore.assert_live_execution_fence()
             try:
                 response = requests.post(
@@ -5261,12 +5375,18 @@ class CoreUpCloud(UtilCloud):
                     )
                 raise problem
             self._upcloud_server_restore_fault_after_accept(
-                restore, identity["server_marker"], stage
+                restore, durable_identity()["server_marker"], stage
             )
             return exact_read(mutation=True)
 
+        current_identity = durable_identity()
+        if not self._upcloud_server_restore_owned(
+            server, current_identity, resource_id=server_id
+        ):
+            raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
         current_server = server
         for _step in range(max(8, len(expected) * 3 + 6)):
+            identity = durable_identity()
             try:
                 contract = _upcloud_server_network_contract(current_server)
             except _BackupProviderError as error:
@@ -5283,6 +5403,8 @@ class CoreUpCloud(UtilCloud):
 
             params = _restore_params(restore)
             current = dict(params.get("_bs_upcloud_restore") or {})
+            if current.get("server_config") != config:
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
             firewall = identity.get("server_firewall")
             if expected and isinstance(firewall, dict) and firewall.get("enabled") is True:
                 verified_raw = current.get("firewall_verified_at")
@@ -5330,14 +5452,12 @@ class CoreUpCloud(UtilCloud):
                     return False
 
             state = str(current_server.get("state") or "").casefold()
-            if state == "error":
-                raise _RestoreProviderError("PROVIDER_FAILED")
-            if state not in {"started", "stopped", "maintenance"}:
+            if state not in {"started", "stopped", "maintenance", "error"}:
                 raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
 
             original_state = current.get("network_original_server_state")
             if original_state in (None, ""):
-                if state == "maintenance":
+                if state in {"maintenance", "error"}:
                     return False
                 original_state = state
                 current["network_original_server_state"] = original_state
@@ -5347,7 +5467,12 @@ class CoreUpCloud(UtilCloud):
 
             assignment = current.get("public_ip_assignment")
             if assignment is not None:
-                if not isinstance(assignment, dict):
+                if not isinstance(assignment, dict) or set(assignment) != {
+                    "server_id",
+                    "ordinal",
+                    "family",
+                    "request_fingerprint",
+                }:
                     raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
                 try:
                     ordinal = int(assignment.get("ordinal"))
@@ -5355,7 +5480,9 @@ class CoreUpCloud(UtilCloud):
                     raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from None
                 family = str(assignment.get("family") or "")
                 if (
-                    ordinal < 0
+                    assignment.get("server_id") != server_id
+                    or type(assignment.get("ordinal")) is not int
+                    or ordinal < 0
                     or ordinal >= len(expected)
                     or family != expected[ordinal]
                 ):
@@ -5380,7 +5507,6 @@ class CoreUpCloud(UtilCloud):
                         witness="public_ip_assignment",
                         stage="public_ip_verified",
                     )
-                    current_server = exact_read()
                     continue
                 if len(actual) != ordinal:
                     raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
@@ -5390,9 +5516,9 @@ class CoreUpCloud(UtilCloud):
                 return False
 
             stop_request = current.get("server_stop_request")
-            stop_payload = {
-                "stop_server": {"stop_type": "soft", "timeout": "60"}
-            }
+            # Do not send UpCloud's optional timeout: it can escalate a soft
+            # stop into a hard stop.  The durable deadline is observation-only.
+            stop_payload = {"stop_server": {"stop_type": "soft"}}
             stop_fingerprint = request_fingerprint(stop_payload)
             if stop_request is not None:
                 if not isinstance(stop_request, dict) or any(
@@ -5411,10 +5537,15 @@ class CoreUpCloud(UtilCloud):
                         witness="server_stop_request",
                         stage="server_stopped",
                     )
-                    current_server = exact_read()
                     continue
+                if power_request_expired(stop_request):
+                    raise _RestoreProviderError(
+                        "PROVIDER_RECONCILIATION_REQUIRED", unknown_outcome=True
+                    )
                 if str(current.get("active_mutation") or "") != "server_stop":
                     raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                if state not in {"started", "maintenance", "error"}:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
                 increment_pending(current, "server_stop_reconciliation_attempts")
                 return False
 
@@ -5429,6 +5560,15 @@ class CoreUpCloud(UtilCloud):
                         "server_stop_request": {
                             "server_id": server_id,
                             "request_fingerprint": stop_fingerprint,
+                            "requested_at": timezone.now()
+                            .astimezone(datetime.timezone.utc)
+                            .isoformat(),
+                            "deadline_at": (
+                                timezone.now().astimezone(datetime.timezone.utc)
+                                + datetime.timedelta(
+                                    seconds=_UPCLOUD_POWER_TRANSITION_SECONDS
+                                )
+                            ).isoformat(),
                         },
                         "server_stop_reconciliation_attempts": 0,
                     }
@@ -5443,6 +5583,7 @@ class CoreUpCloud(UtilCloud):
                     witness="server_stop_request",
                     stage="stop",
                     rejected_stage="server_stop_rejected",
+                    expected_states=("started",),
                 )
                 continue
 
@@ -5463,6 +5604,7 @@ class CoreUpCloud(UtilCloud):
                         "stage": "public_ip_assign_requested",
                         "active_mutation": assignment_active,
                         "public_ip_assignment": {
+                            "server_id": server_id,
                             "ordinal": ordinal,
                             "family": family,
                             "request_fingerprint": fingerprint,
@@ -5503,10 +5645,15 @@ class CoreUpCloud(UtilCloud):
                         witness="server_start_request",
                         stage="server_started",
                     )
-                    current_server = exact_read()
                     continue
                 if str(current.get("active_mutation") or "") != "server_start":
                     raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                if state not in {"stopped", "maintenance", "error"}:
+                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+                if power_request_expired(start_request):
+                    raise _RestoreProviderError(
+                        "PROVIDER_RECONCILIATION_REQUIRED", unknown_outcome=True
+                    )
                 increment_pending(current, "server_start_reconciliation_attempts")
                 return False
 
@@ -5519,6 +5666,15 @@ class CoreUpCloud(UtilCloud):
                         "server_start_request": {
                             "server_id": server_id,
                             "request_fingerprint": start_fingerprint,
+                            "requested_at": timezone.now()
+                            .astimezone(datetime.timezone.utc)
+                            .isoformat(),
+                            "deadline_at": (
+                                timezone.now().astimezone(datetime.timezone.utc)
+                                + datetime.timedelta(
+                                    seconds=_UPCLOUD_POWER_TRANSITION_SECONDS
+                                )
+                            ).isoformat(),
                         },
                         "server_start_reconciliation_attempts": 0,
                     }
@@ -5533,9 +5689,10 @@ class CoreUpCloud(UtilCloud):
                     witness="server_start_request",
                     stage="start",
                     rejected_stage="server_start_rejected",
+                    expected_states=("stopped",),
                 )
                 continue
-            if state == "maintenance":
+            if state in {"maintenance", "error"}:
                 return False
             if state != original_state:
                 raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
@@ -5944,6 +6101,23 @@ class CoreUpCloud(UtilCloud):
                     return _restore_status("IN_PROGRESS")
                 self._adopt_upcloud_server_restore_server(restore, server)
                 return None
+            durable_params = _restore_params(restore)
+            durable_identity = durable_params.get("_bs_upcloud_restore")
+            if _restore_has_unresolved_upcloud_witness(durable_params):
+                # A zero-match list is never permission to create while a
+                # power/network witness remains.  Only the original server
+                # create witness gets bounded zero-match observation; all
+                # later power/network witnesses require manual reconciliation.
+                if (
+                    isinstance(durable_identity, dict)
+                    and durable_identity.get("active_mutation") == "server"
+                ):
+                    return _restore_observe_zero_match(
+                        restore, provider_error_code="PROVIDER_NOT_FOUND"
+                    )
+                raise _RestoreProviderError(
+                    "PROVIDER_RECONCILIATION_REQUIRED", unknown_outcome=True
+                )
             if _restore_unknown(restore):
                 if identity.get("active_mutation") != "server":
                     raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
