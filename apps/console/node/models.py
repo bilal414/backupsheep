@@ -5009,13 +5009,22 @@ class CoreUpCloud(UtilCloud):
         if actual == expected:
             restore.assert_live_execution_fence()
             params, current = self._upcloud_firewall_verified_state(restore)
-            current.update(
-                {
-                    "stage": "firewall_verified",
-                    "active_mutation": "",
-                    "firewall_readback_attempts": 0,
-                }
+            network_mutation_pending = any(
+                current.get(key) is not None
+                for key in (
+                    "server_stop_request",
+                    "public_ip_assignment",
+                    "server_start_request",
+                )
             )
+            current["firewall_readback_attempts"] = 0
+            if not network_mutation_pending:
+                current.update(
+                    {
+                        "stage": "firewall_verified",
+                        "active_mutation": "",
+                    }
+                )
             params["_bs_upcloud_restore"] = current
             restore.params = params
             restore.save(update_fields=["params", "modified"])
@@ -5117,7 +5126,14 @@ class CoreUpCloud(UtilCloud):
         return True
 
     def _upcloud_server_restore_network(self, client, restore, identity, server):
-        """Assign witnessed public IP families only after firewall verification."""
+        """Restore the witnessed public network through durable power fencing.
+
+        UpCloud requires a server to be stopped before a public address can be
+        attached.  Every stop, address assignment, and restart therefore has a
+        durable request witness written before the provider boundary.  A lost
+        response or worker crash is reconciled from the exact owned server; the
+        same mutation is never replayed while its witness remains unresolved.
+        """
         from apps._tasks.integration.upcloud import _upcloud_server_network_contract
 
         config = identity.get("server_config")
@@ -5127,8 +5143,130 @@ class CoreUpCloud(UtilCloud):
         ) or expected != sorted(expected, key=lambda family: (family != "IPv4", family)):
             raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
 
+        server_id = str(server.get("uuid") or "")
+        if not server_id:
+            raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+
+        def request_fingerprint(payload):
+            return hashlib.sha256(
+                json.dumps(
+                    payload, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()
+
+        def persist(current, *, phase=None):
+            params = _restore_params(restore)
+            params["_bs_upcloud_restore"] = current
+            restore.params = params
+            restore.status = _restore_status("IN_PROGRESS")
+            fields = ["params", "status", "modified"]
+            if phase is not None:
+                restore.operation_phase = phase
+                fields.append("operation_phase")
+            restore.save(update_fields=fields)
+
+        def exact_read(*, mutation=False):
+            try:
+                response = requests.get(
+                    f"{settings.UPCLOUD_API}/server/{server_id}",
+                    auth=client,
+                    verify=True,
+                    timeout=request_timeout(),
+                    headers={"accept": "application/json"},
+                )
+            except Exception as error:
+                raise _restore_exception(error, mutation=mutation) from None
+            problem = self._upcloud_restore_response_problem(
+                response, mutation=mutation
+            )
+            if problem is not None:
+                if mutation and problem.code == "PROVIDER_NOT_FOUND":
+                    raise _RestoreProviderError(
+                        problem.code,
+                        retryable=True,
+                        unknown_outcome=True,
+                    )
+                raise problem
+            return self._upcloud_restore_response_server(
+                response, mutation=mutation
+            )
+
+        def clear_mutation(current, *, active, witness, stage):
+            existing_active = str(current.get("active_mutation") or "")
+            if existing_active not in {"", active}:
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+            current.pop(witness, None)
+            current["active_mutation"] = ""
+            current["stage"] = stage
+            params = _restore_params(restore)
+            params["_bs_upcloud_restore"] = current
+            params["_bs_create_outcome_unknown"] = False
+            restore.params = params
+            restore.status = _restore_status("IN_PROGRESS")
+            restore.operation_phase = _restore_phase("RECONCILING")
+            restore.save(
+                update_fields=[
+                    "params",
+                    "status",
+                    "operation_phase",
+                    "modified",
+                ]
+            )
+
+        def reject_mutation(*, active, witness, stage):
+            restore.assert_live_execution_fence()
+            params = _restore_params(restore)
+            current = dict(params.get("_bs_upcloud_restore") or {})
+            clear_mutation(
+                current, active=active, witness=witness, stage=stage
+            )
+
+        def increment_pending(current, field):
+            try:
+                attempts = int(current.get(field, 0)) + 1
+            except (TypeError, ValueError):
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from None
+            current[field] = attempts
+            persist(current)
+            if attempts >= 20:
+                raise _RestoreProviderError(
+                    "PROVIDER_RECONCILIATION_REQUIRED", unknown_outcome=True
+                )
+
+        def post_mutation(path, payload, *, active, witness, stage, rejected_stage):
+            restore.assert_live_execution_fence()
+            try:
+                response = requests.post(
+                    f"{settings.UPCLOUD_API}{path}",
+                    json=payload,
+                    auth=client,
+                    verify=True,
+                    timeout=request_timeout(),
+                    headers={
+                        "accept": "application/json",
+                        "content-type": "application/json",
+                    },
+                )
+            except Exception as error:
+                raise _restore_exception(error, mutation=True) from None
+            problem = self._upcloud_restore_response_problem(
+                response, mutation=True
+            )
+            if problem is not None:
+                if not problem.unknown_outcome:
+                    reject_mutation(
+                        active=active,
+                        witness=witness,
+                        stage=rejected_stage,
+                    )
+                raise problem
+            self._upcloud_server_restore_fault_after_accept(
+                restore, identity["server_marker"], stage
+            )
+            return exact_read(mutation=True)
+
         current_server = server
-        for _step in range(len(expected) + 2):
+        for _step in range(max(8, len(expected) * 3 + 6)):
             try:
                 contract = _upcloud_server_network_contract(current_server)
             except _BackupProviderError as error:
@@ -5190,27 +5328,22 @@ class CoreUpCloud(UtilCloud):
                         ]
                     )
                     return False
-            if actual == expected:
-                current.update(
-                    {
-                        "stage": "network_verified",
-                        "active_mutation": "",
-                        "public_ip_assignments": actual,
-                        "public_ip_reconciliation_attempts": 0,
-                    }
-                )
-                current.pop("public_ip_assignment", None)
-                params["_bs_upcloud_restore"] = current
-                restore.params = params
-                restore.save(update_fields=["params", "modified"])
-                _restore_resolve_reconciliation(restore)
-                return True
 
             state = str(current_server.get("state") or "").casefold()
             if state == "error":
                 raise _RestoreProviderError("PROVIDER_FAILED")
-            if state not in {"started", "stopped"}:
-                return False
+            if state not in {"started", "stopped", "maintenance"}:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
+
+            original_state = current.get("network_original_server_state")
+            if original_state in (None, ""):
+                if state == "maintenance":
+                    return False
+                original_state = state
+                current["network_original_server_state"] = original_state
+                persist(current)
+            elif original_state not in {"started", "stopped"}:
+                raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE")
 
             assignment = current.get("public_ip_assignment")
             if assignment is not None:
@@ -5222,97 +5355,207 @@ class CoreUpCloud(UtilCloud):
                     raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from None
                 family = str(assignment.get("family") or "")
                 if (
-                    ordinal != len(actual)
-                    or ordinal < 0
+                    ordinal < 0
                     or ordinal >= len(expected)
                     or family != expected[ordinal]
                 ):
                     raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
-                try:
-                    attempts = int(current.get("public_ip_reconciliation_attempts", 0)) + 1
-                except (TypeError, ValueError):
-                    raise _RestoreProviderError("PROVIDER_MALFORMED_RESPONSE") from None
-                current["public_ip_reconciliation_attempts"] = attempts
-                params["_bs_upcloud_restore"] = current
-                restore.params = params
-                restore.save(update_fields=["params", "modified"])
-                if attempts >= 20:
-                    raise _RestoreProviderError(
-                        "PROVIDER_RECONCILIATION_REQUIRED", unknown_outcome=True
+                assignment_request = {
+                    "ip_address": {"family": family, "server": server_id}
+                }
+                if assignment.get("request_fingerprint") != request_fingerprint(
+                    assignment_request
+                ):
+                    raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                assignment_active = f"public_ip:{ordinal}:{family}"
+                if len(actual) > ordinal:
+                    if actual[ordinal] != family:
+                        raise _RestoreProviderError(
+                            "PROVIDER_OWNERSHIP_MISMATCH"
+                        )
+                    current["public_ip_reconciliation_attempts"] = 0
+                    clear_mutation(
+                        current,
+                        active=assignment_active,
+                        witness="public_ip_assignment",
+                        stage="public_ip_verified",
                     )
+                    current_server = exact_read()
+                    continue
+                if len(actual) != ordinal:
+                    raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                if str(current.get("active_mutation") or "") != assignment_active:
+                    raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                increment_pending(current, "public_ip_reconciliation_attempts")
                 return False
 
-            ordinal = len(actual)
-            family = expected[ordinal]
-            request = {"ip_address": {"family": family, "server": str(current_server.get("uuid") or "")}}
-            fingerprint = hashlib.sha256(
-                json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest()
+            stop_request = current.get("server_stop_request")
+            stop_payload = {
+                "stop_server": {"stop_type": "soft", "timeout": "60"}
+            }
+            stop_fingerprint = request_fingerprint(stop_payload)
+            if stop_request is not None:
+                if not isinstance(stop_request, dict) or any(
+                    (
+                        stop_request.get("server_id") != server_id,
+                        stop_request.get("request_fingerprint")
+                        != stop_fingerprint,
+                    )
+                ):
+                    raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                if state == "stopped":
+                    current["server_stop_reconciliation_attempts"] = 0
+                    clear_mutation(
+                        current,
+                        active="server_stop",
+                        witness="server_stop_request",
+                        stage="server_stopped",
+                    )
+                    current_server = exact_read()
+                    continue
+                if str(current.get("active_mutation") or "") != "server_stop":
+                    raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                increment_pending(current, "server_stop_reconciliation_attempts")
+                return False
+
+            if actual != expected and state == "maintenance":
+                return False
+            if actual != expected and state == "started":
+                restore.assert_live_execution_fence()
+                current.update(
+                    {
+                        "stage": "server_stop_requested",
+                        "active_mutation": "server_stop",
+                        "server_stop_request": {
+                            "server_id": server_id,
+                            "request_fingerprint": stop_fingerprint,
+                        },
+                        "server_stop_reconciliation_attempts": 0,
+                    }
+                )
+                persist(current)
+                _restore_begin_mutation(restore)
+                _restore_begin_reconciliation(restore)
+                current_server = post_mutation(
+                    f"/server/{server_id}/stop",
+                    stop_payload,
+                    active="server_stop",
+                    witness="server_stop_request",
+                    stage="stop",
+                    rejected_stage="server_stop_rejected",
+                )
+                continue
+
+            if actual != expected and state != "stopped":
+                return False
+
+            if actual != expected:
+                ordinal = len(actual)
+                family = expected[ordinal]
+                request = {
+                    "ip_address": {"family": family, "server": server_id}
+                }
+                fingerprint = request_fingerprint(request)
+                assignment_active = f"public_ip:{ordinal}:{family}"
+                restore.assert_live_execution_fence()
+                current.update(
+                    {
+                        "stage": "public_ip_assign_requested",
+                        "active_mutation": assignment_active,
+                        "public_ip_assignment": {
+                            "ordinal": ordinal,
+                            "family": family,
+                            "request_fingerprint": fingerprint,
+                        },
+                        "public_ip_reconciliation_attempts": 0,
+                    }
+                )
+                persist(current)
+                _restore_begin_mutation(restore)
+                _restore_begin_reconciliation(restore)
+                current_server = post_mutation(
+                    "/ip_address",
+                    request,
+                    active=assignment_active,
+                    witness="public_ip_assignment",
+                    stage="ip",
+                    rejected_stage="public_ip_assign_rejected",
+                )
+                continue
+
+            start_request = current.get("server_start_request")
+            start_payload = {"server": {"start_type": "async"}}
+            start_fingerprint = request_fingerprint(start_payload)
+            if start_request is not None:
+                if not isinstance(start_request, dict) or any(
+                    (
+                        start_request.get("server_id") != server_id,
+                        start_request.get("request_fingerprint")
+                        != start_fingerprint,
+                    )
+                ):
+                    raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                if state == "started":
+                    current["server_start_reconciliation_attempts"] = 0
+                    clear_mutation(
+                        current,
+                        active="server_start",
+                        witness="server_start_request",
+                        stage="server_started",
+                    )
+                    current_server = exact_read()
+                    continue
+                if str(current.get("active_mutation") or "") != "server_start":
+                    raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+                increment_pending(current, "server_start_reconciliation_attempts")
+                return False
+
+            if original_state == "started" and state == "stopped":
+                restore.assert_live_execution_fence()
+                current.update(
+                    {
+                        "stage": "server_start_requested",
+                        "active_mutation": "server_start",
+                        "server_start_request": {
+                            "server_id": server_id,
+                            "request_fingerprint": start_fingerprint,
+                        },
+                        "server_start_reconciliation_attempts": 0,
+                    }
+                )
+                persist(current)
+                _restore_begin_mutation(restore)
+                _restore_begin_reconciliation(restore)
+                current_server = post_mutation(
+                    f"/server/{server_id}/start",
+                    start_payload,
+                    active="server_start",
+                    witness="server_start_request",
+                    stage="start",
+                    rejected_stage="server_start_rejected",
+                )
+                continue
+            if state == "maintenance":
+                return False
+            if state != original_state:
+                raise _RestoreProviderError("PROVIDER_OWNERSHIP_MISMATCH")
+
             current.update(
                 {
-                    "stage": "public_ip_assign_requested",
-                    "active_mutation": f"public_ip:{ordinal}:{family}",
-                    "public_ip_assignment": {
-                        "ordinal": ordinal,
-                        "family": family,
-                        "request_fingerprint": fingerprint,
-                    },
+                    "stage": "network_verified",
+                    "active_mutation": "",
+                    "public_ip_assignments": actual,
                     "public_ip_reconciliation_attempts": 0,
+                    "server_stop_reconciliation_attempts": 0,
+                    "server_start_reconciliation_attempts": 0,
                 }
             )
-            params["_bs_upcloud_restore"] = current
-            restore.params = params
-            restore.save(update_fields=["params", "modified"])
-            _restore_begin_mutation(restore)
-            _restore_begin_reconciliation(restore)
-            restore.assert_live_execution_fence()
-            try:
-                response = requests.post(
-                    f"{settings.UPCLOUD_API}/ip_address",
-                    json=request,
-                    auth=client,
-                    verify=True,
-                    timeout=request_timeout(),
-                    headers={
-                        "accept": "application/json",
-                        "content-type": "application/json",
-                    },
-                )
-                problem = self._upcloud_restore_response_problem(
-                    response, mutation=True
-                )
-                if problem is not None:
-                    if not problem.unknown_outcome:
-                        params = _restore_params(restore)
-                        current = dict(params.get("_bs_upcloud_restore") or {})
-                        current.update({"active_mutation": ""})
-                        current.pop("public_ip_assignment", None)
-                        params["_bs_upcloud_restore"] = current
-                        restore.params = params
-                        restore.save(update_fields=["params", "modified"])
-                    raise problem
-                # The server readback is authoritative.  The IP acceptance
-                # body is intentionally not used to adopt an address.
-                self._upcloud_server_restore_fault_after_accept(
-                    restore, identity["server_marker"], "ip"
-                )
-            except _BackupProviderError as error:
-                raise _RestoreProviderError(
-                    error.code,
-                    retryable=error.retryable,
-                    unknown_outcome=error.unknown_outcome,
-                ) from None
-
-            response = requests.get(
-                f"{settings.UPCLOUD_API}/server/{current_server.get('uuid')}",
-                auth=client,
-                verify=True,
-                timeout=request_timeout(),
-                headers={"accept": "application/json"},
-            )
-            current_server = self._upcloud_restore_response_server(
-                response, mutation=True
-            )
+            current.pop("public_ip_assignment", None)
+            current.pop("server_stop_request", None)
+            current.pop("server_start_request", None)
+            persist(current)
+            _restore_resolve_reconciliation(restore)
+            return True
         raise _RestoreProviderError(
             "PROVIDER_RECONCILIATION_REQUIRED", unknown_outcome=True
         )

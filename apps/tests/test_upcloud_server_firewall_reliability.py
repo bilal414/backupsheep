@@ -419,7 +419,11 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         *,
         lost=False,
         lost_firewall=False,
+        lost_stop=False,
         lost_ip=False,
+        lost_start=False,
+        deferred_stop=False,
+        deferred_start=False,
         target_storage_overrides=None,
     ):
         lease_token = uuid4()
@@ -457,11 +461,18 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         state = {
             "storage_created": False,
             "server_created": False,
+            "server_state": "started",
+            "stop_requests": 0,
             "ip_assigned": False,
+            "start_requests": 0,
         }
 
         def target_view():
-            return deepcopy(target_server if state["ip_assigned"] else isolated_target)
+            value = deepcopy(
+                target_server if state["ip_assigned"] else isolated_target
+            )
+            value["state"] = state["server_state"]
+            return value
 
         def get(url, **kwargs):
             if str(url).endswith(f"/storage/{backup.unique_id}"):
@@ -509,6 +520,37 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
             if str(url).endswith(f"/storage/{backup.unique_id}/clone"):
                 state["storage_created"] = True
                 return Response(202, {"storage": target_storage})
+            if str(url).endswith(f"/server/{target_server['uuid']}/stop"):
+                self.assertEqual(
+                    kwargs.get("json"),
+                    {
+                        "stop_server": {
+                            "stop_type": "soft",
+                            "timeout": "60",
+                        }
+                    },
+                )
+                self.assertEqual(state["server_state"], "started")
+                state["stop_requests"] += 1
+                if not deferred_stop:
+                    state["server_state"] = "stopped"
+                response = Response(200, {"server": target_view()})
+                if lost_stop:
+                    raise raw_requests.Timeout("lost server stop response")
+                return response
+            if str(url).endswith(f"/server/{target_server['uuid']}/start"):
+                self.assertEqual(
+                    kwargs.get("json"),
+                    {"server": {"start_type": "async"}},
+                )
+                self.assertEqual(state["server_state"], "stopped")
+                state["start_requests"] += 1
+                if not deferred_start:
+                    state["server_state"] = "started"
+                response = Response(200, {"server": target_view()})
+                if lost_start:
+                    raise raw_requests.Timeout("lost server start response")
+                return response
             if str(url).endswith("/server"):
                 request_server = (kwargs.get("json") or {}).get("server") or {}
                 self.assertEqual(request_server.get("boot_order"), "disk")
@@ -534,6 +576,7 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
                 return response
             if str(url).endswith("/ip_address"):
                 request = kwargs.get("json") or {}
+                self.assertEqual(state["server_state"], "stopped")
                 self.assertEqual(
                     request,
                     {
@@ -675,8 +718,8 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         self.assertEqual(restore.resource_id, target["uuid"])
         self.assertEqual(
             post_mock.call_count,
-            3,
-        )  # boot clone, isolated server create, and public IPv4 assignment
+            5,
+        )  # boot clone, server create, stop, public IPv4, and restart
         self.assertEqual(put_mock.call_count, 1)
         self.assertTrue(state["firewall_replaced"])
 
@@ -712,7 +755,7 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
 
         restore.refresh_from_db()
         self.assertEqual(restore.resource_id, target["uuid"])
-        self.assertEqual(post_mock.call_count, 3)
+        self.assertEqual(post_mock.call_count, 5)
         self.assertEqual(put_mock.call_count, 1)
         self.assertTrue(state["firewall_replaced"])
         self.assertTrue(state["ip_assigned"])
@@ -1593,6 +1636,222 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         ]
         self.assertEqual(len(ip_posts), 1)
         self.assertTrue(state["ip_assigned"])
+
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
+    def test_restore_lost_stop_response_reconciles_without_duplicate_stop(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="lost-stop-response",
+            params={"zone": "us-chi1"},
+        )
+        get, post, put, state, target = self._restore_http(
+            integration, backup, restore, rules, lost_stop=True
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ), mock.patch(
+            "apps.console.node.models.requests.put", side_effect=put
+        ):
+            result = integration.restore_snapshot(backup, restore)
+            self.assertEqual(result, CoreCloudRestore.Status.IN_PROGRESS)
+            restore.refresh_from_db()
+            identity = restore.params["_bs_upcloud_restore"]
+            self.assertEqual(identity["active_mutation"], "server_stop")
+            self.assertIn("server_stop_request", identity)
+            integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, target["uuid"])
+        self.assertEqual(state["stop_requests"], 1)
+        self.assertEqual(state["start_requests"], 1)
+        self.assertTrue(state["ip_assigned"])
+
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
+    def test_restore_worker_crash_after_stop_acceptance_reconciles_without_duplicate_stop(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="stop-worker-crash",
+            params={"zone": "us-chi1"},
+        )
+        get, post, put, state, target = self._restore_http(
+            integration, backup, restore, rules
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+
+        def crash_after_stop(_restore, _marker, stage):
+            if stage == "stop":
+                raise SystemExit("worker crash after stop acceptance")
+
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ), mock.patch(
+            "apps.console.node.models.requests.put", side_effect=put
+        ), mock.patch.object(
+            CoreUpCloud,
+            "_upcloud_server_restore_fault_after_accept",
+            side_effect=crash_after_stop,
+        ) as fault:
+            with self.assertRaises(SystemExit):
+                integration.restore_snapshot(backup, restore)
+            restore.refresh_from_db()
+            self.assertEqual(
+                restore.params["_bs_upcloud_restore"]["active_mutation"],
+                "server_stop",
+            )
+            fault.side_effect = None
+            integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, target["uuid"])
+        self.assertEqual(state["stop_requests"], 1)
+        self.assertEqual(state["start_requests"], 1)
+
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
+    def test_restore_lost_start_response_reconciles_without_duplicate_start(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="lost-start-response",
+            params={"zone": "us-chi1"},
+        )
+        get, post, put, state, target = self._restore_http(
+            integration, backup, restore, rules, lost_start=True
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ), mock.patch(
+            "apps.console.node.models.requests.put", side_effect=put
+        ):
+            result = integration.restore_snapshot(backup, restore)
+            self.assertEqual(result, CoreCloudRestore.Status.IN_PROGRESS)
+            restore.refresh_from_db()
+            identity = restore.params["_bs_upcloud_restore"]
+            self.assertEqual(identity["active_mutation"], "server_start")
+            self.assertIn("server_start_request", identity)
+            integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, target["uuid"])
+        self.assertEqual(state["stop_requests"], 1)
+        self.assertEqual(state["start_requests"], 1)
+
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
+    def test_restore_worker_crash_after_start_acceptance_reconciles_without_duplicate_start(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="start-worker-crash",
+            params={"zone": "us-chi1"},
+        )
+        get, post, put, state, target = self._restore_http(
+            integration, backup, restore, rules
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+
+        def crash_after_start(_restore, _marker, stage):
+            if stage == "start":
+                raise SystemExit("worker crash after start acceptance")
+
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ), mock.patch(
+            "apps.console.node.models.requests.put", side_effect=put
+        ), mock.patch.object(
+            CoreUpCloud,
+            "_upcloud_server_restore_fault_after_accept",
+            side_effect=crash_after_start,
+        ) as fault:
+            with self.assertRaises(SystemExit):
+                integration.restore_snapshot(backup, restore)
+            restore.refresh_from_db()
+            self.assertEqual(
+                restore.params["_bs_upcloud_restore"]["active_mutation"],
+                "server_start",
+            )
+            fault.side_effect = None
+            integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, target["uuid"])
+        self.assertEqual(state["stop_requests"], 1)
+        self.assertEqual(state["start_requests"], 1)
+
+    @mock.patch(
+        "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
+    )
+    def test_restore_async_power_transitions_poll_without_duplicate_requests(self):
+        integration, backup, rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="async-power-transitions",
+            params={"zone": "us-chi1"},
+        )
+        get, post, put, state, target = self._restore_http(
+            integration,
+            backup,
+            restore,
+            rules,
+            deferred_stop=True,
+            deferred_start=True,
+        )
+        auth_cls = integration.node.connection.auth_upcloud.__class__
+        with mock.patch.object(
+            auth_cls, "get_verified_client", return_value=mock.Mock()
+        ), mock.patch(
+            "apps.console.node.models.requests.get", side_effect=get
+        ), mock.patch(
+            "apps.console.node.models.requests.post", side_effect=post
+        ), mock.patch(
+            "apps.console.node.models.requests.put", side_effect=put
+        ):
+            integration.restore_snapshot(backup, restore)
+            integration.restore_snapshot(backup, restore)
+            self.assertEqual(state["stop_requests"], 1)
+            state["server_state"] = "stopped"
+            integration.restore_snapshot(backup, restore)
+            self.assertEqual(state["start_requests"], 1)
+            integration.restore_snapshot(backup, restore)
+            self.assertEqual(state["start_requests"], 1)
+            state["server_state"] = "started"
+            integration.restore_snapshot(backup, restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.resource_id, target["uuid"])
+        self.assertEqual(state["stop_requests"], 1)
+        self.assertEqual(state["start_requests"], 1)
 
     def test_target_ownership_accepts_provider_all_zero_boot_disk_one_disk_fallback(self):
         integration, backup, rules = self._complete_server_backup()
