@@ -242,6 +242,7 @@ class CoreCloudRestoreSerializer(RestoreExecutionStatusMixin, serializers.ModelS
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()
     can_resume_verification = serializers.BooleanField(read_only=True)
+    verification_resume_mode = serializers.CharField(read_only=True)
 
     class Meta:
         model = CoreCloudRestore

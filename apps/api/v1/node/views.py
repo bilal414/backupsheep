@@ -987,12 +987,12 @@ class CoreNodeView(viewsets.ModelViewSet):
     def resume_restore(self, request, pk=None):
         """Resume read-only provider verification for one durable request.
 
-        This action is deliberately separate from ``restore_backup``.  It may
-        only move a failed/manual-review row with either an already persisted
-        provider pointer or a strictly verified UpCloud volume unknown-outcome
-        identity back to polling/reconciliation. It never invokes a provider
-        create/restore endpoint. The row lock and durable manual-resume sequence
-        make two operator clicks converge on one Celery delivery.
+        This action is deliberately separate from ``restore_backup``. It moves
+        one failed row back to the existing provider state machine. Most modes
+        are read-only polling/reconciliation. A strictly proven UpCloud server
+        request that the provider definitively rejected may retry that same row
+        after a complete zero-match scan. The row lock and durable sequence make
+        two operator clicks converge on one Celery delivery.
         """
         from apps._tasks.integration.restore import poll_cloud_restore
         from apps.console.backup.models import CoreCloudRestore
@@ -1080,15 +1080,11 @@ class CoreNodeView(viewsets.ModelViewSet):
                         status=status.HTTP_409_CONFLICT,
                     )
 
-                if not (
-                    restore.status == CoreCloudRestore.Status.FAILED
-                    and restore.operation_phase
-                    == CoreCloudRestore.OperationPhase.MANUAL_REVIEW
-                ):
+                if restore.status != CoreCloudRestore.Status.FAILED:
                     return Response(
                         {
-                            "code": "restore_not_manual_review",
-                            "detail": "Only failed restores awaiting manual review can be resumed.",
+                            "code": "restore_not_failed",
+                            "detail": "Only failed restores can be resumed.",
                         },
                         status=status.HTTP_409_CONFLICT,
                     )
@@ -1097,10 +1093,11 @@ class CoreNodeView(viewsets.ModelViewSet):
                 if not resume_mode:
                     return Response(
                         {
-                            "code": "restore_provider_pointer_missing",
+                            "code": "restore_not_safely_resumable",
                             "detail": (
-                                "This failed restore has no provider target or exact "
-                                "unknown-outcome identity to verify safely."
+                                "This failed restore has no exact provider target, "
+                                "unknown-outcome identity, or proven rejected request "
+                                "that can be resumed safely."
                             ),
                         },
                         status=status.HTTP_409_CONFLICT,
@@ -1158,7 +1155,7 @@ class CoreNodeView(viewsets.ModelViewSet):
                 restore.execution_metadata = metadata
                 restore.params = params
                 restore.status = CoreCloudRestore.Status.IN_PROGRESS
-                if resume_mode == "provider_reconciliation":
+                if resume_mode in {"provider_reconciliation", "provider_retry"}:
                     restore.operation_phase = (
                         CoreCloudRestore.OperationPhase.RECONCILING
                     )
@@ -1265,6 +1262,7 @@ class CoreNodeView(viewsets.ModelViewSet):
                 "idempotent_replay": False,
                 "manual_resume_enqueued": True,
                 "resume_sequence": resume_sequence,
+                "resume_mode": resume_mode,
             }
         )
         return Response(response_data, status=status.HTTP_202_ACCEPTED)

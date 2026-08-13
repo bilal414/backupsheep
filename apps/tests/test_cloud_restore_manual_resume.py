@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
 from unittest import mock
+from unittest.mock import PropertyMock
 
 from django.db import close_old_connections
 from django.template.loader import get_template
@@ -267,7 +268,7 @@ class ManualCloudRestoreResumeApiTests(TransactionTestCase):
             response = self._post(node, restore.id)
 
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data["code"], "restore_provider_pointer_missing")
+        self.assertEqual(response.data["code"], "restore_not_safely_resumable")
         poll.assert_not_called()
         provider_create.assert_not_called()
         restore.refresh_from_db()
@@ -296,6 +297,47 @@ class ManualCloudRestoreResumeApiTests(TransactionTestCase):
                 data__action="restore_resume_verification",
             ).count(),
             1,
+        )
+
+    def test_proven_definite_rejection_retries_same_row_through_poll_state_machine(self):
+        restore = self._restore(
+            resource_id="",
+            provider_job_id="",
+            status=CoreCloudRestore.Status.FAILED,
+            operation_phase=CoreCloudRestore.OperationPhase.FAILED,
+            execution_phase="failed",
+            last_error_code="PROVIDER_REQUEST_FAILED",
+        )
+
+        with mock.patch.object(
+            CoreCloudRestore,
+            "verification_resume_mode",
+            new_callable=PropertyMock,
+            return_value="provider_retry",
+        ), mock.patch(
+            "apps._tasks.integration.restore.poll_cloud_restore.apply_async"
+        ) as poll, mock.patch.object(
+            self.node.digitalocean, "restore_snapshot"
+        ) as direct_provider_call:
+            response = self._post(self.node, restore.id)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["id"], restore.id)
+        self.assertEqual(response.data["resume_mode"], "provider_retry")
+        direct_provider_call.assert_not_called()
+        poll.assert_called_once_with(
+            task_id=f"cloud-restore-resume-{restore.id}-1",
+            args=[self.node.id, restore.id],
+        )
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, CoreCloudRestore.Status.IN_PROGRESS)
+        self.assertEqual(
+            restore.operation_phase, CoreCloudRestore.OperationPhase.RECONCILING
+        )
+        self.assertEqual(restore.execution_phase, "provider_reconciling")
+        self.assertEqual(
+            restore.execution_metadata["manual_resume_history"][0]["mode"],
+            "provider_retry",
         )
 
     def test_broker_ack_loss_returns_recovery_state_and_repeat_is_harmless(self):
@@ -413,7 +455,7 @@ class ManualCloudRestoreResumeApiTests(TransactionTestCase):
         self.assertEqual(complete_response.data["code"], "restore_already_complete")
         self.assertEqual(missing_response.status_code, 409)
         self.assertEqual(
-            missing_response.data["code"], "restore_provider_pointer_missing"
+            missing_response.data["code"], "restore_not_safely_resumable"
         )
         poll.assert_not_called()
         missing.refresh_from_db()
@@ -463,7 +505,9 @@ class ManualCloudRestoreResumeTemplateTests(SimpleTestCase):
         get_template("console/node/detail.html")
         for marker in (
             "Resume verification",
+            "Retry same restore",
             "nativeRestoreCanResume",
+            "nativeRestoreResumeMode",
             "resumeNativeCloudRestore",
             "/resume_restore/",
             "existing provider target",
@@ -494,6 +538,7 @@ class ManualCloudRestoreResumeTemplateTests(SimpleTestCase):
         )
         self.assertIn("String(item.resource_id || item.provider_job_id || '').trim()", self.source)
         self.assertIn("item.can_resume_verification === true", self.source)
+        self.assertIn("mode === 'provider_retry'", self.source)
 
     def test_duplicate_name_polling_stays_on_the_tracked_restore_id(self):
         polling_block = self.source.split(

@@ -953,6 +953,76 @@ class UpCloudServerFirewallReliabilityTests(BaseTestCase):
         restore.save(update_fields=["params", "modified"])
         self.assertFalse(restore.can_resume_verification)
 
+    def test_definitively_rejected_server_create_can_retry_only_after_complete_zero_match_scan(self):
+        integration, backup, _rules = self._complete_server_backup()
+        restore = CoreCloudRestore.objects.create(
+            node=integration.node,
+            backup_id=backup.id,
+            name="server-definite-retry",
+            status=CoreCloudRestore.Status.FAILED,
+            operation_phase=CoreCloudRestore.OperationPhase.FAILED,
+            execution_phase="failed",
+            last_error_code="PROVIDER_REQUEST_FAILED",
+        )
+        identity = dict(
+            integration._prepare_upcloud_server_restore(backup, restore)
+        )
+        identity.update(
+            {
+                "stage": "server_create_requested",
+                "active_mutation": "server",
+                "target_storage_id": TARGET_STORAGE_ID,
+            }
+        )
+        params = dict(restore.params)
+        params.update(
+            {
+                "_bs_create_outcome_unknown": False,
+                "_bs_last_error_code": "PROVIDER_REQUEST_FAILED",
+                "_bs_last_error_category": "terminal",
+                "_bs_upcloud_server_scan": {
+                    "scan_complete": True,
+                    "page_count": 1,
+                    "item_count": 1,
+                    "match_count": 0,
+                },
+                "_bs_upcloud_restore": identity,
+            }
+        )
+        restore.params = params
+        restore.status = CoreCloudRestore.Status.FAILED
+        restore.operation_phase = CoreCloudRestore.OperationPhase.FAILED
+        restore.execution_phase = "failed"
+        restore.last_error_code = "PROVIDER_REQUEST_FAILED"
+        restore.save(
+            update_fields=[
+                "params",
+                "status",
+                "operation_phase",
+                "execution_phase",
+                "last_error_code",
+                "modified",
+            ]
+        )
+
+        self.assertEqual(restore.verification_resume_mode, "provider_retry")
+        self.assertTrue(restore.can_resume_verification)
+
+        params = dict(restore.params)
+        scan = dict(params["_bs_upcloud_server_scan"])
+        scan["match_count"] = 1
+        params["_bs_upcloud_server_scan"] = scan
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+        self.assertEqual(restore.verification_resume_mode, "")
+
+        scan["match_count"] = 0
+        params["_bs_upcloud_server_scan"] = scan
+        params["_bs_create_outcome_unknown"] = True
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+        self.assertEqual(restore.verification_resume_mode, "")
+
     @mock.patch(
         "apps.console.node.models._UPCLOUD_FIREWALL_STABILIZATION_SECONDS", 0
     )

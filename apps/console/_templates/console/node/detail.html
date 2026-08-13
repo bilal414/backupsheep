@@ -1506,8 +1506,11 @@
                                     Retry scheduled: <span x-text="nativeRestoreStatus.execution_status.next_retry_at"></span>
                                 </p>
                                 <div x-show="nativeRestoreCanResume(nativeRestoreStatus)" class="mt-3 rounded-lg border border-orange-200 bg-orange-50 px-3 py-3">
-                                    <p class="text-xs leading-5 text-orange-800">
+                                    <p x-show="nativeRestoreResumeMode(nativeRestoreStatus) !== 'provider_retry'" class="text-xs leading-5 text-orange-800">
                                         This target already exists at the provider. Resume verification to check that exact target; no new resource will be created.
+                                    </p>
+                                    <p x-show="nativeRestoreResumeMode(nativeRestoreStatus) === 'provider_retry'" class="text-xs leading-5 text-orange-800">
+                                        The provider definitively rejected the previous request and a complete inventory found no matching server. Retry this same restore record; BackupSheep will verify the exact source and inventory again before one create attempt.
                                     </p>
                                     <button type="button" @click="resumeNativeCloudRestore(nativeRestoreStatus)"
                                             :disabled="nativeRestoreResumeSubmitting"
@@ -1516,7 +1519,7 @@
                                             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                                             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                         </svg>
-                                        Resume verification
+                                        <span x-text="nativeRestoreResumeMode(nativeRestoreStatus) === 'provider_retry' ? 'Retry same restore' : 'Resume verification'"></span>
                                     </button>
                                 </div>
                                 <details x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.correlation_id" class="mt-3 rounded-lg border border-slate-200 bg-white px-3 py-2">
@@ -1546,7 +1549,7 @@
                                                         @click="resumeNativeCloudRestore(restoreItem)"
                                                         :disabled="nativeRestoreResumeSubmitting"
                                                         class="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-orange-200 bg-orange-50 px-2.5 py-1 text-xs font-semibold text-orange-700 transition hover:bg-orange-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-600 disabled:cursor-not-allowed disabled:opacity-60">
-                                                    Resume verification
+                                                    <span x-text="nativeRestoreResumeMode(restoreItem) === 'provider_retry' ? 'Retry same restore' : 'Resume verification'"></span>
                                                 </button>
                                             </div>
                                             <span class="inline-flex flex-none items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset"
@@ -3164,11 +3167,19 @@
                         : {};
                     const status = String(item.status || execution.status || '').toLowerCase();
                     const phase = String(item.operation_phase || execution.phase || '').toLowerCase();
+                    const mode = this.nativeRestoreResumeMode(item);
+                    const failed = status === '4' || status === 'failed';
+                    if (mode === 'provider_retry') return failed && phase === 'failed';
+                    return Boolean(mode) && failed && phase === 'manual_review';
+                },
+                nativeRestoreResumeMode(item) {
+                    if (!item || typeof item !== 'object' || Array.isArray(item)) return '';
+                    const declared = String(item.verification_resume_mode || '').trim();
+                    if (['provider_pointer', 'provider_reconciliation', 'provider_retry'].includes(declared)) {
+                        return declared;
+                    }
                     const pointer = String(item.resource_id || item.provider_job_id || '').trim();
-                    const safeResume = item.can_resume_verification === true || Boolean(pointer);
-                    return safeResume &&
-                        (status === '4' || status === 'failed') &&
-                        phase === 'manual_review';
+                    return item.can_resume_verification === true && pointer ? 'provider_pointer' : '';
                 },
                 adoptNativeRestoreTargetIfPresent() {
                     if (this.nativeRestoreStarted || this.nativeRestoreTrackedId) return;
@@ -3380,6 +3391,7 @@
                 },
                 async resumeNativeCloudRestore(item) {
                     if (!this.nativeRestoreCanResume(item) || this.nativeRestoreResumeSubmitting) return;
+                    const resumeMode = this.nativeRestoreResumeMode(item);
                     const restoreId = Number(item.id);
                     if (!Number.isSafeInteger(restoreId) || restoreId < 1) {
                         this.nativeRestoreError = 'This restore could not be identified safely.';
@@ -3427,8 +3439,10 @@
                         Alpine.store('notifications').items.push({
                             show: true,
                             success: true,
-                            heading: 'Verification resumed',
-                            details: 'The existing provider target is being checked. No new resource was created.',
+                            heading: resumeMode === 'provider_retry' ? 'Restore retry started' : 'Verification resumed',
+                            details: resumeMode === 'provider_retry'
+                                ? 'The same durable restore is retrying after exact provider inventory verification.'
+                                : 'The existing provider target is being checked. No new resource was created.',
                         });
                     } catch (error) {
                         const recovered = await this.getNativeCloudRestores(false);

@@ -12671,24 +12671,67 @@ class CoreCloudRestore(BaseRestoreExecution):
         }
         return stage in stage_contracts and active in stage_contracts[stage]
 
+    def _upcloud_server_definite_retry_safe(self, *, params, identity):
+        """Prove that one rejected server create may retry the same row.
+
+        A definite provider rejection means no server was accepted.  Retrying
+        is nevertheless allowed only after a complete marker inventory found
+        zero matches and the durable state machine still points at the exact
+        owned boot-storage clone.  The worker repeats all live ownership reads
+        and the complete marker scan before crossing the create boundary.
+        """
+        if any(
+            (
+                params.get("_bs_create_outcome_unknown") is not False,
+                params.get("_bs_marker_required") is not True,
+                str(self.last_error_code or "") != "PROVIDER_REQUEST_FAILED",
+                str(params.get("_bs_last_error_code") or "")
+                != "PROVIDER_REQUEST_FAILED",
+                str(params.get("_bs_last_error_category") or "") != "terminal",
+                str(identity.get("stage") or "") != "server_create_requested",
+                str(identity.get("active_mutation") or "") != "server",
+                bool(str(identity.get("candidate_server_id") or "").strip()),
+            )
+        ):
+            return False
+        uuid_pattern = (
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}"
+        )
+        if not re.fullmatch(
+            uuid_pattern, str(identity.get("target_storage_id") or "")
+        ):
+            return False
+        scan = params.get("_bs_upcloud_server_scan")
+        if not isinstance(scan, dict) or scan.get("scan_complete") is not True:
+            return False
+        try:
+            page_count = int(scan.get("page_count"))
+            item_count = int(scan.get("item_count"))
+            match_count = int(scan.get("match_count"))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return page_count >= 1 and item_count >= 0 and match_count == 0
+
     @property
     def verification_resume_mode(self):
         """Return the safe operator-resume mode, or an empty string.
 
         Most manual resumes require a committed provider pointer and can only
-        poll that exact target. UpCloud volume/server state machines have one
-        additional safe recovery path: a provider mutation may be accepted
-        before the worker persists the returned UUID. In that crash window,
-        allow the UI to enqueue ``check_restore`` reconciliation only when
-        every durable source-bound identity field is internally consistent.
+        poll that exact target. UpCloud volume/server state machines also
+        reconcile an accepted request whose UUID was not persisted. A third,
+        narrower mode retries the same server row after a *definite* provider
+        rejection and a complete zero-match scan. Every mode requires an
+        internally consistent source-bound durable identity.
         """
-        if not (
-            self.status == self.Status.FAILED
-            and self.operation_phase == self.OperationPhase.MANUAL_REVIEW
-        ):
+        if self.status != self.Status.FAILED:
+            return ""
+        manual_review = self.operation_phase == self.OperationPhase.MANUAL_REVIEW
+        definite_failure = self.operation_phase == self.OperationPhase.FAILED
+        if not (manual_review or definite_failure):
             return ""
         if str(self.resource_id or self.provider_job_id or "").strip():
-            return "provider_pointer"
+            return "provider_pointer" if manual_review else ""
 
         try:
             node = self.node
@@ -12698,8 +12741,6 @@ class CoreCloudRestore(BaseRestoreExecution):
             identity = params.get("_bs_upcloud_restore")
             generic = params.get("_backupsheep_restore")
             if not isinstance(identity, dict) or not isinstance(generic, dict):
-                return ""
-            if params.get("_bs_create_outcome_unknown") is not True:
                 return ""
             if params.get("_bs_marker_required") is not True:
                 return ""
@@ -12718,7 +12759,7 @@ class CoreCloudRestore(BaseRestoreExecution):
                 )
             ).hexdigest()[:24]
             if node.type == node.Type.CLOUD:
-                if self._upcloud_server_verification_resume_safe(
+                safe_identity = self._upcloud_server_verification_resume_safe(
                     params=params,
                     identity=identity,
                     generic=generic,
@@ -12726,10 +12767,20 @@ class CoreCloudRestore(BaseRestoreExecution):
                     source_id=source_id,
                     source_server_id=source_origin_id,
                     digest=digest,
-                ):
+                )
+                if not safe_identity:
+                    return ""
+                if manual_review and params.get("_bs_create_outcome_unknown") is True:
                     return "provider_reconciliation"
+                if definite_failure and self._upcloud_server_definite_retry_safe(
+                    params=params,
+                    identity=identity,
+                ):
+                    return "provider_retry"
                 return ""
             if node.type != node.Type.VOLUME:
+                return ""
+            if not manual_review or params.get("_bs_create_outcome_unknown") is not True:
                 return ""
             marker = f"backupsheep-upcloud-{self.pk}-{digest}"[:128]
             expected_identity = {
