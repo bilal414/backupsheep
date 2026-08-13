@@ -42,9 +42,8 @@ credentials, or public IP address assigned to a restored customer workload.
 - Demo URL: `https://demo.backupsheep.com`
 - UpCloud empty-firewall fix: `b7d44b9151bf3bec2db9a296a6af2c6463f89abf`
 - UpCloud power-safe network restore: `5a5542e` (`Make UpCloud network restores crash-safe`)
-- Final review hardening: resolve the code-bearing commit with
-  `git log -1 --format=%H -- apps/console/node/models.py` after this handoff is
-  committed.
+- Final review hardening:
+  `7e93c22f5dfbf5a3c7540bf3d7a924f267de9dd7`
 - The final authoritative SHA is the commit containing this document. Resolve
   it instead of copying a stale abbreviated hash:
 
@@ -53,9 +52,9 @@ credentials, or public IP address assigned to a restored customer workload.
   ```
 
 At the live acceptance checkpoint, `5a5542e` was pushed to `origin/develop`,
-fast-forwarded on the demo, rebuilt, and migrated. The post-review code is
-covered by the final automated receipt below. The final deployment receipt is
-recorded in this document after the demo checkout is updated and audited.
+fast-forwarded on the demo, rebuilt, and migrated. The post-review code-bearing
+commit `7e93c22` was subsequently pushed, rebuilt, migrated, and audited on the
+demo. The exact receipt is below.
 
 ### Preserved demo database snapshots
 
@@ -67,9 +66,39 @@ root, and mode `0600`.
 | Before controlled row-26 SIGKILL | `pre-upcloud-row26-sigkill-20260813T025815Z.sql.gz` | 244227 | `a290d85031de7ccf4535594c9ed5396d84487e2d57e2e4caa18a55aa5ca2fc01` |
 | Before deploying empty-firewall fix | `predeploy-b7d44b9-20260813T030507Z.sql.gz` | 245340 | `3fda060bce74b803c9db960a245e4fc00cd992ef67b05474dd82f3c53b19f404` |
 | Before power-sequence implementation/deploy | `pre-upcloud-power-sequence-20260813T031044Z.sql.gz` | 249502 | `d76a19b08148252314dd76abf3e7f5a6c5c647d75284bc462fb183f8fba86722` |
+| Before final post-review deploy | `predeploy-7e93c22-20260813T041532Z.sql.gz` | 254908 | `6d9c6655ac6cfff3c145e98fb87d50acae057894c1fa8b74893135a1ef645697` |
 
 Earlier snapshots remain documented in
 `provider-live-e2e-wrap-up-20260812.md`.
+
+### Final post-review demo deployment receipt
+
+Verified at `2026-08-13T04:16:40Z` after rebuilding and restarting from
+`7e93c22f5dfbf5a3c7540bf3d7a924f267de9dd7`:
+
+- demo `HEAD` and `origin/develop` were exactly the code-bearing SHA above;
+- the only expected checkout-local paths remained untracked `_docs/` and
+  `docker-compose.override.yml`;
+- the override SHA-256 remained
+  `90c8c98923b97e32a077f27ddefe5e8e7236a9249d91a24e8e9c4b32f94a1462`;
+- migration container exit code was `0`, `migrate --check --plan` reported no
+  planned operations, and `manage.py check` reported no issues;
+- app, beat, PostgreSQL, RabbitMQ, and the cloud, database, files, logs, and
+  storage workers were running; app, PostgreSQL, and RabbitMQ were healthy;
+- `cloud`, `database`, `default`, `files`, `logs`, and `storage` queues all had
+  zero ready and zero unacknowledged messages with one consumer each;
+- native cloud, website, logical database, and Vultr managed-database restores
+  all had zero pending/in-progress rows;
+- row `26` remained `Complete` with operation/execution phase `complete`, exact
+  provider pointer `00434b40-ffc2-4f85-baa9-6bfbb77c4fe9`, empty last error,
+  unknown outcome `false`, and manual resume count `3`;
+- node `29` still had exactly restore row `[26]`, and global native cloud
+  restore max ID remained `26`;
+- `https://demo.backupsheep.com/healthz/` returned HTTP `200`.
+
+The documentation-only receipt commit that contains this section must be
+fast-forwarded on the demo after publication. It does not require another app
+image rebuild because it changes no executable or deployment input.
 
 ## What changed in the final continuation
 
