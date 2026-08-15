@@ -1,5 +1,11 @@
 # BackupSheep provider live E2E final handoff — 2026-08-13 UTC
 
+> **Continuation notice (2026-08-15):** This checkpoint is superseded by
+> `provider-live-e2e-pause-handoff-20260815.md`. The newer handoff records the
+> deployed hardening, fresh three-provider UI backups, the exact safe pause
+> point, and the remaining restore/native verification work. Its instruction to
+> retain all tokens and keys overrides the credential-rotation steps below.
+
 This is the authoritative continuation document for the UpCloud, Oracle Cloud,
 and DigitalOcean acceptance work plus the final independent-review hardening
 and automated validation completed on 2026-08-13. It supersedes the status and
