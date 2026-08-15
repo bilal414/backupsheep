@@ -1047,6 +1047,8 @@ class OracleEnterpriseReliabilityTests(BaseTestCase):
             ).check_restore(restore),
             CoreCloudRestore.Status.COMPLETE,
         )
+        restore.refresh_from_db()
+        self.assertEqual(restore.params["_bs_provider_status"], "RUNNING")
 
     def test_boot_volume_backup_and_fork_restore_use_current_source_details(self):
         node, integration, backup = self._boot_fixture()

@@ -63,6 +63,7 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
         self.assertIn("backup_id: Number(this.nativeRestore.backupId)", self.source)
         self.assertIn("confirm: true", self.source)
         self.assertIn("request_id: this.nativeRestoreRequestId()", self.source)
+        self.assertIn("recovery_id: this.nativeRestoreRecoveryId()", self.source)
         self.assertIn("params.destination_bucket_name = targetName", self.source)
         self.assertIn("params.target_table_name = targetName", self.source)
         self.assertIn("if (response.status !== 200 && response.status !== 201)", self.source)
@@ -72,7 +73,10 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
         self.assertIn("if (this.nativeRestore.requestId && this.nativeRestore.requestTargetName === targetName)", self.source)
         self.assertIn("window.crypto.randomUUID()", self.source)
         self.assertIn("this.nativeRestore.requestTargetName = targetName", self.source)
+        self.assertIn("if (this.nativeRestore.recoveryId && this.nativeRestore.recoveryTargetName === targetName)", self.source)
+        self.assertIn("this.nativeRestore.recoveryTargetName = targetName", self.source)
         self.assertGreaterEqual(self.source.count("requestId: null"), 3)
+        self.assertGreaterEqual(self.source.count("recoveryId: null"), 3)
         # A fetch failure reconciles the existing durable row; it does not call
         # openNativeCloudRestoreModal or reset requestId before the next attempt.
         retry_block = self.source.split("async startNativeCloudRestore()", 1)[1].split(
@@ -92,6 +96,27 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
         self.assertIn("clearNativeRestorePoll()", self.source)
         self.assertIn("this.nativeRestoreStatusIsTerminal(this.nativeRestoreStatus)", self.source)
         self.assertIn("A lost response can still mean the API created the durable", self.source)
+
+    def test_existing_backup_promotes_latest_restore_but_lost_post_stays_exact(self):
+        restore_block = self.source.split(
+            "async getNativeCloudRestores(showErrors = false, allowNameRecovery = false)",
+            1,
+        )[1].split("async startNativeCloudRestore()", 1)[0]
+        self.assertIn("const recoveringAcceptedRequest = Boolean(", restore_block)
+        self.assertIn(
+            "this.nativeRestore.recoveryId && this.nativeRestore.recoveryTargetName",
+            restore_block,
+        )
+        self.assertIn(
+            "String((item.execution_status || {}).recovery_id || '').trim() === recoveryId",
+            restore_block,
+        )
+        self.assertIn("String(item.name || '').trim() === targetName", restore_block)
+        self.assertIn("matches.length === 1 ? matches[0] : null", restore_block)
+        self.assertNotIn("correlation_id", restore_block)
+        self.assertIn("exact = records.reduce((latest, item) =>", restore_block)
+        self.assertIn("return itemId > latestId ? item : latest", restore_block)
+        self.assertIn("the newest durable attempt instead of pinning", restore_block)
 
     def test_terminal_restore_can_start_another_unique_copy(self):
         self.assertIn("Restore another copy", self.source)

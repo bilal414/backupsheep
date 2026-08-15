@@ -15,6 +15,7 @@ Object Storage access credentials are written atomically to one ignored mode
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import ipaddress
 import io
@@ -129,7 +130,6 @@ SERVICE_TRANSITIONAL_STATES = {
 }
 SERVICE_FAILED_STATES = {"error", "failed", "stopped", "terminated"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-BACKUP_ROW_ID_RE = re.compile(r"^[1-9][0-9]*$")
 UPCLOUD_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
@@ -143,10 +143,187 @@ UI_OBJECT_KINDS = {
     "database": "mos_ui_database_object",
 }
 UI_OBJECT_MANIFEST_SCHEMA = 1
+MANIFEST_MAX_BYTES = 64 * 1024
+MANIFEST_TOP_LEVEL_KEYS = {
+    "object": frozenset({"schema", "run_id", "objects"}),
+    "compute": frozenset({"schema", "run_id", "volume", "server"}),
+    "workload": frozenset({"schema", "run_id", "website", "postgresql"}),
+}
+UPCLOUD_GENERATION_MARKER = ".upcloud-manifest-generation.json"
+WORKLOAD_GENERATION_MARKER = ".workload-manifest-ownership.json"
+UPCLOUD_GENERATION_FILENAMES = frozenset(
+    {
+        "upcloud-compute-manifest.json",
+        "upcloud-workload-manifest.json",
+        "upcloud-object-manifest.json",
+        UPCLOUD_GENERATION_MARKER,
+    }
+)
+WORKLOAD_GENERATION_FILENAMES = frozenset(
+    {"upcloud-workload-manifest.json", WORKLOAD_GENERATION_MARKER}
+)
+UPCLOUD_GENERATION_MARKER_KEYS = frozenset(
+    {
+        "schema",
+        "kind",
+        "provider",
+        "integration_code",
+        "run_id",
+        "disposition",
+        "manifests",
+        "storage_id",
+        "rows",
+        "artifact_bindings",
+    }
+)
+WORKLOAD_GENERATION_MARKER_KEYS = frozenset(
+    {
+        "schema",
+        "kind",
+        "run_id",
+        "provider_code",
+        "integration_code",
+        "storage_id",
+        "rows",
+        "website_restore_correlation_id",
+        "database_restore_correlation_id",
+        "website_restore_path",
+        "database_restore_database",
+        "artifact_bindings",
+        "manifest",
+    }
+)
+UPCLOUD_GENERATION_ROW_KEYS = frozenset(
+    {
+        "volume_node_id",
+        "volume_backup_id",
+        "volume_restore_id",
+        "server_node_id",
+        "server_backup_id",
+        "server_restore_id",
+        "website_node_id",
+        "website_backup_id",
+        "website_restore_id",
+        "database_node_id",
+        "database_backup_id",
+        "database_restore_id",
+        "website_storage_point_id",
+        "database_storage_point_id",
+        "website_artifact_id",
+        "database_artifact_id",
+    }
+)
+WORKLOAD_GENERATION_ROW_KEYS = frozenset(
+    {
+        "website_node_id",
+        "website_backup_id",
+        "website_restore_id",
+        "database_node_id",
+        "database_backup_id",
+        "database_restore_id",
+        "website_storage_point_id",
+        "database_storage_point_id",
+        "website_artifact_id",
+        "database_artifact_id",
+    }
+)
+ARTIFACT_BINDING_KEYS = frozenset(
+    {"artifact_id", "byte_count", "sha256", "etag", "version_id", "binding_sha256"}
+)
+WORKLOAD_STORAGE_CODES = {
+    "do_spaces": "digitalocean",
+    "upcloud": "upcloud",
+    "oracle": "oracle",
+}
+UI_OBJECT_ROW_KEYS = frozenset(
+    {
+        "kind",
+        "backup_id",
+        "backup_uuid",
+        "storage_point_id",
+        "storage_id",
+        "artifact_id",
+        "artifact_status",
+        "object_key",
+        "sha256",
+        "byte_count",
+        "etag",
+        "version_id",
+    }
+)
+COMPUTE_VOLUME_KEYS = frozenset(
+    {
+        "node_id",
+        "backup_id",
+        "restore_id",
+        "source_resource_id",
+        "backup_resource_id",
+        "backup_marker",
+        "restore_resource_id",
+        "restore_marker",
+    }
+)
+COMPUTE_SERVER_KEYS = frozenset(
+    {
+        "node_id",
+        "backup_id",
+        "restore_id",
+        "source_resource_id",
+        "backup_resource_id",
+        "backup_marker",
+        "restore_storage_id",
+        "restore_storage_marker",
+        "restore_server_id",
+        "restore_server_marker",
+        "restore_hostname",
+    }
+)
+WORKLOAD_WEBSITE_KEYS = frozenset(
+    {"node_id", "backup_id", "restore_id", "restore_path"}
+)
+WORKLOAD_DATABASE_KEYS = frozenset(
+    {"node_id", "backup_id", "restore_id", "restore_database"}
+)
+SAFE_BACKUP_OBJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$")
 OBJECT_LEDGER_KINDS = set(UI_OBJECT_KINDS.values()) | {
     "mos_ownership_object",
     "mos_delete_marker",
 }
+USER_RETAINED_BY_INSTRUCTION = "USER_RETAINED_BY_INSTRUCTION"
+MOS_RETENTION_RECEIPT_KIND = "mos_retention_receipt"
+MOS_RUNTIME_CREDENTIAL_KIND = "mos_runtime_credential_file"
+UPCLOUD_ACCOUNT_TOKEN_KIND = "upcloud_account_api_token"
+MOS_RETAINED_PROVIDER_KINDS = frozenset(
+    {
+        "mos_service",
+        "mos_network",
+        "mos_user",
+        "mos_inline_policy",
+        "mos_access_key",
+    }
+)
+MOS_RETAINED_KINDS = MOS_RETAINED_PROVIDER_KINDS | frozenset(
+    {MOS_RUNTIME_CREDENTIAL_KIND}
+)
+MOS_RETENTION_OWNERSHIP_KEYS = frozenset(
+    {
+        "account",
+        "run_id",
+        "service_uuid",
+        "retained_kind",
+        "retained_resource_id",
+        "disposition",
+    }
+)
+MOS_DATA_LEDGER_KINDS = frozenset(
+    {
+        "mos_bucket",
+        "mos_bucket_configuration",
+        "mos_multipart_upload",
+        "mos_ui_object_binding",
+        *OBJECT_LEDGER_KINDS,
+    }
+)
 
 
 class HarnessError(RuntimeError):
@@ -341,10 +518,14 @@ def _read_runtime_secret(path: Path) -> dict:
     return payload
 
 
-def _remove_runtime_secret(path: Path) -> None:
+def _remove_compute_runtime_secret(path: Path) -> None:
     path = _safe_path(
-        path, variable="UPCLOUD_E2E_RUNTIME_FILE", allow_runtime=True
+        path, variable="UpCloud compute runtime file", allow_runtime=True
     )
+    if not path.name.endswith(".upcloud-compute.json"):
+        raise HarnessError(
+            "Only the separate compute runtime artifact can be removed by cleanup."
+        )
     if not path.exists():
         return
     if path.is_symlink() or not path.is_file():
@@ -580,6 +761,245 @@ def _contains_sensitive_key(value) -> bool:
     elif isinstance(value, list):
         return any(_contains_sensitive_key(child) for child in value)
     return False
+
+
+def _strict_object_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise HarnessError("A manifest contains a duplicate JSON key.")
+        result[key] = value
+    return result
+
+
+def _parse_manifest_bytes(payload: bytes, *, kind: str) -> dict:
+    if not isinstance(payload, bytes) or len(payload) > MANIFEST_MAX_BYTES:
+        raise HarnessError(f"The UpCloud {kind} manifest is missing, unsafe, or too large.")
+    try:
+        manifest = json.loads(
+            payload.decode("utf-8"), object_pairs_hook=_strict_object_pairs
+        )
+    except HarnessError:
+        raise
+    except (UnicodeDecodeError, TypeError, ValueError):
+        raise HarnessError(f"The UpCloud {kind} manifest is unreadable.") from None
+    if not isinstance(manifest, dict):
+        raise HarnessError(f"The UpCloud {kind} manifest must be a JSON object.")
+    if _contains_sensitive_key(manifest):
+        raise HarnessError(f"The UpCloud {kind} manifest must not contain credentials.")
+    expected = MANIFEST_TOP_LEVEL_KEYS[kind]
+    if set(manifest) != expected:
+        raise HarnessError(f"The UpCloud {kind} manifest has unknown or missing fields.")
+    if type(manifest.get("schema")) is not int or manifest["schema"] != 1:
+        raise HarnessError(f"The UpCloud {kind} manifest schema must be integer 1.")
+    return manifest
+
+
+def _load_strict_manifest(path_value, *, kind: str) -> dict:
+    """Reject the retired loose-file interface before any file is trusted."""
+
+    _safe_path(path_value, variable="--manifest")
+    raise HarnessError(
+        "Loose manifest paths are no longer accepted; pass a complete new "
+        "generation directory containing its ownership marker."
+    )
+
+
+def _safe_backup_object_id(value, field="backup_uuid") -> str:
+    value = str(value or "").strip()
+    if (
+        not SAFE_BACKUP_OBJECT_ID_RE.fullmatch(value)
+        or value in {".", ".."}
+        or ".." in value
+        or "/" in value
+        or "\\" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise HarnessError(f"{field} is not a safe BackupSheep object identifier.")
+    return value
+
+
+def _positive_generation_id(value, field: str) -> int:
+    if type(value) is not int or value < 1:
+        raise HarnessError(f"{field} must be a positive BackupSheep row ID.")
+    return value
+
+
+def _safe_generation_directory(value) -> tuple[Path, dict[str, Path]]:
+    """Open one immutable-looking generation envelope without provider I/O."""
+
+    if not value:
+        raise HarnessError(
+            "A complete generation directory is required; loose manifest paths "
+            "are no longer accepted."
+        )
+    raw = Path(value).expanduser()
+    if not raw.is_absolute() or any(part in {".", ".."} for part in raw.parts[1:]):
+        raise HarnessError("The generation path must be an absolute, unambiguous directory.")
+    try:
+        if raw.is_symlink():
+            raise HarnessError("The manifest generation directory cannot be a symlink.")
+        absolute = raw.absolute()
+        real = Path(os.path.realpath(absolute))
+        if real != absolute:
+            raise HarnessError("The manifest generation path cannot traverse a symlink.")
+        directory_stat = os.lstat(real)
+    except HarnessError:
+        raise
+    except OSError:
+        raise HarnessError("The manifest generation directory is missing or unreadable.") from None
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        raise HarnessError(
+            "Loose manifest paths are no longer accepted; pass a complete new "
+            "generation directory."
+        )
+    if stat.S_IMODE(directory_stat.st_mode) != 0o700:
+        raise HarnessError("The manifest generation directory must have mode 0700.")
+    files = {}
+    try:
+        with os.scandir(real) as entries:
+            for entry in entries:
+                entry_path = real / entry.name
+                entry_stat = os.lstat(entry_path)
+                if entry.is_symlink() or stat.S_ISLNK(entry_stat.st_mode):
+                    raise HarnessError("Manifest generation files cannot be symlinks.")
+                if not stat.S_ISREG(entry_stat.st_mode):
+                    raise HarnessError("Manifest generation contains a non-regular file.")
+                if stat.S_IMODE(entry_stat.st_mode) != 0o600:
+                    raise HarnessError("Manifest generation files must have mode 0600.")
+                files[entry.name] = entry_path
+    except HarnessError:
+        raise
+    except OSError:
+        raise HarnessError("The manifest generation directory is unreadable.") from None
+    return real, files
+
+
+def _read_generation_file(path: Path, *, label: str) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = None
+    try:
+        descriptor = os.open(path, flags)
+        payload = os.read(descriptor, MANIFEST_MAX_BYTES + 1)
+    except OSError:
+        raise HarnessError(f"The {label} is unreadable.") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if len(payload) > MANIFEST_MAX_BYTES:
+        raise HarnessError(f"The {label} is too large.")
+    return payload
+
+
+def _artifact_binding_digest(identity: dict) -> str:
+    payload = json.dumps(
+        identity,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8") + b"\n"
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _validate_artifact_binding(binding, row, *, label: str) -> dict:
+    if not isinstance(binding, dict) or set(binding) != ARTIFACT_BINDING_KEYS:
+        raise HarnessError(f"The {label} artifact binding is incomplete.")
+    artifact_id = _positive_generation_id(binding.get("artifact_id"), f"{label}.artifact_id")
+    byte_count = _positive_generation_id(binding.get("byte_count"), f"{label}.byte_count")
+    checksum = str(binding.get("sha256") or "").casefold()
+    etag = str(binding.get("etag") or "")
+    version_id = str(binding.get("version_id") or "")
+    binding_digest = str(binding.get("binding_sha256") or "").casefold()
+    if (
+        not SHA256_RE.fullmatch(checksum)
+        or not etag
+        or not version_id
+        or version_id == "null"
+        or not SHA256_RE.fullmatch(binding_digest)
+    ):
+        raise HarnessError(f"The {label} artifact binding is malformed.")
+    identity = {
+        "artifact_id": artifact_id,
+        "byte_count": byte_count,
+        "sha256": checksum,
+        "etag": etag,
+        "version_id": version_id,
+    }
+    if _artifact_binding_digest(identity) != binding_digest:
+        raise HarnessError(f"The {label} artifact binding digest is invalid.")
+    if any(
+        (
+            not isinstance(row, dict),
+            row.get("artifact_id") != artifact_id,
+            row.get("byte_count") != byte_count,
+            str(row.get("sha256") or "").casefold() != checksum,
+            str(row.get("etag") or "") != etag,
+            str(row.get("version_id") or "") != version_id,
+        )
+    ):
+        raise HarnessError(f"The {label} artifact binding does not match its manifest row.")
+    return identity
+
+
+def _validate_object_manifest_rows(manifest: dict) -> dict[str, dict]:
+    rows = manifest.get("objects") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(rows, list)
+        or len(rows) != len(UI_OBJECT_KINDS)
+        or any(not isinstance(row, dict) for row in rows)
+        or sorted(str(row.get("kind") or "") for row in rows)
+        != sorted(UI_OBJECT_KINDS)
+    ):
+        raise HarnessError(
+            "The UI object manifest must contain exactly one website and one database object."
+        )
+    result = {}
+    for row in rows:
+        if set(row) != UI_OBJECT_ROW_KEYS:
+            raise HarnessError("The UI object manifest contains a malformed row.")
+        kind = str(row.get("kind") or "")
+        if kind in result or kind not in UI_OBJECT_KINDS:
+            raise HarnessError("The UI object manifest contains duplicate artifact kinds.")
+        for field in (
+            "backup_id",
+            "storage_point_id",
+            "storage_id",
+            "artifact_id",
+        ):
+            _positive_generation_id(row.get(field), f"{kind}.{field}")
+        backup_uuid = _safe_backup_object_id(row.get("backup_uuid"), f"{kind}.backup_uuid")
+        checksum = str(row.get("sha256") or "").casefold()
+        if (
+            row.get("artifact_status") != "verified"
+            or not checksum
+            or not SHA256_RE.fullmatch(checksum)
+            or type(row.get("byte_count")) is not int
+            or row["byte_count"] < 1
+            or not str(row.get("etag") or "")
+            or not str(row.get("version_id") or "")
+            or str(row.get("version_id")) == "null"
+            or not str(row.get("object_key") or "")
+            or str(row["object_key"]).startswith("/")
+            or "\\" in str(row["object_key"])
+        ):
+            raise HarnessError(f"The {kind} artifact witness is incomplete or unsafe.")
+        result[kind] = {
+            **row,
+            "backup_uuid": backup_uuid,
+            "sha256": checksum,
+            "etag": str(row["etag"]),
+            "version_id": str(row["version_id"]),
+        }
+    return result
+
+
+def _validate_marker_rows(rows, expected, *, label: str) -> None:
+    if not isinstance(rows, dict) or set(rows) != set(expected):
+        raise HarnessError(f"The {label} row binding is incomplete.")
+    for field, value in expected.items():
+        if _positive_generation_id(rows.get(field), f"{label}.{field}") != value:
+            raise HarnessError(f"The {label} row binding does not match its manifests.")
 
 
 @dataclass(frozen=True)
@@ -1335,6 +1755,10 @@ class UpCloudLiveHarness:
         intent_key = "mos_service_create"
         intent = self.intents.get(intent_key)
         services = self._offset_list("/object-storage-2")
+        ledger_service_ids = {
+            str(row.get("resource_id") or "")
+            for row in self._active_entries("mos_service")
+        }
         candidate = self._exact_name(services, "name", self.names["service"])
         intent_matches = bool(
             intent
@@ -2266,6 +2690,7 @@ class UpCloudLiveHarness:
                 "service_uuid": service_entry["resource_id"],
                 "bucket": bucket,
                 "versioning": "Enabled",
+                "provenance": "intent_applied",
                 "request_fingerprint": _fingerprint(versioning_request),
             },
             source_witness=f"{service_entry['resource_id']}:{bucket}",
@@ -2387,29 +2812,258 @@ class UpCloudLiveHarness:
             "versioning": "Enabled",
         }
 
+    def _validate_bucket_configuration(
+        self, entry: dict, *, service_entry: dict, bucket: str
+    ) -> dict:
+        ownership = dict((entry or {}).get("ownership") or {})
+        service_id = str(service_entry.get("resource_id") or "")
+        expected_id = f"{service_id}:{bucket}:versioning"
+        provenance = str(ownership.get("provenance") or "")
+        common_valid = all(
+            (
+                entry.get("resource_id") == expected_id,
+                entry.get("name") == bucket,
+                entry.get("source_witness") == f"{service_id}:{bucket}",
+                ownership.get("account") == self.account,
+                ownership.get("run_id") == self.config.run_id,
+                ownership.get("service_uuid") == service_id,
+                ownership.get("bucket") == bucket,
+                ownership.get("versioning") == "Enabled",
+                provenance in {"intent_applied", "observed_existing"},
+            )
+        )
+        if not common_valid:
+            raise HarnessError("The UpCloud bucket configuration witness is malformed.")
+        if provenance == "intent_applied":
+            if set(ownership) != {
+                "account",
+                "run_id",
+                "service_uuid",
+                "bucket",
+                "versioning",
+                "provenance",
+                "request_fingerprint",
+            }:
+                raise HarnessError("The UpCloud bucket mutation witness has extra fields.")
+            request = {"bucket": bucket, "status": "Enabled"}
+            if ownership.get("request_fingerprint") != _fingerprint(request):
+                raise HarnessError("The UpCloud bucket mutation witness changed.")
+        else:
+            if set(ownership) != {
+                "account",
+                "run_id",
+                "service_uuid",
+                "bucket",
+                "versioning",
+                "provenance",
+                "request_fingerprint",
+                "observation_fingerprint",
+                "ownership_marker",
+            }:
+                raise HarnessError("The UpCloud bucket observation witness has extra fields.")
+            if ownership.get("request_fingerprint") not in (None, ""):
+                raise HarnessError("Observed bucket evidence must not invent a request fingerprint.")
+            observation = {
+                "service_uuid": service_id,
+                "bucket": bucket,
+                "versioning": "Enabled",
+                "provenance": "observed_existing",
+            }
+            if ownership.get("observation_fingerprint") != _fingerprint(observation):
+                raise HarnessError("The UpCloud bucket observation witness changed.")
+        return ownership
+
+    def _ownership_marker_contract(self, bucket: str, prefix: str) -> dict:
+        key = f"{prefix}.backupsheep-e2e-ownership.bin"
+        body = (
+            "BackupSheep UpCloud MOS ownership witness v1\n"
+            + _hash(f"{self.account}:{self.config.run_id}:{bucket}")
+            + "\n"
+        ).encode("ascii")
+        return {
+            "key": key,
+            "body": body,
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "byte_count": len(body),
+            "metadata": {
+                "backupsheep-run": self.config.run_id,
+                "backupsheep-sha256": hashlib.sha256(body).hexdigest(),
+                "backupsheep-bytes": str(len(body)),
+            },
+        }
+
+    def reconcile_object_storage_evidence(self) -> dict:
+        """Adopt fresh read-only versioning/marker evidence for an exact owned bucket."""
+
+        self._require_object_storage_config()
+        self.verify_account()
+        service_entry = self._one_active("mos_service")
+        bucket_entry = self._one_active("mos_bucket")
+        if service_entry is None or bucket_entry is None:
+            raise HarnessError("Object evidence reconciliation requires exact service and bucket witnesses.")
+        service_id = str(service_entry["resource_id"])
+        service = self._service_read(service_id)
+        if not self._service_owned(service or {}, resource_id=service_id):
+            raise HarnessError("The run-owned UpCloud service ownership changed.")
+        bucket_ownership = dict(bucket_entry.get("ownership") or {})
+        if any(
+            (
+                bucket_entry.get("resource_id") != f"{service_id}:{self.names['bucket']}",
+                bucket_entry.get("name") != self.names["bucket"],
+                bucket_entry.get("source_witness") != service_id,
+                bucket_ownership.get("account") != self.account,
+                bucket_ownership.get("run_id") != self.config.run_id,
+                bucket_ownership.get("service_uuid") != service_id,
+                bucket_ownership.get("bucket_name") != self.names["bucket"],
+                bucket_ownership.get("prefix") != self.names["prefix"],
+                bucket_ownership.get("request_fingerprint")
+                != _fingerprint(self._bucket_request()),
+            )
+        ):
+            raise HarnessError("The run-owned UpCloud bucket witness changed.")
+        bucket = self._exact_name(self._buckets(service_id), "name", self.names["bucket"])
+        if bucket is None:
+            raise HarnessError("The exact run-owned UpCloud bucket is not present.")
+        client, runtime = self._s3(service)
+        if runtime["bucket_name"] != self.names["bucket"] or runtime["prefix"] != self.names["prefix"]:
+            raise HarnessError("The protected runtime bucket scope changed.")
+        versioning = _s3_call(
+            lambda: client.get_bucket_versioning(Bucket=runtime["bucket_name"])
+        )
+        if not isinstance(versioning, dict) or versioning.get("Status") != "Enabled":
+            raise HarnessError("The exact run-owned bucket is not currently versioned.")
+
+        contract = self._ownership_marker_contract(
+            runtime["bucket_name"], runtime["prefix"]
+        )
+        inventory = self._s3_inventory(
+            client, runtime["bucket_name"], runtime["prefix"]
+        )
+        marker_versions = self._exact_key_versions(inventory, contract["key"])
+        marker_deletes = [
+            item
+            for item in inventory.get("delete_markers") or []
+            if str(item.get("Key") or "") == contract["key"]
+        ]
+        if len(marker_versions) + len(marker_deletes) > 1:
+            raise HarnessError("Multiple exact UpCloud ownership-marker versions were found.")
+        if marker_deletes:
+            raise HarnessError("The exact UpCloud ownership marker was replaced by a delete marker.")
+        candidates = marker_versions
+        marker_entry = self._one_active("mos_ownership_object")
+        if marker_entry is not None and not candidates:
+            raise HarnessError("The ledgered UpCloud ownership marker disappeared.")
+        marker_status = "absent"
+        if candidates:
+            version_id = str(candidates[0].get("VersionId") or "")
+            if not version_id or version_id == "null":
+                raise HarnessError("The UpCloud ownership marker lacks a version ID.")
+            head = self._head_object(
+                client, runtime["bucket_name"], contract["key"], version_id
+            )
+            if not isinstance(head, dict):
+                raise HarnessError("The exact UpCloud ownership marker is unreadable.")
+            observed_sha, observed_bytes = self._stream_identity(
+                client,
+                runtime["bucket_name"],
+                contract["key"],
+                version_id,
+                contract["byte_count"],
+            )
+            metadata = head.get("Metadata") or {}
+            if any(
+                (
+                    observed_sha != contract["sha256"],
+                    observed_bytes != contract["byte_count"],
+                    int(head.get("ContentLength") or -1) != contract["byte_count"],
+                    any(
+                        str(metadata.get(key) or "") != value
+                        for key, value in contract["metadata"].items()
+                    ),
+                )
+            ):
+                raise HarnessError("The exact UpCloud ownership marker changed.")
+            if marker_entry is None:
+                self._record_object(
+                    kind="mos_ownership_object",
+                    bucket=runtime["bucket_name"],
+                    key=contract["key"],
+                    version_id=version_id,
+                    sha256=contract["sha256"],
+                    byte_count=contract["byte_count"],
+                    etag=head.get("ETag"),
+                    backup_id="",
+                    metadata=contract["metadata"],
+                )
+            else:
+                self._verify_object_entry(client, marker_entry, contract["byte_count"])
+            marker_status = "verified"
+
+        config_entry = self._one_active("mos_bucket_configuration")
+        if config_entry is None:
+            observation = {
+                "service_uuid": service_id,
+                "bucket": runtime["bucket_name"],
+                "versioning": "Enabled",
+                "provenance": "observed_existing",
+            }
+            config_entry = self.ledger.record(
+                kind="mos_bucket_configuration",
+                resource_id=f"{service_id}:{runtime['bucket_name']}:versioning",
+                name=runtime["bucket_name"],
+                ownership={
+                    "account": self.account,
+                    "run_id": self.config.run_id,
+                    **observation,
+                    "request_fingerprint": "",
+                    "observation_fingerprint": _fingerprint(observation),
+                    "ownership_marker": marker_status,
+                },
+                source_witness=f"{service_id}:{runtime['bucket_name']}",
+            )
+        self._validate_bucket_configuration(
+            config_entry,
+            service_entry=service_entry,
+            bucket=runtime["bucket_name"],
+        )
+        config_ownership = config_entry.get("ownership") or {}
+        if (
+            config_ownership.get("provenance") == "observed_existing"
+            and config_ownership.get("ownership_marker") != marker_status
+        ):
+            raise HarnessError("The observed UpCloud ownership-marker state changed.")
+        return {
+            "status": "verified",
+            "service_uuid": service_id,
+            "bucket_name": runtime["bucket_name"],
+            "prefix": runtime["prefix"],
+            "versioning": "Enabled",
+            "configuration_provenance": (config_entry.get("ownership") or {}).get(
+                "provenance"
+            ),
+            "ownership_marker": marker_status,
+        }
+
     def verify_ui_objects(self, manifest_path: str, *, maximum_bytes: int) -> dict:
         if maximum_bytes < 1 or maximum_bytes > 1024**4:
             raise HarnessError("The object verification byte bound is invalid.")
-        path = _safe_path(manifest_path, variable="--manifest")
-        if path.is_symlink() or not path.is_file():
-            raise HarnessError("The UI object manifest is missing or unsafe.")
-        try:
-            with open(path, encoding="utf-8") as source:
-                manifest = json.load(source)
-        except (OSError, ValueError) as error:
-            raise HarnessError("The UI object manifest could not be read.") from error
-        if not isinstance(manifest, dict):
-            raise HarnessError("The UI object manifest must be a JSON object.")
-        if _contains_sensitive_key(manifest):
-            raise HarnessError("The UI object manifest must not contain credentials.")
-        if (
-            type(manifest.get("schema")) is not int
-            or manifest.get("schema") != UI_OBJECT_MANIFEST_SCHEMA
-        ):
-            raise HarnessError("The UI object manifest schema must be 1.")
+        generation = self._load_generation(manifest_path, kind="object")
+        manifest = generation["manifest"]
         if manifest.get("run_id") != self.config.run_id:
             raise HarnessError(
                 "The UI object manifest run_id does not match this harness run."
+            )
+        rows = manifest.get("objects") if isinstance(manifest, dict) else None
+        if (
+            not isinstance(rows, list)
+            or len(rows) != len(UI_OBJECT_KINDS)
+            or any(not isinstance(row, dict) for row in rows)
+            or sorted(str(row.get("kind") or "") for row in rows)
+            != sorted(UI_OBJECT_KINDS)
+        ):
+            raise HarnessError(
+                "The UI object manifest must contain exactly one website and "
+                "one database object."
             )
 
         self._require_object_storage_config()
@@ -2422,39 +3076,54 @@ class UpCloudLiveHarness:
         if not self._service_owned(service or {}, resource_id=service_entry["resource_id"]):
             raise HarnessError("The run-owned UpCloud service ownership changed.")
         client, runtime = self._s3(service)
-        rows = manifest.get("objects") if isinstance(manifest, dict) else None
-        if not isinstance(rows, list) or not rows or len(rows) > 100:
-            raise HarnessError("The UI object manifest must contain 1-100 objects.")
+        self._validate_bucket_configuration(
+            config_entry,
+            service_entry=service_entry,
+            bucket=runtime["bucket_name"],
+        )
+        versioning = _s3_call(
+            lambda: client.get_bucket_versioning(Bucket=runtime["bucket_name"])
+        )
+        if not isinstance(versioning, dict) or versioning.get("Status") != "Enabled":
+            raise HarnessError("The exact UpCloud bucket is no longer versioned.")
         seen = set()
         seen_keys = set()
         verified = []
         for row in rows:
-            if not isinstance(row, dict):
+            if not isinstance(row, dict) or set(row) != UI_OBJECT_ROW_KEYS:
                 raise HarnessError("The UI object manifest contains a malformed row.")
             object_kind = str(row.get("kind") or "")
             kind = UI_OBJECT_KINDS.get(object_kind)
             backup_id = self._manifest_backup_row_id(
                 row.get("backup_id"), "backup_id"
             )
-            backup_uuid = self._manifest_uuid(
-                row.get("backup_uuid"), "backup_uuid"
+            backup_uuid = _safe_backup_object_id(row.get("backup_uuid"))
+            storage_point_id = self._manifest_backup_row_id(
+                row.get("storage_point_id"), "storage_point_id"
             )
+            storage_id = self._manifest_backup_row_id(
+                row.get("storage_id"), "storage_id"
+            )
+            artifact_id = self._manifest_backup_row_id(
+                row.get("artifact_id"), "artifact_id"
+            )
+            artifact_status = str(row.get("artifact_status") or "")
             key = str(row.get("object_key") or "")
             sha256 = str(row.get("sha256") or "").casefold()
             version_id = str(row.get("version_id") or "")
             etag = _etag(row.get("etag"))
-            try:
-                byte_count = int(row.get("byte_count"))
-            except (TypeError, ValueError):
-                raise HarnessError("A UI object byte count is malformed.") from None
+            byte_count = row.get("byte_count")
+            if type(byte_count) is not int:
+                raise HarnessError("A UI object byte count is malformed.")
             identity = (object_kind, backup_id, backup_uuid)
             if (
                 not kind
+                or artifact_status != "verified"
                 or identity in seen
                 or key in seen_keys
                 or key != f"{runtime['prefix']}{backup_uuid}.zip"
                 or not SHA256_RE.fullmatch(sha256)
-                or byte_count < 0
+                or byte_count < 1
                 or byte_count > maximum_bytes
                 or not etag
                 or not version_id
@@ -2480,7 +3149,7 @@ class UpCloudLiveHarness:
             expected_metadata = {
                 "backupsheep-sha256": sha256,
                 "backupsheep-bytes": str(byte_count),
-                "backupsheep-backup-id": backup_id,
+                "backupsheep-backup-id": str(backup_id),
             }
             observed_sha, observed_bytes = self._stream_identity(
                 client,
@@ -2515,11 +3184,45 @@ class UpCloudLiveHarness:
                 backup_uuid=backup_uuid,
                 metadata=expected_metadata,
             )
+            entry = self.ledger.get(kind, _hash(f"{runtime['bucket_name']}\0{key}\0{version_id}"))
+            ownership = dict((entry or {}).get("ownership") or {})
+            ownership["durable_binding"] = {
+                "storage_point_id": storage_point_id,
+                "storage_id": storage_id,
+                "artifact_id": artifact_id,
+                "artifact_status": artifact_status,
+            }
+            if entry is not None:
+                # DurableResourceLedger intentionally refuses rebinding. Record the
+                # complete binding on first adoption by passing it through a dedicated
+                # evidence row whose identity is derived from the exact object version.
+                self.ledger.record(
+                    kind="mos_ui_object_binding",
+                    resource_id=_hash(
+                        f"{kind}\0{backup_id}\0{backup_uuid}\0{storage_point_id}\0{artifact_id}"
+                    ),
+                    name=key,
+                    ownership={
+                        "account": self.account,
+                        "run_id": self.config.run_id,
+                        "object_kind": kind,
+                        "object_resource_id": entry["resource_id"],
+                        "backup_id": backup_id,
+                        "backup_uuid": backup_uuid,
+                        "generation_marker_sha256": generation["marker_digest"],
+                        **ownership["durable_binding"],
+                    },
+                    source_witness=entry["resource_id"],
+                )
             verified.append(
                 {
                     "kind": object_kind,
                     "backup_id": backup_id,
                     "backup_uuid": backup_uuid,
+                    "storage_point_id": storage_point_id,
+                    "storage_id": storage_id,
+                    "artifact_id": artifact_id,
+                    "artifact_status": artifact_status,
                     "object_key": key,
                     "version_id": version_id,
                     "byte_count": byte_count,
@@ -2579,6 +3282,63 @@ class UpCloudLiveHarness:
         self, client, bucket: str, prefix: str, *, maximum_bytes: int
     ) -> tuple[dict, list[dict], list[dict]]:
         inventory = self._s3_inventory(client, bucket, prefix)
+        object_entries = self._object_entries()
+        upload_entries = self._active_entries("mos_multipart_upload")
+        actual_all_versions = {
+            (str(item.get("Key") or ""), str(item.get("VersionId") or ""))
+            for section in ("versions", "delete_markers")
+            for item in (inventory.get(section) or [])
+        }
+        actual_upload_pairs = {
+            (str(item.get("Key") or ""), str(item.get("UploadId") or ""))
+            for item in (inventory.get("multipart_uploads") or [])
+        }
+        for entry in object_entries:
+            ownership = entry.get("ownership") or {}
+            intent_key = f"cleanup:{entry['kind']}:{entry['resource_id']}"
+            intent = self.intents.get(intent_key)
+            if intent and intent.get("request_boundary_crossed"):
+                expected_intent = {
+                    "marker": self.config.run_id,
+                    "kind": entry["kind"],
+                    "name": ownership.get("key"),
+                    "operation": "delete-version",
+                }
+                if any(intent.get(key) != value for key, value in expected_intent.items()):
+                    raise HarnessError("A pending object-delete intent changed scope.")
+                pair = (
+                    str(ownership.get("key") or ""),
+                    str(ownership.get("version_id") or ""),
+                )
+                if pair in actual_all_versions:
+                    raise AmbiguousMutation(
+                        "A crossed object-delete intent remains present; deletion will not replay."
+                    )
+                self.ledger.mark_cleanup(entry["kind"], entry["resource_id"], state="deleted")
+                self.intents.clear(intent_key)
+        for entry in upload_entries:
+            ownership = entry.get("ownership") or {}
+            intent_key = f"cleanup:mos-upload:{entry['resource_id']}"
+            intent = self.intents.get(intent_key)
+            if intent and intent.get("request_boundary_crossed"):
+                expected_intent = {
+                    "marker": self.config.run_id,
+                    "kind": "mos_multipart_upload",
+                    "name": ownership.get("key"),
+                    "operation": "abort",
+                }
+                if any(intent.get(key) != value for key, value in expected_intent.items()):
+                    raise HarnessError("A pending multipart-abort intent changed scope.")
+                pair = (
+                    str(ownership.get("key") or ""),
+                    str(ownership.get("upload_id") or ""),
+                )
+                if pair in actual_upload_pairs:
+                    raise AmbiguousMutation(
+                        "A crossed multipart-abort intent remains present; abort will not replay."
+                    )
+                self.ledger.mark_cleanup("mos_multipart_upload", entry["resource_id"], state="deleted")
+                self.intents.clear(intent_key)
         object_entries = self._object_entries()
         upload_entries = self._active_entries("mos_multipart_upload")
         expected_versions = {
@@ -2733,14 +3493,31 @@ class UpCloudLiveHarness:
         verify_absent,
         params=None,
     ) -> None:
+        if kind in MOS_RETAINED_PROVIDER_KINDS:
+            raise HarnessError(
+                "MOS credential and service scaffolding is retained by user "
+                "instruction and cannot enter a provider-delete path."
+            )
+        expected_intent = {
+            "marker": self.config.run_id,
+            "kind": kind,
+            "name": entry.get("name") or entry["resource_id"],
+            "operation": "delete",
+        }
+        pending = self.intents.get(intent_key)
+        if pending and pending.get("request_boundary_crossed"):
+            if any(pending.get(key) != value for key, value in expected_intent.items()):
+                raise HarnessError("A pending provider-delete intent changed scope.")
+            if verify_absent():
+                self.ledger.mark_cleanup(kind, entry["resource_id"], state="deleted")
+                self.intents.clear(intent_key)
+                return
+            raise AmbiguousMutation(
+                "A crossed provider-delete intent still has an exact resource; deletion will not replay."
+            )
         self.intents.put(
             intent_key,
-            {
-                "marker": self.config.run_id,
-                "kind": kind,
-                "name": entry.get("name") or entry["resource_id"],
-                "operation": "delete",
-            },
+            expected_intent,
         )
         self.intents.update(intent_key, request_boundary_crossed=True)
         self._control_mutation(
@@ -2791,46 +3568,356 @@ class UpCloudLiveHarness:
             )
         self._record_access_key(service_id, username, exact)
 
-    def cleanup_object_storage(self, *, maximum_bytes: int) -> dict:
+    def _record_mos_retention_receipt(
+        self,
+        *,
+        service_id: str,
+        retained_kind: str,
+        retained_resource_id: str,
+        source_witness: str,
+    ) -> dict:
+        if retained_kind not in MOS_RETAINED_KINDS:
+            raise HarnessError("An unsupported MOS retention receipt was requested.")
+        retained_resource_id = str(retained_resource_id or "")
+        if not retained_resource_id or len(retained_resource_id) > 1024:
+            raise HarnessError("A MOS retention receipt resource ID is malformed.")
+        ownership = {
+            "account": self.account,
+            "run_id": self.config.run_id,
+            "service_uuid": str(service_id or ""),
+            "retained_kind": retained_kind,
+            "retained_resource_id": retained_resource_id,
+            "disposition": USER_RETAINED_BY_INSTRUCTION,
+        }
+        receipt_id = _hash(_canonical(ownership))
+        return self.ledger.record(
+            kind=MOS_RETENTION_RECEIPT_KIND,
+            resource_id=receipt_id,
+            name=f"{retained_kind}-retained",
+            ownership=ownership,
+            source_witness=str(source_witness or retained_resource_id),
+        )
+
+    def _mos_retention_receipts(self) -> dict:
+        receipts = {}
+        for row in self._active_entries(MOS_RETENTION_RECEIPT_KIND):
+            ownership = row.get("ownership")
+            if (
+                not isinstance(ownership, dict)
+                or set(ownership) != MOS_RETENTION_OWNERSHIP_KEYS
+                or ownership.get("account") != self.account
+                or ownership.get("run_id") != self.config.run_id
+                or ownership.get("retained_kind") not in MOS_RETAINED_KINDS
+                or ownership.get("disposition")
+                != USER_RETAINED_BY_INSTRUCTION
+                or not str(ownership.get("service_uuid") or "")
+                or not str(ownership.get("retained_resource_id") or "")
+                or row.get("resource_id") != _hash(_canonical(ownership))
+            ):
+                raise HarnessError("A durable MOS retention receipt is malformed.")
+            identity = (
+                str(ownership["retained_kind"]),
+                str(ownership["retained_resource_id"]),
+            )
+            if identity in receipts:
+                raise HarnessError("Duplicate durable MOS retention receipts exist.")
+            receipts[identity] = row
+        return receipts
+
+    @staticmethod
+    def _account_token_retention_summary() -> dict:
+        return {
+            "kind": UPCLOUD_ACCOUNT_TOKEN_KIND,
+            "resource_id": "outside-harness",
+            "disposition": USER_RETAINED_BY_INSTRUCTION,
+        }
+
+    def _mos_retention_summary(self, receipts: dict | None = None) -> list[dict]:
+        receipts = receipts if receipts is not None else self._mos_retention_receipts()
+        result = [self._account_token_retention_summary()]
+        result.extend(
+            {
+                "kind": kind,
+                "resource_id": resource_id,
+                "disposition": USER_RETAINED_BY_INSTRUCTION,
+            }
+            for kind, resource_id in sorted(receipts)
+        )
+        return result
+
+    def _runtime_retention_resource_id(self, key_entry: dict) -> str:
+        return _hash(
+            f"{self.config.runtime_path}\0{key_entry['resource_id']}\0"
+            f"{self.config.run_id}"
+        )
+
+    def _validate_runtime_for_retention(
+        self, service: dict, key_entry: dict
+    ) -> str:
+        runtime = self._validate_runtime(
+            _read_runtime_secret(self.config.runtime_path), service
+        )
+        if _hash(str(runtime.get("access_key") or "")) != key_entry["resource_id"]:
+            raise HarnessError(
+                "The protected runtime credential no longer matches its exact "
+                "access-key witness."
+            )
+        return self._runtime_retention_resource_id(key_entry)
+
+    def _validate_and_receipt_retained_mos_scaffolding(
+        self, service_entry: dict, service: dict
+    ) -> list[dict]:
+        service_id = str(service_entry.get("resource_id") or "")
+        if not self._service_owned(service, resource_id=service_id):
+            raise HarnessError("Retained MOS service ownership verification failed.")
+
+        retained_entries = [("mos_service", service_entry)]
+        network_entry = self._one_active("mos_network")
+        if not network_entry:
+            raise HarnessError("The retained MOS service lacks its network witness.")
+        networks = self.control.request(
+            "GET", f"/object-storage-2/{quote(service_id, safe='')}/networks"
+        )
+        if not isinstance(networks, list) or any(
+            not isinstance(item, dict) for item in networks
+        ):
+            raise HarnessError("UpCloud returned malformed retained network inventory.")
+        if len(networks) != 1:
+            raise HarnessError("Retained MOS network inventory is not exact.")
+        network = networks[0]
+        network_ownership = network_entry.get("ownership") or {}
+        if (
+            network_entry.get("resource_id")
+            != f"{service_id}:{self.names['network']}"
+            or network_ownership.get("account") != self.account
+            or network_ownership.get("run_id") != self.config.run_id
+            or network_ownership.get("service_uuid") != service_id
+            or str(network.get("name") or "") != self.names["network"]
+            or str(network.get("type") or "") != "public"
+            or str(network.get("family") or "") != "IPv4"
+        ):
+            raise HarnessError("Retained MOS network ownership verification failed.")
+        retained_entries.append(("mos_network", network_entry))
+
+        user_entry = self._one_active("mos_user")
+        policy_entry = self._one_active("mos_inline_policy")
+        if user_entry:
+            self._adopt_pending_access_key_for_cleanup(
+                service_id, self.names["username"]
+            )
+        key_entry = self._one_active("mos_access_key")
+        if not user_entry and (policy_entry or key_entry):
+            raise HarnessError(
+                "Retained MOS policy or key evidence exists without its user."
+            )
+
+        users = [
+            item
+            for item in self._users(service_id)
+            if str(item.get("username") or "") != "_upcloud-internal-user"
+        ]
+        if user_entry:
+            if len(users) != 1 or not self._user_owned(
+                users[0], self.names["username"]
+            ):
+                raise HarnessError("Retained MOS user inventory is not exact.")
+            exact_user = self._user_read(service_id, self.names["username"])
+            user_ownership = user_entry.get("ownership") or {}
+            if (
+                not self._user_owned(exact_user or {}, self.names["username"])
+                or user_entry.get("resource_id")
+                != f"{service_id}:{self.names['username']}"
+                or user_ownership.get("account") != self.account
+                or user_ownership.get("run_id") != self.config.run_id
+                or user_ownership.get("service_uuid") != service_id
+            ):
+                raise HarnessError("Retained MOS user ownership verification failed.")
+            retained_entries.append(("mos_user", user_entry))
+
+            policies = self._inline_policies(service_id, self.names["username"])
+            if policy_entry:
+                if (
+                    len(policies) != 1
+                    or str(policies[0].get("name") or "") != self.names["policy"]
+                ):
+                    raise HarnessError("Retained MOS policy inventory is not exact.")
+                exact_policy = self._policy_read(
+                    service_id, self.names["username"], self.names["policy"]
+                )
+                policy_ownership = policy_entry.get("ownership") or {}
+                request = self._policy_request()
+                if (
+                    not self._policy_owned(exact_policy or {}, request)
+                    or policy_entry.get("resource_id")
+                    != f"{service_id}:{self.names['username']}:{self.names['policy']}"
+                    or policy_ownership.get("account") != self.account
+                    or policy_ownership.get("run_id") != self.config.run_id
+                    or policy_ownership.get("service_uuid") != service_id
+                    or policy_ownership.get("document_sha256")
+                    != _hash(_normalized_policy(request["document"]))
+                ):
+                    raise HarnessError("Retained MOS policy ownership verification failed.")
+                retained_entries.append(("mos_inline_policy", policy_entry))
+            elif policies:
+                raise HarnessError("An unledgered retained MOS policy exists.")
+
+            keys = self._access_keys(service_id, self.names["username"])
+            if key_entry:
+                matches = [
+                    item
+                    for item in keys
+                    if _hash(str(item.get("access_key_id") or ""))
+                    == key_entry["resource_id"]
+                ]
+                if len(keys) != 1 or len(matches) != 1:
+                    raise HarnessError("Retained MOS access-key inventory is not exact.")
+                key_id = str(matches[0].get("access_key_id") or "")
+                exact_key = self._access_key_read(
+                    service_id, self.names["username"], key_id
+                )
+                key_ownership = key_entry.get("ownership") or {}
+                if (
+                    not exact_key
+                    or str(exact_key.get("status") or "") != "Active"
+                    or _hash(str(exact_key.get("access_key_id") or ""))
+                    != key_entry["resource_id"]
+                    or key_ownership.get("account") != self.account
+                    or key_ownership.get("run_id") != self.config.run_id
+                    or key_ownership.get("service_uuid") != service_id
+                    or key_ownership.get("username") != self.names["username"]
+                ):
+                    raise HarnessError(
+                        "Retained MOS access-key ownership verification failed."
+                    )
+                retained_entries.append(("mos_access_key", key_entry))
+            elif keys:
+                raise HarnessError("An unledgered retained MOS access key exists.")
+        elif users:
+            raise HarnessError("An unledgered retained MOS user exists.")
+
+        runtime_exists = self.config.runtime_path.exists() or self.config.runtime_path.is_symlink()
+        runtime_resource_id = ""
+        if key_entry:
+            runtime_resource_id = self._validate_runtime_for_retention(
+                service, key_entry
+            )
+        elif runtime_exists:
+            raise HarnessError(
+                "A protected MOS runtime credential exists without an exact key witness."
+            )
+
+        for retained_kind, entry in retained_entries:
+            ownership = entry.get("ownership") or {}
+            if (
+                ownership.get("account") != self.account
+                or ownership.get("run_id") != self.config.run_id
+                or (
+                    retained_kind != "mos_service"
+                    and ownership.get("service_uuid") != service_id
+                )
+            ):
+                raise HarnessError("Retained MOS durable ownership evidence changed.")
+            self._record_mos_retention_receipt(
+                service_id=service_id,
+                retained_kind=retained_kind,
+                retained_resource_id=str(entry["resource_id"]),
+                source_witness=str(entry["resource_id"]),
+            )
+        if runtime_resource_id:
+            self._record_mos_retention_receipt(
+                service_id=service_id,
+                retained_kind=MOS_RUNTIME_CREDENTIAL_KIND,
+                retained_resource_id=runtime_resource_id,
+                source_witness=str(key_entry["resource_id"]),
+            )
+        return self._mos_retention_summary()
+
+    def cleanup_object_storage(
+        self,
+        *,
+        maximum_bytes: int,
+        require_evidence: bool = False,
+        preserve_credentials: bool = True,
+    ) -> dict:
         self._require_cleanup()
+        if preserve_credentials is not True:
+            raise HarnessError(
+                "MOS credential preservation is mandatory; no credential-revoke "
+                "cleanup mode exists."
+            )
         self._require_object_storage_config()
         self.verify_account()
         if maximum_bytes < 1 or maximum_bytes > 1024**4:
             raise HarnessError("The cleanup verification byte bound is invalid.")
         service_entry = self._one_active("mos_service")
         if not service_entry:
-            if any(self._active_entries(kind) for kind in (
-                "mos_bucket",
-                "mos_user",
-                "mos_inline_policy",
-                "mos_access_key",
-            )):
-                raise HarnessError("Nested MOS resources exist without a service witness.")
+            nested_kinds = (
+                *sorted(MOS_RETAINED_PROVIDER_KINDS - {"mos_service"}),
+                *sorted(MOS_DATA_LEDGER_KINDS),
+                MOS_RETENTION_RECEIPT_KIND,
+            )
+            if any(self._active_entries(kind) for kind in nested_kinds):
+                raise HarnessError(
+                    "MOS resources or retention receipts exist without a service witness."
+                )
             return {"status": "nothing_to_cleanup"}
+
+        if require_evidence and (
+            self._one_active("mos_bucket_configuration") is None
+            or self._one_active("mos_ui_website_object") is None
+            or self._one_active("mos_ui_database_object") is None
+            or len(self._active_entries("mos_ui_object_binding")) != 2
+        ):
+            raise HarnessError(
+                "Evidence-gated object cleanup requires complete website/database "
+                "object bindings."
+            )
+
         service_id = str(service_entry["resource_id"])
         service = self._service_read(service_id)
         if service is None:
-            for kind in (
-                "mos_network",
-                "mos_bucket",
-                "mos_bucket_configuration",
-                "mos_user",
-                "mos_inline_policy",
-                "mos_access_key",
-                "mos_multipart_upload",
-                *sorted(OBJECT_LEDGER_KINDS),
-            ):
-                for row in self._active_entries(kind):
-                    self.ledger.mark_cleanup(kind, row["resource_id"], state="absent")
-            self.ledger.mark_cleanup("mos_service", service_id, state="absent")
-            _remove_runtime_secret(self.config.runtime_path)
-            return {"status": "already_absent", "service_uuid": service_id}
+            raise HarnessError(
+                "The user-retained MOS service is absent; cleanup will not mark "
+                "credential or service scaffolding terminal."
+            )
         if not self._service_owned(service, resource_id=service_id):
             raise HarnessError("Cleanup refused a service ownership mismatch.")
 
         bucket_entry = self._one_active("mos_bucket")
-        user_entry = self._one_active("mos_user")
-        policy_entry = self._one_active("mos_inline_policy")
+        if require_evidence:
+            config_entry = self._one_active("mos_bucket_configuration")
+            website = self._one_active("mos_ui_website_object")
+            database = self._one_active("mos_ui_database_object")
+            bindings = self._active_entries("mos_ui_object_binding")
+            if not config_entry or not website or not database or len(bindings) != 2:
+                raise HarnessError(
+                    "Evidence-gated object cleanup requires complete website/database "
+                    "object bindings."
+                )
+            self._validate_bucket_configuration(
+                config_entry,
+                service_entry=service_entry,
+                bucket=self.names["bucket"],
+            )
+            client, runtime = self._s3(service)
+            current = _s3_call(
+                lambda: client.get_bucket_versioning(Bucket=runtime["bucket_name"])
+            )
+            if not isinstance(current, dict) or current.get("Status") != "Enabled":
+                raise HarnessError(
+                    "Evidence-gated object cleanup requires fresh enabled versioning."
+                )
+            if {
+                str((row.get("ownership") or {}).get("object_resource_id") or "")
+                for row in bindings
+            } != {website["resource_id"], database["resource_id"]}:
+                raise HarnessError(
+                    "Durable object bindings do not match exact object versions."
+                )
+
+        retained = self._validate_and_receipt_retained_mos_scaffolding(
+            service_entry, service
+        )
         if bucket_entry:
             ownership = bucket_entry.get("ownership") or {}
             if (
@@ -2843,261 +3930,89 @@ class UpCloudLiveHarness:
                 != f"{service_id}:{self.names['bucket']}"
             ):
                 raise HarnessError("Cleanup refused a bucket ownership mismatch.")
-        if user_entry:
-            ownership = user_entry.get("ownership") or {}
-            if (
-                ownership.get("account") != self.account
-                or ownership.get("run_id") != self.config.run_id
-                or ownership.get("service_uuid") != service_id
-                or ownership.get("username") != self.names["username"]
-            ):
-                raise HarnessError("Cleanup refused a user ownership mismatch.")
-            user = self._user_read(service_id, self.names["username"])
-            if user is not None and not self._user_owned(user, self.names["username"]):
-                raise HarnessError("Cleanup refused a changed UpCloud user.")
-            self._adopt_pending_access_key_for_cleanup(
-                service_id, self.names["username"]
-            )
 
-        runtime = None
-        if bucket_entry:
-            buckets = self._buckets(service_id)
-            bucket = self._exact_name(buckets, "name", self.names["bucket"])
-            if bucket is None:
-                for entry in self._object_entries():
-                    self.ledger.mark_cleanup(
-                        entry["kind"], entry["resource_id"], state="absent"
-                    )
-                for entry in self._active_entries("mos_multipart_upload"):
-                    self.ledger.mark_cleanup(
-                        "mos_multipart_upload", entry["resource_id"], state="absent"
-                    )
-                for entry in self._active_entries("mos_bucket_configuration"):
-                    self.ledger.mark_cleanup(
-                        "mos_bucket_configuration",
-                        entry["resource_id"],
-                        state="absent",
-                    )
-                self.ledger.mark_cleanup(
-                    "mos_bucket", bucket_entry["resource_id"], state="absent"
-                )
-            else:
-                client, runtime = self._s3(service)
-                self._delete_bucket_contents(
-                    client,
-                    self.names["bucket"],
-                    runtime["prefix"],
-                    maximum_bytes=maximum_bytes,
-                )
-                bucket_path = (
-                    f"/object-storage-2/{quote(service_id, safe='')}/buckets/"
-                    f"{quote(self.names['bucket'], safe='')}"
-                )
-                self._control_delete(
-                    intent_key="cleanup:mos-bucket",
-                    kind="mos_bucket",
-                    entry=bucket_entry,
-                    path=bucket_path,
-                    verify_absent=lambda: self._exact_name(
-                        self._buckets(service_id), "name", self.names["bucket"]
-                    )
-                    is None,
-                )
-                for entry in self._active_entries("mos_bucket_configuration"):
-                    self.ledger.mark_cleanup(
-                        "mos_bucket_configuration",
-                        entry["resource_id"],
-                        state="deleted",
-                    )
-
-        key_entry = self._one_active("mos_access_key")
-        if key_entry:
-            if not user_entry:
-                raise HarnessError("An access-key witness exists without its exact user.")
-            keys = self._access_keys(service_id, self.names["username"])
-            matches = [
-                item
-                for item in keys
-                if _hash(str(item.get("access_key_id") or ""))
-                == key_entry["resource_id"]
-            ]
-            if len(matches) > 1 or len(keys) != len(matches):
-                raise HarnessError(
-                    "Cleanup refused an extra or ambiguous access key on the run-owned user."
-                )
-            if not matches:
-                self.ledger.mark_cleanup(
-                    "mos_access_key", key_entry["resource_id"], state="absent"
-                )
-            else:
-                key_id = str(matches[0].get("access_key_id") or "")
-                exact = self._access_key_read(
-                    service_id, self.names["username"], key_id
-                )
-                if (
-                    not exact
-                    or _hash(str(exact.get("access_key_id") or ""))
-                    != key_entry["resource_id"]
-                ):
-                    raise HarnessError("Cleanup refused a changed access key.")
-                self._control_delete(
-                    intent_key="cleanup:mos-access-key",
-                    kind="mos_access_key",
-                    entry=key_entry,
-                    path=(
-                        f"/object-storage-2/{quote(service_id, safe='')}/users/"
-                        f"{quote(self.names['username'], safe='')}/access-keys/"
-                        f"{quote(key_id, safe='')}"
-                    ),
-                    verify_absent=lambda: self._access_key_read(
-                        service_id, self.names["username"], key_id
-                    )
-                    is None,
-                )
-
-        if policy_entry:
-            policy = self._policy_read(
-                service_id, self.names["username"], self.names["policy"]
-            )
-            if policy is None:
-                self.ledger.mark_cleanup(
-                    "mos_inline_policy", policy_entry["resource_id"], state="absent"
-                )
-            else:
-                request = self._policy_request()
-                ownership = policy_entry.get("ownership") or {}
-                if (
-                    not self._policy_owned(policy, request)
-                    or ownership.get("document_sha256")
-                    != _hash(_normalized_policy(request["document"]))
-                ):
-                    raise HarnessError("Cleanup refused a changed inline policy.")
-                self._control_delete(
-                    intent_key="cleanup:mos-inline-policy",
-                    kind="mos_inline_policy",
-                    entry=policy_entry,
-                    path=(
-                        f"/object-storage-2/{quote(service_id, safe='')}/users/"
-                        f"{quote(self.names['username'], safe='')}/inline-policies/"
-                        f"{quote(self.names['policy'], safe='')}"
-                    ),
-                    verify_absent=lambda: self._policy_read(
-                        service_id, self.names["username"], self.names["policy"]
-                    )
-                    is None,
-                )
-
-        if user_entry:
-            user = self._user_read(service_id, self.names["username"])
-            if user is None:
-                self.ledger.mark_cleanup(
-                    "mos_user", user_entry["resource_id"], state="absent"
-                )
-            else:
-                if (
-                    not self._user_owned(user, self.names["username"])
-                    or self._access_keys(service_id, self.names["username"])
-                    or self._inline_policies(service_id, self.names["username"])
-                    or (user.get("policies") or [])
-                ):
-                    raise HarnessError(
-                        "Cleanup refused a user with extra keys or policy dependencies."
-                    )
-                self._control_delete(
-                    intent_key="cleanup:mos-user",
-                    kind="mos_user",
-                    entry=user_entry,
-                    path=(
-                        f"/object-storage-2/{quote(service_id, safe='')}/users/"
-                        f"{quote(self.names['username'], safe='')}"
-                    ),
-                    verify_absent=lambda: self._user_read(
-                        service_id, self.names["username"]
-                    )
-                    is None,
-                )
-
-        network_entry = self._one_active("mos_network")
-        if network_entry:
-            ownership = network_entry.get("ownership") or {}
-            networks = self.control.request(
-                "GET", f"/object-storage-2/{quote(service_id, safe='')}/networks"
-            )
-            if not isinstance(networks, list):
-                raise HarnessError("UpCloud returned malformed network inventory.")
-            matches = [
-                item
-                for item in networks
-                if isinstance(item, dict)
-                and str(item.get("name") or "") == self.names["network"]
-            ]
-            if len(matches) > 1:
-                raise HarnessError("Multiple exact run-owned networks were found.")
-            if not matches:
-                self.ledger.mark_cleanup(
-                    "mos_network", network_entry["resource_id"], state="absent"
-                )
-            else:
-                network = matches[0]
-                if (
-                    ownership.get("account") != self.account
-                    or ownership.get("run_id") != self.config.run_id
-                    or ownership.get("service_uuid") != service_id
-                    or str(network.get("type") or "") != "public"
-                    or str(network.get("family") or "") != "IPv4"
-                ):
-                    raise HarnessError("Cleanup refused a changed service network.")
-                self._control_delete(
-                    intent_key="cleanup:mos-network",
-                    kind="mos_network",
-                    entry=network_entry,
-                    path=(
-                        f"/object-storage-2/{quote(service_id, safe='')}/networks/"
-                        f"{quote(self.names['network'], safe='')}"
-                    ),
-                    verify_absent=lambda: not any(
-                        isinstance(item, dict)
-                        and str(item.get("name") or "") == self.names["network"]
-                        for item in self.control.request(
-                            "GET",
-                            f"/object-storage-2/{quote(service_id, safe='')}/networks",
-                        )
-                    ),
-                )
-
-        remaining_buckets = self._buckets(service_id)
-        remaining_users = [
-            item
-            for item in self._users(service_id)
-            if str(item.get("username") or "") != "_upcloud-internal-user"
+        buckets = self._buckets(service_id)
+        bucket = self._exact_name(buckets, "name", self.names["bucket"])
+        foreign_buckets = [
+            row
+            for row in buckets
+            if str(row.get("name") or "") != self.names["bucket"]
         ]
-        remaining_networks = self.control.request(
-            "GET", f"/object-storage-2/{quote(service_id, safe='')}/networks"
-        )
-        if remaining_buckets or remaining_users or remaining_networks:
+        if foreign_buckets:
             raise HarnessError(
-                "Service cleanup refused unowned bucket, user, or network dependencies."
+                "Data cleanup refused an unowned bucket on the retained MOS service."
             )
-        self._control_delete(
-            intent_key="cleanup:mos-service",
-            kind="mos_service",
-            entry=service_entry,
-            path=f"/object-storage-2/{quote(service_id, safe='')}",
-            params={"force": "false"},
-            verify_absent=lambda: self._service_read(service_id) is None,
-        )
+        if bucket and not bucket_entry:
+            raise HarnessError(
+                "Data cleanup refused an unledgered bucket on the retained MOS service."
+            )
 
-        active_keys = self._active_entries("mos_access_key")
-        active_services = self._active_entries("mos_service")
-        if active_keys or active_services:
-            raise HarnessError(
-                "The protected runtime credential remains until key and service cleanup are proven."
+        if bucket_entry and bucket is None:
+            for entry in self._object_entries():
+                self.ledger.mark_cleanup(
+                    entry["kind"], entry["resource_id"], state="absent"
+                )
+            for entry in self._active_entries("mos_multipart_upload"):
+                self.ledger.mark_cleanup(
+                    "mos_multipart_upload", entry["resource_id"], state="absent"
+                )
+            for kind in ("mos_bucket_configuration", "mos_ui_object_binding"):
+                for entry in self._active_entries(kind):
+                    self.ledger.mark_cleanup(
+                        kind, entry["resource_id"], state="absent"
+                    )
+            self.ledger.mark_cleanup(
+                "mos_bucket", bucket_entry["resource_id"], state="absent"
             )
-        _remove_runtime_secret(self.config.runtime_path)
-        for key in list(self.intents.pending()):
-            if key.startswith("mos_") or key.startswith("cleanup:mos-"):
-                self.intents.clear(key)
-        return {"status": "completed", "service_uuid": service_id}
+        elif bucket_entry:
+            client, runtime = self._s3(service)
+            self._delete_bucket_contents(
+                client,
+                self.names["bucket"],
+                runtime["prefix"],
+                maximum_bytes=maximum_bytes,
+            )
+            bucket_path = (
+                f"/object-storage-2/{quote(service_id, safe='')}/buckets/"
+                f"{quote(self.names['bucket'], safe='')}"
+            )
+            self._control_delete(
+                intent_key="cleanup:mos-bucket",
+                kind="mos_bucket",
+                entry=bucket_entry,
+                path=bucket_path,
+                verify_absent=lambda: self._exact_name(
+                    self._buckets(service_id), "name", self.names["bucket"]
+                )
+                is None,
+            )
+            for kind in ("mos_bucket_configuration", "mos_ui_object_binding"):
+                for entry in self._active_entries(kind):
+                    self.ledger.mark_cleanup(
+                        kind, entry["resource_id"], state="deleted"
+                    )
+
+        if self._buckets(service_id):
+            raise HarnessError(
+                "The retained MOS service still contains a bucket after data cleanup."
+            )
+        active_data = {
+            kind: [row["resource_id"] for row in self._active_entries(kind)]
+            for kind in sorted(MOS_DATA_LEDGER_KINDS)
+            if self._active_entries(kind)
+        }
+        if active_data:
+            raise HarnessError(
+                "Object data cleanup cannot complete while durable data evidence "
+                "remains active."
+            )
+        return {
+            "status": "completed",
+            "service_uuid": service_id,
+            "data_cleanup": "terminal",
+            "credential_service_scaffolding": USER_RETAINED_BY_INSTRUCTION,
+            "retained_by_instruction": retained,
+        }
 
     # Compute and Block Storage -------------------------------------------------
 
@@ -3163,6 +4078,38 @@ class UpCloudLiveHarness:
                 raise HarnessError("UpCloud compute pagination did not advance.")
             offset = next_offset
         raise HarnessError("UpCloud compute inventory exceeded its page bound.")
+
+    def _ip_inventory(self) -> list[dict]:
+        rows = []
+        seen = set()
+        offset = 0
+        for _page in range(MAX_PAGES):
+            payload = self.control.request(
+                "GET",
+                "/ip_address",
+                params={"limit": COMPUTE_PAGE_LIMIT, "offset": offset},
+            )
+            container = payload.get("ip_addresses") if isinstance(payload, dict) else None
+            page = container.get("ip_address") if isinstance(container, dict) else None
+            if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+                raise HarnessError("UpCloud returned malformed IP inventory.")
+            for row in page:
+                address = str(row.get("address") or "")
+                try:
+                    ipaddress.ip_address(address)
+                except ValueError:
+                    raise HarnessError("UpCloud returned malformed IP inventory.") from None
+                identity = (address, str(row.get("server") or ""))
+                if identity in seen:
+                    raise HarnessError("UpCloud IP inventory contains duplicates.")
+                seen.add(identity)
+                rows.append(row)
+            if len(rows) > MAX_ITEMS:
+                raise HarnessError("UpCloud IP inventory exceeded the safety bound.")
+            if len(page) < COMPUTE_PAGE_LIMIT:
+                return rows
+            offset += len(page)
+        raise HarnessError("UpCloud IP inventory exceeded the page bound.")
 
     @staticmethod
     def _exact_title(items: list[dict], title: str) -> dict | None:
@@ -4396,6 +5343,97 @@ class UpCloudLiveHarness:
         )
 
     @staticmethod
+    def _ssh_host_key_fingerprint(client) -> str:
+        try:
+            raw = client.get_transport().get_remote_server_key().asbytes()
+        except Exception:
+            raise HarnessError("The UpCloud SSH host key was not readable.") from None
+        if not isinstance(raw, bytes) or not raw:
+            raise HarnessError("The UpCloud SSH host key was malformed.")
+        return "SHA256:" + base64.b64encode(hashlib.sha256(raw).digest()).decode(
+            "ascii"
+        ).rstrip("=")
+
+    def _guest_restore_evidence(self, client, server: dict) -> dict:
+        """Verify the restored guest network, boot, and bounded egress state."""
+
+        provider_addresses = self._server_public_addresses(server)
+        if len(provider_addresses) != 1:
+            raise HarnessError("Guest verification requires one exact provider public IPv4.")
+        try:
+            addresses = json.loads(self._ssh_run(client, "ip -j address show", timeout=30))
+            routes = json.loads(self._ssh_run(client, "ip -j route show default", timeout=30))
+        except (TypeError, ValueError):
+            raise HarnessError("The restored guest returned malformed network evidence.") from None
+        if not isinstance(addresses, list) or not isinstance(routes, list):
+            raise HarnessError("The restored guest returned malformed network evidence.")
+        matches = []
+        for interface in addresses:
+            if not isinstance(interface, dict):
+                raise HarnessError("The restored guest returned malformed interfaces.")
+            for address in interface.get("addr_info") or []:
+                if (
+                    isinstance(address, dict)
+                    and address.get("family") == "inet"
+                    and address.get("scope") == "global"
+                    and str(address.get("local") or "") == provider_addresses[0]
+                ):
+                    matches.append(interface)
+        if len(matches) != 1:
+            raise HarnessError("The restored guest public IP does not match the provider.")
+        interface = matches[0]
+        ifname = str(interface.get("ifname") or "")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_.:-]{1,32}", ifname)
+            or str(interface.get("operstate") or "").upper() != "UP"
+        ):
+            raise HarnessError("The restored guest public interface is not UP.")
+        defaults = [
+            route
+            for route in routes
+            if isinstance(route, dict)
+            and str(route.get("dst") or "default") == "default"
+            and str(route.get("dev") or "") == ifname
+        ]
+        if len(defaults) != 1:
+            raise HarnessError("The restored guest default route uses another interface.")
+        boot = self._ssh_run(
+            client,
+            "printf '%s|' \"$(cat /proc/sys/kernel/random/boot_id)\"; "
+            "awk '{printf \"%.0f\\n\", $1}' /proc/uptime",
+            timeout=30,
+        )
+        boot_id, separator, uptime_value = boot.partition("|")
+        try:
+            uptime_seconds = int(uptime_value)
+        except (TypeError, ValueError):
+            uptime_seconds = -1
+        if (
+            not separator
+            or not UPCLOUD_UUID_RE.fullmatch(boot_id)
+            or uptime_seconds < 0
+            or uptime_seconds > 31 * 24 * 60 * 60
+        ):
+            raise HarnessError("The restored guest boot/uptime evidence is malformed.")
+        reachability = self._ssh_run(
+            client,
+            "python3 -c 'import socket; s=socket.create_connection((\"1.1.1.1\",443),5); s.close(); print(\"reachable\")'",
+            timeout=15,
+        )
+        if reachability != "reachable":
+            raise HarnessError("The restored guest outbound reachability check failed.")
+        return {
+            "interface": ifname,
+            "interface_state": "UP",
+            "public_ip_sha256": _hash(provider_addresses[0]),
+            "default_route_interface": ifname,
+            "outbound_reachability": "verified",
+            "outbound_target": "1.1.1.1:443",
+            "boot_id_sha256": _hash(boot_id),
+            "uptime_seconds": uptime_seconds,
+        }
+
+    @staticmethod
     def _ssh_run(client, command: str, *, timeout: int = 60) -> str:
         try:
             _stdin, stdout, _stderr = client.exec_command(command, timeout=timeout)
@@ -4658,10 +5696,8 @@ class UpCloudLiveHarness:
         return {
             "base": base,
             "website_root": f"{base}/website",
-            "restore_root": f"{base}/restores",
             "database": f"bs_e2e_{digest}"[:63],
             "database_user": f"bs_e2e_u_{digest}"[:63],
-            "restore_database_prefix": f"bsr_{digest}_",
             "nginx_site": f"backupsheep-e2e-{self.config.run_id}",
         }
 
@@ -4868,8 +5904,36 @@ ALTER TABLE events OWNER TO {database_user};
         return payload
 
     def _website_evidence(self, client, root: str, expected: dict) -> dict:
-        if not root.startswith(f"/srv/backupsheep-e2e/{self.config.run_id}/"):
-            raise HarnessError("The website evidence root escaped the run directory.")
+        root = self._owned_website_restore_path(root)
+        path_probe = (
+            "import json,os,stat,sys\n"
+            "path=sys.argv[1]\n"
+            "current=''\n"
+            "links=[]\n"
+            "for part in [value for value in path.split('/') if value]:\n"
+            "    current += '/' + part\n"
+            "    if stat.S_ISLNK(os.lstat(current).st_mode):\n"
+            "        links.append(current)\n"
+            "print(json.dumps({'realpath':os.path.realpath(path),'symlinks':links},sort_keys=True))\n"
+        )
+        identity = self._ssh_run(
+            client,
+            "sudo -n python3 -c "
+            + shlex.quote(path_probe)
+            + " "
+            + shlex.quote(root),
+            timeout=30,
+        )
+        try:
+            identity = json.loads(identity)
+        except (TypeError, ValueError):
+            raise HarnessError("The website restore path identity is malformed.") from None
+        if (
+            not isinstance(identity, dict)
+            or identity.get("realpath") != root
+            or identity.get("symlinks") != []
+        ):
+            raise HarnessError("The website restore path contains symlink ambiguity.")
         quoted_root = shlex.quote(root)
         listing = self._ssh_run(
             client,
@@ -5078,8 +6142,8 @@ ALTER TABLE events OWNER TO {database_user};
                 _compute_runtime_path(self.config.runtime_path, self.config.run_id)
             ),
             "ssh_private_key_file": str(self._key_paths()[0]),
-            "restore_website_root": names["restore_root"],
-            "restore_database_prefix": names["restore_database_prefix"],
+            "website_restore_contract": "exact_completed_durable_source_state",
+            "database_restore_contract": "exact_completed_durable_target_mapping",
             "compatible_ui_destinations": [
                 "UpCloud Managed Object Storage",
                 "Oracle Object Storage",
@@ -5152,8 +6216,8 @@ ALTER TABLE events OWNER TO {database_user};
                     )
                 ),
                 "ssh_private_key_file": str(self._key_paths()[0]),
-                "restore_website_root": names["restore_root"],
-                "restore_database_prefix": names["restore_database_prefix"],
+                "website_restore_contract": "exact_completed_durable_source_state",
+                "database_restore_contract": "exact_completed_durable_target_mapping",
                 "compatible_ui_destinations": [
                     "UpCloud Managed Object Storage",
                     "Oracle Object Storage",
@@ -5335,61 +6399,337 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
             firewall,
         )
 
-    def _load_workload_manifest(self, manifest_path: str) -> dict:
-        path = _safe_path(manifest_path, variable="--manifest")
-        if not path.is_file() or path.stat().st_size > 64 * 1024:
-            raise HarnessError("The workload manifest is missing or too large.")
-        try:
-            with open(path, encoding="utf-8") as source:
-                manifest = json.load(source)
-        except (OSError, ValueError):
-            raise HarnessError("The workload manifest is unreadable.") from None
+    def _normalize_workload_manifest(self, manifest: dict) -> dict:
         if (
-            not isinstance(manifest, dict)
-            or manifest.get("schema") != 1
-            or manifest.get("run_id") != self.config.run_id
+            manifest.get("run_id") != self.config.run_id
             or not isinstance(manifest.get("website"), dict)
+            or set(manifest["website"]) != WORKLOAD_WEBSITE_KEYS
             or not isinstance(manifest.get("postgresql"), dict)
+            or set(manifest["postgresql"]) != WORKLOAD_DATABASE_KEYS
         ):
             raise HarnessError("The workload manifest scope is malformed.")
         names = self._workload_names()
         website = manifest["website"]
         database = manifest["postgresql"]
-        website_backup_id = self._manifest_marker(
+        website_node_id = self._manifest_backup_row_id(
+            website.get("node_id"), "website.node_id"
+        )
+        website_backup_id = self._manifest_backup_row_id(
             website.get("backup_id"), "website.backup_id"
         )
-        website_restore_id = self._manifest_marker(
+        website_restore_id = self._manifest_backup_row_id(
             website.get("restore_id"), "website.restore_id"
         )
-        expected_path = f"{names['restore_root']}/{website_restore_id}"
-        if str(website.get("restore_path") or "") != expected_path:
-            raise HarnessError("The website restore path escaped its exact run directory.")
-        database_backup_id = self._manifest_marker(
+        expected_path = self._owned_website_restore_path(
+            website.get("restore_path")
+        )
+        database_node_id = self._manifest_backup_row_id(
+            database.get("node_id"), "postgresql.node_id"
+        )
+        database_backup_id = self._manifest_backup_row_id(
             database.get("backup_id"), "postgresql.backup_id"
         )
-        database_restore_id = self._manifest_marker(
+        database_restore_id = self._manifest_backup_row_id(
             database.get("restore_id"), "postgresql.restore_id"
         )
         restore_database = str(database.get("restore_database") or "")
+        source_database = names["database"]
         if (
-            not re.fullmatch(r"[a-z][a-z0-9_]{2,62}", restore_database)
-            or not restore_database.startswith(names["restore_database_prefix"])
+            not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", restore_database)
+            or restore_database == source_database
+            or f"_{source_database}_" not in f"_{restore_database}_"
         ):
-            raise HarnessError("The PostgreSQL restore database escaped its run prefix.")
+            raise HarnessError(
+                "The PostgreSQL restore target is not bound to the owned source database."
+            )
         return {
             "website": {
+                "node_id": website_node_id,
                 "backup_id": website_backup_id,
                 "restore_id": website_restore_id,
                 "restore_path": expected_path,
             },
             "postgresql": {
+                "node_id": database_node_id,
                 "backup_id": database_backup_id,
                 "restore_id": database_restore_id,
                 "restore_database": restore_database,
             },
         }
 
+    def _load_workload_manifest_with_evidence(self, generation_path: str) -> tuple[dict, str]:
+        loaded = self._load_generation(generation_path, kind="workload")
+        return (
+            self._normalize_workload_manifest(loaded["manifest"]),
+            loaded["marker_digest"],
+        )
+
+    def _load_workload_manifest(self, generation_path: str) -> dict:
+        return self._load_workload_manifest_with_evidence(generation_path)[0]
+
+    def _owned_website_restore_path(self, value) -> str:
+        value = str(value or "")
+        base = self._workload_names()["base"]
+        if (
+            value != value.strip()
+            or "\\" in value
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            or not (value == base or value.startswith(base + "/"))
+        ):
+            raise HarnessError("The website restore path escaped its owned run root.")
+        parts = value.split("/")
+        if parts[0] or any(part in {"", ".", ".."} for part in parts[1:]):
+            raise HarnessError("The website restore path is lexically ambiguous.")
+        return value
+
+    def _load_generation(self, generation_path: str, *, kind: str) -> dict:
+        """Load and bind one complete generation before provider/guest reads."""
+
+        if kind not in MANIFEST_TOP_LEVEL_KEYS:
+            raise HarnessError("The requested manifest kind is unsupported.")
+        directory, files = _safe_generation_directory(generation_path)
+        names = set(files)
+        if names == UPCLOUD_GENERATION_FILENAMES:
+            marker_filename = UPCLOUD_GENERATION_MARKER
+            full_generation = True
+        elif kind == "workload" and names == WORKLOAD_GENERATION_FILENAMES:
+            marker_filename = WORKLOAD_GENERATION_MARKER
+            full_generation = False
+        else:
+            raise HarnessError(
+                "The generation must contain exactly its ownership marker and all "
+                "required manifest files; copied or mixed generations are rejected."
+            )
+
+        marker_bytes = _read_generation_file(
+            files[marker_filename], label="manifest ownership marker"
+        )
+        try:
+            marker = json.loads(
+                marker_bytes.decode("utf-8"), object_pairs_hook=_strict_object_pairs
+            )
+        except HarnessError:
+            raise
+        except (UnicodeDecodeError, TypeError, ValueError):
+            raise HarnessError("The manifest ownership marker is unreadable.") from None
+        if not isinstance(marker, dict) or _contains_sensitive_key(marker):
+            raise HarnessError("The manifest ownership marker is malformed or contains credentials.")
+        if marker.get("run_id") != self.config.run_id:
+            raise HarnessError("The manifest ownership marker run_id does not match this harness run.")
+
+        if full_generation:
+            if set(marker) != UPCLOUD_GENERATION_MARKER_KEYS or any(
+                (
+                    marker.get("schema") != 1,
+                    marker.get("kind") != "upcloud_manifest_generation_ownership",
+                    marker.get("provider") != "upcloud",
+                    marker.get("integration_code") != "upcloud",
+                    marker.get("disposition") != "EXCLUSIVE_COMPLETE_GENERATION",
+                )
+            ):
+                raise HarnessError("The UpCloud generation ownership marker is malformed.")
+            manifest_entries = marker.get("manifests")
+            if not isinstance(manifest_entries, dict) or set(manifest_entries) != {
+                "compute",
+                "workload",
+                "object",
+            }:
+                raise HarnessError("The UpCloud generation manifest set is incomplete.")
+            for manifest_kind, entry in manifest_entries.items():
+                if not isinstance(entry, dict) or set(entry) != {
+                    "filename",
+                    "sha256",
+                    "byte_count",
+                }:
+                    raise HarnessError("The UpCloud generation file binding is malformed.")
+                expected_filename = {
+                    "compute": "upcloud-compute-manifest.json",
+                    "workload": "upcloud-workload-manifest.json",
+                    "object": "upcloud-object-manifest.json",
+                }[manifest_kind]
+                if (
+                    entry.get("filename") != expected_filename
+                    or not SHA256_RE.fullmatch(str(entry.get("sha256") or "").casefold())
+                    or type(entry.get("byte_count")) is not int
+                    or entry["byte_count"] < 1
+                    or entry["byte_count"] > MANIFEST_MAX_BYTES
+                ):
+                    raise HarnessError("The UpCloud generation file binding is malformed.")
+            manifests = {}
+            for manifest_kind, entry in manifest_entries.items():
+                filename = entry["filename"]
+                payload = _read_generation_file(
+                    files[filename], label=f"UpCloud {manifest_kind} manifest"
+                )
+                digest = hashlib.sha256(payload).hexdigest()
+                if len(payload) != entry["byte_count"] or digest != entry["sha256"]:
+                    raise HarnessError(
+                        "The generation contains a tampered or mixed-generation manifest."
+                    )
+                manifests[manifest_kind] = _parse_manifest_bytes(
+                    payload, kind=manifest_kind
+                )
+            if any(
+                manifest.get("run_id") != self.config.run_id
+                for manifest in manifests.values()
+            ):
+                raise HarnessError("A manifest run_id does not match the ownership marker.")
+            if (
+                not isinstance(manifests["compute"].get("volume"), dict)
+                or set(manifests["compute"]["volume"]) != COMPUTE_VOLUME_KEYS
+                or not isinstance(manifests["compute"].get("server"), dict)
+                or set(manifests["compute"]["server"]) != COMPUTE_SERVER_KEYS
+                or not isinstance(manifests["workload"].get("website"), dict)
+                or set(manifests["workload"]["website"]) != WORKLOAD_WEBSITE_KEYS
+                or not isinstance(manifests["workload"].get("postgresql"), dict)
+                or set(manifests["workload"]["postgresql"]) != WORKLOAD_DATABASE_KEYS
+            ):
+                raise HarnessError("The UpCloud generation manifest fields are malformed.")
+            object_rows = _validate_object_manifest_rows(manifests["object"])
+            try:
+                volume = manifests["compute"]["volume"]
+                server = manifests["compute"]["server"]
+                website = manifests["workload"]["website"]
+                database = manifests["workload"]["postgresql"]
+                expected_rows = {
+                    "volume_node_id": _positive_generation_id(volume["node_id"], "volume node_id"),
+                    "volume_backup_id": _positive_generation_id(volume["backup_id"], "volume backup_id"),
+                    "volume_restore_id": _positive_generation_id(volume["restore_id"], "volume restore_id"),
+                    "server_node_id": _positive_generation_id(server["node_id"], "server node_id"),
+                    "server_backup_id": _positive_generation_id(server["backup_id"], "server backup_id"),
+                    "server_restore_id": _positive_generation_id(server["restore_id"], "server restore_id"),
+                    "website_node_id": _positive_generation_id(website["node_id"], "website node_id"),
+                    "website_backup_id": _positive_generation_id(website["backup_id"], "website backup_id"),
+                    "website_restore_id": _positive_generation_id(website["restore_id"], "website restore_id"),
+                    "database_node_id": _positive_generation_id(database["node_id"], "database node_id"),
+                    "database_backup_id": _positive_generation_id(database["backup_id"], "database backup_id"),
+                    "database_restore_id": _positive_generation_id(database["restore_id"], "database restore_id"),
+                    "website_storage_point_id": _positive_generation_id(
+                        object_rows["website"]["storage_point_id"], "website storage_point_id"
+                    ),
+                    "database_storage_point_id": _positive_generation_id(
+                        object_rows["database"]["storage_point_id"], "database storage_point_id"
+                    ),
+                    "website_artifact_id": _positive_generation_id(
+                        object_rows["website"]["artifact_id"], "website artifact_id"
+                    ),
+                    "database_artifact_id": _positive_generation_id(
+                        object_rows["database"]["artifact_id"], "database artifact_id"
+                    ),
+                }
+            except (KeyError, TypeError):
+                raise HarnessError("The UpCloud generation row bindings are incomplete.") from None
+            _validate_marker_rows(marker.get("rows"), expected_rows, label="UpCloud generation")
+            storage_ids = {
+                object_rows["website"]["storage_id"],
+                object_rows["database"]["storage_id"],
+            }
+            if len(storage_ids) != 1 or marker.get("storage_id") != next(iter(storage_ids)):
+                raise HarnessError("The UpCloud generation storage binding is inconsistent.")
+            bindings = marker.get("artifact_bindings")
+            if not isinstance(bindings, dict) or set(bindings) != {"website", "database"}:
+                raise HarnessError("The UpCloud generation artifact bindings are incomplete.")
+            for label in ("website", "database"):
+                _validate_artifact_binding(bindings[label], object_rows[label], label=label)
+        else:
+            if set(marker) != WORKLOAD_GENERATION_MARKER_KEYS or marker.get("schema") != 1:
+                raise HarnessError("The workload generation ownership marker is malformed.")
+            provider_code = str(marker.get("provider_code") or "")
+            if (
+                provider_code not in WORKLOAD_STORAGE_CODES
+                or marker.get("integration_code") != WORKLOAD_STORAGE_CODES[provider_code]
+                or type(marker.get("storage_id")) is not int
+                or marker["storage_id"] < 1
+                or not UPCLOUD_UUID_RE.fullmatch(
+                    str(marker.get("website_restore_correlation_id") or "")
+                )
+                or not UPCLOUD_UUID_RE.fullmatch(
+                    str(marker.get("database_restore_correlation_id") or "")
+                )
+                or not isinstance(marker.get("website_restore_path"), str)
+                or not isinstance(marker.get("database_restore_database"), str)
+            ):
+                raise HarnessError("The workload generation ownership marker is malformed.")
+            entry = marker.get("manifest")
+            if not isinstance(entry, dict) or set(entry) != {
+                "filename",
+                "sha256",
+                "byte_count",
+            } or entry.get("filename") != "upcloud-workload-manifest.json":
+                raise HarnessError("The workload generation file binding is malformed.")
+            if (
+                not SHA256_RE.fullmatch(str(entry.get("sha256") or "").casefold())
+                or type(entry.get("byte_count")) is not int
+                or entry["byte_count"] < 1
+                or entry["byte_count"] > MANIFEST_MAX_BYTES
+            ):
+                raise HarnessError("The workload generation file binding is malformed.")
+            payload = _read_generation_file(
+                files["upcloud-workload-manifest.json"], label="UpCloud workload manifest"
+            )
+            if len(payload) != entry["byte_count"] or hashlib.sha256(payload).hexdigest() != entry["sha256"]:
+                raise HarnessError(
+                    "The generation contains a tampered or mixed-generation workload manifest."
+                )
+            manifests = {"workload": _parse_manifest_bytes(payload, kind="workload")}
+            workload = manifests["workload"]
+            if (
+                not isinstance(workload.get("website"), dict)
+                or set(workload["website"]) != WORKLOAD_WEBSITE_KEYS
+                or not isinstance(workload.get("postgresql"), dict)
+                or set(workload["postgresql"]) != WORKLOAD_DATABASE_KEYS
+            ):
+                raise HarnessError("The workload generation manifest fields are malformed.")
+            website = workload.get("website") or {}
+            database = workload.get("postgresql") or {}
+            expected_rows = {
+                "website_node_id": _positive_generation_id(website.get("node_id"), "website node_id"),
+                "website_backup_id": _positive_generation_id(website.get("backup_id"), "website backup_id"),
+                "website_restore_id": _positive_generation_id(website.get("restore_id"), "website restore_id"),
+                "database_node_id": _positive_generation_id(database.get("node_id"), "database node_id"),
+                "database_backup_id": _positive_generation_id(database.get("backup_id"), "database backup_id"),
+                "database_restore_id": _positive_generation_id(database.get("restore_id"), "database restore_id"),
+            }
+            rows = marker.get("rows")
+            if not isinstance(rows, dict) or set(rows) != WORKLOAD_GENERATION_ROW_KEYS:
+                raise HarnessError("The workload generation row binding is incomplete.")
+            for field, value in expected_rows.items():
+                if rows.get(field) != value:
+                    raise HarnessError("The workload generation row binding does not match its manifest.")
+            if (
+                marker["website_restore_path"] != website.get("restore_path")
+                or marker["database_restore_database"] != database.get("restore_database")
+            ):
+                raise HarnessError("The workload generation restore binding does not match its manifest.")
+            bindings = marker.get("artifact_bindings")
+            if not isinstance(bindings, dict) or set(bindings) != {"website", "database"}:
+                raise HarnessError("The workload generation artifact bindings are incomplete.")
+            for label in ("website", "database"):
+                binding = bindings[label]
+                if not isinstance(binding, dict) or set(binding) != ARTIFACT_BINDING_KEYS:
+                    raise HarnessError(f"The {label} artifact binding is incomplete.")
+                _validate_artifact_binding(
+                    binding,
+                    {
+                        "artifact_id": rows[f"{label}_artifact_id"],
+                        "byte_count": binding.get("byte_count"),
+                        "sha256": binding.get("sha256"),
+                        "etag": binding.get("etag"),
+                        "version_id": binding.get("version_id"),
+                    },
+                    label=label,
+                )
+
+        return {
+            "generation_dir": str(directory),
+            "marker_digest": hashlib.sha256(marker_bytes).hexdigest(),
+            "marker": marker,
+            "manifests": manifests,
+            "manifest": manifests[kind],
+        }
+
     def verify_workloads(self, manifest_path: str) -> dict:
+        manifest, marker_digest = self._load_workload_manifest_with_evidence(manifest_path)
         self._require_apply()
         self._require_compute_config()
         self.verify_account()
@@ -5403,7 +6743,6 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
         runtime = _read_compute_runtime_secret(
             _compute_runtime_path(self.config.runtime_path, self.config.run_id)
         )
-        manifest = self._load_workload_manifest(manifest_path)
         ownership = source.get("ownership") or {}
         client = self._ssh_client(
             server, host_variable="UPCLOUD_E2E_SOURCE_SSH_HOST"
@@ -5470,6 +6809,7 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
                 "website": restored_website,
                 "postgresql": restored_database,
                 "all_evidence_matches": True,
+                "manifest_marker_sha256": marker_digest,
             },
             source_witness=server_entry["resource_id"],
         )
@@ -5527,16 +6867,8 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
         return value
 
     @staticmethod
-    def _manifest_backup_row_id(value, field: str) -> str:
-        if isinstance(value, bool) or value is None:
-            raise HarnessError(f"{field} must be a positive numeric BackupSheep row ID.")
-        if isinstance(value, int):
-            value = str(value)
-        elif isinstance(value, str):
-            value = value.strip()
-        else:
-            raise HarnessError(f"{field} must be a positive numeric BackupSheep row ID.")
-        if not BACKUP_ROW_ID_RE.fullmatch(value):
+    def _manifest_backup_row_id(value, field: str) -> int:
+        if type(value) is not int or value < 1:
             raise HarnessError(f"{field} must be a positive numeric BackupSheep row ID.")
         return value
 
@@ -5549,27 +6881,31 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
             raise HarnessError(f"{field} is not a BackupSheep-owned marker.")
         return value
 
-    def _load_compute_manifest(self, manifest_path: str) -> dict:
-        path = _safe_path(manifest_path, variable="--manifest")
-        if not path.is_file() or path.stat().st_size > 64 * 1024:
-            raise HarnessError("The UpCloud compute manifest is missing or too large.")
-        try:
-            with open(path, encoding="utf-8") as source:
-                manifest = json.load(source)
-        except (OSError, ValueError):
-            raise HarnessError("The UpCloud compute manifest is unreadable.") from None
+    def _normalize_compute_manifest(self, manifest: dict) -> dict:
         if (
-            not isinstance(manifest, dict)
-            or manifest.get("schema") != 1
-            or manifest.get("run_id") != self.config.run_id
+            manifest.get("run_id") != self.config.run_id
             or not isinstance(manifest.get("volume"), dict)
+            or set(manifest["volume"]) != COMPUTE_VOLUME_KEYS
             or not isinstance(manifest.get("server"), dict)
+            or set(manifest["server"]) != COMPUTE_SERVER_KEYS
         ):
             raise HarnessError("The UpCloud compute manifest scope is malformed.")
         volume = manifest["volume"]
         server = manifest["server"]
         normalized = {
             "volume": {
+                "node_id": self._manifest_backup_row_id(
+                    volume.get("node_id"), "volume.node_id"
+                ),
+                "backup_id": self._manifest_backup_row_id(
+                    volume.get("backup_id"), "volume.backup_id"
+                ),
+                "restore_id": self._manifest_backup_row_id(
+                    volume.get("restore_id"), "volume.restore_id"
+                ),
+                "source_resource_id": self._manifest_uuid(
+                    volume.get("source_resource_id"), "volume.source_resource_id"
+                ),
                 "backup_resource_id": self._manifest_uuid(
                     volume.get("backup_resource_id"),
                     "volume.backup_resource_id",
@@ -5588,6 +6924,18 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
                 ),
             },
             "server": {
+                "node_id": self._manifest_backup_row_id(
+                    server.get("node_id"), "server.node_id"
+                ),
+                "backup_id": self._manifest_backup_row_id(
+                    server.get("backup_id"), "server.backup_id"
+                ),
+                "restore_id": self._manifest_backup_row_id(
+                    server.get("restore_id"), "server.restore_id"
+                ),
+                "source_resource_id": self._manifest_uuid(
+                    server.get("source_resource_id"), "server.source_resource_id"
+                ),
                 "backup_resource_id": self._manifest_uuid(
                     server.get("backup_resource_id"),
                     "server.backup_resource_id",
@@ -5638,7 +6986,28 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
         }
         if len(ids) != len(set(ids)) or set(ids).intersection(source_ids):
             raise HarnessError("The UpCloud UI manifest reuses a source or target UUID.")
+        source_volume = self._one_active("compute_source_volume")
+        source_server = self._one_active("compute_source_server")
+        if (
+            source_volume is None
+            or source_server is None
+            or normalized["volume"]["source_resource_id"]
+            != source_volume["resource_id"]
+            or normalized["server"]["source_resource_id"]
+            != source_server["resource_id"]
+        ):
+            raise HarnessError("The UpCloud UI manifest source IDs do not match the run ledger.")
         return normalized
+
+    def _load_compute_manifest_with_evidence(self, generation_path: str) -> tuple[dict, str]:
+        loaded = self._load_generation(generation_path, kind="compute")
+        return (
+            self._normalize_compute_manifest(loaded["manifest"]),
+            loaded["marker_digest"],
+        )
+
+    def _load_compute_manifest(self, generation_path: str) -> dict:
+        return self._load_compute_manifest_with_evidence(generation_path)[0]
 
     def _assert_unique_storage_marker(
         self, *, storage_type: str, resource_id: str, marker: str
@@ -6021,7 +7390,9 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
                 )
         return actual
 
-    def _verify_server_restore_bytes(self, server: dict) -> dict:
+    def _verify_server_restore_bytes(
+        self, server: dict, *, source_host_key_fingerprint: str
+    ) -> dict:
         fixture = self._one_active("compute_server_fixture")
         if fixture is None:
             raise HarnessError("The durable source-server fixture evidence is missing.")
@@ -6031,21 +7402,31 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
             "byte_count": int(ownership.get("byte_count") or -1),
         }
         path = str(ownership.get("path") or "")
-        client = self._ssh_client(
+        client = self._wait_ssh_client(
             server, host_variable="UPCLOUD_E2E_RESTORE_SSH_HOST"
         )
         try:
             actual = self._remote_evidence(client, path)
+            restored_fingerprint = self._ssh_host_key_fingerprint(client)
+            guest = self._guest_restore_evidence(client, server)
         finally:
             client.close()
         if actual != expected:
             raise HarnessError("UpCloud server restore failed boot-disk byte/hash verification.")
-        return actual
+        if restored_fingerprint != source_host_key_fingerprint:
+            raise HarnessError("The restored SSH host key does not match the source snapshot.")
+        return {
+            "payload": actual,
+            "source_host_key_fingerprint": source_host_key_fingerprint,
+            "restored_host_key_fingerprint": restored_fingerprint,
+            "guest": guest,
+        }
 
     def verify_compute(self, manifest_path: str) -> dict:
         # Verification attaches the UI-created restored volume and is therefore
         # APPLY-gated even though all provider-created backup/restore resources
         # are discovered and verified by exact ID.
+        manifest, marker_digest = self._load_compute_manifest_with_evidence(manifest_path)
         self._require_apply()
         self._require_compute_config()
         self.verify_account()
@@ -6065,7 +7446,6 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
         )
         if not owned or boot_id != source_boot_entry["resource_id"]:
             raise HarnessError("The exact source graph changed before UI verification.")
-        manifest = self._load_compute_manifest(manifest_path)
         volume = manifest["volume"]
         server = manifest["server"]
         volume_backup = self._verify_ui_storage(
@@ -6122,12 +7502,22 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
             expected_config=safe_config,
         )
         restored_server = self._wait_server_started(str(restored_server["uuid"]))
+        source_client = self._wait_ssh_client(
+            source_server, host_variable="UPCLOUD_E2E_SOURCE_SSH_HOST"
+        )
+        try:
+            source_host_key_fingerprint = self._ssh_host_key_fingerprint(source_client)
+        finally:
+            source_client.close()
         volume_evidence = self._verify_volume_restore_bytes(
             source_server=source_server,
             source_server_id=source_server_entry["resource_id"],
             restore_storage_id=str(volume_restore["uuid"]),
         )
-        server_evidence = self._verify_server_restore_bytes(restored_server)
+        server_evidence = self._verify_server_restore_bytes(
+            restored_server,
+            source_host_key_fingerprint=source_host_key_fingerprint,
+        )
         verification_id = _hash(
             ":".join(
                 [
@@ -6147,9 +7537,26 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
                 "volume": volume_evidence,
                 "server": server_evidence,
                 "all_hashes_match": True,
+                "manifest_marker_sha256": marker_digest,
             },
             source_witness=(
                 f"{volume['restore_resource_id']}:{server['restore_server_id']}"
+            ),
+        )
+        self.ledger.record(
+            kind="compute_guest_restore_verification",
+            resource_id=_hash(server["restore_server_id"]),
+            name=server["restore_hostname"],
+            ownership={
+                "account": self.account,
+                "run_id": self.config.run_id,
+                "source_server_id": source_server_entry["resource_id"],
+                "restore_server_id": server["restore_server_id"],
+                **server_evidence,
+                "manifest_marker_sha256": marker_digest,
+            },
+            source_witness=(
+                f"{source_server_entry['resource_id']}:{server['restore_server_id']}"
             ),
         )
         return {
@@ -6454,35 +7861,49 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
     def _stop_server_for_cleanup(self, entry: dict, server: dict) -> dict:
         resource_id = entry["resource_id"]
         state = str(server.get("state") or "").casefold()
-        if state == "stopped":
-            self.intents.clear(f"cleanup:compute-stop:{resource_id}")
-            return server
-        if state != "started":
-            raise HarnessError("Cleanup refused a server outside started/stopped state.")
         intent_key = f"cleanup:compute-stop:{resource_id}"
         intent = self.intents.get(intent_key)
-        if intent and intent.get("request_boundary_crossed"):
-            raise AmbiguousMutation(
-                "The server stop response was lost and the server remains started."
+        expected = {
+            "marker": self.config.run_id,
+            "kind": entry["kind"],
+            "name": entry.get("name") or resource_id,
+            "operation": "stop",
+            "resource_id": resource_id,
+        }
+        if intent and intent.get("request_boundary_crossed") and any(
+            intent.get(key) != value for key, value in expected.items()
+        ):
+            raise HarnessError("A pending soft-stop intent changed scope.")
+        if state == "stopped":
+            self.intents.clear(intent_key)
+            return server
+        if state not in {"started", "maintenance"}:
+            raise HarnessError(
+                "Cleanup refused a server outside started/maintenance/stopped state."
             )
-        self.intents.put(
-            intent_key,
-            {
-                "marker": self.config.run_id,
-                "kind": entry["kind"],
-                "name": entry.get("name") or resource_id,
-                "operation": "stop",
-                "resource_id": resource_id,
-            },
-        )
-        self.intents.update(intent_key, request_boundary_crossed=True)
-        self._control_mutation(
-            intent_key,
-            "POST",
-            f"/server/{quote(resource_id, safe='')}/stop",
-            accepted=(200,),
-            json_body={"stop_server": {"stop_type": "soft", "timeout": "60"}},
-        )
+        if not (intent and intent.get("request_boundary_crossed")):
+            if state == "maintenance":
+                raise HarnessError(
+                    "A server entered maintenance without this run's soft-stop intent."
+                )
+            self.intents.put(
+                intent_key,
+                {
+                    "marker": self.config.run_id,
+                    "kind": entry["kind"],
+                    "name": entry.get("name") or resource_id,
+                    "operation": "stop",
+                    "resource_id": resource_id,
+                },
+            )
+            self.intents.update(intent_key, request_boundary_crossed=True)
+            self._control_mutation(
+                intent_key,
+                "POST",
+                f"/server/{quote(resource_id, safe='')}/stop",
+                accepted=(200,),
+                json_body={"stop_server": {"stop_type": "soft"}},
+            )
         for _attempt in range(COMPUTE_MAX_WAIT_POLLS):
             exact = self._server_read(resource_id)
             if exact is None:
@@ -6698,13 +8119,12 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
             for entry in website_entries:
                 ownership = entry.get("ownership") or {}
                 path = str(ownership.get("restore_path") or "")
-                expected = f"{names['restore_root']}/{ownership.get('restore_id') or ''}"
                 if (
                     ownership.get("account") != self.account
                     or ownership.get("run_id") != self.config.run_id
-                    or path != expected
                 ):
                     raise HarnessError("Website cleanup refused a changed restore witness.")
+                self._owned_website_restore_path(path)
                 quoted = shlex.quote(path)
                 self._ssh_run(
                     client,
@@ -6751,6 +8171,7 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
 
         if require_evidence and (
             self._one_active("compute_restore_verification") is None
+            or self._one_active("compute_guest_restore_verification") is None
             or self._one_active("compute_workload_restore_verification") is None
         ):
             raise HarnessError(
@@ -6809,6 +8230,7 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
                 "compute_server_fixture",
                 "compute_volume_fixture",
                 "compute_restore_verification",
+                "compute_guest_restore_verification",
                 "compute_workload_fixture",
                 "compute_workload_restore_verification",
                 "ui_website_restore",
@@ -6827,7 +8249,7 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
                 self.config.runtime_path, self.config.run_id
             )
             if compute_runtime.exists():
-                _remove_runtime_secret(compute_runtime)
+                _remove_compute_runtime_secret(compute_runtime)
             for key in list(self.intents.pending()):
                 if key.startswith("compute_") or key.startswith("cleanup:compute"):
                     self.intents.clear(key)
@@ -6839,6 +8261,347 @@ path.write_text('\\n'.join(output) + '\\n', encoding='utf-8')
                 restored_server["resource_id"] if restored_server else None
             ),
         }
+
+    def inventory(self, *, phase: str) -> dict:
+        """Read-only exact-run inventory; never adopts evidence or mutates state."""
+
+        if phase not in {"before", "after"}:
+            raise HarnessError("Inventory phase must be before or after.")
+        self.verify_account()
+        retention_receipts = self._mos_retention_receipts()
+        ledger_service_ids = {
+            str(row.get("resource_id") or "")
+            for row in self._active_entries("mos_service")
+        }
+        ledger_compute_ids = {
+            str(row.get("resource_id") or "")
+            for kind in (
+                "compute_source_server",
+                "compute_source_volume",
+                "compute_source_boot",
+                "ui_volume_backup",
+                "ui_volume_restore",
+                "ui_server_backup",
+                "ui_server_restore_storage",
+                "ui_server_restore_server",
+            )
+            for row in self._active_entries(kind)
+        }
+        expected_titles = {
+            self.names["source_server"],
+            self.names["source_volume"],
+            self.names["source_boot"],
+        }
+        matches = {"servers": [], "storages": [], "backups": []}
+        collisions = []
+        for kind, output_key in (
+            ("server", "servers"),
+            ("storage", "storages"),
+            ("backup", "backups"),
+        ):
+            for summary in self._compute_inventory(kind):
+                resource_id = str(summary.get("uuid") or "")
+                title = str(summary.get("title") or "")
+                labels = _label_map(summary.get("labels"))
+                run_marked = (
+                    labels.get("backupsheep-e2e-owned") == "true"
+                    and labels.get("backupsheep-e2e-run") == self.config.run_id
+                )
+                if run_marked or resource_id in ledger_compute_ids:
+                    matches[output_key].append(resource_id)
+                elif title in expected_titles:
+                    collisions.append({"kind": kind, "resource_id": resource_id})
+        attachments = []
+        public_ips = []
+        for server_id in matches["servers"]:
+            exact = self._server_read(server_id)
+            if exact is None:
+                raise HarnessError("An inventoried exact-run server disappeared.")
+            attachments.extend(
+                {
+                    "server_id": server_id,
+                    "storage_id": str(device.get("storage") or ""),
+                }
+                for device in self._server_storage_devices(exact)
+            )
+            public_ips.extend(
+                {
+                    "server_id": server_id,
+                    "address_sha256": _hash(address),
+                }
+                for address in self._server_public_addresses(exact)
+            )
+        for storage_id in matches["storages"] + matches["backups"]:
+            exact = self._storage_read(storage_id)
+            if exact is None:
+                raise HarnessError("An inventoried exact-run storage disappeared.")
+            attachments.extend(
+                {"server_id": server_id, "storage_id": storage_id}
+                for server_id in self._storage_server_ids(exact)
+            )
+        attachments = [
+            {"server_id": server_id, "storage_id": storage_id}
+            for server_id, storage_id in sorted(
+                {(row["server_id"], row["storage_id"]) for row in attachments}
+            )
+        ]
+        for row in self._ip_inventory():
+            server_id = str(row.get("server") or "")
+            if server_id in ledger_compute_ids or server_id in matches["servers"]:
+                public_ips.append(
+                    {
+                        "server_id": server_id,
+                        "address_sha256": _hash(str(row.get("address") or "")),
+                    }
+                )
+        public_ips = [
+            {"server_id": server_id, "address_sha256": digest}
+            for server_id, digest in sorted(
+                {(row["server_id"], row["address_sha256"]) for row in public_ips}
+            )
+        ]
+        services = self._offset_list("/object-storage-2")
+        service_matches = []
+        service_collisions = []
+        mos_graph = []
+        for summary in services:
+            name = str(summary.get("name") or "")
+            labels = _label_map(summary.get("labels"))
+            marked = (
+                labels.get("backupsheep-e2e-owned") == "true"
+                and labels.get("backupsheep-e2e-run") == self.config.run_id
+            )
+            service_id = str(summary.get("uuid") or "")
+            if marked or service_id in ledger_service_ids:
+                exact = self._service_read(service_id)
+                if not self._service_owned(exact or {}, resource_id=service_id):
+                    raise HarnessError("An exact-run MOS service changed ownership.")
+                service_matches.append(service_id)
+                networks = self.control.request(
+                    "GET", f"/object-storage-2/{quote(service_id, safe='')}/networks"
+                )
+                if not isinstance(networks, list) or any(
+                    not isinstance(row, dict) for row in networks
+                ):
+                    raise HarnessError("UpCloud returned malformed MOS network inventory.")
+                buckets = sorted(
+                    str(row.get("name") or "") for row in self._buckets(service_id)
+                )
+                users = sorted(
+                    str(row.get("username") or "")
+                    for row in self._users(service_id)
+                    if str(row.get("username") or "")
+                    != "_upcloud-internal-user"
+                )
+                network_names = sorted(
+                    str(row.get("name") or "") for row in networks
+                )
+                policy_names = []
+                key_fingerprints = []
+                if users == [self.names["username"]]:
+                    policy_names = sorted(
+                        str(row.get("name") or "")
+                        for row in self._inline_policies(
+                            service_id, self.names["username"]
+                        )
+                    )
+                    key_fingerprints = sorted(
+                        _hash(str(row.get("access_key_id") or ""))
+                        for row in self._access_keys(
+                            service_id, self.names["username"]
+                        )
+                    )
+
+                service_entries = [
+                    row
+                    for row in self._active_entries("mos_service")
+                    if str(row.get("resource_id") or "") == service_id
+                ]
+                network_entries = [
+                    row
+                    for row in self._active_entries("mos_network")
+                    if (row.get("ownership") or {}).get("service_uuid")
+                    == service_id
+                ]
+                user_entries = [
+                    row
+                    for row in self._active_entries("mos_user")
+                    if (row.get("ownership") or {}).get("service_uuid")
+                    == service_id
+                ]
+                policy_entries = [
+                    row
+                    for row in self._active_entries("mos_inline_policy")
+                    if (row.get("ownership") or {}).get("service_uuid")
+                    == service_id
+                ]
+                key_entries = [
+                    row
+                    for row in self._active_entries("mos_access_key")
+                    if (row.get("ownership") or {}).get("service_uuid")
+                    == service_id
+                ]
+                provider_entries = (
+                    [("mos_service", row) for row in service_entries]
+                    + [("mos_network", row) for row in network_entries]
+                    + [("mos_user", row) for row in user_entries]
+                    + [("mos_inline_policy", row) for row in policy_entries]
+                    + [("mos_access_key", row) for row in key_entries]
+                )
+                unreceipted = [
+                    {
+                        "kind": kind,
+                        "resource_id": str(row.get("resource_id") or ""),
+                    }
+                    for kind, row in provider_entries
+                    if (kind, str(row.get("resource_id") or ""))
+                    not in retention_receipts
+                ]
+                runtime_verified = False
+                runtime_receipt_id = ""
+                if len(key_entries) == 1:
+                    runtime_receipt_id = self._runtime_retention_resource_id(
+                        key_entries[0]
+                    )
+                    if (
+                        MOS_RUNTIME_CREDENTIAL_KIND,
+                        runtime_receipt_id,
+                    ) in retention_receipts:
+                        self._validate_runtime_for_retention(exact, key_entries[0])
+                        runtime_verified = True
+                expected_receipt_identities = {
+                    (kind, str(row.get("resource_id") or ""))
+                    for kind, row in provider_entries
+                }
+                if runtime_receipt_id:
+                    expected_receipt_identities.add(
+                        (MOS_RUNTIME_CREDENTIAL_KIND, runtime_receipt_id)
+                    )
+                service_receipt_identities = {
+                    identity
+                    for identity, receipt in retention_receipts.items()
+                    if (receipt.get("ownership") or {}).get("service_uuid")
+                    == service_id
+                }
+                unexpected_receipts = sorted(
+                    service_receipt_identities - expected_receipt_identities
+                )
+                expected_networks = (
+                    [self.names["network"]] if len(network_entries) == 1 else []
+                )
+                expected_users = (
+                    [self.names["username"]] if len(user_entries) == 1 else []
+                )
+                expected_policies = (
+                    [self.names["policy"]] if len(policy_entries) == 1 else []
+                )
+                expected_key_fingerprints = sorted(
+                    str(row.get("resource_id") or "") for row in key_entries
+                )
+                retention_verified = all(
+                    (
+                        len(service_entries) == 1,
+                        len(network_entries) == 1,
+                        len(user_entries) == 1,
+                        len(policy_entries) == 1,
+                        len(key_entries) == 1,
+                        not buckets,
+                        network_names == expected_networks,
+                        users == expected_users,
+                        policy_names == expected_policies,
+                        key_fingerprints == expected_key_fingerprints,
+                        not unreceipted,
+                        runtime_verified,
+                        not unexpected_receipts,
+                    )
+                )
+                scaffold_receipts = [
+                    {
+                        "kind": kind,
+                        "resource_id": resource_id,
+                        "disposition": USER_RETAINED_BY_INSTRUCTION,
+                    }
+                    for (kind, resource_id), receipt in sorted(
+                        retention_receipts.items()
+                    )
+                    if (receipt.get("ownership") or {}).get("service_uuid")
+                    == service_id
+                ]
+                mos_graph.append(
+                    {
+                        "service_uuid": service_id,
+                        "buckets": buckets,
+                        "users": users,
+                        "networks": network_names,
+                        "inline_policies": policy_names,
+                        "key_fingerprints": key_fingerprints,
+                        "protected_runtime_file_verified": runtime_verified,
+                        "disposition": (
+                            USER_RETAINED_BY_INSTRUCTION
+                            if (
+                                "mos_service",
+                                service_id,
+                            ) in retention_receipts
+                            else ""
+                        ),
+                        "retention_verified": retention_verified,
+                        "unreceipted_scaffolding": unreceipted,
+                        "unexpected_retention_receipts": [
+                            {"kind": kind, "resource_id": resource_id}
+                            for kind, resource_id in unexpected_receipts
+                        ],
+                        "retained_scaffolding": scaffold_receipts,
+                    }
+                )
+            elif name == self.names["service"]:
+                service_collisions.append(str(summary.get("uuid") or ""))
+        result = {
+            "status": "verified",
+            "phase": phase,
+            "exact_run": {
+                **{key: sorted(value) for key, value in matches.items()},
+                "attachments": sorted(attachments, key=lambda row: (row["server_id"], row["storage_id"])),
+                "public_ips": sorted(public_ips, key=lambda row: (row["server_id"], row["address_sha256"])),
+                "mos_services": sorted(service_matches),
+                "mos_graph": mos_graph,
+            },
+            "name_only_collisions": collisions,
+            "mos_name_only_collisions": service_collisions,
+            "retained_by_instruction": self._mos_retention_summary(
+                retention_receipts
+            ),
+        }
+        missing_ledger_services = sorted(
+            ledger_service_ids - set(service_matches)
+        )
+        orphaned_receipt_services = sorted(
+            {
+                str((row.get("ownership") or {}).get("service_uuid") or "")
+                for row in retention_receipts.values()
+            }
+            - set(service_matches)
+        )
+        unverified_retained_graph = [
+            row["service_uuid"]
+            for row in mos_graph
+            if not row["retention_verified"]
+        ]
+        if phase == "after" and any(
+            (
+                matches["servers"],
+                matches["storages"],
+                matches["backups"],
+                attachments,
+                public_ips,
+                collisions,
+                service_collisions,
+                missing_ledger_services,
+                orphaned_receipt_services,
+                unverified_retained_graph,
+            )
+        ):
+            raise HarnessError("Final exact-run inventory found provider orphans.")
+        return result
 
 
 def _plan() -> dict:
@@ -6855,6 +8618,9 @@ def _plan() -> dict:
             "arm-object-storage",
             "verify-object-storage",
             "cleanup-object-storage",
+            "reconcile-object-storage-evidence",
+            "export-manifests",
+            "inventory",
         ],
         "gates": {
             "setup": "BACKUPSHEEP_E2E_APPLY=YES",
@@ -6865,6 +8631,10 @@ def _plan() -> dict:
                 "UPCLOUD_E2E_ALLOWED_CIDRS containing only exact /32 or /128 hosts"
             ),
             "acceptance_cleanup": "cleanup-compute --require-evidence",
+            "object_storage_credentials": (
+                "preserve-credentials is mandatory and default-on; this harness "
+                "has no credential revoke mode"
+            ),
         },
         "workflow": [
             "Run setup-compute to create the exact server, boot storage, normal volume, website tree, and PostgreSQL fixture.",
@@ -6902,6 +8672,33 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--maximum-bytes", type=int, default=10 * 1024**3)
     cleanup = subparsers.add_parser("cleanup-object-storage")
     cleanup.add_argument("--maximum-bytes", type=int, default=10 * 1024**3)
+    cleanup.add_argument("--require-evidence", action="store_true")
+    cleanup.add_argument(
+        "--preserve-credentials",
+        action="store_true",
+        default=True,
+        help=(
+            "Mandatory default-on gate retaining the MOS key, user, service, "
+            "policy, network, and protected runtime file."
+        ),
+    )
+    subparsers.add_parser("reconcile-object-storage-evidence")
+    inventory = subparsers.add_parser("inventory")
+    inventory.add_argument("--phase", choices=("before", "after"), required=True)
+    exporter = subparsers.add_parser("export-manifests")
+    for option in (
+        "account-id",
+        "storage-id",
+        "website-backup-id",
+        "website-restore-id",
+        "database-backup-id",
+        "database-restore-id",
+        "volume-restore-id",
+        "server-restore-id",
+    ):
+        exporter.add_argument(f"--{option}", type=int, required=True)
+    exporter.add_argument("--run-id", required=True)
+    exporter.add_argument("--output-dir", required=True)
     return parser
 
 
@@ -6914,6 +8711,33 @@ def main(argv=None, *, environment=None) -> int:
         return 0
     environment = environment or os.environ
     try:
+        if command == "export-manifests":
+            os.environ.setdefault("DJANGO_SETTINGS_MODULE", "backupsheep.settings")
+            import django
+
+            django.setup()
+            from scripts.upcloud_manifest_export import (
+                UpCloudManifestExportError,
+                export_upcloud_manifests,
+            )
+
+            try:
+                result = export_upcloud_manifests(
+                    output_dir=args.output_dir,
+                    run_id=args.run_id,
+                    account_id=args.account_id,
+                    storage_id=args.storage_id,
+                    website_backup_id=args.website_backup_id,
+                    website_restore_id=args.website_restore_id,
+                    database_backup_id=args.database_backup_id,
+                    database_restore_id=args.database_restore_id,
+                    volume_restore_id=args.volume_restore_id,
+                    server_restore_id=args.server_restore_id,
+                )
+            except UpCloudManifestExportError as error:
+                raise HarnessError(str(error)) from None
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
         config = HarnessConfig.from_environment(environment)
         harness = UpCloudLiveHarness(config, environment=environment)
         if command == "setup-compute":
@@ -6936,8 +8760,14 @@ def main(argv=None, *, environment=None) -> int:
             )
         elif command == "cleanup-object-storage":
             result = harness.cleanup_object_storage(
-                maximum_bytes=args.maximum_bytes
+                maximum_bytes=args.maximum_bytes,
+                require_evidence=args.require_evidence,
+                preserve_credentials=args.preserve_credentials,
             )
+        elif command == "reconcile-object-storage-evidence":
+            result = harness.reconcile_object_storage_evidence()
+        elif command == "inventory":
+            result = harness.inventory(phase=args.phase)
         else:
             raise HarnessError("Unknown UpCloud harness command.")
         print(json.dumps(result, indent=2, sort_keys=True))

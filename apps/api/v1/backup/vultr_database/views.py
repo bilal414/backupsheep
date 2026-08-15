@@ -86,7 +86,13 @@ class CoreVultrDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet)
             raise RestoreMissingParams("The provider parameters are invalid.")
 
         node = backup.vultr_database.node
-        correlation_id, request_fingerprint, idempotency_key, key_source = (
+        (
+            correlation_id,
+            request_fingerprint,
+            idempotency_key,
+            key_source,
+            recovery_id,
+        ) = (
             _cloud_restore_request_identity(
                 node,
                 request,
@@ -102,16 +108,17 @@ class CoreVultrDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet)
             raise RestoreMissingParams(
                 "An Idempotency-Key header or request_id is required."
             )
-        request_metadata = {
-            "api_request": {
-                "fingerprint": request_fingerprint,
-                "key_source": key_source,
-                "payload_version": 1,
-                "idempotency_key_sha256": hashlib.sha256(
-                    idempotency_key.encode("utf-8")
-                ).hexdigest(),
-            }
+        api_request_metadata = {
+            "fingerprint": request_fingerprint,
+            "key_source": key_source,
+            "payload_version": 1,
+            "idempotency_key_sha256": hashlib.sha256(
+                idempotency_key.encode("utf-8")
+            ).hexdigest(),
         }
+        if recovery_id is not None:
+            api_request_metadata["recovery_id"] = recovery_id
+        request_metadata = {"api_request": api_request_metadata}
         try:
             restore, created = create_or_replay_vultr_database_restore(
                 node=node,

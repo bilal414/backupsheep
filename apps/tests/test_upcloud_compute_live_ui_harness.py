@@ -5,13 +5,16 @@ from __future__ import annotations
 import io
 import json
 import tempfile
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from django.test import SimpleTestCase
 
 from scripts import upcloud_live_ui_e2e as live_harness
+from scripts import upcloud_manifest_export
 
 
 SOURCE_VOLUME_ID = "01a00000-0000-4000-8000-000000000001"
@@ -59,6 +62,53 @@ class UpCloudComputeLiveUIHarnessSafetyTests(SimpleTestCase):
         )
         value.account = self.account
         return value
+
+    def manifest_payloads(self):
+        objects = [
+            {
+                "kind": "website",
+                "backup_id": 11,
+                "backup_uuid": "website-backup-2026-08-15",
+                "storage_point_id": 201,
+                "storage_id": 202,
+                "artifact_id": 203,
+                "artifact_status": "verified",
+                "object_key": "backupsheep-e2e/website-backup-2026-08-15.zip",
+                "sha256": "a" * 64,
+                "byte_count": 128,
+                "etag": "etag-website",
+                "version_id": "version-website",
+            },
+            {
+                "kind": "database",
+                "backup_id": 12,
+                "backup_uuid": "database-backup-2026-08-15",
+                "storage_point_id": 204,
+                "storage_id": 202,
+                "artifact_id": 205,
+                "artifact_status": "verified",
+                "object_key": "backupsheep-e2e/database-backup-2026-08-15.zip",
+                "sha256": "b" * 64,
+                "byte_count": 129,
+                "etag": "etag-database",
+                "version_id": "version-database",
+            },
+        ]
+        return {
+            "compute": {
+                "schema": 1,
+                "run_id": self.run_id,
+                "volume": {"node_id": 1, "backup_id": 2, "restore_id": 3},
+                "server": {"node_id": 4, "backup_id": 5, "restore_id": 6},
+            },
+            "workload": {
+                "schema": 1,
+                "run_id": self.run_id,
+                "website": {"node_id": 7, "backup_id": 11, "restore_id": 8},
+                "postgresql": {"node_id": 9, "backup_id": 12, "restore_id": 10},
+            },
+            "object": {"schema": 1, "run_id": self.run_id, "objects": objects},
+        }
 
     def storage(
         self,
@@ -655,6 +705,15 @@ class UpCloudComputeLiveUIHarnessSafetyTests(SimpleTestCase):
             )
         self.assertEqual(connect.call_count, 3)
 
+    def test_ssh_host_key_fingerprint_is_stable_and_secret_free(self):
+        key = mock.Mock()
+        key.asbytes.return_value = b"public-host-key-material"
+        client = mock.Mock()
+        client.get_transport.return_value.get_remote_server_key.return_value = key
+        fingerprint = live_harness.UpCloudLiveHarness._ssh_host_key_fingerprint(client)
+        self.assertTrue(fingerprint.startswith("SHA256:"))
+        self.assertNotIn("public-host-key-material", fingerprint)
+
     def test_mount_detection_ignores_parent_root_and_requires_exact_target(self):
         mount_path = f"/mnt/backupsheep-e2e-{self.run_id}"
         self.assertEqual(
@@ -802,13 +861,15 @@ To                         Action      From
             "schema": 1,
             "run_id": self.run_id,
             "website": {
-                "backup_id": "website-backup-1",
-                "restore_id": "website-restore-1",
+                "node_id": 10,
+                "backup_id": 11,
+                "restore_id": 12,
                 "restore_path": "/tmp/foreign",
             },
             "postgresql": {
-                "backup_id": "database-backup-1",
-                "restore_id": "database-restore-1",
+                "node_id": 20,
+                "backup_id": 21,
+                "restore_id": 22,
                 "restore_database": "foreign_database",
             },
         }
@@ -816,3 +877,504 @@ To                         Action      From
         path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaises(live_harness.HarnessError):
             harness._load_workload_manifest(str(path))
+
+    def test_workload_manifest_rejects_retired_loose_path(self):
+        harness = self.harness()
+        names = harness._workload_names()
+        target = (
+            "bs_restore_45c7b8c781e6_"
+            f"{names['database']}_"
+            + live_harness.hashlib.sha256(names["database"].encode()).hexdigest()[:12]
+        )[:63]
+        manifest = {
+            "schema": 1,
+            "run_id": self.run_id,
+            "website": {
+                "node_id": 10,
+                "backup_id": 11,
+                "restore_id": 9,
+                "restore_path": names["base"],
+            },
+            "postgresql": {
+                "node_id": 20,
+                "backup_id": 21,
+                "restore_id": 22,
+                "restore_database": target,
+            },
+        }
+        path = self.root / "durable-workloads.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(
+            live_harness.HarnessError, r"complete new generation directory"
+        ):
+            harness._load_workload_manifest(str(path))
+
+    def test_workload_manifest_rejects_escaped_or_ambiguous_durable_paths(self):
+        harness = self.harness()
+        names = harness._workload_names()
+        for value in (
+            f"{names['base']}/../foreign",
+            f"{names['base']}//website",
+            f"{names['base']}/./website",
+            f"{names['base']}\\website",
+            "/srv/backupsheep-e2e/foreign-run",
+        ):
+            with self.subTest(value=value), self.assertRaises(live_harness.HarnessError):
+                harness._owned_website_restore_path(value)
+        self.assertEqual(
+            harness._owned_website_restore_path(f"{names['base']}/website"),
+            f"{names['base']}/website",
+        )
+
+    def test_website_evidence_rejects_remote_symlink_ambiguity(self):
+        harness = self.harness()
+        root = harness._workload_names()["base"]
+        with mock.patch.object(
+            harness,
+            "_ssh_run",
+            return_value=json.dumps(
+                {"realpath": "/srv/foreign", "symlinks": [root]}
+            ),
+        ) as run, self.assertRaises(live_harness.HarnessError):
+            harness._website_evidence(mock.Mock(), root, {"files": {}})
+        self.assertEqual(run.call_count, 1)
+
+    def test_workload_manifest_rejects_escaped_or_foreign_database_target(self):
+        harness = self.harness()
+        names = harness._workload_names()
+        base = {
+            "schema": 1,
+            "run_id": self.run_id,
+            "website": {
+                "node_id": 10,
+                "backup_id": 11,
+                "restore_id": 12,
+                "restore_path": names["base"],
+            },
+            "postgresql": {
+                "node_id": 20,
+                "backup_id": 21,
+                "restore_id": 22,
+                "restore_database": "",
+            },
+        }
+        for target in ("foreign_database", "bad-name", "../escape", names["database"]):
+            manifest = json.loads(json.dumps(base))
+            manifest["postgresql"]["restore_database"] = target
+            path = self.root / f"invalid-database-{len(target)}.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.subTest(target=target), self.assertRaises(live_harness.HarnessError):
+                harness._load_workload_manifest(str(path))
+
+    def _durable_website_rows(self, *, target=None):
+        target = target or f"/srv/backupsheep-e2e/{self.run_id}"
+        backup_uuid = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        correlation = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        source_digest = "a" * 64
+        fingerprint = live_harness.hashlib.sha256(
+            f"{backup_uuid}|{source_digest}".encode()
+        ).hexdigest()
+        file_row = {"path": "index.html", "bytes": 12, "sha256": "b" * 64}
+        parent, basename = target.rsplit("/", 1)
+        stage_root = (
+            f"{parent}/.backupsheep_restore_"
+            f"{str(correlation).replace('-', '')[:16]}_{fingerprint[:16]}"
+        )
+        website = SimpleNamespace(
+            all_paths=False,
+            paths=[{"name": target, "path": target, "type": "directory"}],
+        )
+        backup = SimpleNamespace(uuid=backup_uuid, website=website)
+        restore = SimpleNamespace(
+            pk=9,
+            correlation_id=correlation,
+            execution_phase="complete",
+            progress_completed=1,
+            progress_total=1,
+            progress_unit="paths",
+            execution_metadata={
+                "source_manifest": {
+                    f"directory:{target}": {
+                        "path": target,
+                        "type": "directory",
+                        "source_digest": source_digest,
+                        "files": [file_row],
+                    }
+                },
+                "source_states": {
+                    fingerprint: {
+                        "path": target,
+                        "target_path": target,
+                        "type": "directory",
+                        "source_digest": source_digest,
+                        "status": "complete",
+                        "files": {
+                            "index.html": {
+                                "bytes": 12,
+                                "sha256": "b" * 64,
+                                "status": "complete",
+                            }
+                        },
+                        "stage_root": stage_root,
+                        "payload": f"{stage_root}/payload",
+                        "old": (
+                            f"{parent}/.{basename}.backupsheep_previous_"
+                            f"{str(correlation).replace('-', '')[:16]}_{fingerprint[:16]}"
+                        ),
+                    }
+                },
+                "completed_sources": [fingerprint],
+            },
+        )
+        return backup, restore, target
+
+    def test_exporter_uses_exact_completed_in_place_website_target(self):
+        backup, restore, target = self._durable_website_rows()
+        self.assertEqual(
+            upcloud_manifest_export._durable_website_restore_target(
+                restore, backup=backup, run_id=self.run_id
+            ),
+            target,
+        )
+
+    def test_exporter_rejects_ambiguous_or_escaped_website_restore_evidence(self):
+        backup, restore, _target = self._durable_website_rows()
+        fingerprint, state = next(iter(restore.execution_metadata["source_states"].items()))
+        restore.execution_metadata["source_states"]["c" * 64] = dict(state)
+        with self.assertRaises(upcloud_manifest_export.UpCloudManifestExportError):
+            upcloud_manifest_export._durable_website_restore_target(
+                restore, backup=backup, run_id=self.run_id
+            )
+        escaped_backup, escaped_restore, _target = self._durable_website_rows(
+            target=f"/srv/backupsheep-e2e/{self.run_id}/../foreign"
+        )
+        with self.assertRaises(upcloud_manifest_export.UpCloudManifestExportError):
+            upcloud_manifest_export._durable_website_restore_target(
+                escaped_restore, backup=escaped_backup, run_id=self.run_id
+            )
+
+    def _durable_database_rows(self):
+        source = "bs_e2e_50d32a3bb404"
+        target = "bs_restore_45c7b8c781e6_bs_e2e_50d32a3bb404_b51c2326c3b4"
+        backup_uuid = uuid.UUID("33333333-3333-4333-8333-333333333333")
+        mapping = {source: target}
+        backup = SimpleNamespace(
+            uuid=backup_uuid,
+            database=SimpleNamespace(all_databases=False, databases=[source]),
+        )
+        restore = SimpleNamespace(
+            pk=22,
+            correlation_id=uuid.UUID("45c7b8c7-81e6-4444-8444-444444444444"),
+            params={
+                "mode": "fork",
+                "target_mapping": mapping,
+                "mapping_locked": True,
+                "source_backup_uuid": str(backup_uuid),
+            },
+            execution_metadata={
+                "source_to_target": mapping,
+                "mapping_locked": True,
+                "target_checkpoints": {
+                    target: {
+                        "source": source,
+                        "source_digest": "d" * 64,
+                        "status": "complete",
+                    }
+                },
+            },
+            execution_phase="complete",
+            progress_completed=1,
+            progress_total=1,
+            progress_unit="databases",
+        )
+        return backup, restore, source, target
+
+    def test_exporter_accepts_native_postgresql_fork_target_mapping(self):
+        backup, restore, _source, target = self._durable_database_rows()
+        self.assertEqual(
+            upcloud_manifest_export._durable_database_restore_target(
+                restore, backup=backup
+            ),
+            target,
+        )
+
+    def test_exporter_rejects_foreign_or_escaped_database_mapping(self):
+        for kind in ("foreign", "escaped"):
+            backup, restore, source, target = self._durable_database_rows()
+            if kind == "foreign":
+                restore.params["target_mapping"] = {"foreign_database": target}
+            else:
+                restore.params["target_mapping"] = {source: "bad-name"}
+            with self.subTest(kind=kind), self.assertRaises(
+                upcloud_manifest_export.UpCloudManifestExportError
+            ):
+                upcloud_manifest_export._durable_database_restore_target(
+                    restore, backup=backup
+                )
+
+    def test_guest_restore_evidence_binds_interface_route_boot_and_reachability(self):
+        harness = self.harness()
+        server = {
+            "ip_addresses": {
+                "ip_address": [
+                    {
+                        "access": "public",
+                        "family": "IPv4",
+                        "address": "203.0.113.8",
+                    }
+                ]
+            }
+        }
+        outputs = [
+            json.dumps(
+                [
+                    {
+                        "ifname": "ens3",
+                        "operstate": "UP",
+                        "addr_info": [
+                            {
+                                "family": "inet",
+                                "scope": "global",
+                                "local": "203.0.113.8",
+                            }
+                        ],
+                    }
+                ]
+            ),
+            json.dumps([{"dst": "default", "dev": "ens3", "gateway": "203.0.113.1"}]),
+            "11111111-1111-4111-8111-111111111111|42",
+            "reachable",
+        ]
+        with mock.patch.object(harness, "_ssh_run", side_effect=outputs) as run:
+            evidence = harness._guest_restore_evidence(mock.Mock(), server)
+        self.assertEqual(evidence["interface"], "ens3")
+        self.assertEqual(evidence["default_route_interface"], "ens3")
+        self.assertEqual(evidence["uptime_seconds"], 42)
+        self.assertNotIn("203.0.113.8", json.dumps(evidence))
+        self.assertEqual(run.call_count, 4)
+
+    def test_guest_restore_evidence_rejects_default_route_on_other_interface(self):
+        harness = self.harness()
+        server = {
+            "ip_addresses": {
+                "ip_address": [
+                    {"access": "public", "family": "IPv4", "address": "203.0.113.8"}
+                ]
+            }
+        }
+        with mock.patch.object(
+            harness,
+            "_ssh_run",
+            side_effect=[
+                json.dumps(
+                    [
+                        {
+                            "ifname": "ens3",
+                            "operstate": "UP",
+                            "addr_info": [
+                                {"family": "inet", "scope": "global", "local": "203.0.113.8"}
+                            ],
+                        }
+                    ]
+                ),
+                json.dumps([{"dst": "default", "dev": "ens4"}]),
+            ],
+        ), self.assertRaises(live_harness.HarnessError):
+            harness._guest_restore_evidence(mock.Mock(), server)
+
+    def test_soft_stop_lost_response_reconciles_without_second_post(self):
+        harness = self.harness(cleanup=True)
+        entry = harness.ledger.record(
+            kind="ui_server_restore_server",
+            resource_id=SOURCE_SERVER_ID,
+            name="restored",
+            ownership={"account": self.account, "run_id": self.run_id},
+            source_witness="witness",
+        )
+        intent_key = f"cleanup:compute-stop:{SOURCE_SERVER_ID}"
+        harness.intents.put(
+            intent_key,
+            {
+                "marker": self.run_id,
+                "kind": entry["kind"],
+                "name": "restored",
+                "operation": "stop",
+                "resource_id": SOURCE_SERVER_ID,
+            },
+        )
+        harness.intents.update(intent_key, request_boundary_crossed=True)
+        with mock.patch.object(
+            harness,
+            "_server_read",
+            side_effect=[{"uuid": SOURCE_SERVER_ID, "state": "maintenance"}, {"uuid": SOURCE_SERVER_ID, "state": "stopped"}],
+        ), mock.patch.object(harness, "_control_mutation") as mutate:
+            result = harness._stop_server_for_cleanup(
+                entry, {"uuid": SOURCE_SERVER_ID, "state": "started"}
+            )
+        self.assertEqual(result["state"], "stopped")
+        mutate.assert_not_called()
+
+    def test_crossed_delete_intent_adopts_absence_without_replay(self):
+        harness = self.harness(cleanup=True)
+        entry = harness.ledger.record(
+            kind="ui_volume_restore",
+            resource_id=RESTORE_VOLUME_ID,
+            name="restore",
+            ownership={"account": self.account, "run_id": self.run_id},
+            source_witness="witness",
+        )
+        key = "cleanup:test-delete"
+        harness.intents.put(
+            key,
+            {"marker": self.run_id, "kind": entry["kind"], "name": "restore", "operation": "delete"},
+        )
+        harness.intents.update(key, request_boundary_crossed=True)
+        with mock.patch.object(harness, "_control_mutation") as mutate:
+            harness._control_delete(
+                intent_key=key,
+                kind=entry["kind"],
+                entry=entry,
+                path="/storage/exact",
+                verify_absent=lambda: True,
+            )
+        mutate.assert_not_called()
+        self.assertEqual(harness.ledger.get(entry["kind"], entry["resource_id"])["cleanup_state"], "deleted")
+
+    def test_manifest_export_writes_atomic_mode_0600_files(self):
+        output = self.root / "external"
+        parent_mode = self.root.stat().st_mode & 0o777
+        payloads = self.manifest_payloads()
+        with mock.patch.object(
+            upcloud_manifest_export,
+            "collect_upcloud_manifest_payloads",
+            return_value=payloads,
+        ):
+            result = upcloud_manifest_export.export_upcloud_manifests(
+                output_dir=output, run_id=self.run_id
+            )
+        self.assertEqual(result["status"], "exported")
+        self.assertEqual(output.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.root.stat().st_mode & 0o777, parent_mode)
+        self.assertEqual(Path(result["generation_dir"]), output)
+        marker_path = Path(result["generation_marker"])
+        self.assertEqual(marker_path.stat().st_mode & 0o777, 0o600)
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        self.assertEqual(marker["schema"], 1)
+        self.assertEqual(marker["provider"], "upcloud")
+        self.assertEqual(marker["run_id"], self.run_id)
+        self.assertEqual(set(marker["manifests"]), {"compute", "workload", "object"})
+        for path in result["files"].values():
+            self.assertEqual(Path(path).stat().st_mode & 0o777, 0o600)
+        for kind, path in result["files"].items():
+            payload = Path(path).read_bytes()
+            self.assertEqual(
+                marker["manifests"][kind]["sha256"],
+                upcloud_manifest_export.hashlib.sha256(payload).hexdigest(),
+            )
+            self.assertEqual(
+                marker["manifests"][kind]["byte_count"], len(payload)
+            )
+
+    def test_manifest_export_rejects_existing_destination_without_chmod_or_overwrite(self):
+        payloads = self.manifest_payloads()
+        existing_directory = self.root / "existing-generation"
+        existing_directory.mkdir(mode=0o755)
+        canary = existing_directory / "canary.txt"
+        canary.write_bytes(b"DO-NOT-OVERWRITE")
+        directory_mode = existing_directory.stat().st_mode & 0o777
+        existing_file = self.root / "existing-file"
+        existing_file.write_bytes(b"DO-NOT-OVERWRITE-FILE")
+        file_mode = existing_file.stat().st_mode & 0o777
+
+        with mock.patch.object(
+            upcloud_manifest_export,
+            "collect_upcloud_manifest_payloads",
+            return_value=payloads,
+        ) as collect:
+            for destination in (existing_directory, existing_file):
+                with self.subTest(destination=destination), self.assertRaisesRegex(
+                    upcloud_manifest_export.UpCloudManifestExportError,
+                    r"destination already exists",
+                ):
+                    upcloud_manifest_export.export_upcloud_manifests(
+                        output_dir=destination, run_id=self.run_id
+                    )
+        collect.assert_not_called()
+        self.assertEqual(canary.read_bytes(), b"DO-NOT-OVERWRITE")
+        self.assertEqual(existing_directory.stat().st_mode & 0o777, directory_mode)
+        self.assertEqual(existing_file.read_bytes(), b"DO-NOT-OVERWRITE-FILE")
+        self.assertEqual(existing_file.stat().st_mode & 0o777, file_mode)
+
+    def test_manifest_export_failure_before_publish_leaves_no_generation(self):
+        output = self.root / "failed-generation"
+        payloads = self.manifest_payloads()
+        original = upcloud_manifest_export._write_exclusive_file
+
+        def fail_on_workload(path, payload):
+            if path.name == upcloud_manifest_export.MANIFEST_FILENAMES["workload"]:
+                raise OSError("simulated crash before publish")
+            return original(path, payload)
+
+        with mock.patch.object(
+            upcloud_manifest_export,
+            "collect_upcloud_manifest_payloads",
+            return_value=payloads,
+        ), mock.patch.object(
+            upcloud_manifest_export,
+            "_write_exclusive_file",
+            side_effect=fail_on_workload,
+        ), self.assertRaises(OSError):
+            upcloud_manifest_export.export_upcloud_manifests(
+                output_dir=output, run_id=self.run_id
+            )
+        self.assertFalse(output.exists())
+        self.assertEqual(
+            list(self.root.glob(".failed-generation.upcloud-staging-*")), []
+        )
+
+    def test_manifest_export_exclusive_publish_never_replaces_racing_destination(self):
+        output = self.root / "racing-generation"
+        payloads = self.manifest_payloads()
+        original = upcloud_manifest_export._rename_directory_exclusive
+
+        def create_racing_destination(source, destination):
+            destination.mkdir(mode=0o755)
+            (destination / "canary.txt").write_bytes(b"RACING-OWNER")
+            return original(source, destination)
+
+        with mock.patch.object(
+            upcloud_manifest_export,
+            "collect_upcloud_manifest_payloads",
+            return_value=payloads,
+        ), mock.patch.object(
+            upcloud_manifest_export,
+            "_rename_directory_exclusive",
+            side_effect=create_racing_destination,
+        ), self.assertRaisesRegex(
+            upcloud_manifest_export.UpCloudManifestExportError,
+            r"destination already exists",
+        ):
+            upcloud_manifest_export.export_upcloud_manifests(
+                output_dir=output, run_id=self.run_id
+            )
+        self.assertEqual((output / "canary.txt").read_bytes(), b"RACING-OWNER")
+        self.assertEqual(
+            list(self.root.glob(".racing-generation.upcloud-staging-*")), []
+        )
+
+    def test_manifest_builder_rejects_duplicate_verified_artifacts(self):
+        artifacts = mock.Mock()
+        queryset = mock.MagicMock()
+        queryset.__getitem__.return_value = [
+            mock.Mock(),
+            mock.Mock(),
+        ]
+        artifacts.filter.return_value.order_by.return_value = queryset
+        backup = mock.Mock(artifact_records=artifacts)
+        with self.assertRaises(upcloud_manifest_export.UpCloudManifestExportError):
+            upcloud_manifest_export._artifact_for(
+                backup,
+                storage_id=1,
+                storage_point=mock.Mock(),
+                label="website",
+            )

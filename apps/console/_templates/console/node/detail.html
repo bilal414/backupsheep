@@ -2740,6 +2740,8 @@
                     confirm: false,
                     requestId: null,
                     requestTargetName: '',
+                    recoveryId: null,
+                    recoveryTargetName: '',
                 },
                 nativeRestoreResourceLabel: nativeRestoreConfig.resourceLabel,
                 nativeRestoreResourceKind: nativeRestoreConfig.resourceKind,
@@ -3012,21 +3014,35 @@
                     if (this.nativeRestore.requestId && this.nativeRestore.requestTargetName === targetName) {
                         return this.nativeRestore.requestId;
                     }
+                    this.nativeRestore.requestId = this.nativeRestoreRandomUUID(
+                        'A secure restore request ID could not be generated. Reload the page and try again.'
+                    );
+                    this.nativeRestore.requestTargetName = targetName;
+                    return this.nativeRestore.requestId;
+                },
+                nativeRestoreRecoveryId() {
+                    const targetName = this.nativeRestoreTargetName();
+                    if (this.nativeRestore.recoveryId && this.nativeRestore.recoveryTargetName === targetName) {
+                        return this.nativeRestore.recoveryId;
+                    }
+                    this.nativeRestore.recoveryId = this.nativeRestoreRandomUUID(
+                        'A secure restore recovery ID could not be generated. Reload the page and try again.'
+                    );
+                    this.nativeRestore.recoveryTargetName = targetName;
+                    return this.nativeRestore.recoveryId;
+                },
+                nativeRestoreRandomUUID(errorMessage) {
                     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-                        this.nativeRestore.requestId = window.crypto.randomUUID();
-                        this.nativeRestore.requestTargetName = targetName;
-                        return this.nativeRestore.requestId;
+                        return window.crypto.randomUUID();
                     }
                     if (!window.crypto || typeof window.crypto.getRandomValues !== 'function') {
-                        throw new Error('A secure restore request ID could not be generated. Reload the page and try again.');
+                        throw new Error(errorMessage);
                     }
                     const bytes = window.crypto.getRandomValues(new Uint8Array(16));
                     bytes[6] = (bytes[6] & 0x0f) | 0x40;
                     bytes[8] = (bytes[8] & 0x3f) | 0x80;
                     const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
-                    this.nativeRestore.requestId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-                    this.nativeRestore.requestTargetName = targetName;
-                    return this.nativeRestore.requestId;
+                    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
                 },
                 nativeRestoreDestinationBucketValid() {
                     const value = this.nativeRestoreTargetName();
@@ -3079,6 +3095,7 @@
                         params,
                         confirm: true,
                         request_id: this.nativeRestoreRequestId(),
+                        recovery_id: this.nativeRestoreRecoveryId(),
                     };
                 },
                 nativeRestoreStatusCategory(item) {
@@ -3221,6 +3238,8 @@
                     this.nativeRestore.confirm = false;
                     this.nativeRestore.requestId = null;
                     this.nativeRestore.requestTargetName = '';
+                    this.nativeRestore.recoveryId = null;
+                    this.nativeRestore.recoveryTargetName = '';
                     this.nativeRestoreStarted = false;
                     this.nativeRestoreStatus = null;
                     this.nativeRestoreExecutionStatus = null;
@@ -3252,6 +3271,8 @@
                         confirm: false,
                         requestId: null,
                         requestTargetName: '',
+                        recoveryId: null,
+                        recoveryTargetName: '',
                     };
                     this.getNativeCloudRestores(true, true);
                 },
@@ -3280,6 +3301,8 @@
                         confirm: false,
                         requestId: null,
                         requestTargetName: '',
+                        recoveryId: null,
+                        recoveryTargetName: '',
                     };
                 },
                 clearNativeRestorePoll() {
@@ -3316,9 +3339,31 @@
                         if (trackedId !== null) {
                             exact = records.find(item => this.nativeRestoreId(item.id) === trackedId);
                         } else if (allowNameRecovery) {
-                            const targetName = this.nativeRestoreTargetName();
-                            const matches = records.filter(item => String(item.name || '').trim() === targetName);
-                            exact = matches.length === 1 ? matches[0] : null;
+                            const recoveringAcceptedRequest = Boolean(
+                                this.nativeRestore.recoveryId && this.nativeRestore.recoveryTargetName
+                            );
+                            if (recoveringAcceptedRequest) {
+                                // A lost POST response may still have created the durable
+                                // row. Recover only the exact request correlation and
+                                // requested target name; never substitute a concurrent
+                                // restore attempt that reused the same display name.
+                                const targetName = this.nativeRestoreTargetName();
+                                const recoveryId = String(this.nativeRestore.recoveryId || '').trim();
+                                const matches = records.filter(item => (
+                                    String(item.name || '').trim() === targetName
+                                    && String((item.execution_status || {}).recovery_id || '').trim() === recoveryId
+                                ));
+                                exact = matches.length === 1 ? matches[0] : null;
+                            } else {
+                                // Opening an existing backup is a status view. Promote
+                                // the newest durable attempt instead of pinning the
+                                // modal to the original failed target name forever.
+                                exact = records.reduce((latest, item) => {
+                                    const latestId = this.nativeRestoreId(latest && latest.id) || 0;
+                                    const itemId = this.nativeRestoreId(item && item.id) || 0;
+                                    return itemId > latestId ? item : latest;
+                                }, null);
+                            }
                             if (exact) this.nativeRestoreTrackedId = this.nativeRestoreId(exact.id);
                         }
                         if (exact) {

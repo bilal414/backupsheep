@@ -28,8 +28,8 @@ import ipaddress
 import json
 import os
 import re
+import stat
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,6 +97,43 @@ PROVIDER_DEFAULT_KINDS = frozenset(
         KIND_DEFAULT_ROUTE_TABLE,
         KIND_DEFAULT_SECURITY_LIST,
         KIND_DEFAULT_DHCP_OPTIONS,
+    }
+)
+RUNTIME_SCOPE_SCHEMA = 1
+CLEANUP_RECEIPT_SCHEMA = 1
+RUNTIME_SCOPE_KEYS = frozenset(
+    {
+        "schema",
+        "run_id",
+        "profile",
+        "tenancy_id",
+        "compartment_id",
+        "subnet_id",
+        "availability_domain",
+        "region",
+        "ui_ledger_path",
+        "network_ledger_path",
+    }
+)
+CLEANUP_RECEIPT_KEYS = frozenset(
+    {
+        "schema",
+        "run_id",
+        "tenancy_id",
+        "compartment_id",
+        "runtime_scope_digest",
+        "ui_ledger_path",
+        "ui_ledger_digest",
+        "terminal_resources",
+    }
+)
+UI_USER_RETAINED_KINDS = frozenset(
+    {
+        "customer_secret_key",
+        "iam_membership",
+        "iam_policy",
+        "iam_group",
+        "iam_user",
     }
 )
 
@@ -313,6 +350,232 @@ def _lexical_path(value: Any, *, variable: str) -> Path:
     return path
 
 
+def _reject_symlink_components(path: Path, *, variable: str) -> None:
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            if current.is_symlink():
+                raise HarnessError(f"{variable} must not use symlinked path components.")
+        except OSError as error:
+            raise HarnessError(f"{variable} could not be inspected safely.") from error
+
+
+def _read_json_artifact(
+    path_value: Any,
+    *,
+    variable: str,
+    exact_keys: frozenset[str] | None = None,
+    require_0600: bool = True,
+) -> tuple[Path, dict[str, Any]]:
+    path = _lexical_path(path_value, variable=variable)
+    _reject_symlink_components(path, variable=variable)
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise HarnessError(f"{variable} is missing or unreadable.") from error
+    mode = stat.S_IMODE(before.st_mode)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_size > 256 * 1024
+        or (require_0600 and mode != 0o600)
+        or (not require_0600 and mode & 0o022)
+    ):
+        raise HarnessError(f"{variable} has unsafe type, mode, or size.")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_dev != before.st_dev or opened.st_ino != before.st_ino:
+            raise HarnessError(f"{variable} changed while being opened.")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+            descriptor = None
+            payload = json.load(source)
+    except HarnessError:
+        raise
+    except (OSError, ValueError) as error:
+        raise HarnessError(f"{variable} is malformed.") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if not isinstance(payload, dict) or (
+        exact_keys is not None and set(payload) != set(exact_keys)
+    ):
+        raise HarnessError(f"{variable} has an unsupported schema.")
+    return path, payload
+
+
+def _publish_private_bytes(path: Path, payload: bytes, *, variable: str) -> Path:
+    """Create one file through a pinned parent fd without replacement races."""
+
+    path = Path(os.path.abspath(os.fspath(path)))
+    _reject_symlink_components(path.parent, variable=variable)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    directory_fd = None
+    try:
+        directory_fd = os.open(path.parent.anchor, flags)
+        for component in path.parent.parts[1:]:
+            created = False
+            try:
+                child_fd = os.open(component, flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                    os.fsync(directory_fd)
+                    created = True
+                except FileExistsError:
+                    pass
+                child_fd = os.open(component, flags, dir_fd=directory_fd)
+            opened = os.fstat(child_fd)
+            if not stat.S_ISDIR(opened.st_mode):
+                os.close(child_fd)
+                raise HarnessError(f"{variable} parent path is not a directory.")
+            if created:
+                os.fchmod(child_fd, 0o700)
+                os.fsync(child_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+    except HarnessError:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        raise
+    except OSError as error:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        raise HarnessError(f"{variable} parent directory could not be pinned.") from error
+    temporary_name = f".{path.name}.{os.urandom(12).hex()}.tmp"
+    target_created = False
+    published = False
+    cleanup_error = None
+    try:
+        pinned = os.fstat(directory_fd)
+        try:
+            visible = os.stat(path.parent, follow_symlinks=False)
+        except OSError as error:
+            raise HarnessError(f"{variable} parent directory changed.") from error
+        if (
+            not stat.S_ISDIR(pinned.st_mode)
+            or pinned.st_dev != visible.st_dev
+            or pinned.st_ino != visible.st_ino
+            or stat.S_IMODE(pinned.st_mode) & 0o022
+        ):
+            raise HarnessError(f"{variable} parent directory is unsafe or changed.")
+        create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            create_flags |= os.O_NOFOLLOW
+        descriptor = os.open(
+            temporary_name, create_flags, 0o600, dir_fd=directory_fd
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                descriptor = None
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        try:
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            target_created = True
+        except FileExistsError as error:
+            raise HarnessError(
+                f"{variable} appeared during write; refusing replacement."
+            ) from error
+        except OSError as error:
+            raise HarnessError(f"{variable} could not be published safely.") from error
+        try:
+            current = os.stat(path.parent, follow_symlinks=False)
+        except OSError as error:
+            raise HarnessError(
+                f"{variable} parent directory changed during publication."
+            ) from error
+        if current.st_dev != pinned.st_dev or current.st_ino != pinned.st_ino:
+            raise HarnessError(f"{variable} parent directory changed during publication.")
+        os.fsync(directory_fd)
+        published = True
+    finally:
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            cleanup_error = error
+        if target_created and (not published or cleanup_error is not None):
+            try:
+                os.unlink(path.name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+                target_created = False
+                published = False
+            except FileNotFoundError:
+                target_created = False
+            except OSError as error:
+                cleanup_error = cleanup_error or error
+        os.close(directory_fd)
+        if cleanup_error is not None:
+            raise HarnessError(
+                f"{variable} publication rollback could not be completed safely."
+            ) from cleanup_error
+    return path
+
+
+def _write_private_json(path_value: Any, payload: dict[str, Any], *, variable: str) -> Path:
+    path = _lexical_path(path_value, variable=variable)
+    _reject_symlink_components(path, variable=variable)
+    if path.exists():
+        raise HarnessError(f"{variable} already exists; refusing overwrite.")
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return _publish_private_bytes(path, encoded, variable=variable)
+
+
+def _digest_payload(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _file_digest(path: Path, *, variable: str) -> str:
+    path = Path(path)
+    _reject_symlink_components(path, variable=variable)
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise HarnessError(f"{variable} is missing.") from error
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise HarnessError(f"{variable} must be a regular file.")
+    digest = hashlib.sha256()
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_dev != metadata.st_dev or opened.st_ino != metadata.st_ino:
+            raise HarnessError(f"{variable} changed while being opened.")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest()
+
+
 def _parse_host_cidrs(value: Any) -> tuple[str, ...]:
     raw_values = [item.strip() for item in str(value or "").split(",") if item.strip()]
     if not raw_values:
@@ -376,6 +639,9 @@ class HarnessConfig:
     profile: str
     config_file: Path
     ledger_path: Path
+    ui_ledger_path: Path
+    runtime_scope_path: Path
+    ui_cleanup_receipt_path: Path
     availability_domain: str
     caller_cidrs: tuple[str, ...]
     database_ports: tuple[int, ...]
@@ -407,6 +673,33 @@ class HarnessConfig:
             environment.get("BACKUPSHEEP_E2E_NETWORK_LEDGER_PATH"),
             variable="BACKUPSHEEP_E2E_NETWORK_LEDGER_PATH",
         )
+        ui_ledger_path = _lexical_path(
+            environment.get("BACKUPSHEEP_E2E_LEDGER_PATH"),
+            variable="BACKUPSHEEP_E2E_LEDGER_PATH",
+        )
+        if ui_ledger_path == ledger_path:
+            raise HarnessError("Oracle UI and network ledgers must use separate paths.")
+        runtime_scope_path = _lexical_path(
+            environment.get("ORACLE_E2E_RUNTIME_SCOPE_FILE"),
+            variable="ORACLE_E2E_RUNTIME_SCOPE_FILE",
+        )
+        ui_cleanup_receipt_path = _lexical_path(
+            environment.get("ORACLE_E2E_UI_CLEANUP_RECEIPT"),
+            variable="ORACLE_E2E_UI_CLEANUP_RECEIPT",
+        )
+        protected_artifacts = {
+            ledger_path,
+            ui_ledger_path,
+            runtime_scope_path,
+            ui_cleanup_receipt_path,
+        }
+        if len(protected_artifacts) != 4:
+            raise HarnessError(
+                "Oracle network/UI ledgers, runtime scope, and cleanup receipt "
+                "must use four distinct paths."
+            )
+        for path in protected_artifacts:
+            _reject_symlink_components(path, variable="Oracle protected artifact")
         region = str(environment.get("ORACLE_E2E_REGION", REGION) or "").strip()
         if region != REGION:
             raise HarnessError(f"The Oracle fixture region must be exactly {REGION}.")
@@ -442,6 +735,9 @@ class HarnessConfig:
             profile=profile,
             config_file=config_file,
             ledger_path=ledger_path,
+            ui_ledger_path=ui_ledger_path,
+            runtime_scope_path=runtime_scope_path,
+            ui_cleanup_receipt_path=ui_cleanup_receipt_path,
             availability_domain=availability_domain,
             caller_cidrs=caller_cidrs,
             database_ports=database_ports,
@@ -586,9 +882,26 @@ class OracleTestCompartmentHarness:
         return type("Models", (), {**vars(core_models), **vars(identity_models)})
 
     def _load_clients(self) -> dict[str, Any]:
-        if self._clients and not {"identity", "network"}.issubset(self._clients):
-            raise HarnessError("Injected OCI clients must include identity and network clients.")
-        if self._clients and {"identity", "network"}.issubset(self._clients):
+        required = {
+            "identity",
+            "network",
+            "compute",
+            "block",
+            "object",
+            "database",
+            "mysql",
+            "postgresql",
+            "load_balancer",
+            "network_load_balancer",
+            "file_storage",
+            "container_engine",
+            "container_instances",
+            "functions",
+            "nosql",
+        }
+        if self._clients and not required.issubset(self._clients):
+            raise HarnessError("Injected OCI clients are incomplete for survivor sweeps.")
+        if self._clients and required.issubset(self._clients):
             return self._clients
         try:
             import oci
@@ -603,6 +916,25 @@ class OracleTestCompartmentHarness:
                 "_config": dict(loaded),
                 "identity": oci.identity.IdentityClient(loaded, **kwargs),
                 "network": oci.core.VirtualNetworkClient(loaded, **kwargs),
+                "compute": oci.core.ComputeClient(loaded, **kwargs),
+                "block": oci.core.BlockstorageClient(loaded, **kwargs),
+                "object": oci.object_storage.ObjectStorageClient(loaded, **kwargs),
+                "database": oci.database.DatabaseClient(loaded, **kwargs),
+                "mysql": oci.mysql.DbSystemClient(loaded, **kwargs),
+                "postgresql": oci.psql.PostgresqlClient(loaded, **kwargs),
+                "load_balancer": oci.load_balancer.LoadBalancerClient(loaded, **kwargs),
+                "network_load_balancer": oci.network_load_balancer.NetworkLoadBalancerClient(
+                    loaded, **kwargs
+                ),
+                "file_storage": oci.file_storage.FileStorageClient(loaded, **kwargs),
+                "container_engine": oci.container_engine.ContainerEngineClient(
+                    loaded, **kwargs
+                ),
+                "container_instances": oci.container_instances.ContainerInstanceClient(
+                    loaded, **kwargs
+                ),
+                "functions": oci.functions.FunctionsManagementClient(loaded, **kwargs),
+                "nosql": oci.nosql.NosqlClient(loaded, **kwargs),
             }
         except HarnessError:
             raise
@@ -652,6 +984,142 @@ class OracleTestCompartmentHarness:
         ]
         if len(exact_ad) != 1:
             raise HarnessError("The configured availability domain was not an exact active fact.")
+
+    def _runtime_scope_payload(self, *, compartment_id: str, subnet_id: str) -> dict[str, Any]:
+        return {
+            "schema": RUNTIME_SCOPE_SCHEMA,
+            "run_id": self.config.run_id,
+            "profile": self.config.profile,
+            "tenancy_id": self.config.allowed_tenancy_ocid,
+            "compartment_id": _require_ocid(
+                compartment_id, label="runtime compartment", resource_type="compartment"
+            ),
+            "subnet_id": _require_ocid(
+                subnet_id, label="runtime subnet", resource_type="subnet"
+            ),
+            "availability_domain": self.config.availability_domain,
+            "region": self.config.region,
+            "ui_ledger_path": str(self.config.ui_ledger_path),
+            "network_ledger_path": str(self.config.ledger_path),
+        }
+
+    def _validate_runtime_scope(self, payload: dict[str, Any], *, facts=None) -> dict[str, Any]:
+        if set(payload) != set(RUNTIME_SCOPE_KEYS) or payload.get("schema") != RUNTIME_SCOPE_SCHEMA:
+            raise HarnessError("Oracle runtime scope has an unsupported schema.")
+        ui_ledger_path = _lexical_path(
+            payload.get("ui_ledger_path"), variable="runtime ui ledger"
+        )
+        network_ledger_path = _lexical_path(
+            payload.get("network_ledger_path"), variable="runtime network ledger"
+        )
+        _reject_symlink_components(ui_ledger_path, variable="runtime ui ledger")
+        _reject_symlink_components(
+            network_ledger_path, variable="runtime network ledger"
+        )
+        if (
+            payload.get("run_id") != self.config.run_id
+            or payload.get("profile") != self.config.profile
+            or payload.get("tenancy_id") != self.config.allowed_tenancy_ocid
+            or payload.get("availability_domain") != self.config.availability_domain
+            or payload.get("region") != self.config.region
+            or ui_ledger_path != self.config.ui_ledger_path
+            or network_ledger_path != self.config.ledger_path
+        ):
+            raise HarnessError("Oracle runtime scope drifted from the exact configured run.")
+        compartment_id = _require_ocid(
+            payload.get("compartment_id"), label="runtime compartment", resource_type="compartment"
+        )
+        subnet_id = _require_ocid(
+            payload.get("subnet_id"), label="runtime subnet", resource_type="subnet"
+        )
+        if facts and (
+            compartment_id != facts["compartment_id"] or subnet_id != facts["subnet_id"]
+        ):
+            raise HarnessError("Oracle runtime scope does not match the exact network graph.")
+        return dict(payload)
+
+    def _ensure_runtime_scope(self, facts: dict[str, Any]) -> dict[str, Any]:
+        expected = self._runtime_scope_payload(**facts)
+        path = self.config.runtime_scope_path
+        if path.exists():
+            _path, current = _read_json_artifact(
+                path,
+                variable="ORACLE_E2E_RUNTIME_SCOPE_FILE",
+                exact_keys=RUNTIME_SCOPE_KEYS,
+            )
+            self._validate_runtime_scope(current, facts=facts)
+            if current != expected:
+                raise HarnessError("Existing Oracle runtime scope differs from exact network facts.")
+            return current
+        _write_private_json(
+            path, expected, variable="ORACLE_E2E_RUNTIME_SCOPE_FILE"
+        )
+        return expected
+
+    def _preflight_runtime_scope_for_provision(self) -> None:
+        """Reject unsafe or drifted resume artifacts before provider access."""
+
+        intent_path = self.config.ledger_path.with_name(
+            self.config.ledger_path.name + ".network-intents.json"
+        )
+        for variable, path in (
+            ("BACKUPSHEEP_E2E_NETWORK_LEDGER_PATH", self.config.ledger_path),
+            ("Oracle network mutation intents", intent_path),
+            ("ORACLE_E2E_RUNTIME_SCOPE_FILE", self.config.runtime_scope_path),
+        ):
+            _reject_symlink_components(path, variable=variable)
+        if self.config.runtime_scope_path.exists():
+            rows = self._read_network_rows_read_only()
+            self._load_runtime_scope_for_graph(rows)
+
+    def normalize_runtime_scope(self, network_output_path: str) -> dict[str, Any]:
+        """Import old non-secret network output without reading the OCI profile."""
+
+        _path, source = _read_json_artifact(
+            network_output_path,
+            variable="--network-output",
+            require_0600=False,
+        )
+        if set(source) != {"phase", "run_id", "oracle_harness_environment"}:
+            raise HarnessError("Legacy Oracle network output has an unsupported schema.")
+        facts = source.get("oracle_harness_environment")
+        expected_fact_keys = {
+            "ORACLE_E2E_ALLOWED_TENANCY_OCID",
+            "ORACLE_E2E_COMPARTMENT_OCID",
+            "ORACLE_E2E_ALLOWED_COMPARTMENT_OCID",
+            "ORACLE_E2E_SUBNET_OCID",
+            "ORACLE_E2E_AVAILABILITY_DOMAIN",
+        }
+        if (
+            source.get("phase") != "PROVISIONED"
+            or source.get("run_id") != self.config.run_id
+            or not isinstance(facts, dict)
+            or set(facts) != expected_fact_keys
+            or facts["ORACLE_E2E_ALLOWED_TENANCY_OCID"]
+            != self.config.allowed_tenancy_ocid
+            or facts["ORACLE_E2E_COMPARTMENT_OCID"]
+            != facts["ORACLE_E2E_ALLOWED_COMPARTMENT_OCID"]
+            or facts["ORACLE_E2E_AVAILABILITY_DOMAIN"]
+            != self.config.availability_domain
+        ):
+            raise HarnessError("Legacy Oracle network output does not match this exact run.")
+        payload = self._runtime_scope_payload(
+            compartment_id=facts["ORACLE_E2E_COMPARTMENT_OCID"],
+            subnet_id=facts["ORACLE_E2E_SUBNET_OCID"],
+        )
+        if self.config.runtime_scope_path.exists():
+            raise HarnessError("Runtime scope already exists; refusing normalization overwrite.")
+        written = _write_private_json(
+            self.config.runtime_scope_path,
+            payload,
+            variable="ORACLE_E2E_RUNTIME_SCOPE_FILE",
+        )
+        return {
+            "phase": "RUNTIME_SCOPE_NORMALIZED",
+            "run_id": self.config.run_id,
+            "runtime_scope_file": str(written),
+            "source_overwritten": False,
+        }
 
     def _find_exact(self, spec: _Spec) -> Any | None:
         rows = list(iter_oci_pages(spec.list_method, **spec.list_kwargs))
@@ -1260,7 +1728,9 @@ class OracleTestCompartmentHarness:
 
     def provision(self) -> dict[str, Any]:
         self._require_apply()
+        self._preflight_runtime_scope_for_provision()
         facts = self._provision_graph()
+        self._ensure_runtime_scope(facts)
         # Only these non-secret values are intended to be copied into the
         # environment used by oracle_live_ui_e2e.py.
         return {
@@ -1570,14 +2040,390 @@ class OracleTestCompartmentHarness:
                 self._sleep(self.config.poll_seconds)
         return results
 
+    def _read_network_rows_read_only(self) -> dict[str, dict[str, Any]]:
+        _path, payload = _read_json_artifact(
+            self.config.ledger_path,
+            variable="BACKUPSHEEP_E2E_NETWORK_LEDGER_PATH",
+            require_0600=True,
+        )
+        if (
+            payload.get("schema") != 1
+            or payload.get("provider") != "oracle_test_compartment"
+            or payload.get("run_id") != self.config.run_id
+            or payload.get("scope") != self.scope
+            or not isinstance(payload.get("resources"), list)
+        ):
+            raise HarnessError("Oracle network ledger does not match this exact run.")
+        rows = payload["resources"]
+        kinds = [str(row.get("kind") or "") for row in rows if isinstance(row, dict)]
+        if len(rows) != len(kinds) or set(kinds) != set(KINDS) or len(kinds) != len(set(kinds)):
+            raise HarnessError("Oracle network ledger graph is incomplete or duplicated.")
+        return {row["kind"]: dict(row) for row in rows}
+
+    def _load_runtime_scope_for_graph(self, rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        _path, payload = _read_json_artifact(
+            self.config.runtime_scope_path,
+            variable="ORACLE_E2E_RUNTIME_SCOPE_FILE",
+            exact_keys=RUNTIME_SCOPE_KEYS,
+        )
+        facts = {
+            "compartment_id": str(rows[KIND_COMPARTMENT]["resource_id"]),
+            "subnet_id": str(rows[KIND_SUBNET]["resource_id"]),
+        }
+        return self._validate_runtime_scope(payload, facts=facts)
+
+    def _validate_ui_cleanup_receipt(
+        self, runtime_scope: dict[str, Any]
+    ) -> dict[str, Any]:
+        _path, receipt = _read_json_artifact(
+            self.config.ui_cleanup_receipt_path,
+            variable="ORACLE_E2E_UI_CLEANUP_RECEIPT",
+            exact_keys=CLEANUP_RECEIPT_KEYS,
+        )
+        receipt_ui_ledger_path = _lexical_path(
+            receipt.get("ui_ledger_path"), variable="receipt UI ledger"
+        )
+        _reject_symlink_components(
+            receipt_ui_ledger_path, variable="receipt UI ledger"
+        )
+        if (
+            receipt.get("schema") != CLEANUP_RECEIPT_SCHEMA
+            or receipt.get("run_id") != self.config.run_id
+            or receipt.get("tenancy_id") != self.config.allowed_tenancy_ocid
+            or receipt.get("compartment_id") != runtime_scope["compartment_id"]
+            or receipt.get("runtime_scope_digest") != _digest_payload(runtime_scope)
+            or receipt_ui_ledger_path != self.config.ui_ledger_path
+            or receipt.get("ui_ledger_digest")
+            != _file_digest(self.config.ui_ledger_path, variable="Oracle UI ledger")
+        ):
+            raise HarnessError("Oracle UI cleanup receipt does not match the exact runtime scope.")
+        _ledger_path, ui_ledger = _read_json_artifact(
+            self.config.ui_ledger_path,
+            variable="BACKUPSHEEP_E2E_LEDGER_PATH",
+            require_0600=True,
+        )
+        expected_scope = (
+            f"oci:{self.config.profile}:{runtime_scope['compartment_id']}:"
+            f"{self.config.availability_domain}"
+        )
+        if (
+            ui_ledger.get("schema") != 1
+            or ui_ledger.get("provider") != "oracle_cloud"
+            or ui_ledger.get("run_id") != self.config.run_id
+            or ui_ledger.get("scope") != expected_scope
+            or not isinstance(ui_ledger.get("resources"), list)
+        ):
+            raise HarnessError("Oracle UI ledger does not match the cleanup receipt scope.")
+        expected_terminal = []
+        for row in ui_ledger["resources"]:
+            if not isinstance(row, dict):
+                raise HarnessError("Oracle network cleanup requires valid UI ledger rows.")
+            kind = str(row.get("kind") or "")
+            state = str(row.get("cleanup_state") or "")
+            if kind in UI_USER_RETAINED_KINDS:
+                if state not in {"eligible", "failed", "manual_review"}:
+                    raise HarnessError(
+                        "Oracle network cleanup cannot prove a terminal credential row is user-retained."
+                    )
+                state = "user_retained"
+            elif state not in {"deleted", "absent"}:
+                raise HarnessError("Oracle network cleanup requires every UI resource terminal.")
+            expected_terminal.append(
+                {
+                    "kind": kind,
+                    "resource_id": str(row.get("resource_id") or ""),
+                    "state": state,
+                }
+            )
+        terminal = receipt.get("terminal_resources")
+        if not isinstance(terminal, list) or any(
+            not isinstance(row, dict) or set(row) != {"kind", "resource_id", "state"}
+            for row in terminal
+        ):
+            raise HarnessError("Oracle UI cleanup receipt terminal list is malformed.")
+        sort_key = lambda row: (row["kind"], row["resource_id"])
+        if sorted(terminal, key=sort_key) != sorted(expected_terminal, key=sort_key):
+            raise HarnessError("Oracle UI cleanup receipt does not match terminal ledger IDs.")
+        retained = [row for row in terminal if row["state"] == "user_retained"]
+        retained_kinds = {row["kind"] for row in retained}
+        if retained and retained_kinds != set(UI_USER_RETAINED_KINDS):
+            raise HarnessError(
+                "Oracle UI cleanup receipt has an incomplete retained credential graph."
+            )
+        if len({(row["kind"], row["resource_id"]) for row in terminal}) != len(
+            terminal
+        ):
+            raise HarnessError("Oracle UI cleanup receipt repeats a terminal ID.")
+        return receipt
+
+    @staticmethod
+    def _retained_receipt_ids(receipt: dict[str, Any]) -> set[tuple[str, str]]:
+        return {
+            (str(row["kind"]), str(row["resource_id"]))
+            for row in receipt["terminal_resources"]
+            if row["state"] == "user_retained"
+        }
+
+    def _dependent_survivors(
+        self,
+        compartment_id: str,
+        *,
+        retained_ids: set[tuple[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Sweep supported compartment families and fail closed on any unknown child."""
+
+        retained_ids = set(retained_ids or set())
+        if any(kind not in UI_USER_RETAINED_KINDS or not resource_id for kind, resource_id in retained_ids):
+            raise HarnessError("Oracle retained-resource receipt IDs are unsupported.")
+        survivors: set[tuple[str, str]] = set()
+        observed_retained: set[tuple[str, str]] = set()
+        seen_inventory: set[tuple[str, str]] = set()
+        terminal = {"DELETED", "TERMINATED", "DETACHED", "CANCELED", "CANCELLED"}
+
+        def pages(method, **kwargs):
+            if not callable(method):
+                raise HarnessError("OCI survivor sweep client lacks a required list method.")
+            cursor = ""
+            seen = set()
+            count = 0
+            for _ in range(MAX_PAGES):
+                if count >= MAX_ITEMS:
+                    raise HarnessError("OCI survivor inventory exceeded the safety limit.")
+                request = dict(kwargs)
+                request["limit"] = min(100, MAX_ITEMS - count)
+                if cursor:
+                    request["page"] = cursor
+                response = self._call(method, **request)
+                data = _data(response)
+                rows = data if isinstance(data, (list, tuple)) else _value(data, "items")
+                if not isinstance(rows, (list, tuple)):
+                    raise HarnessError("OCI survivor inventory returned a malformed page.")
+                for item in rows:
+                    count += 1
+                    if count > MAX_ITEMS:
+                        raise HarnessError("OCI survivor inventory exceeded the safety limit.")
+                    yield item
+                cursor = _next_page(response)
+                if not cursor:
+                    return
+                if cursor in seen:
+                    raise HarnessError("OCI survivor inventory repeated a cursor.")
+                seen.add(cursor)
+            raise HarnessError("OCI survivor inventory exceeded the page limit.")
+
+        def remember(kind: str, resource: Any, *, include=True):
+            if not include:
+                return
+            resource_id = str(_value(resource, "id") or "")
+            if not resource_id:
+                raise HarnessError("OCI survivor inventory omitted a resource ID.")
+            identity = (kind, resource_id)
+            if identity in seen_inventory:
+                raise HarnessError("OCI survivor inventory repeated a resource ID.")
+            seen_inventory.add(identity)
+            state = str(
+                _value(resource, "lifecycle_state")
+                or _value(resource, "state")
+                or ""
+            ).upper()
+            if state in terminal:
+                return
+            if identity in retained_ids:
+                observed_retained.add(identity)
+                return
+            survivors.add(identity)
+
+        def collect(kind: str, client_name: str, method_name: str, **kwargs):
+            client = self._clients.get(client_name)
+            if client is None:
+                raise HarnessError("OCI survivor sweep client family is unavailable.")
+            for resource in pages(getattr(client, method_name, None), **kwargs):
+                remember(kind, resource)
+
+        common = {"compartment_id": compartment_id}
+        for kind, client_name, method_name, kwargs in (
+            ("instance", "compute", "list_instances", common),
+            ("image", "compute", "list_images", common),
+            ("vnic_attachment", "compute", "list_vnic_attachments", common),
+            ("volume_attachment", "compute", "list_volume_attachments", common),
+            (
+                "boot_volume_attachment",
+                "compute",
+                "list_boot_volume_attachments",
+                {**common, "availability_domain": self.config.availability_domain},
+            ),
+            ("volume", "block", "list_volumes", {**common, "availability_domain": self.config.availability_domain}),
+            ("boot_volume", "block", "list_boot_volumes", {**common, "availability_domain": self.config.availability_domain}),
+            ("volume_backup", "block", "list_volume_backups", common),
+            ("boot_volume_backup", "block", "list_boot_volume_backups", common),
+            ("nat_gateway", "network", "list_nat_gateways", common),
+            ("service_gateway", "network", "list_service_gateways", common),
+            ("local_peering_gateway", "network", "list_local_peering_gateways", common),
+            ("network_security_group", "network", "list_network_security_groups", common),
+            ("drg", "network", "list_drgs", common),
+            ("drg_attachment", "network", "list_drg_attachments", common),
+            ("ipsec_connection", "network", "list_ip_sec_connections", common),
+            ("virtual_circuit", "network", "list_virtual_circuits", common),
+            ("public_ip", "network", "list_public_ips", {**common, "scope": "REGION"}),
+            ("database_system", "database", "list_db_systems", common),
+            ("autonomous_database", "database", "list_autonomous_databases", common),
+            ("mysql_db_system", "mysql", "list_db_systems", common),
+            ("postgresql_db_system", "postgresql", "list_db_systems", common),
+            ("load_balancer", "load_balancer", "list_load_balancers", common),
+            ("network_load_balancer", "network_load_balancer", "list_network_load_balancers", common),
+            ("file_system", "file_storage", "list_file_systems", {**common, "availability_domain": self.config.availability_domain}),
+            ("mount_target", "file_storage", "list_mount_targets", {**common, "availability_domain": self.config.availability_domain}),
+            ("oke_cluster", "container_engine", "list_clusters", common),
+            ("oke_node_pool", "container_engine", "list_node_pools", common),
+            ("container_instance", "container_instances", "list_container_instances", common),
+            ("function_application", "functions", "list_applications", common),
+            ("nosql_table", "nosql", "list_tables", common),
+        ):
+            collect(kind, client_name, method_name, **kwargs)
+
+        identity = self._clients["identity"]
+        for resource in pages(identity.list_policies, compartment_id=compartment_id):
+            remember("iam_policy", resource)
+        for kind, method_name in (("iam_user", "list_users"), ("iam_group", "list_groups")):
+            for resource in pages(
+                getattr(identity, method_name, None),
+                compartment_id=self.config.allowed_tenancy_ocid,
+            ):
+                resource_id = str(_value(resource, "id") or "")
+                remember(
+                    kind,
+                    resource,
+                    include=(
+                        _tags(resource).get(TAG_RUN) == self.config.run_id
+                        or (kind, resource_id) in retained_ids
+                    ),
+                )
+        retained_users = {
+            resource_id for kind, resource_id in retained_ids if kind == "iam_user"
+        }
+        retained_groups = {
+            resource_id for kind, resource_id in retained_ids if kind == "iam_group"
+        }
+        for resource in pages(
+            getattr(identity, "list_user_group_memberships", None),
+            compartment_id=self.config.allowed_tenancy_ocid,
+        ):
+            remember(
+                "iam_membership",
+                resource,
+                include=(
+                    str(_value(resource, "user_id") or "") in retained_users
+                    or str(_value(resource, "group_id") or "") in retained_groups
+                    or (
+                        "iam_membership",
+                        str(_value(resource, "id") or ""),
+                    )
+                    in retained_ids
+                ),
+            )
+        list_keys = getattr(identity, "list_customer_secret_keys", None)
+        if not callable(list_keys):
+            raise HarnessError("OCI survivor sweep cannot inventory customer secret keys.")
+        for user_id in retained_users:
+            response = self._call(list_keys, user_id=user_id)
+            rows = _data(response)
+            if not isinstance(rows, (list, tuple)):
+                raise HarnessError("OCI customer-secret inventory is malformed.")
+            for resource in rows:
+                remember("customer_secret_key", resource)
+
+        object_client = self._clients["object"]
+        namespace = str(
+            _data(
+                self._call(
+                    object_client.get_namespace,
+                    compartment_id=self.config.allowed_tenancy_ocid,
+                )
+            )
+            or ""
+        )
+        if not namespace:
+            raise HarnessError("Oracle Object Storage namespace readback is malformed.")
+        for resource in pages(
+            getattr(object_client, "list_buckets", None),
+            namespace_name=namespace,
+            compartment_id=compartment_id,
+        ):
+            remember("bucket", resource)
+
+        missing_retained = retained_ids - observed_retained
+        if missing_retained:
+            raise HarnessError("Oracle retained credential inventory no longer matches its receipt.")
+        return [
+            {"kind": kind, "resource_id": resource_id}
+            for kind, resource_id in sorted(survivors)
+        ]
+
+    def cleanup_plan(self) -> dict[str, Any]:
+        """Read-only cleanup preflight; does not initialize mutable stores."""
+
+        rows = self._read_network_rows_read_only()
+        runtime = self._load_runtime_scope_for_graph(rows)
+        receipt = self._validate_ui_cleanup_receipt(runtime)
+        retained_ids = self._retained_receipt_ids(receipt)
+        self._load_clients()
+        self._validate_scope()
+        self._verify_cleanup_graph(rows)
+        survivors = self._dependent_survivors(
+            runtime["compartment_id"], retained_ids=retained_ids
+        )
+        return {
+            "phase": "CLEANUP_PLAN",
+            "run_id": self.config.run_id,
+            "provider_mutations": False,
+            "local_writes": False,
+            "survivors": survivors,
+            "user_retained_resources": [
+                {"kind": kind, "resource_id": resource_id}
+                for kind, resource_id in sorted(retained_ids)
+            ],
+            "compartment_delete_allowed": not retained_ids,
+            "cleanup_allowed": not survivors,
+        }
+
     def cleanup(self) -> dict[str, Any]:
         self._require_cleanup()
+        # Validate both protected ledgers and the receipt before constructing
+        # mutable stores. A receipt mismatch must not create an intent file or
+        # alter the network ledger.
+        rows = self._read_network_rows_read_only()
+        runtime = self._load_runtime_scope_for_graph(rows)
+        receipt = self._validate_ui_cleanup_receipt(runtime)
+        retained_ids = self._retained_receipt_ids(receipt)
+        if not retained_ids and all(
+            str(row.get("cleanup_state") or "") in {"deleted", "absent"}
+            for row in rows.values()
+        ):
+            return {
+                "phase": "ALREADY_CLEANED",
+                "run_id": self.config.run_id,
+                "provider_mutations": False,
+                "results": {
+                    kind: "ALREADY_ABSENT" for kind in sorted(rows)
+                },
+                "user_retained_resources": [],
+            }
         self._load_clients()
         self._validate_scope()
         if self.intents.pending():
             raise HarnessError("Cleanup is blocked by unresolved network mutation intents.")
-        rows = self._ledger_specs()
         self._verify_cleanup_graph(rows)
+        survivors = self._dependent_survivors(
+            runtime["compartment_id"], retained_ids=retained_ids
+        )
+        if survivors:
+            raise HarnessError("Cleanup is blocked by surviving or unledgered child resources.")
+        mutable_rows = self._ledger_specs()
+        if mutable_rows != rows:
+            raise HarnessError("Oracle network ledger changed after cleanup preflight.")
+        rows = mutable_rows
+        if self.intents.pending():
+            raise HarnessError("Cleanup is blocked by unresolved network mutation intents.")
         direct_order = (
             KIND_SUBNET,
             KIND_SECURITY_LIST,
@@ -1589,46 +2435,77 @@ class OracleTestCompartmentHarness:
             kind: self._delete_kind(kind, rows[kind]) for kind in direct_order
         }
         results.update(self._reconcile_provider_defaults_after_vcn_absence(rows))
-        results[KIND_COMPARTMENT] = self._delete_kind(
-            KIND_COMPARTMENT,
-            rows[KIND_COMPARTMENT],
-        )
+        if retained_ids:
+            results[KIND_COMPARTMENT] = "USER_RETAINED_CREDENTIAL_SCOPE"
+        else:
+            results[KIND_COMPARTMENT] = self._delete_kind(
+                KIND_COMPARTMENT,
+                rows[KIND_COMPARTMENT],
+            )
         if self.intents.pending():
             raise HarnessError("Network mutation intents remained after cleanup.")
-        return {"phase": "CLEANED", "run_id": self.config.run_id, "results": results}
+        return {
+            "phase": (
+                "CLEANED_WITH_USER_RETAINED_CREDENTIALS"
+                if retained_ids
+                else "CLEANED"
+            ),
+            "run_id": self.config.run_id,
+            "results": results,
+            "user_retained_resources": [
+                {"kind": kind, "resource_id": resource_id}
+                for kind, resource_id in sorted(retained_ids)
+            ],
+        }
 
 
-def _write_output(path_value: str, payload: dict[str, Any]) -> None:
+def _write_output(
+    path_value: str,
+    payload: dict[str, Any],
+    *,
+    protected_paths: Iterable[Path] = (),
+) -> None:
     path = _lexical_path(path_value, variable="--output")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump(payload, output, indent=2, sort_keys=True)
-            output.write("\n")
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    protected = {Path(item) for item in protected_paths}
+    if path in protected:
+        raise HarnessError("--output must not overwrite a protected/source artifact.")
+    _write_private_json(path, payload, variable="--output")
+
+
+def _environment_protected_paths(
+    environment: dict[str, Any], *, network_output: str | None = None
+) -> set[Path]:
+    paths = set()
+    for name in (
+        "BACKUPSHEEP_E2E_NETWORK_LEDGER_PATH",
+        "BACKUPSHEEP_E2E_LEDGER_PATH",
+        "ORACLE_E2E_RUNTIME_SCOPE_FILE",
+        "ORACLE_E2E_UI_CLEANUP_RECEIPT",
+        "OCI_CLI_CONFIG_FILE",
+    ):
+        value = str(environment.get(name) or "").strip()
+        if value:
+            paths.add(Path(os.path.abspath(os.path.expanduser(value))))
+    if network_output:
+        paths.add(Path(os.path.abspath(os.path.expanduser(network_output))))
+    return paths
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Offline-safe Oracle test compartment/network harness.")
-    parser.add_argument("--phase", choices=("plan", "provision", "cleanup"), default="plan")
+    parser.add_argument(
+        "--phase",
+        choices=("plan", "normalize-runtime", "provision", "cleanup-plan", "cleanup"),
+        default="plan",
+    )
     parser.add_argument("--output", help="Optional non-secret JSON output path outside the repository.")
+    parser.add_argument("--network-output", help="Existing non-secret provision output to normalize.")
     return parser
 
 
 def main(argv=None, *, environment=None, clients=None) -> int:
     args = build_parser().parse_args(argv)
+    environment = dict(os.environ if environment is None else environment)
     try:
         # This branch must remain before HarnessConfig.from_environment and
         # OracleTestCompartmentHarness construction.  Empty-environment plan is
@@ -1638,17 +2515,52 @@ def main(argv=None, *, environment=None, clients=None) -> int:
         if args.phase == "plan":
             result = OracleTestCompartmentHarness.inert_plan()
             if args.output:
-                _write_output(args.output, result)
+                _write_output(
+                    args.output,
+                    result,
+                    protected_paths=_environment_protected_paths(
+                        environment, network_output=args.network_output
+                    ),
+                )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         config = HarnessConfig.from_environment(environment)
+        protected_outputs = {
+            config.config_file,
+            config.ledger_path,
+            config.ui_ledger_path,
+            config.runtime_scope_path,
+            config.ui_cleanup_receipt_path,
+            *_environment_protected_paths(
+                environment, network_output=args.network_output
+            ),
+        }
+        if args.output:
+            output_path = _lexical_path(args.output, variable="--output")
+            _reject_symlink_components(output_path, variable="--output")
+            if output_path in protected_outputs:
+                raise HarnessError(
+                    "--output must not overwrite a protected/source artifact."
+                )
+            if output_path.exists():
+                raise HarnessError("--output already exists; refusing overwrite.")
         harness = OracleTestCompartmentHarness(config, clients=clients)
-        if args.phase == "provision":
+        if args.phase == "normalize-runtime":
+            if not args.network_output:
+                raise HarnessError("--network-output is required for normalize-runtime.")
+            result = harness.normalize_runtime_scope(args.network_output)
+        elif args.phase == "provision":
             result = harness.provision()
+        elif args.phase == "cleanup-plan":
+            result = harness.cleanup_plan()
         else:
             result = harness.cleanup()
         if args.output:
-            _write_output(args.output, result)
+            _write_output(
+                args.output,
+                result,
+                protected_paths=protected_outputs,
+            )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except (HarnessError, LedgerError) as error:

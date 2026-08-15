@@ -1,4 +1,7 @@
+import hashlib
+import json
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
@@ -166,6 +169,170 @@ class CloudRestoreRequestIdempotencyTests(
                 "restore_id": restore.id,
             },
         )
+
+    def test_recovery_id_is_safe_in_the_api_serializer_contract(self):
+        node = factories.make_cloud_node(self.account, self.member)
+        backup = _completed_cloud_backup(node)
+        recovery_id = str(uuid.uuid4())
+        opaque_key = "header-secret-that-must-not-be-returned"
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_cloud_backup.apply_async"
+        ):
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self._post(
+                    node,
+                    self._payload(backup, recovery_id=recovery_id),
+                    idempotency_key=opaque_key,
+                )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.data["execution_status"]["recovery_id"], recovery_id
+        )
+        restore = CoreCloudRestore.objects.get(node=node)
+        self.assertEqual(
+            restore.execution_metadata["api_request"]["recovery_id"],
+            recovery_id,
+        )
+        self.assertNotIn(opaque_key, str(response.data))
+        self.assertNotIn(opaque_key, str(restore.execution_metadata))
+        self.assertNotIn("idempotency_key", response.data["execution_status"])
+
+    def test_legacy_fingerprint_replays_without_recovery_id(self):
+        node = factories.make_cloud_node(self.account, self.member)
+        backup = _completed_cloud_backup(node)
+        payload = self._payload(backup)
+        idempotency_key = "legacy-fingerprint-replay"
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_cloud_backup.apply_async"
+        ) as dispatch:
+            with self.captureOnCommitCallbacks(execute=True):
+                first = self._post(
+                    node, payload, idempotency_key=idempotency_key
+                )
+
+            restore = CoreCloudRestore.objects.get(node=node)
+            legacy_payload = {
+                "node_id": node.id,
+                "backup_id": backup.id,
+                "name": "restored-server",
+                "params": {},
+            }
+            expected_fingerprint = hashlib.sha256(
+                json.dumps(
+                    legacy_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            self.assertEqual(
+                restore.execution_metadata["api_request"]["fingerprint"],
+                expected_fingerprint,
+            )
+            self.assertNotIn(
+                "recovery_id", restore.execution_metadata["api_request"]
+            )
+
+            replay = self._post(
+                node, payload, idempotency_key=idempotency_key
+            )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.data["idempotent_replay"])
+        self.assertEqual(replay.data["id"], restore.id)
+        dispatch.assert_called_once()
+
+    def test_recovery_id_is_part_of_the_immutable_request_identity(self):
+        node = factories.make_cloud_node(self.account, self.member)
+        backup = _completed_cloud_backup(node)
+        first_recovery_id = str(uuid.uuid4())
+        second_recovery_id = str(uuid.uuid4())
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_cloud_backup.apply_async"
+        ) as dispatch:
+            with self.captureOnCommitCallbacks(execute=True):
+                first = self._post(
+                    node,
+                    self._payload(backup, recovery_id=first_recovery_id),
+                    idempotency_key="immutable-recovery-key",
+                )
+            conflict = self._post(
+                node,
+                self._payload(backup, recovery_id=second_recovery_id),
+                idempotency_key="immutable-recovery-key",
+            )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.data["code"], "restore_idempotency_conflict")
+        self.assertEqual(CoreCloudRestore.objects.filter(node=node).count(), 1)
+        dispatch.assert_called_once()
+
+    def test_recovery_id_accepts_only_canonical_rfc4122_version_four_uuid(self):
+        node = factories.make_cloud_node(self.account, self.member)
+        backup = _completed_cloud_backup(node)
+        invalid_recovery_ids = (
+            "not-a-uuid",
+            str(uuid.uuid4()).upper(),
+            str(uuid.uuid1()),
+            str(uuid.UUID(int=0)),
+            123,
+        )
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_cloud_backup.apply_async"
+        ) as dispatch:
+            for index, recovery_id in enumerate(invalid_recovery_ids):
+                response = self._post(
+                    node,
+                    self._payload(backup, recovery_id=recovery_id),
+                    idempotency_key=f"invalid-recovery-{index}",
+                )
+                self.assertEqual(response.status_code, 503)
+
+        self.assertEqual(CoreCloudRestore.objects.filter(node=node).count(), 0)
+        dispatch.assert_not_called()
+
+    def test_duplicate_target_names_are_distinguished_by_recovery_id(self):
+        node = factories.make_cloud_node(self.account, self.member)
+        backup = _completed_cloud_backup(node)
+        first_recovery_id = str(uuid.uuid4())
+        second_recovery_id = str(uuid.uuid4())
+
+        with mock.patch(
+            "apps._tasks.integration.restore.restore_cloud_backup.apply_async"
+        ) as dispatch:
+            with self.captureOnCommitCallbacks(execute=True):
+                first = self._post(
+                    node,
+                    self._payload(backup, recovery_id=first_recovery_id),
+                    idempotency_key="duplicate-name-one",
+                )
+            with self.captureOnCommitCallbacks(execute=True):
+                second = self._post(
+                    node,
+                    self._payload(backup, recovery_id=second_recovery_id),
+                    idempotency_key="duplicate-name-two",
+                )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(first.data["name"], second.data["name"])
+        self.assertNotEqual(first.data["id"], second.data["id"])
+        self.assertEqual(
+            first.data["execution_status"]["recovery_id"], first_recovery_id
+        )
+        self.assertEqual(
+            second.data["execution_status"]["recovery_id"], second_recovery_id
+        )
+        self.assertEqual(CoreCloudRestore.objects.filter(node=node).count(), 2)
+        self.assertEqual(dispatch.call_count, 2)
 
     def test_replay_survives_provider_fingerprint_and_internal_param_updates(self):
         node = factories.make_cloud_node(self.account, self.member)

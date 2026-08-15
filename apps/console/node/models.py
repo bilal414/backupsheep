@@ -348,41 +348,67 @@ def _restore_unknown_outcome(restore, *, code="PROVIDER_UNKNOWN_OUTCOME"):
 
 
 def _restore_safe_failure(restore, code, *, manual_review=False):
-    params = _restore_params(restore)
-    unresolved_upcloud_witness = _restore_has_unresolved_upcloud_witness(params)
-    if unresolved_upcloud_witness:
-        # A failed exact read after a power/network POST is not proof that the
-        # provider rejected the mutation.  Keep the exact witness and fence
-        # every future server create until a successor worker reconciles it.
-        params["_bs_create_outcome_unknown"] = True
-        params["_bs_last_error_category"] = "manual_review"
-    elif code in {
-        "PROVIDER_AUTH_FAILED",
-        "PROVIDER_NOT_FOUND",
-        "PROVIDER_RATE_LIMIT",
-        "PROVIDER_REQUEST_FAILED",
-        "PROVIDER_FAILED",
-        "PROVIDER_CONFLICT",
-    }:
-        params["_bs_create_outcome_unknown"] = False
-    else:
-        params["_bs_create_outcome_unknown"] = bool(params.get("_bs_create_outcome_unknown"))
-    params["_bs_last_error_code"] = code
-    if not unresolved_upcloud_witness:
-        params["_bs_last_error_category"] = "manual_review" if manual_review else "terminal"
+    # Provider status polling persists a merged params document in its own
+    # short transaction.  A caller may still hold the object it loaded before
+    # that transaction, and another worker can persist reconciliation or
+    # mutation evidence in the gap before this terminal transition.  Lock and
+    # reload the row here so the terminal update changes only its own error
+    # fields and never writes that stale whole-document snapshot back.
+    with transaction.atomic():
+        locked = restore.__class__.objects.select_for_update().get(pk=restore.pk)
+        params = _restore_params(locked)
+        unresolved_upcloud_witness = _restore_has_unresolved_upcloud_witness(params)
+        if unresolved_upcloud_witness:
+            # A failed exact read after a power/network POST is not proof that
+            # the provider rejected the mutation.  Keep the exact witness and
+            # fence every future server create until a successor worker
+            # reconciles it.
+            params["_bs_create_outcome_unknown"] = True
+            params["_bs_last_error_category"] = "manual_review"
+        elif code in {
+            "PROVIDER_AUTH_FAILED",
+            "PROVIDER_NOT_FOUND",
+            "PROVIDER_RATE_LIMIT",
+            "PROVIDER_REQUEST_FAILED",
+            "PROVIDER_FAILED",
+            "PROVIDER_CONFLICT",
+        }:
+            params["_bs_create_outcome_unknown"] = False
+        else:
+            params["_bs_create_outcome_unknown"] = bool(
+                params.get("_bs_create_outcome_unknown")
+            )
+        params["_bs_last_error_code"] = code
+        if not unresolved_upcloud_witness:
+            params["_bs_last_error_category"] = (
+                "manual_review" if manual_review else "terminal"
+            )
+
+        error = _restore_message(code)
+        status = _restore_status("FAILED")
+        operation_phase = _restore_phase(
+            "MANUAL_REVIEW" if manual_review or unresolved_upcloud_witness else "FAILED"
+        )
+        locked.params = params
+        locked.error = error
+        locked.status = status
+        locked.operation_phase = operation_phase
+        if hasattr(locked, "last_error_code"):
+            locked.last_error_code = code
+        fields = ["params", "error", "status", "operation_phase", "modified"]
+        if hasattr(locked, "last_error_code"):
+            fields.append("last_error_code")
+        locked.save(update_fields=fields)
+
+    # Keep the caller coherent for any subsequent status-only save while
+    # ensuring its params are the just-committed durable merge.
     restore.params = params
-    restore.error = _restore_message(code)
-    restore.status = _restore_status("FAILED")
-    restore.operation_phase = _restore_phase(
-        "MANUAL_REVIEW" if manual_review or unresolved_upcloud_witness else "FAILED"
-    )
+    restore.error = error
+    restore.status = status
+    restore.operation_phase = operation_phase
     if hasattr(restore, "last_error_code"):
         restore.last_error_code = code
-    fields = ["params", "error", "status", "operation_phase", "modified"]
-    if hasattr(restore, "last_error_code"):
-        fields.append("last_error_code")
-    restore.save(update_fields=fields)
-    return _restore_status("FAILED")
+    return status
 
 
 def _restore_adopt(restore, resource_id, *, provider_status=None, params_update=None, marker_verified=True):
@@ -406,6 +432,27 @@ def _restore_adopt(restore, resource_id, *, provider_status=None, params_update=
         fields.append("provider_job_id")
     restore.save(update_fields=list(dict.fromkeys(fields)))
     return resource_id
+
+
+def _restore_record_provider_status(restore, provider_status):
+    """Persist the latest safe provider state exposed by restore status APIs."""
+
+    provider_status = str(provider_status or "").strip()[:64]
+    if not provider_status or not getattr(restore, "pk", None):
+        return False
+    with transaction.atomic():
+        locked = restore.__class__.objects.select_for_update().get(pk=restore.pk)
+        params = _restore_params(locked)
+        if params.get("_bs_provider_status") == provider_status:
+            restore.params = params
+            return False
+        params["_bs_provider_status"] = provider_status
+        locked.params = params
+        locked.save(update_fields=["params", "modified"])
+    # Keep the caller coherent for any subsequent phase-only save without
+    # allowing its potentially stale JSON snapshot to overwrite the merge.
+    restore.params = params
+    return True
 
 
 def _restore_begin_mutation(restore):
@@ -917,6 +964,11 @@ def _restore_exception(error, *, mutation=False):
 
 
 def _restore_handle_error(restore, error, *, mutation=False, raise_terminal=True):
+    # Losing the durable execution lease is a worker-fencing event, not a
+    # provider failure.  A stale worker must stop immediately and must never
+    # acquire a fresh row lock to write terminal state over its successor.
+    if isinstance(error, RestoreExecutionLeaseLostError):
+        raise error
     classified = _restore_exception(error, mutation=mutation)
     if classified.retryable:
         if (
@@ -3319,6 +3371,20 @@ class CoreDigitalOcean(UtilCloud):
                     )
 
                 state = str(resource.get("status") or "").lower()
+                if target_kind == "volume" and not state:
+                    # DigitalOcean volume reads have historically omitted this
+                    # field in some API responses. Infer only from the exact
+                    # attachment list; missing or malformed attachment evidence
+                    # is not proof that the volume is available.
+                    droplet_ids = resource.get("droplet_ids")
+                    if not isinstance(droplet_ids, list):
+                        return _restore_safe_failure(
+                            restore,
+                            "PROVIDER_MALFORMED_RESPONSE",
+                            manual_review=True,
+                        )
+                    state = "in-use" if droplet_ids else "available"
+                _restore_record_provider_status(restore, state)
                 if target_kind == "droplet":
                     if state in {"active", "off"}:
                         restore.operation_phase = _restore_phase("COMPLETE")
@@ -6291,6 +6357,7 @@ class CoreUpCloud(UtilCloud):
             ):
                 return _restore_status("IN_PROGRESS")
             state = str(server.get("state") or "").casefold()
+            _restore_record_provider_status(restore, state)
             if state in {"started", "stopped"}:
                 restore.operation_phase = _restore_phase("COMPLETE")
                 restore.save(update_fields=["operation_phase", "modified"])
@@ -6500,6 +6567,7 @@ class CoreUpCloud(UtilCloud):
                 )
             _restore_resolve_reconciliation(restore)
             state = str(candidate.get("state") or "").casefold()
+            _restore_record_provider_status(restore, state)
             if state == "online":
                 restore.operation_phase = _restore_phase("COMPLETE")
                 restore.save(update_fields=["operation_phase", "modified"])

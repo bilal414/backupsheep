@@ -540,7 +540,7 @@ class ManualCloudRestoreResumeTemplateTests(SimpleTestCase):
         self.assertIn("item.can_resume_verification === true", self.source)
         self.assertIn("mode === 'provider_retry'", self.source)
 
-    def test_duplicate_name_polling_stays_on_the_tracked_restore_id(self):
+    def test_duplicate_name_polling_requires_recovery_id_then_tracks_exact_id(self):
         polling_block = self.source.split(
             "async getNativeCloudRestores(showErrors = false, allowNameRecovery = false)",
             1,
@@ -555,6 +555,25 @@ class ManualCloudRestoreResumeTemplateTests(SimpleTestCase):
         self.assertNotIn("item.name", tracked_branch)
         self.assertIn("else if (allowNameRecovery)", polling_block)
         self.assertIn(
-            "const matches = records.filter(item => String(item.name || '').trim() === targetName)",
+            "const recoveringAcceptedRequest = Boolean(",
+            polling_block,
+        )
+        self.assertIn(
+            "this.nativeRestore.recoveryId && this.nativeRestore.recoveryTargetName",
+            polling_block,
+        )
+        self.assertIn(
+            "String(item.name || '').trim() === targetName",
+            polling_block,
+        )
+        self.assertIn(
+            "String((item.execution_status || {}).recovery_id || '').trim() === recoveryId",
+            polling_block,
+        )
+        self.assertIn("exact = matches.length === 1 ? matches[0] : null", polling_block)
+        self.assertNotIn("correlation_id", polling_block)
+        self.assertIn("exact = records.reduce((latest, item) =>", polling_block)
+        self.assertNotIn(
+            "records.filter(item => String(item.name || '').trim() === targetName)",
             polling_block,
         )

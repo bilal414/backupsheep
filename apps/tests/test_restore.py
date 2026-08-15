@@ -17,6 +17,8 @@ from apps.console.connection.models import CoreAuthLightsail, CoreLightsailRegio
 from apps.console.node.models import CoreNode
 from apps.console.node.models import CoreLightsail
 from apps.console.node.models import _prepare_cloud_restore
+from apps.console.node.models import _restore_record_provider_status
+from apps.console.node.models import _restore_safe_failure
 from apps.console.utils.models import UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -214,6 +216,7 @@ class DigitalOceanRestoreTests(BaseTestCase):
             ],
             "region": {"slug": (restore.params or {}).get("region", "nyc3")},
             "size_gigabytes": max(1, __import__("math").ceil(backup.size_gigabytes)),
+            "droplet_ids": [],
             "status": status,
         }
 
@@ -303,6 +306,291 @@ class DigitalOceanRestoreTests(BaseTestCase):
             with self._patch_client(), \
                     mock.patch("apps.console.node.models.requests.get", return_value=get_resp):
                 self.assertEqual(node.digitalocean.check_restore(restore), expected)
+            restore.refresh_from_db()
+            self.assertEqual(
+                restore.params["_bs_provider_status"], droplet_status
+            )
+
+    def test_check_restore_persists_inferred_available_volume_state(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-available",
+            size_gigabytes=1,
+        )
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored-volume",
+            resource_id="restored-volume-1",
+            params={"region": "nyc3"},
+        )
+        identity = self._restore_identity(node, backup, restore)
+        params = dict(restore.params or {})
+        identity.update({"region": "nyc3", "size_gigabytes": 1})
+        params["_digitalocean_restore"] = identity
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+        volume = self._owned_volume(
+            node,
+            backup,
+            restore,
+            resource_id="restored-volume-1",
+        )
+        volume.pop("status")
+        self.assertTrue(
+            node.digitalocean._digitalocean_restore_owned(
+                volume, identity, resource_id="restored-volume-1"
+            )
+        )
+        get_resp = mock.MagicMock(status_code=200)
+        get_resp.json.return_value = {"volume": volume}
+
+        with self._patch_client(), mock.patch(
+            "apps.console.node.models.requests.get", return_value=get_resp
+        ):
+            result = node.digitalocean.check_restore(restore)
+
+        restore.refresh_from_db()
+        self.assertEqual(
+            result,
+            CoreCloudRestore.Status.COMPLETE,
+            restore.params,
+        )
+        self.assertEqual(restore.params["_bs_provider_status"], "available")
+
+    def test_check_restore_provider_status_merge_preserves_newer_witness(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-status-merge",
+            size_gigabytes=1,
+        )
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored-volume",
+            resource_id="restored-volume-merge",
+            params={"region": "nyc3"},
+        )
+        identity = self._restore_identity(node, backup, restore)
+        params = dict(restore.params or {})
+        identity.update({"region": "nyc3", "size_gigabytes": 1})
+        params["_digitalocean_restore"] = identity
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+
+        # Simulate a newer worker persisting reconciliation evidence after this
+        # poller loaded its row but before it records the provider lifecycle.
+        current = dict(params)
+        current["concurrent_reconciliation_witness"] = {
+            "marker": "durable-newer-witness"
+        }
+        CoreCloudRestore.objects.filter(pk=restore.pk).update(params=current)
+
+        volume = self._owned_volume(
+            node,
+            backup,
+            restore,
+            resource_id="restored-volume-merge",
+        )
+        volume.pop("status")
+        get_resp = mock.MagicMock(status_code=200)
+        get_resp.json.return_value = {"volume": volume}
+
+        with self._patch_client(), mock.patch(
+            "apps.console.node.models.requests.get", return_value=get_resp
+        ):
+            self.assertEqual(
+                node.digitalocean.check_restore(restore),
+                CoreCloudRestore.Status.COMPLETE,
+            )
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.params["_bs_provider_status"], "available")
+        self.assertEqual(
+            restore.params["concurrent_reconciliation_witness"],
+            {"marker": "durable-newer-witness"},
+        )
+
+    def test_safe_failure_merges_witness_after_provider_status_recording(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-terminal-merge",
+            size_gigabytes=1,
+        )
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored-volume",
+            resource_id="restored-volume-terminal-merge",
+            params={"durable_source": "original"},
+        )
+
+        # This is the first worker's status transaction.  The caller remains
+        # an intentionally stale in-memory object after it returns.
+        self.assertTrue(_restore_record_provider_status(restore, "error"))
+        stale_params = dict(restore.params)
+
+        # Deterministically model a newer reconciliation worker running after
+        # provider-status recording but before terminal error persistence.
+        newer_params = dict(stale_params)
+        newer_params["new_reconciliation_witness"] = {
+            "generation": 2,
+            "mutation_id": "accepted-before-readback",
+        }
+        CoreCloudRestore.objects.filter(pk=restore.pk).update(params=newer_params)
+
+        self.assertNotIn("new_reconciliation_witness", stale_params)
+        self.assertEqual(
+            _restore_safe_failure(restore, "PROVIDER_FAILED"),
+            CoreCloudRestore.Status.FAILED,
+        )
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.params["durable_source"], "original")
+        self.assertEqual(restore.params["_bs_provider_status"], "error")
+        self.assertEqual(
+            restore.params["new_reconciliation_witness"],
+            {
+                "generation": 2,
+                "mutation_id": "accepted-before-readback",
+            },
+        )
+        self.assertEqual(restore.params["_bs_last_error_code"], "PROVIDER_FAILED")
+        self.assertEqual(restore.params["_bs_last_error_category"], "terminal")
+        self.assertFalse(restore.params["_bs_create_outcome_unknown"])
+        self.assertEqual(restore.operation_phase, CoreCloudRestore.OperationPhase.FAILED)
+
+    def test_success_phase_save_after_provider_status_recording_preserves_witness(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-success-merge",
+            size_gigabytes=1,
+        )
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored-volume",
+            resource_id="restored-volume-success-merge",
+            params={"durable_source": "original"},
+        )
+
+        self.assertTrue(_restore_record_provider_status(restore, "available"))
+        newer_params = dict(restore.params)
+        newer_params["new_mutation_witness"] = {
+            "generation": 2,
+            "resource_id": "restored-volume-success-merge",
+        }
+        CoreCloudRestore.objects.filter(pk=restore.pk).update(params=newer_params)
+
+        # Success paths intentionally save only their terminal scalar fields;
+        # this is the non-regression contract for a status-only transition.
+        restore.status = CoreCloudRestore.Status.COMPLETE
+        restore.operation_phase = CoreCloudRestore.OperationPhase.COMPLETE
+        restore.error = ""
+        restore.save(update_fields=["status", "operation_phase", "error", "modified"])
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.params["_bs_provider_status"], "available")
+        self.assertEqual(
+            restore.params["new_mutation_witness"],
+            {
+                "generation": 2,
+                "resource_id": "restored-volume-success-merge",
+            },
+        )
+        self.assertEqual(restore.status, CoreCloudRestore.Status.COMPLETE)
+        self.assertEqual(restore.operation_phase, CoreCloudRestore.OperationPhase.COMPLETE)
+
+    def test_check_restore_persists_inferred_in_use_volume_state(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-in-use",
+            size_gigabytes=1,
+        )
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored-volume",
+            resource_id="restored-volume-2",
+            params={"region": "nyc3"},
+        )
+        identity = self._restore_identity(node, backup, restore)
+        params = dict(restore.params or {})
+        identity.update({"region": "nyc3", "size_gigabytes": 1})
+        params["_digitalocean_restore"] = identity
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+        volume = self._owned_volume(
+            node,
+            backup,
+            restore,
+            resource_id="restored-volume-2",
+        )
+        volume.pop("status")
+        volume["droplet_ids"] = [777]
+        get_resp = mock.MagicMock(status_code=200)
+        get_resp.json.return_value = {"volume": volume}
+
+        with self._patch_client(), mock.patch(
+            "apps.console.node.models.requests.get", return_value=get_resp
+        ):
+            self.assertEqual(
+                node.digitalocean.check_restore(restore),
+                CoreCloudRestore.Status.COMPLETE,
+            )
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.params["_bs_provider_status"], "in-use")
+
+    def test_check_restore_rejects_missing_volume_attachment_evidence(self):
+        node = self._make_volume_node_with_auth()
+        backup = make_completed_backup(
+            node,
+            unique_id="volume-snapshot-malformed",
+            size_gigabytes=1,
+        )
+        restore = CoreCloudRestore.objects.create(
+            node=node,
+            backup_id=backup.id,
+            name="restored-volume",
+            resource_id="restored-volume-3",
+            params={"region": "nyc3"},
+        )
+        identity = self._restore_identity(node, backup, restore)
+        params = dict(restore.params or {})
+        identity.update({"region": "nyc3", "size_gigabytes": 1})
+        params["_digitalocean_restore"] = identity
+        restore.params = params
+        restore.save(update_fields=["params", "modified"])
+        volume = self._owned_volume(
+            node,
+            backup,
+            restore,
+            resource_id="restored-volume-3",
+        )
+        volume.pop("status")
+        volume.pop("droplet_ids")
+        get_resp = mock.MagicMock(status_code=200)
+        get_resp.json.return_value = {"volume": volume}
+
+        with self._patch_client(), mock.patch(
+            "apps.console.node.models.requests.get", return_value=get_resp
+        ):
+            self.assertEqual(
+                node.digitalocean.check_restore(restore),
+                CoreCloudRestore.Status.FAILED,
+            )
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.operation_phase, restore.OperationPhase.MANUAL_REVIEW)
+        self.assertEqual(
+            restore.params["_bs_last_error_code"], "PROVIDER_MALFORMED_RESPONSE"
+        )
 
     def test_restore_snapshot_volume_uses_snapshot_and_atomic_identity_tags(self):
         node = self._make_volume_node_with_auth()

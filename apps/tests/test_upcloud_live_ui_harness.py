@@ -146,6 +146,25 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         )
         return user
 
+    def provider_scaffolding(self, harness, *, key_id="KEY-CANARY"):
+        policy_request = harness._policy_request()
+        return {
+            "network": {
+                "name": harness.names["network"],
+                "type": "public",
+                "family": "IPv4",
+            },
+            "user": {
+                "username": harness.names["username"],
+                "arn": f"urn:ecs:iam::test:user/{harness.names['username']}",
+            },
+            "policy": {
+                "name": harness.names["policy"],
+                "document": policy_request["document"],
+            },
+            "key": {"access_key_id": key_id, "status": "Active"},
+        }
+
     def write_runtime(self, harness, value, *, key_id="KEY-CANARY"):
         payload = harness._runtime_payload(
             service=value,
@@ -156,6 +175,7 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         return payload
 
     def arm_bucket_for_manifest(self, harness, value, runtime):
+        request = {"bucket": runtime["bucket_name"], "status": "Enabled"}
         harness.ledger.record(
             kind="mos_bucket_configuration",
             resource_id=f"{value['uuid']}:{runtime['bucket_name']}:versioning",
@@ -166,9 +186,150 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
                 "service_uuid": value["uuid"],
                 "bucket": runtime["bucket_name"],
                 "versioning": "Enabled",
+                "provenance": "intent_applied",
+                "request_fingerprint": live_harness._fingerprint(request),
             },
-            source_witness=value["uuid"],
+            source_witness=f"{value['uuid']}:{runtime['bucket_name']}",
         )
+
+    @staticmethod
+    def object_row(*, kind, backup_id, backup_uuid, object_key, **overrides):
+        row = {
+            "kind": kind,
+            "backup_id": backup_id,
+            "backup_uuid": backup_uuid,
+            "storage_point_id": 201,
+            "storage_id": 202,
+            "artifact_id": 203,
+            "artifact_status": "verified",
+            "object_key": object_key,
+            "sha256": "a" * 64,
+            "byte_count": 1,
+            "etag": "etag",
+            "version_id": "v1",
+        }
+        row.update(overrides)
+        return row
+
+    def write_generation(self, object_manifest, *, name="generation"):
+        rows = {row["kind"]: row for row in object_manifest["objects"]}
+        generation = self.root / name
+        generation.mkdir(mode=0o700)
+        compute = {
+            "schema": 1,
+            "run_id": self.run_id,
+            "volume": {
+                "node_id": 1,
+                "backup_id": 2,
+                "restore_id": 3,
+                "source_resource_id": "01a00000-0000-4000-8000-000000000001",
+                "backup_resource_id": "01a00000-0000-4000-8000-000000000002",
+                "backup_marker": "volume-backup-marker",
+                "restore_resource_id": "01a00000-0000-4000-8000-000000000003",
+                "restore_marker": "backupsheep-upcloud-volume-restore",
+            },
+            "server": {
+                "node_id": 4,
+                "backup_id": 5,
+                "restore_id": 6,
+                "source_resource_id": "00a00000-0000-4000-8000-000000000001",
+                "backup_resource_id": "01a00000-0000-4000-8000-000000000004",
+                "backup_marker": "server-backup-marker",
+                "restore_storage_id": "01a00000-0000-4000-8000-000000000005",
+                "restore_storage_marker": "backupsheep-upcloud-storage-restore",
+                "restore_server_id": "00a00000-0000-4000-8000-000000000006",
+                "restore_server_marker": "backupsheep-upcloud-server-restore",
+                "restore_hostname": "bs-upcloud-restore",
+            },
+        }
+        workload = {
+            "schema": 1,
+            "run_id": self.run_id,
+            "website": {
+                "node_id": 7,
+                "backup_id": rows["website"]["backup_id"],
+                "restore_id": 8,
+                "restore_path": f"/srv/backupsheep-e2e/{self.run_id}",
+            },
+            "postgresql": {
+                "node_id": 9,
+                "backup_id": rows["database"]["backup_id"],
+                "restore_id": 10,
+                "restore_database": "bs_restore_database",
+            },
+        }
+        payloads = {"compute": compute, "workload": workload, "object": object_manifest}
+        filenames = {
+            "compute": "upcloud-compute-manifest.json",
+            "workload": "upcloud-workload-manifest.json",
+            "object": "upcloud-object-manifest.json",
+        }
+        encoded = {}
+        for kind, payload in payloads.items():
+            body = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+            path = generation / filenames[kind]
+            path.write_bytes(body)
+            path.chmod(0o600)
+            encoded[kind] = body
+
+        def binding(row):
+            identity = {
+                "artifact_id": row["artifact_id"],
+                "byte_count": row["byte_count"],
+                "sha256": row["sha256"],
+                "etag": row["etag"],
+                "version_id": row["version_id"],
+            }
+            return {
+                **identity,
+                "binding_sha256": live_harness._artifact_binding_digest(identity),
+            }
+
+        marker = {
+            "schema": 1,
+            "kind": "upcloud_manifest_generation_ownership",
+            "provider": "upcloud",
+            "integration_code": "upcloud",
+            "run_id": self.run_id,
+            "disposition": "EXCLUSIVE_COMPLETE_GENERATION",
+            "manifests": {
+                kind: {
+                    "filename": filenames[kind],
+                    "sha256": live_harness.hashlib.sha256(body).hexdigest(),
+                    "byte_count": len(body),
+                }
+                for kind, body in encoded.items()
+            },
+            "storage_id": rows["website"]["storage_id"],
+            "rows": {
+                "volume_node_id": 1,
+                "volume_backup_id": 2,
+                "volume_restore_id": 3,
+                "server_node_id": 4,
+                "server_backup_id": 5,
+                "server_restore_id": 6,
+                "website_node_id": 7,
+                "website_backup_id": rows["website"]["backup_id"],
+                "website_restore_id": 8,
+                "database_node_id": 9,
+                "database_backup_id": rows["database"]["backup_id"],
+                "database_restore_id": 10,
+                "website_storage_point_id": rows["website"]["storage_point_id"],
+                "database_storage_point_id": rows["database"]["storage_point_id"],
+                "website_artifact_id": rows["website"]["artifact_id"],
+                "database_artifact_id": rows["database"]["artifact_id"],
+            },
+            "artifact_bindings": {
+                "website": binding(rows["website"]),
+                "database": binding(rows["database"]),
+            },
+        }
+        marker_path = generation / live_harness.UPCLOUD_GENERATION_MARKER
+        marker_path.write_bytes(
+            (json.dumps(marker, indent=2, sort_keys=True) + "\n").encode()
+        )
+        marker_path.chmod(0o600)
+        return generation
 
     def _assert_manifest_envelope_rejected_before_provider(
         self, manifest, message
@@ -180,7 +341,9 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
             mock.patch.object(harness, "_service_read") as service_read, \
             mock.patch.object(harness, "_s3") as s3, \
             mock.patch.object(harness, "_s3_inventory") as inventory, \
-            self.assertRaisesRegex(live_harness.HarnessError, message):
+            self.assertRaisesRegex(
+                live_harness.HarnessError, r"complete new generation directory"
+            ):
             harness.verify_ui_objects(str(manifest_path), maximum_bytes=1024)
 
         verify_account.assert_not_called()
@@ -196,12 +359,12 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
     def test_ui_manifest_rejects_wrong_schema_before_provider_inventory(self):
         self._assert_manifest_envelope_rejected_before_provider(
             {"schema": 2, "run_id": self.run_id, "objects": []},
-            r"schema must be 1",
+            r"schema must be integer 1",
         )
 
     def test_ui_manifest_rejects_missing_schema_before_provider_inventory(self):
         self._assert_manifest_envelope_rejected_before_provider(
-            {"run_id": self.run_id, "objects": []}, r"schema must be 1"
+            {"run_id": self.run_id, "objects": []}, r"unknown or missing fields"
         )
 
     def test_ui_manifest_rejects_wrong_run_id_before_provider_inventory(self):
@@ -212,8 +375,33 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
 
     def test_ui_manifest_rejects_missing_run_id_before_provider_inventory(self):
         self._assert_manifest_envelope_rejected_before_provider(
-            {"schema": 1, "objects": []}, r"run_id does not match"
+            {"schema": 1, "objects": []}, r"unknown or missing fields"
         )
+
+    def test_ui_manifest_requires_exactly_one_website_and_database_before_provider(self):
+        cases = {
+            "missing_database": [{"kind": "website"}],
+            "missing_website": [{"kind": "database"}],
+            "duplicate_website": [
+                {"kind": "website"},
+                {"kind": "website"},
+            ],
+            "duplicate_database": [
+                {"kind": "database"},
+                {"kind": "database"},
+            ],
+            "extra_kind": [
+                {"kind": "website"},
+                {"kind": "database"},
+                {"kind": "volume"},
+            ],
+        }
+        for label, rows in cases.items():
+            with self.subTest(case=label):
+                self._assert_manifest_envelope_rejected_before_provider(
+                    {"schema": 1, "run_id": self.run_id, "objects": rows},
+                    r"exactly one website and one database",
+                )
 
     def test_plan_is_offline_and_never_reads_or_prints_token(self):
         stdout = io.StringIO()
@@ -827,63 +1015,74 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         self.seed_bucket(harness, value)
         self.seed_user_policy_key(harness, value)
         runtime = self.write_runtime(harness, value)
-        harness.ledger.record(
-            kind="mos_bucket_configuration",
-            resource_id=f"{value['uuid']}:{runtime['bucket_name']}:versioning",
-            name=runtime["bucket_name"],
-            ownership={
-                "account": self.account,
-                "run_id": self.run_id,
-                "service_uuid": value["uuid"],
-                "bucket": runtime["bucket_name"],
-                "versioning": "Enabled",
-                "request_fingerprint": "f" * 64,
+        self.arm_bucket_for_manifest(harness, value, runtime)
+        witnesses = [
+            {
+                "kind": "website",
+                "backup_id": 123,
+                "backup_uuid": "backup-live_2026.08:15",
+                "payload": b"deterministic-website-backup-bytes\x00\xff",
+                "version_id": "version-website",
+                "etag": "etag-website",
             },
-            source_witness=f"{value['uuid']}:{runtime['bucket_name']}",
-        )
-        backup_id = "123"
-        backup_uuid = "11111111-1111-4111-8111-111111111111"
-        payload = b"deterministic-backup-bytes\x00\xff"
-        sha256 = live_harness.hashlib.sha256(payload).hexdigest()
-        key = f"{runtime['prefix']}{backup_uuid}.zip"
-        version_id = "version-1"
-        etag = "etag-1"
-        metadata = {
-            "backupsheep-sha256": sha256,
-            "backupsheep-bytes": str(len(payload)),
-            "backupsheep-backup-id": backup_id,
-        }
+            {
+                "kind": "database",
+                "backup_id": 124,
+                "backup_uuid": "database-live_2026.08:15",
+                "payload": b"deterministic-database-backup-bytes\x00\xff",
+                "version_id": "version-database",
+                "etag": "etag-database",
+            },
+        ]
+        for witness in witnesses:
+            witness["sha256"] = live_harness.hashlib.sha256(
+                witness["payload"]
+            ).hexdigest()
+            witness["key"] = (
+                f"{runtime['prefix']}{witness['backup_uuid']}.zip"
+            )
         client = mock.Mock()
-        client.head_object.return_value = {
-            "ContentLength": len(payload),
-            "ETag": f'"{etag}"',
-            "VersionId": version_id,
-            "Metadata": metadata,
-        }
-        body = Body(payload)
-        client.get_object.return_value = {"Body": body}
+        client.get_bucket_versioning.return_value = {"Status": "Enabled"}
+        client.head_object.side_effect = [
+            {
+                "ContentLength": len(witness["payload"]),
+                "ETag": f'"{witness["etag"]}"',
+                "VersionId": witness["version_id"],
+                "Metadata": {
+                    "backupsheep-sha256": witness["sha256"],
+                    "backupsheep-bytes": str(len(witness["payload"])),
+                    "backupsheep-backup-id": str(witness["backup_id"]),
+                },
+            }
+            for witness in witnesses
+        ]
+        bodies = [Body(witness["payload"]) for witness in witnesses]
+        client.get_object.side_effect = [{"Body": body} for body in bodies]
         manifest = {
             "schema": 1,
             "run_id": self.run_id,
             "objects": [
-                {
-                    "kind": "website",
-                    "backup_id": backup_id,
-                    "backup_uuid": backup_uuid,
-                    "object_key": key,
-                    "sha256": sha256,
-                    "byte_count": len(payload),
-                    "etag": etag,
-                    "version_id": version_id,
-                }
+                self.object_row(
+                    kind=witness["kind"],
+                    backup_id=witness["backup_id"],
+                    backup_uuid=witness["backup_uuid"],
+                    object_key=witness["key"],
+                    sha256=witness["sha256"],
+                    byte_count=len(witness["payload"]),
+                    etag=witness["etag"],
+                    version_id=witness["version_id"],
+                )
+                for witness in witnesses
             ]
         }
-        manifest_path = self.root / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        generation_path = self.write_generation(manifest)
         inventory = {
-            "versions": [{"Key": key, "VersionId": version_id}],
+            "versions": [
+                {"Key": witness["key"], "VersionId": witness["version_id"]}
+                for witness in witnesses
+            ],
             "delete_markers": [],
-            "objects": [{"Key": key}],
+            "objects": [{"Key": witness["key"]} for witness in witnesses],
             "multipart_uploads": [],
         }
 
@@ -892,36 +1091,448 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
             mock.patch.object(harness, "_s3", return_value=(client, runtime)), \
             mock.patch.object(harness, "_s3_inventory", return_value=inventory):
             result = harness.verify_ui_objects(
-                str(manifest_path), maximum_bytes=1024
+                str(generation_path), maximum_bytes=1024
             )
 
         self.assertEqual(result["status"], "verified")
-        self.assertTrue(body.closed)
+        self.assertTrue(all(body.closed for body in bodies))
         entry = harness._one_active("mos_ui_website_object")
-        self.assertEqual(entry["ownership"]["version_id"], version_id)
-        self.assertEqual(entry["ownership"]["sha256"], sha256)
-        self.assertEqual(entry["ownership"]["byte_count"], len(payload))
-        self.assertEqual(entry["ownership"]["etag"], etag)
+        self.assertEqual(entry["ownership"]["version_id"], "version-website")
+        self.assertEqual(entry["ownership"]["sha256"], witnesses[0]["sha256"])
+        self.assertEqual(
+            entry["ownership"]["byte_count"], len(witnesses[0]["payload"])
+        )
+        self.assertEqual(entry["ownership"]["etag"], "etag-website")
+        bindings = harness._active_entries("mos_ui_object_binding")
+        self.assertEqual(len(bindings), 2)
+        self.assertTrue(
+            all(row["ownership"]["storage_point_id"] == 201 for row in bindings)
+        )
+        self.assertTrue(
+            all(
+                row["ownership"]["artifact_status"] == "verified"
+                for row in bindings
+            )
+        )
+        self.assertTrue(
+            all(
+                row["ownership"]["generation_marker_sha256"]
+                == live_harness.hashlib.sha256(
+                    (generation_path / live_harness.UPCLOUD_GENERATION_MARKER).read_bytes()
+                ).hexdigest()
+                for row in bindings
+            )
+        )
+
+    def test_tampered_and_swapped_generations_fail_before_provider_reads(self):
+        manifest = {
+            "schema": 1,
+            "run_id": self.run_id,
+            "objects": [
+                self.object_row(
+                    kind="website",
+                    backup_id=123,
+                    backup_uuid="website-generation-2026.08:15",
+                    object_key="backupsheep-e2e/website-generation-2026.08:15.zip",
+                ),
+                self.object_row(
+                    kind="database",
+                    backup_id=124,
+                    backup_uuid="database-generation-2026.08:15",
+                    object_key="backupsheep-e2e/database-generation-2026.08:15.zip",
+                ),
+            ],
+        }
+        tampered = self.write_generation(manifest, name="tampered-generation")
+        marker_path = tampered / live_harness.UPCLOUD_GENERATION_MARKER
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        marker["artifact_bindings"]["website"]["sha256"] = "f" * 64
+        marker_path.write_text(json.dumps(marker, indent=2, sort_keys=True) + "\n")
+        marker_path.chmod(0o600)
+
+        swapped_manifest = deepcopy(manifest)
+        swapped_manifest["objects"][0]["version_id"] = "version-swapped"
+        swapped = self.write_generation(swapped_manifest, name="swapped-generation")
+        original = self.write_generation(manifest, name="original-generation")
+        swapped_object = swapped / "upcloud-object-manifest.json"
+        original_object = original / "upcloud-object-manifest.json"
+        original_object.write_bytes(swapped_object.read_bytes())
+        original_object.chmod(0o600)
+
+        for generation in (tampered, original):
+            harness = self.harness(apply=True)
+            with self.subTest(generation=generation), \
+                mock.patch.object(harness, "verify_account") as verify_account, \
+                mock.patch.object(harness, "_service_read") as service_read, \
+                mock.patch.object(harness, "_s3") as s3, \
+                mock.patch.object(harness, "_s3_inventory") as inventory, \
+                self.assertRaises(live_harness.HarnessError):
+                harness.verify_ui_objects(str(generation), maximum_bytes=1024)
+            verify_account.assert_not_called()
+            service_read.assert_not_called()
+            s3.assert_not_called()
+            inventory.assert_not_called()
+
+    def test_backup_object_identifier_accepts_real_strings_and_rejects_path_escape(self):
+        self.assertEqual(
+            live_harness._safe_backup_object_id("backup-live_2026.08:15"),
+            "backup-live_2026.08:15",
+        )
+        for value in ("../escape", "a/b", "a\\b", ".", "a..b", "bad\nvalue", ""):
+            with self.subTest(value=value), self.assertRaises(live_harness.HarnessError):
+                live_harness._safe_backup_object_id(value)
+
+    def test_manifest_rejects_duplicate_json_key_and_boolean_schema_before_provider(self):
+        harness = self.harness(apply=True)
+        duplicate = self.root / "duplicate-key.json"
+        duplicate.write_text(
+            '{"schema":1,"schema":1,"run_id":"%s","objects":[]}' % self.run_id,
+            encoding="utf-8",
+        )
+        boolean = self.root / "boolean-schema.json"
+        boolean.write_text(
+            json.dumps({"schema": True, "run_id": self.run_id, "objects": []}),
+            encoding="utf-8",
+        )
+        for path in (duplicate, boolean):
+            with self.subTest(path=path), mock.patch.object(
+                harness, "verify_account"
+            ) as provider, self.assertRaises(live_harness.HarnessError):
+                harness.verify_ui_objects(str(path), maximum_bytes=1024)
+            provider.assert_not_called()
+
+    def test_reconcile_object_storage_adopts_observed_configuration_with_fresh_versioning(self):
+        harness = self.harness(apply=False)
+        value = self.seed_service(harness)
+        self.seed_bucket(harness, value)
+        self.seed_user_policy_key(harness, value)
+        runtime = self.write_runtime(harness, value)
+        client = mock.Mock()
+        client.get_bucket_versioning.return_value = {"Status": "Enabled"}
+        with mock.patch.object(harness, "verify_account", return_value=self.account), \
+            mock.patch.object(harness, "_service_read", return_value=value), \
+            mock.patch.object(harness, "_buckets", return_value=[{"name": runtime["bucket_name"]}]), \
+            mock.patch.object(harness, "_s3", return_value=(client, runtime)), \
+            mock.patch.object(
+                harness,
+                "_s3_inventory",
+                return_value={"versions": [], "delete_markers": [], "objects": [], "multipart_uploads": []},
+            ):
+            result = harness.reconcile_object_storage_evidence()
+        self.assertEqual(result["configuration_provenance"], "observed_existing")
+        config = harness._one_active("mos_bucket_configuration")
+        self.assertEqual(config["ownership"]["request_fingerprint"], "")
+        self.assertEqual(config["ownership"]["versioning"], "Enabled")
+
+    def test_reconcile_object_storage_rejects_duplicate_ownership_marker_versions(self):
+        harness = self.harness(apply=False)
+        value = self.seed_service(harness)
+        self.seed_bucket(harness, value)
+        self.seed_user_policy_key(harness, value)
+        runtime = self.write_runtime(harness, value)
+        key = harness._ownership_marker_contract(
+            runtime["bucket_name"], runtime["prefix"]
+        )["key"]
+        client = mock.Mock()
+        client.get_bucket_versioning.return_value = {"Status": "Enabled"}
+        inventory = {
+            "versions": [{"Key": key, "VersionId": "v1"}, {"Key": key, "VersionId": "v2"}],
+            "delete_markers": [],
+            "objects": [{"Key": key}],
+            "multipart_uploads": [],
+        }
+        with mock.patch.object(harness, "verify_account", return_value=self.account), \
+            mock.patch.object(harness, "_service_read", return_value=value), \
+            mock.patch.object(harness, "_buckets", return_value=[{"name": runtime["bucket_name"]}]), \
+            mock.patch.object(harness, "_s3", return_value=(client, runtime)), \
+            mock.patch.object(harness, "_s3_inventory", return_value=inventory), \
+            self.assertRaises(live_harness.HarnessError):
+            harness.reconcile_object_storage_evidence()
+        self.assertIsNone(harness._one_active("mos_bucket_configuration"))
+
+    def test_crossed_object_delete_adopts_exact_absence_without_replay(self):
+        harness = self.harness(apply=True, cleanup=True)
+        key = f"{harness.names['prefix']}backup-live.zip"
+        entry = harness._record_object(
+            kind="mos_ui_website_object",
+            bucket=harness.names["bucket"],
+            key=key,
+            version_id="v1",
+            sha256="a" * 64,
+            byte_count=1,
+            etag="etag",
+            backup_id="1",
+            backup_uuid="backup-live",
+            metadata={},
+        )
+        intent_key = f"cleanup:{entry['kind']}:{entry['resource_id']}"
+        harness.intents.put(
+            intent_key,
+            {"marker": self.run_id, "kind": entry["kind"], "name": key, "operation": "delete-version"},
+        )
+        harness.intents.update(intent_key, request_boundary_crossed=True)
+        empty = {"versions": [], "delete_markers": [], "objects": [], "multipart_uploads": []}
+        client = mock.Mock()
+        with mock.patch.object(harness, "_s3_inventory", return_value=empty):
+            harness._delete_bucket_contents(
+                client, harness.names["bucket"], harness.names["prefix"], maximum_bytes=1024
+            )
+        client.delete_object.assert_not_called()
+        self.assertEqual(harness.ledger.get(entry["kind"], entry["resource_id"])["cleanup_state"], "deleted")
+
+    def test_object_cleanup_evidence_gate_stops_before_mutation(self):
+        harness = self.harness(apply=True, cleanup=True)
+        value = self.seed_service(harness)
+        with mock.patch.object(harness, "verify_account", return_value=self.account), \
+            mock.patch.object(harness, "_service_read", return_value=value), \
+            mock.patch.object(harness, "_control_mutation") as mutation, \
+            self.assertRaises(live_harness.HarnessError):
+            harness.cleanup_object_storage(maximum_bytes=1024, require_evidence=True)
+        mutation.assert_not_called()
+
+    def test_object_cleanup_preserves_credentials_service_and_runtime_bytes(self):
+        harness = self.harness(apply=True, cleanup=True)
+        value = self.seed_service(harness)
+        self.seed_bucket(harness, value)
+        self.seed_user_policy_key(harness, value)
+        runtime = self.write_runtime(harness, value)
+        before = harness.config.runtime_path.read_bytes()
+        provider = self.provider_scaffolding(harness)
+        client = mock.Mock()
+
+        with mock.patch.object(
+            harness, "verify_account", return_value=self.account
+        ), mock.patch.object(
+            harness, "_service_read", return_value=value
+        ), mock.patch.object(
+            harness,
+            "_buckets",
+            side_effect=[
+                [{"name": harness.names["bucket"]}],
+                [],
+                [],
+            ],
+        ), mock.patch.object(
+            harness, "_users", return_value=[provider["user"]]
+        ), mock.patch.object(
+            harness, "_user_read", return_value=provider["user"]
+        ), mock.patch.object(
+            harness, "_inline_policies", return_value=[provider["policy"]]
+        ), mock.patch.object(
+            harness, "_policy_read", return_value=provider["policy"]
+        ), mock.patch.object(
+            harness, "_access_keys", return_value=[provider["key"]]
+        ), mock.patch.object(
+            harness, "_access_key_read", return_value=provider["key"]
+        ), mock.patch.object(
+            harness, "_s3", return_value=(client, runtime)
+        ), mock.patch.object(
+            harness, "_delete_bucket_contents"
+        ) as delete_contents, mock.patch.object(
+            harness, "_control_mutation"
+        ) as mutation:
+            harness.control.request.return_value = [provider["network"]]
+            result = harness.cleanup_object_storage(maximum_bytes=1024)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["data_cleanup"], "terminal")
+        self.assertEqual(
+            result["credential_service_scaffolding"],
+            live_harness.USER_RETAINED_BY_INSTRUCTION,
+        )
+        self.assertEqual(harness.config.runtime_path.read_bytes(), before)
+        with self.assertRaisesRegex(
+            live_harness.HarnessError, r"Only the separate compute runtime"
+        ):
+            live_harness._remove_compute_runtime_secret(
+                harness.config.runtime_path
+            )
+        self.assertEqual(harness.config.runtime_path.read_bytes(), before)
+        delete_contents.assert_called_once()
+        self.assertEqual(mutation.call_count, 1)
+        self.assertEqual(mutation.call_args.args[0], "cleanup:mos-bucket")
+        self.assertEqual(mutation.call_args.args[1], "DELETE")
+        self.assertIn("/buckets/", mutation.call_args.args[2])
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "DELETE"
+                for call in harness.control.request.call_args_list
+            )
+        )
+        for kind in live_harness.MOS_RETAINED_PROVIDER_KINDS:
+            rows = harness._active_entries(kind)
+            self.assertEqual(len(rows), 1, kind)
+            self.assertEqual(rows[0]["cleanup_state"], "eligible")
+        receipt_kinds = {
+            row["ownership"]["retained_kind"]
+            for row in harness._active_entries(
+                live_harness.MOS_RETENTION_RECEIPT_KIND
+            )
+        }
+        self.assertEqual(receipt_kinds, live_harness.MOS_RETAINED_KINDS)
+        self.assertIn(
+            live_harness.UPCLOUD_ACCOUNT_TOKEN_KIND,
+            {row["kind"] for row in result["retained_by_instruction"]},
+        )
+
+    def test_retained_mos_delete_kinds_are_blocked_before_any_endpoint(self):
+        harness = self.harness(apply=True, cleanup=True)
+        for kind in (
+            "mos_access_key",
+            "mos_user",
+            "mos_service",
+            "mos_inline_policy",
+            "mos_network",
+        ):
+            with self.subTest(kind=kind), mock.patch.object(
+                harness, "_control_mutation"
+            ) as mutation, self.assertRaisesRegex(
+                live_harness.HarnessError, r"retained by user instruction"
+            ):
+                harness._control_delete(
+                    intent_key=f"cleanup:{kind}",
+                    kind=kind,
+                    entry={"resource_id": f"{kind}-id", "name": kind},
+                    path=f"/forbidden/{kind}",
+                    verify_absent=lambda: False,
+                )
+            mutation.assert_not_called()
+        harness.control.request.assert_not_called()
+
+    def test_object_cleanup_preservation_gate_is_default_on_and_cannot_disable(self):
+        args = live_harness.build_parser().parse_args(["cleanup-object-storage"])
+        self.assertIs(args.preserve_credentials, True)
+        harness = self.harness(apply=True, cleanup=True)
+        with mock.patch.object(harness, "verify_account") as verify_account, \
+            self.assertRaisesRegex(
+                live_harness.HarnessError, r"preservation is mandatory"
+            ):
+            harness.cleanup_object_storage(
+                maximum_bytes=1024, preserve_credentials=False
+            )
+        verify_account.assert_not_called()
+
+    def test_missing_retained_service_never_removes_runtime_or_marks_credentials(self):
+        harness = self.harness(apply=True, cleanup=True)
+        value = self.seed_service(harness)
+        self.seed_user_policy_key(harness, value)
+        self.write_runtime(harness, value)
+        before = harness.config.runtime_path.read_bytes()
+        with mock.patch.object(
+            harness, "verify_account", return_value=self.account
+        ), mock.patch.object(
+            harness, "_service_read", return_value=None
+        ), mock.patch.object(
+            harness, "_control_mutation"
+        ) as mutation, self.assertRaisesRegex(
+            live_harness.HarnessError, r"user-retained MOS service is absent"
+        ):
+            harness.cleanup_object_storage(maximum_bytes=1024)
+        mutation.assert_not_called()
+        self.assertEqual(harness.config.runtime_path.read_bytes(), before)
+        self.assertEqual(
+            harness._one_active("mos_service")["cleanup_state"], "eligible"
+        )
+        self.assertEqual(
+            harness._one_active("mos_access_key")["cleanup_state"], "eligible"
+        )
+
+    def test_after_inventory_accepts_complete_nonempty_retained_mos_graph(self):
+        harness = self.harness(apply=False)
+        value = self.seed_service(harness)
+        self.seed_user_policy_key(harness, value)
+        self.write_runtime(harness, value)
+        provider = self.provider_scaffolding(harness)
+        harness.control.request.return_value = [provider["network"]]
+        with mock.patch.object(
+            harness, "_users", return_value=[provider["user"]]
+        ), mock.patch.object(
+            harness, "_user_read", return_value=provider["user"]
+        ), mock.patch.object(
+            harness, "_inline_policies", return_value=[provider["policy"]]
+        ), mock.patch.object(
+            harness, "_policy_read", return_value=provider["policy"]
+        ), mock.patch.object(
+            harness, "_access_keys", return_value=[provider["key"]]
+        ), mock.patch.object(
+            harness, "_access_key_read", return_value=provider["key"]
+        ):
+            harness._validate_and_receipt_retained_mos_scaffolding(
+                harness._one_active("mos_service"), value
+            )
+
+            with mock.patch.object(
+                harness, "verify_account", return_value=self.account
+            ), mock.patch.object(
+                harness, "_compute_inventory", return_value=[]
+            ), mock.patch.object(
+                harness, "_ip_inventory", return_value=[]
+            ), mock.patch.object(
+                harness, "_offset_list", return_value=[value]
+            ), mock.patch.object(
+                harness, "_service_read", return_value=value
+            ), mock.patch.object(
+                harness, "_buckets", return_value=[]
+            ):
+                result = harness.inventory(phase="after")
+
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["exact_run"]["mos_services"], [value["uuid"]])
+        graph = result["exact_run"]["mos_graph"][0]
+        self.assertTrue(graph["retention_verified"])
+        self.assertTrue(graph["protected_runtime_file_verified"])
+        self.assertEqual(
+            graph["disposition"],
+            live_harness.USER_RETAINED_BY_INSTRUCTION,
+        )
+
+    def test_read_only_after_inventory_proves_no_exact_run_graph(self):
+        harness = self.harness(apply=False)
+        with mock.patch.object(harness, "verify_account", return_value=self.account), \
+            mock.patch.object(harness, "_compute_inventory", return_value=[]), \
+            mock.patch.object(harness, "_ip_inventory", return_value=[]), \
+            mock.patch.object(harness, "_offset_list", return_value=[]):
+            result = harness.inventory(phase="after")
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["exact_run"]["servers"], [])
+
+    def test_final_inventory_rejects_exact_run_orphan(self):
+        harness = self.harness(apply=False)
+        summary = {
+            "uuid": "11111111-1111-4111-8111-111111111111",
+            "title": harness.names["source_server"],
+            "labels": live_harness._labels(self.run_id),
+        }
+        exact = {
+            **summary,
+            "storage_devices": {"storage_device": []},
+            "ip_addresses": {"ip_address": []},
+        }
+        with mock.patch.object(harness, "verify_account", return_value=self.account), \
+            mock.patch.object(harness, "_compute_inventory", side_effect=[[summary], [], []]), \
+            mock.patch.object(harness, "_server_read", return_value=exact), \
+            mock.patch.object(harness, "_ip_inventory", return_value=[]), \
+            mock.patch.object(harness, "_offset_list", return_value=[]), \
+            self.assertRaises(live_harness.HarnessError):
+            harness.inventory(phase="after")
+
+    def test_empty_object_cleanup_is_idempotent(self):
+        harness = self.harness(apply=True, cleanup=True)
+        with mock.patch.object(harness, "verify_account", return_value=self.account):
+            first = harness.cleanup_object_storage(maximum_bytes=1024)
+            second = harness.cleanup_object_storage(maximum_bytes=1024)
+        self.assertEqual(first, {"status": "nothing_to_cleanup"})
+        self.assertEqual(second, first)
+        harness.control.request.assert_not_called()
 
     def test_duplicate_ui_object_versions_fail_closed_without_ledger_adoption(self):
         harness = self.harness(apply=True)
         value = self.seed_service(harness)
         self.seed_user_policy_key(harness, value)
         runtime = self.write_runtime(harness, value)
-        harness.ledger.record(
-            kind="mos_bucket_configuration",
-            resource_id=f"{value['uuid']}:{runtime['bucket_name']}:versioning",
-            name=runtime["bucket_name"],
-            ownership={
-                "account": self.account,
-                "run_id": self.run_id,
-                "service_uuid": value["uuid"],
-                "bucket": runtime["bucket_name"],
-                "versioning": "Enabled",
-            },
-            source_witness=value["uuid"],
-        )
-        backup_id = "124"
+        self.seed_bucket(harness, value)
+        self.arm_bucket_for_manifest(harness, value, runtime)
+        backup_id = 124
         backup_uuid = "22222222-2222-4222-8222-222222222222"
         key = f"{runtime['prefix']}{backup_uuid}.zip"
         manifest_path = self.root / "duplicate.json"
@@ -931,16 +1542,21 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
                     "schema": 1,
                     "run_id": self.run_id,
                     "objects": [
-                        {
-                            "kind": "database",
-                            "backup_id": backup_id,
-                            "backup_uuid": backup_uuid,
-                            "object_key": key,
-                            "sha256": "a" * 64,
-                            "byte_count": 1,
-                            "etag": "etag",
-                            "version_id": "v2",
-                        }
+                        self.object_row(
+                            kind="database",
+                            backup_id=backup_id,
+                            backup_uuid=backup_uuid,
+                            object_key=key,
+                            version_id="v2",
+                        ),
+                        self.object_row(
+                            kind="website",
+                            backup_id=125,
+                            backup_uuid="website-companion-2026.08.15",
+                            object_key=(
+                                f"{runtime['prefix']}website-companion-2026.08.15.zip"
+                            ),
+                        ),
                     ]
                 }
             ),
@@ -958,7 +1574,16 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
 
         with mock.patch.object(harness, "verify_account", return_value=self.account), \
             mock.patch.object(harness, "_service_read", return_value=value), \
-            mock.patch.object(harness, "_s3", return_value=(mock.Mock(), runtime)), \
+            mock.patch.object(
+                harness,
+                "_s3",
+                return_value=(
+                    mock.Mock(
+                        get_bucket_versioning=mock.Mock(return_value={"Status": "Enabled"})
+                    ),
+                    runtime,
+                ),
+            ), \
             mock.patch.object(harness, "_s3_inventory", return_value=inventory), \
             self.assertRaises(live_harness.HarnessError):
             harness.verify_ui_objects(str(manifest_path), maximum_bytes=1024)
@@ -980,16 +1605,20 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
                     "schema": 1,
                     "run_id": self.run_id,
                     "objects": [
-                        {
-                            "kind": "website",
-                            "backup_id": "125",
-                            "backup_uuid": backup_uuid,
-                            "object_key": f"{runtime['prefix']}125.zip",
-                            "sha256": "a" * 64,
-                            "byte_count": 1,
-                            "etag": "etag",
-                            "version_id": "v1",
-                        }
+                        self.object_row(
+                            kind="website",
+                            backup_id=125,
+                            backup_uuid=backup_uuid,
+                            object_key=f"{runtime['prefix']}125.zip",
+                        ),
+                        self.object_row(
+                            kind="database",
+                            backup_id=126,
+                            backup_uuid="database-companion-2026.08.15",
+                            object_key=(
+                                f"{runtime['prefix']}database-companion-2026.08.15.zip"
+                            ),
+                        ),
                     ]
                 }
             ),
@@ -1013,16 +1642,12 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
         self.arm_bucket_for_manifest(harness, value, runtime)
         backup_uuid = "44444444-4444-4444-8444-444444444444"
         key = f"{runtime['prefix']}{backup_uuid}.zip"
-        row = {
-            "kind": "database",
-            "backup_id": "126",
-            "backup_uuid": backup_uuid,
-            "object_key": key,
-            "sha256": "a" * 64,
-            "byte_count": 1,
-            "etag": "etag",
-            "version_id": "v1",
-        }
+        row = self.object_row(
+            kind="database",
+            backup_id=126,
+            backup_uuid=backup_uuid,
+            object_key=key,
+        )
         duplicate = dict(row)
         duplicate["backup_id"] = "127"
         manifest_path = self.root / "duplicate-manifest.json"
@@ -1039,7 +1664,7 @@ class UpCloudLiveUIHarnessSafetyTests(SimpleTestCase):
             self.assertRaises(live_harness.HarnessError):
             harness.verify_ui_objects(str(manifest_path), maximum_bytes=1024)
 
-        inventory.assert_called_once()
+        inventory.assert_not_called()
 
     def test_ui_manifest_rejects_sensitive_keys(self):
         harness = self.harness(apply=True)

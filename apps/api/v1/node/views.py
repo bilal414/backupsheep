@@ -59,7 +59,7 @@ def _log_activity(request, log_type, data):
 
 
 _CLOUD_RESTORE_ALLOWED_FIELDS = frozenset(
-    {"backup_id", "name", "params", "confirm", "request_id"}
+    {"backup_id", "name", "params", "confirm", "request_id", "recovery_id"}
 )
 _CLOUD_RESTORE_MAX_NAME_LENGTH = 255
 _CLOUD_RESTORE_MAX_KEY_LENGTH = 255
@@ -68,6 +68,7 @@ _CLOUD_RESTORE_MAX_PARAM_DEPTH = 16
 _CLOUD_RESTORE_MAX_PARAM_ITEMS = 1000
 _CLOUD_RESTORE_MAX_PARAM_BYTES = 64 * 1024
 _CLOUD_RESTORE_MISSING = object()
+_CLOUD_RESTORE_INVALID = object()
 _CLOUD_RESTORE_MANUAL_RESUME_MAX_COUNT = 1000
 _CLOUD_RESTORE_MANUAL_RESUME_HISTORY_LIMIT = 10
 
@@ -351,27 +352,61 @@ def _cloud_restore_idempotency_key(request):
     return key, source
 
 
+def _cloud_restore_recovery_id(request):
+    """Return the browser's canonical, non-secret recovery identifier.
+
+    ``crypto.randomUUID()`` produces a lowercase RFC4122 version-4 UUID. Keep
+    this contract strict so the public adoption key cannot contain arbitrary
+    caller text or a provider/API secret. The value is independent from the
+    opaque idempotency key used to derive the node-scoped UUIDv5 correlation.
+    """
+    raw = request.data.get("recovery_id", _CLOUD_RESTORE_MISSING)
+    if raw is _CLOUD_RESTORE_MISSING:
+        return None
+    if not isinstance(raw, str):
+        return _CLOUD_RESTORE_INVALID
+    try:
+        parsed = uuid.UUID(raw)
+    except (AttributeError, TypeError, ValueError):
+        return _CLOUD_RESTORE_INVALID
+    if (
+        parsed.version != 4
+        or parsed.variant != uuid.RFC_4122
+        or str(parsed) != raw
+    ):
+        return _CLOUD_RESTORE_INVALID
+    return str(parsed)
+
+
 def _cloud_restore_request_identity(node, request, payload=None):
-    """Return a stable correlation id and immutable request fingerprint.
+    """Return a stable correlation id, fingerprint, and safe recovery id.
 
     A browser can retry a POST after losing the response.  Mapping the caller's
     idempotency key into a node-scoped UUID lets the database enforce one restore
     row without adding a provider mutation or trusting the message broker to
-    deduplicate deliveries.
+    deduplicate deliveries. The independent recovery id is included in the
+    immutable request fingerprint and is safe to return to the browser for
+    exact lost-response adoption.
     """
     key, key_source = _cloud_restore_idempotency_key(request)
-    if key is None:
-        return None, None, None, None
+    recovery_id = _cloud_restore_recovery_id(request)
+    if key is None or recovery_id is _CLOUD_RESTORE_INVALID:
+        return None, None, None, None, None
     correlation_id = uuid.uuid5(
         uuid.NAMESPACE_URL,
         f"backupsheep:cloud-restore:node:{node.id}:{key}",
     )
-    payload = payload or {
+    payload = dict(payload or {
         "node_id": node.id,
         "backup_id": request.data.get("backup_id"),
         "name": request.data.get("name"),
         "params": request.data.get("params") or {},
-    }
+    })
+    # Preserve the pre-recovery_id canonical bytes for legacy clients and rows.
+    # A supplied strict UUID is the only value that becomes part of the new
+    # immutable identity.
+    if recovery_id is not None:
+        payload["recovery_id"] = recovery_id
     try:
         canonical = json.dumps(
             payload,
@@ -381,9 +416,9 @@ def _cloud_restore_request_identity(node, request, payload=None):
             allow_nan=False,
         )
     except (TypeError, ValueError, OverflowError):
-        return None, None, None, None
+        return None, None, None, None, None
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return correlation_id, fingerprint, key, key_source
+    return correlation_id, fingerprint, key, key_source, recovery_id
 
 
 class CoreNodeView(viewsets.ModelViewSet):
@@ -575,7 +610,13 @@ class CoreNodeView(viewsets.ModelViewSet):
         if node.connection.integration.code == "oracle":
             params = _validate_oracle_restore_request(node, backup, name, params)
 
-        correlation_id, request_fingerprint, idempotency_key, key_source = (
+        (
+            correlation_id,
+            request_fingerprint,
+            idempotency_key,
+            key_source,
+            recovery_id,
+        ) = (
             _cloud_restore_request_identity(
                 node,
                 request,
@@ -592,18 +633,22 @@ class CoreNodeView(viewsets.ModelViewSet):
                 "The restore request id and provider parameters must be valid JSON values."
             )
 
-        request_metadata = {
-            "api_request": {
-                "fingerprint": request_fingerprint,
-                "key_source": key_source,
-                "payload_version": 1,
-                # Persist a digest instead of the caller's raw key.  Idempotency
-                # keys sometimes contain session or integration identifiers.
-                "idempotency_key_sha256": hashlib.sha256(
-                    idempotency_key.encode("utf-8")
-                ).hexdigest(),
-            }
+        api_request_metadata = {
+            "fingerprint": request_fingerprint,
+            "key_source": key_source,
+            "payload_version": 1,
+            # Persist a digest instead of the caller's raw key. Idempotency
+            # keys sometimes contain session or integration identifiers.
+            "idempotency_key_sha256": hashlib.sha256(
+                idempotency_key.encode("utf-8")
+            ).hexdigest(),
         }
+        if recovery_id is not None:
+            # This is the browser-generated public adoption key. It is
+            # strict/canonical by construction; never store the raw
+            # Idempotency-Key, only its digest above.
+            api_request_metadata["recovery_id"] = recovery_id
+        request_metadata = {"api_request": api_request_metadata}
 
         if is_vultr_managed_database:
             try:

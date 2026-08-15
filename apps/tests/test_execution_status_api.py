@@ -27,12 +27,17 @@ from apps.tests.base import BaseTestCase
 
 
 class ExecutionStatusApiTests(BaseTestCase):
-    def test_documented_rds_lifecycle_statuses_remain_visible(self):
+    def test_documented_provider_lifecycle_statuses_remain_visible(self):
         self.assertEqual(
             _safe_provider_status("configuring-enhanced-monitoring"),
             "configuring-enhanced-monitoring",
         )
         self.assertEqual(_safe_provider_status("restore-error"), "restore-error")
+        self.assertEqual(_safe_provider_status("new"), "new")
+        self.assertEqual(_safe_provider_status("archive"), "archive")
+        self.assertEqual(_safe_provider_status("in-use"), "in-use")
+        self.assertEqual(_safe_provider_status("off"), "off")
+        self.assertEqual(_safe_provider_status("terminated"), "terminated")
         self.assertEqual(_safe_provider_status("provider-secret-canary"), "unknown")
 
     def _backup(self, *, status=None):
@@ -247,6 +252,7 @@ class ExecutionStatusApiTests(BaseTestCase):
 
     def test_restore_status_redacts_coordination_metadata_params_and_errors(self):
         node = factories.make_website_node(self.account, self.member)
+        recovery_id = str(uuid.uuid4())
         backup = CoreWebsiteBackup.objects.create(
             website=node.website,
             name="restore-source",
@@ -266,6 +272,10 @@ class ExecutionStatusApiTests(BaseTestCase):
             execution_metadata={
                 "secret": "execution-secret-canary",
                 "internal_path": "/srv/restore-secret-canary",
+                "api_request": {
+                    "recovery_id": recovery_id,
+                    "idempotency_key_sha256": "a" * 64,
+                },
             },
             lease_owner="restore-worker-secret-canary",
             lease_token=uuid.uuid4(),
@@ -285,6 +295,7 @@ class ExecutionStatusApiTests(BaseTestCase):
         ).data
         status = data["execution_status"]
         self.assertEqual(status["correlation_id"], str(restore.correlation_id))
+        self.assertEqual(status["recovery_id"], recovery_id)
         self.assertEqual(status["phase"], "reconciling")
         self.assertEqual(status["attempts"], 2)
         self.assertEqual(status["progress"], {

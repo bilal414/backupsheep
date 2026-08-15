@@ -1,4 +1,5 @@
 import re
+import uuid
 from datetime import timezone as datetime_timezone
 
 from django.contrib.contenttypes.models import ContentType
@@ -37,6 +38,7 @@ _PUBLIC_PHASES = {
 }
 _PUBLIC_PROVIDER_STATUSES = {
     "active",
+    "archive",
     "available",
     "archived",
     "backing-up",
@@ -54,8 +56,10 @@ _PUBLIC_PROVIDER_STATUSES = {
     "delete-precheck",
     "deleted",
     "deleting",
+    "destroyed",
     "error",
     "failed",
+    "in-use",
     "in_progress",
     "inaccessible-encryption-credentials",
     "inaccessible-encryption-credentials-recoverable",
@@ -70,7 +74,9 @@ _PUBLIC_PROVIDER_STATUSES = {
     "maintenance",
     "modifying",
     "moving-to-vpc",
+    "new",
     "not_found",
+    "off",
     "offline",
     "online",
     "pending",
@@ -98,6 +104,8 @@ _PUBLIC_PROVIDER_STATUSES = {
     "success",
     "suspended",
     "terminal_failure",
+    "terminated",
+    "terminating",
     "timeout",
     "transient_outage",
     "unknown",
@@ -370,6 +378,33 @@ def _safe_reconciliation_reason(value):
     return token if token in _PUBLIC_RECONCILIATION_REASONS else None
 
 
+def _safe_recovery_id(value):
+    """Expose only the canonical browser recovery UUID, never arbitrary text."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if (
+        parsed.version != 4
+        or parsed.variant != uuid.RFC_4122
+        or str(parsed) != value
+    ):
+        return None
+    return str(parsed)
+
+
+def _restore_recovery_id(obj):
+    metadata = getattr(obj, "execution_metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    api_request = metadata.get("api_request")
+    if not isinstance(api_request, dict):
+        return None
+    return _safe_recovery_id(api_request.get("recovery_id"))
+
+
 def _safe_progress(completed, total, unit):
     try:
         completed = max(0, int(completed or 0))
@@ -586,6 +621,7 @@ def _restore_execution_status(obj):
         "correlation_id": (
             str(obj.correlation_id) if getattr(obj, "correlation_id", None) else None
         ),
+        "recovery_id": _restore_recovery_id(obj),
         "status": legacy_status,
         "phase": _public_phase(phase_value, fallback=legacy_status),
         "last_error_code": error_code,

@@ -449,9 +449,23 @@ class DigitalOceanClientTests(SimpleTestCase):
                 "backupsheep-restore-volume",
             ],
             "snapshot_id": 123456,
+            "region": {"slug": "nyc3"},
+            "size_gigabytes": 1,
+            "droplet_ids": [],
             "status": "available",
         }
         harness._read_resource = mock.Mock(return_value=candidate)
+        content_witness = {
+            "proof": "LIVE_NATIVE_VOLUME_BYTE_PROOF",
+            "source_volume_id": "source-1",
+            "restore_volume_id": witness["provider_id"],
+            "sha256": "a" * 64,
+            "byte_count": 1024,
+            "read_only_restore": True,
+        }
+        harness._live_native_volume_content_proof = mock.Mock(
+            return_value=content_witness
+        )
         with mock.patch.object(
             live_harness, "iter_collection", return_value=[candidate]
         ):
@@ -463,13 +477,17 @@ class DigitalOceanClientTests(SimpleTestCase):
                 run_tag=witness["run_tag"],
                 snapshot_marker=witness["snapshot_marker"],
                 restore_marker=witness["restore_marker"],
+                expected_region="nyc3",
+                expected_size_gigabytes=1,
             )
 
+        self.assertEqual(result["status"], "FULL_E2E")
         self.assertEqual(result["snapshot_marker"], witness["snapshot_marker"])
         self.assertEqual(result["restore_marker"], witness["restore_marker"])
         ownership = harness.ledger.record.call_args.kwargs["ownership"]
         self.assertEqual(ownership["snapshot_marker"], witness["snapshot_marker"])
         self.assertEqual(ownership["restore_marker"], witness["restore_marker"])
+        self.assertEqual(ownership["content_witness"], content_witness)
 
     def test_harness_refuses_snapshot_marker_mismatch_before_inventory(self):
         witness = self._restore_witness()
@@ -869,6 +887,10 @@ class DigitalOceanClientTests(SimpleTestCase):
                 headers=harness.headers,
             )
 
+    @mock.patch.dict(
+        live_harness.os.environ,
+        {"BACKUPSHEEP_E2E_FIREWALL_APPLY": "YES"},
+    )
     def test_payload_firewall_attachment_intent_reconciles_after_worker_restart(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -884,7 +906,13 @@ class DigitalOceanClientTests(SimpleTestCase):
                 harness = object.__new__(live_harness.DigitalOceanHarness)
                 harness.run_id = run_id
                 harness.run_tag = run_id
-                harness.account = {"team_uuid": "team-uuid"}
+                harness.account = {
+                    "team_uuid": "team-uuid",
+                    "team_name": "Personal",
+                }
+                harness.apply = True
+                harness.attach_ui_droplet_firewall = True
+                harness.expected_team_uuid = "team-uuid"
                 harness.headers = {"Authorization": "Bearer redacted-test-token"}
                 harness.probe_cidrs = ["203.0.113.10/32"]
                 harness.intents = intents
@@ -1408,6 +1436,14 @@ class DigitalOceanClientTests(SimpleTestCase):
                     "grants": key["grants"],
                 },
             )
+            bucket_creation = {
+                "bucket": credentials["bucket"],
+                "region": "nyc3",
+                "prefix": harness.spaces_prefix,
+                "acl": "private",
+                "versioning": "Enabled",
+                "created_at": "2026-08-12T00:00:00+00:00",
+            }
             ledger.record(
                 kind="spaces_bucket",
                 resource_id=credentials["bucket"],
@@ -1424,25 +1460,26 @@ class DigitalOceanClientTests(SimpleTestCase):
                     "versioning": "Enabled",
                     "prefix": harness.spaces_prefix,
                     "creation_witness": {
-                        "bucket": credentials["bucket"],
-                        "region": "nyc3",
-                        "prefix": harness.spaces_prefix,
-                        "acl": "private",
-                        "versioning": "Enabled",
-                        "immutable_fingerprint": live_harness._fingerprint(
-                            {
-                                "bucket": credentials["bucket"],
-                                "region": "nyc3",
-                                "prefix": harness.spaces_prefix,
-                                "acl": "private",
-                                "versioning": "Enabled",
-                            }
-                        ),
+                        **bucket_creation,
+                        "immutable_fingerprint": live_harness._fingerprint(bucket_creation),
                     },
                 },
                 source_witness="spaces-bucket:test",
             )
             client = mock.Mock()
+            client.list_buckets.return_value = {
+                "Buckets": [
+                    {
+                        "Name": credentials["bucket"],
+                        "CreationDate": bucket_creation["created_at"],
+                    }
+                ]
+            }
+            client.head_bucket.return_value = {}
+            client.get_bucket_location.return_value = {
+                "LocationConstraint": "nyc3"
+            }
+            client.get_bucket_versioning.return_value = {"Status": "Enabled"}
             foreign_inventory = {
                 "versions": [{"Key": "foreign", "VersionId": "foreign-v1"}],
                 "delete_markers": [],
@@ -1495,6 +1532,7 @@ class DigitalOceanClientTests(SimpleTestCase):
             "prefix": harness.spaces_prefix,
             "acl": "private",
             "versioning": "Enabled",
+            "created_at": "2026-08-12T00:00:00+00:00",
         }
         bucket_ownership = {
             "team_uuid": "team-uuid",
@@ -1556,6 +1594,17 @@ class DigitalOceanClientTests(SimpleTestCase):
                 "Metadata": metadata,
             }
         client = mock.Mock()
+        client.list_buckets.return_value = {
+            "Buckets": [
+                {
+                    "Name": credentials["bucket"],
+                    "CreationDate": bucket_creation["created_at"],
+                }
+            ]
+        }
+        client.head_bucket.return_value = {}
+        client.get_bucket_location.return_value = {"LocationConstraint": "nyc3"}
+        client.get_bucket_versioning.return_value = {"Status": "Enabled"}
         client.head_object.side_effect = lambda **kwargs: heads[
             (kwargs["Key"], kwargs["VersionId"])
         ]
@@ -2336,3 +2385,206 @@ class DigitalOceanAdapterDatabaseTests(BaseTestCase):
 
         self.assertEqual(response.status_code, 400)
         listing.assert_not_called()
+
+
+class DigitalOceanMutationPreflightTests(SimpleTestCase):
+    def _store(self, temporary, run_id="bs-e2e-do-preflight"):
+        return live_harness.DurableMutationIntentStore(
+            Path(temporary) / "intents.json",
+            provider="digitalocean",
+            run_id=run_id,
+            scope="team-uuid",
+        )
+
+    def test_cleanup_and_spaces_delete_read_failures_remain_retryable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_id = "bs-e2e-do-preflight"
+            resource = {
+                "id": "droplet-1",
+                "name": f"{run_id}-droplet",
+                "tags": [run_id],
+                "region": {"slug": "nyc3"},
+                "size_slug": "s-1vcpu-1gb",
+                "image": {"slug": "ubuntu-24-04-x64"},
+            }
+            request = {
+                "provider_id": resource["id"],
+                "kind": "source_droplet",
+                "name": resource["name"],
+                "region": "nyc3",
+                "size": "s-1vcpu-1gb",
+                "image": "ubuntu-24-04-x64",
+                "tags": [run_id],
+            }
+            witness = live_harness._creation_witness(
+                "source_droplet", resource, request
+            )
+            witness["immutable_fingerprint"] = live_harness._fingerprint(witness)
+
+            harness = object.__new__(live_harness.DigitalOceanHarness)
+            harness.run_tag = run_id
+            harness.intents = self._store(temporary, run_id)
+            verify = lambda current: self.assertTrue(
+                live_harness._creation_witness_matches(
+                    "source_droplet", current, witness
+                )
+            )
+            with self.assertRaises(live_harness.HarnessError):
+                harness._delete_provider_with_intent(
+                    intent_key="cleanup:source:droplet-1",
+                    kind="source_droplet",
+                    resource_id="droplet-1",
+                    name=resource["name"],
+                    request=request,
+                    read_back=mock.Mock(
+                        side_effect=live_harness.HarnessError("preflight read failed")
+                    ),
+                    verify_present=verify,
+                    delete_call=mock.Mock(),
+                )
+            pending = harness.intents.get("cleanup:source:droplet-1")
+            self.assertEqual(pending["state"], "planned")
+            self.assertFalse(pending["request_boundary_crossed"])
+
+            spaces_harness = object.__new__(live_harness.DigitalOceanHarness)
+            spaces_harness.run_tag = run_id
+            spaces_harness.intents = self._store(
+                Path(temporary) / "spaces", run_id
+            )
+            spaces_request = {
+                "bucket": "bucket",
+                "key": "ui/bs-e2e-do-preflight/website.zip",
+                "version_id": "version-1",
+                "etag": "etag",
+                "byte_count": 3,
+            }
+            with self.assertRaises(live_harness.HarnessError):
+                spaces_harness._delete_spaces_with_intent(
+                    intent_key="cleanup:spaces:object-1",
+                    kind="spaces_ui_website_object",
+                    name=spaces_request["key"],
+                    request=spaces_request,
+                    read_back=mock.Mock(
+                        side_effect=live_harness.HarnessError("spaces preflight failed")
+                    ),
+                    verify_present=mock.Mock(),
+                    delete_call=mock.Mock(),
+                )
+            spaces_pending = spaces_harness.intents.get("cleanup:spaces:object-1")
+            self.assertEqual(spaces_pending["state"], "planned")
+            self.assertFalse(spaces_pending["request_boundary_crossed"])
+
+    @mock.patch.dict(
+        live_harness.os.environ,
+        {"BACKUPSHEEP_E2E_FIREWALL_APPLY": "YES"},
+    )
+    def test_payload_firewall_attachment_read_failure_stays_before_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_id = "bs-e2e-do-preflight"
+            harness = object.__new__(live_harness.DigitalOceanHarness)
+            harness.run_id = run_id
+            harness.run_tag = run_id
+            harness.account = {"team_uuid": "team-uuid", "team_name": "Personal"}
+            harness.expected_team_uuid = "team-uuid"
+            harness.apply = True
+            harness.attach_ui_droplet_firewall = True
+            harness.probe_cidrs = ["203.0.113.10/32"]
+            harness.headers = {"Authorization": "Bearer redacted"}
+            harness.intents = self._store(temporary, run_id)
+            harness.ledger = mock.Mock()
+            request = {
+                "name": live_harness._resource_name(run_id, "payload-firewall"),
+                "inbound_rules": [
+                    {
+                        "protocol": "tcp",
+                        "ports": str(live_harness.PAYLOAD_PORT),
+                        "sources": {"addresses": list(harness.probe_cidrs)},
+                    }
+                ],
+                "outbound_rules": [
+                    {
+                        "protocol": protocol,
+                        "ports": "0",
+                        "destinations": {"addresses": ["0.0.0.0/0", "::/0"]},
+                    }
+                    for protocol in ("tcp", "udp", "icmp")
+                ],
+                "droplet_ids": [901],
+            }
+            immutable = harness._firewall_immutable_fingerprint(request)
+            entry = {
+                "resource_id": "fw-1",
+                "cleanup_state": "eligible",
+                "ownership": {
+                    "source_droplet_id": "901",
+                    "immutable_fingerprint": immutable,
+                    "creation_witness": {
+                        "name": request["name"],
+                        "rules_fingerprint": immutable,
+                        "source_droplet_id": "901",
+                        "immutable_fingerprint": immutable,
+                    },
+                },
+            }
+            harness.ledger.entries.side_effect = lambda kind: (
+                [entry]
+                if kind == "payload_firewall"
+                else ([{"resource_id": "901"}, {"resource_id": "902"}] if kind in {"source_droplet", "ui_restore_droplet"} else [])
+            )
+            firewall = {
+                "id": "fw-1",
+                **request,
+                "droplet_ids": ["901"],
+            }
+            harness._read_resource = mock.Mock(
+                side_effect=[
+                    firewall,
+                    live_harness.HarnessError("attachment preflight read failed"),
+                ]
+            )
+            with mock.patch.object(live_harness, "_mutation_response") as mutation:
+                with self.assertRaises(live_harness.HarnessError):
+                    harness._attach_payload_firewall("902")
+            mutation.assert_not_called()
+            pending = harness.intents.get("attach:payload-firewall:fw-1:902")
+            self.assertEqual(pending["state"], "planned")
+            self.assertFalse(pending["request_boundary_crossed"])
+
+    def test_native_volume_action_read_failure_stays_planned_and_does_not_check_droplet(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            harness = object.__new__(live_harness.DigitalOceanHarness)
+            harness.run_tag = "bs-e2e-do-preflight"
+            harness.run_id = harness.run_tag
+            harness.account = {"team_uuid": "team-uuid", "team_name": "Personal"}
+            harness.expected_team_uuid = "team-uuid"
+            harness.apply = True
+            harness.region = "nyc3"
+            harness.native_volume_offset_bytes = 16 * 1024 * 1024
+            harness.native_volume_byte_count = 4096
+            harness.intents = self._store(temporary, harness.run_id)
+            harness._read_exact_native_volume = mock.Mock(
+                side_effect=live_harness.HarnessError("volume preflight read failed")
+            )
+            harness._fresh_owned_verifier_droplet_for_mutation = mock.Mock()
+            with mock.patch.dict(
+                live_harness.os.environ,
+                {
+                    "BACKUPSHEEP_E2E_VOLUME_VERIFY_APPLY": "YES",
+                    "BACKUPSHEEP_E2E_VOLUME_SEED_APPLY": "YES",
+                },
+            ), mock.patch.object(live_harness, "_mutation_response") as mutation:
+                with self.assertRaises(live_harness.HarnessError):
+                    harness._transition_native_volume_attachment(
+                        kind="source_volume",
+                        volume_id="902",
+                        volume_name="restored-volume",
+                        verifier_droplet_id="601",
+                        region="nyc3",
+                        size_gigabytes=1,
+                        attach=True,
+                    )
+            pending = harness.intents.get("native-volume:attach:902:601")
+            self.assertEqual(pending["state"], "planned")
+            self.assertFalse(pending["request_boundary_crossed"])
+            harness._fresh_owned_verifier_droplet_for_mutation.assert_not_called()
+            mutation.assert_not_called()

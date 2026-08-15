@@ -2543,6 +2543,7 @@ class OracleRestoreAdapter:
     def check_restore(self, restore):
         from apps.console.node.models import (
             _restore_observe_zero_match,
+            _restore_record_provider_status,
             _restore_safe_failure,
             _restore_status,
         )
@@ -2609,6 +2610,7 @@ class OracleRestoreAdapter:
                 restore, "PROVIDER_OWNERSHIP_MISMATCH", manual_review=True
             )
         lifecycle = str(resource.get("lifecycle_state") or "").upper()
+        _restore_record_provider_status(restore, lifecycle)
         complete_states = (
             {"RUNNING", "STOPPED"}
             if witness.target_type == "instance"

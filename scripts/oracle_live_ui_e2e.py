@@ -15,7 +15,10 @@ accepted as arguments, copied into the ledger, or printed.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import ipaddress
+import io
 import json
 import os
 import re
@@ -23,8 +26,8 @@ import shlex
 import stat
 import subprocess
 import sys
-import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,6 +68,10 @@ class HarnessError(RuntimeError):
 
 OCI_OCID_RE = re.compile(r"^ocid1\.[a-z0-9-]+\.[a-z0-9-]*\.[a-z0-9-]*\..+$")
 PROFILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+SAFE_BACKUP_MARKER_RE = re.compile(
+    r"^(?:bs|backupsheep)-[a-z0-9][a-z0-9._-]{4,124}$"
+)
+SSH_FINGERPRINT_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 MAX_PAGES = 100
 MAX_ITEMS = 10_000
 REQUEST_TIMEOUT = (10.0, 60.0)
@@ -112,6 +119,15 @@ STORAGE_KINDS = {
     "iam_membership",
     "customer_secret_key",
 }
+USER_RETAINED_STORAGE_KINDS = frozenset(
+    {
+        "customer_secret_key",
+        "iam_membership",
+        "iam_policy",
+        "iam_group",
+        "iam_user",
+    }
+)
 ALL_KINDS |= STORAGE_KINDS
 TAGGABLE_SOURCE_KINDS = {
     "source_block_volume",
@@ -147,6 +163,149 @@ STORAGE_SCOPE_KEYS = frozenset(
     }
 )
 CLEANUP_INTENT_PREFIX = "cleanup:"
+RUNTIME_SCOPE_SCHEMA = 1
+UI_MANIFEST_SCHEMA = 3
+ORPHAN_RECONCILIATION_SCHEMA = 1
+STORAGE_SCOPE_REPAIR_SCHEMA = 2
+CLEANUP_RECEIPT_SCHEMA = 1
+RUNTIME_SCOPE_KEYS = frozenset(
+    {
+        "schema",
+        "run_id",
+        "profile",
+        "tenancy_id",
+        "compartment_id",
+        "subnet_id",
+        "availability_domain",
+        "region",
+        "ui_ledger_path",
+        "network_ledger_path",
+    }
+)
+STORAGE_SCOPE_REPAIR_KEYS = frozenset(
+    {
+        "schema",
+        "run_id",
+        "runtime_scope_digest",
+        "scope_identity_sha256",
+        "storage_scope",
+        "bucket_witness",
+        "user_witness",
+        "customer_secret_witness",
+    }
+)
+STORAGE_LEDGER_WITNESS_KEYS = frozenset(
+    {"kind", "resource_id", "name", "ownership", "source_witness"}
+)
+WORKLOAD_GUEST_SCOPE_KEYS = frozenset(
+    {
+        "provider",
+        "run_id",
+        "durable_ledger_path",
+        "durable_ledger_scope",
+        "source_server_id",
+        "safe_root",
+        "website_source_root",
+        "source_database",
+        "ssh_host",
+        "ssh_port",
+        "ssh_user",
+        "ssh_private_key_path",
+        "ssh_private_key_sha256",
+        "known_hosts_path",
+        "known_hosts_sha256",
+        "known_host_key_type",
+        "known_host_fingerprint",
+    }
+)
+WORKLOAD_ROW_WITNESS_KEYS = frozenset(
+    {
+        "node_row_id",
+        "backup_row_id",
+        "backup_status",
+        "backup_marker",
+        "restore_row_id",
+        "restore_status",
+        "restore_target",
+    }
+)
+ORPHAN_ADOPTION_KINDS = frozenset(
+    {
+        "ui_compute_backup",
+        "ui_block_backup",
+        "ui_boot_backup",
+        "ui_compute_restore",
+        "ui_block_restore",
+        "ui_boot_restore",
+        "ui_compute_restore_boot_volume",
+        "ui_compute_restore_vnic",
+    }
+)
+ORPHAN_MANIFEST_KEYS = frozenset(
+    {
+        "schema",
+        "run_id",
+        "profile",
+        "tenancy_id",
+        "compartment_id",
+        "resources",
+    }
+)
+ORPHAN_RESOURCE_KEYS = frozenset(
+    {
+        "kind",
+        "provider_ocid",
+        "name",
+        "freeform_tags",
+        "lifecycle_state",
+        "source_relationship",
+        "demo_row_witness",
+    }
+)
+ORPHAN_RELATIONSHIP_KEYS = frozenset({"kind", "ocid"})
+ORPHAN_ROW_WITNESS_KEYS = frozenset(
+    {"row_type", "row_id", "status", "marker", "provider_ocid"}
+)
+ORPHAN_RELATION_KINDS = {
+    "ui_compute_backup": "source_instance",
+    "ui_block_backup": "source_block_volume",
+    "ui_boot_backup": "source_boot_volume",
+    "ui_compute_restore": "ui_compute_backup",
+    "ui_block_restore": "ui_block_backup",
+    "ui_boot_restore": "ui_boot_backup",
+    "ui_compute_restore_boot_volume": "ui_compute_restore",
+    "ui_compute_restore_vnic": "ui_compute_restore",
+}
+ORPHAN_RESOURCE_TYPES = {
+    "ui_compute_backup": "image",
+    "ui_block_backup": "volumebackup",
+    "ui_boot_backup": "bootvolumebackup",
+    "ui_compute_restore": "instance",
+    "ui_block_restore": "volume",
+    "ui_boot_restore": "bootvolume",
+    "ui_compute_restore_boot_volume": "bootvolume",
+    "ui_compute_restore_vnic": "vnic",
+}
+ORPHAN_ALLOWED_TAG_KEYS = frozenset(
+    {
+        E2E_RUN_TAG,
+        E2E_OWNED_TAG,
+        E2E_KIND_TAG,
+        BACKUP_MARKER_TAG,
+        BACKUP_SOURCE_TAG,
+        BACKUP_KIND_TAG,
+        BACKUP_REQUEST_TAG,
+        RESTORE_MARKER_TAG,
+        RESTORE_SOURCE_TAG,
+        RESTORE_ORIGIN_TAG,
+    }
+)
+_CREDENTIAL_FIELD_RE = re.compile(
+    r"(?i)(?:^|_)(?:access_key|api_key|authorization|credential|password|private_key|secret|secret_key)(?:$|_)"
+)
+_SAFE_REFERENCE_FIELDS = frozenset(
+    {"ssh_private_key_path", "ssh_private_key_sha256"}
+)
 CLEANUP_TRANSITIONAL_STATES = frozenset(
     {
         "ATTACHING",
@@ -168,6 +327,406 @@ def _safe_path(value, *, variable):
     if "_docs" in path.parts:
         raise HarnessError(f"{variable} must not point inside _docs.")
     return path
+
+
+def _external_path(value, *, variable):
+    path = _safe_path(value, variable=variable)
+    try:
+        path.relative_to(ROOT)
+    except ValueError:
+        return path
+    raise HarnessError(f"{variable} must point outside the repository.")
+
+
+def _external_nonsymlink_path(value, *, variable):
+    """Resolve one external path only after rejecting lexical symlink components."""
+
+    raw = Path(str(value or "")).expanduser()
+    _reject_symlink_components(raw, variable=variable)
+    path = _external_path(raw, variable=variable)
+    _reject_symlink_components(path, variable=variable)
+    return path
+
+
+def _reject_symlink_components(path, *, variable):
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        try:
+            if current.is_symlink():
+                raise HarnessError(f"{variable} must not use symlinked path components.")
+        except OSError as error:
+            raise HarnessError(f"{variable} could not be inspected safely.") from error
+
+
+def _read_private_json(path_value, *, variable, exact_keys=None, maximum=256 * 1024):
+    raw_path = Path(str(path_value or "")).expanduser()
+    _reject_symlink_components(raw_path, variable=variable)
+    path = _external_path(raw_path, variable=variable)
+    _reject_symlink_components(path, variable=variable)
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise HarnessError(f"{variable} is missing or could not be inspected.") from error
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_size > maximum
+    ):
+        raise HarnessError(f"{variable} must be a regular 0600 file within the size limit.")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = None
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+            descriptor = None
+            opened = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino
+            ):
+                raise HarnessError(f"{variable} changed while being opened.")
+            payload = json.load(source)
+    except HarnessError:
+        raise
+    except (OSError, ValueError) as error:
+        raise HarnessError(f"{variable} is unreadable or malformed.") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if not isinstance(payload, dict) or (
+        exact_keys is not None and set(payload) != set(exact_keys)
+    ):
+        raise HarnessError(f"{variable} has an unsupported or incomplete schema.")
+    return path, payload
+
+
+def _publish_private_bytes(path, payload, *, variable):
+    """Create one 0600 file through a pinned, non-writable parent directory."""
+
+    path = Path(os.path.abspath(os.fspath(path)))
+    _reject_symlink_components(path.parent, variable=variable)
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+
+    # Walk from the filesystem root with directory-relative opens. Missing
+    # components are created through an already pinned parent descriptor, so
+    # a concurrent symlink swap cannot redirect publication elsewhere.
+    directory_fd = None
+    try:
+        directory_fd = os.open(path.parent.anchor, directory_flags)
+        for component in path.parent.parts[1:]:
+            created = False
+            try:
+                child_fd = os.open(
+                    component, directory_flags, dir_fd=directory_fd
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                    os.fsync(directory_fd)
+                    created = True
+                except FileExistsError:
+                    pass
+                child_fd = os.open(
+                    component, directory_flags, dir_fd=directory_fd
+                )
+            opened = os.fstat(child_fd)
+            if not stat.S_ISDIR(opened.st_mode):
+                os.close(child_fd)
+                raise HarnessError(f"{variable} parent path is not a directory.")
+            if created:
+                os.fchmod(child_fd, 0o700)
+                os.fsync(child_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+    except HarnessError:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        raise
+    except OSError as error:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        raise HarnessError(f"{variable} parent directory could not be pinned.") from error
+    temporary_name = f".{path.name}.{os.urandom(12).hex()}.tmp"
+    target_created = False
+    published = False
+    cleanup_error = None
+    try:
+        pinned = os.fstat(directory_fd)
+        try:
+            visible = os.stat(path.parent, follow_symlinks=False)
+        except OSError as error:
+            raise HarnessError(f"{variable} parent directory changed.") from error
+        if (
+            not stat.S_ISDIR(pinned.st_mode)
+            or pinned.st_dev != visible.st_dev
+            or pinned.st_ino != visible.st_ino
+            or stat.S_IMODE(pinned.st_mode) & 0o022
+        ):
+            raise HarnessError(f"{variable} parent directory is unsafe or changed.")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(temporary_name, flags, 0o600, dir_fd=directory_fd)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                descriptor = None
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        try:
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            target_created = True
+        except FileExistsError as error:
+            raise HarnessError(
+                f"{variable} appeared during the write; refusing replacement."
+            ) from error
+        except OSError as error:
+            raise HarnessError(f"{variable} could not be published safely.") from error
+        try:
+            current = os.stat(path.parent, follow_symlinks=False)
+        except OSError as error:
+            raise HarnessError(
+                f"{variable} parent directory changed during publication."
+            ) from error
+        if current.st_dev != pinned.st_dev or current.st_ino != pinned.st_ino:
+            raise HarnessError(f"{variable} parent directory changed during publication.")
+        os.fsync(directory_fd)
+        published = True
+    finally:
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            cleanup_error = error
+        if target_created and (not published or cleanup_error is not None):
+            try:
+                os.unlink(path.name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+                target_created = False
+                published = False
+            except FileNotFoundError:
+                target_created = False
+            except OSError as error:
+                cleanup_error = cleanup_error or error
+        os.close(directory_fd)
+        if cleanup_error is not None:
+            raise HarnessError(
+                f"{variable} publication rollback could not be completed safely."
+            ) from cleanup_error
+    return path
+
+
+def _atomic_private_json(path_value, payload, *, variable, refuse_existing=True):
+    raw_path = Path(str(path_value or "")).expanduser()
+    _reject_symlink_components(raw_path, variable=variable)
+    path = _external_path(raw_path, variable=variable)
+    _reject_symlink_components(path, variable=variable)
+    if not refuse_existing:
+        raise HarnessError(f"{variable} replacement writes are not supported.")
+    if path.exists():
+        raise HarnessError(f"{variable} already exists; refusing to overwrite it.")
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return _publish_private_bytes(path, encoded, variable=variable)
+
+
+def _file_digest(path, *, variable):
+    path = Path(path)
+    _reject_symlink_components(path, variable=variable)
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise HarnessError(f"{variable} is missing.") from error
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise HarnessError(f"{variable} must be a regular file.")
+    digest = hashlib.sha256()
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_dev != metadata.st_dev or opened.st_ino != metadata.st_ino:
+            raise HarnessError(f"{variable} changed while being opened.")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest()
+
+
+def _read_private_bytes(path_value, *, variable, maximum=1024 * 1024):
+    raw_path = Path(str(path_value or "")).expanduser()
+    _reject_symlink_components(raw_path, variable=variable)
+    path = _external_path(raw_path, variable=variable)
+    _reject_symlink_components(path, variable=variable)
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise HarnessError(f"{variable} is missing or could not be inspected.") from error
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or not 0 < before.st_size <= maximum
+    ):
+        raise HarnessError(f"{variable} must be a non-empty regular 0600 file.")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_dev != before.st_dev or opened.st_ino != before.st_ino:
+            raise HarnessError(f"{variable} changed while being opened.")
+        chunks = []
+        observed = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - observed))
+            if not chunk:
+                break
+            observed += len(chunk)
+            if observed > maximum:
+                raise HarnessError(f"{variable} exceeded the size limit.")
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    payload = b"".join(chunks)
+    return path, payload, hashlib.sha256(payload).hexdigest()
+
+
+def _assert_no_credential_fields(value, *, path="manifest"):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if (
+                _CREDENTIAL_FIELD_RE.search(str(key))
+                and str(key) not in _SAFE_REFERENCE_FIELDS
+            ):
+                raise HarnessError(f"{path} contains a credential-shaped field.")
+            _assert_no_credential_fields(child, path=f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _assert_no_credential_fields(child, path=f"{path}[{index}]")
+
+
+class _ReadOnlyIntentStore:
+    def __init__(self, path, *, provider, run_id, scope, suffix):
+        base = Path(path).expanduser()
+        self.path = base.with_name(base.name + suffix)
+        self.provider = provider
+        self.run_id = run_id
+        self.scope = scope
+
+    def _payload(self):
+        try:
+            _path, payload = _read_private_json(
+                self.path,
+                variable="read-only durable state",
+                exact_keys={"schema", "provider", "run_id", "scope", "pending"},
+            )
+        except HarnessError as error:
+            raise LedgerError("The read-only durable state could not be read.") from error
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != 1
+            or payload.get("provider") != self.provider
+            or payload.get("run_id") != self.run_id
+            or payload.get("scope") != self.scope
+            or not isinstance(payload.get("pending"), dict)
+        ):
+            raise LedgerError("The read-only durable state scope is malformed.")
+        return payload
+
+    def get(self, key):
+        value = self._payload()["pending"].get(str(key))
+        return dict(value) if isinstance(value, dict) else None
+
+    def pending(self):
+        return {key: dict(value) for key, value in self._payload()["pending"].items()}
+
+    def put(self, *_args, **_kwargs):
+        raise LedgerError("Read-only verification cannot write durable state.")
+
+    update = put
+    clear = put
+
+
+class _ReadOnlyResourceLedger:
+    def __init__(self, path, *, provider, run_id, scope):
+        self.path = Path(path).expanduser()
+        self.provider = provider
+        self.run_id = run_id
+        self.scope = scope
+
+    def _payload(self):
+        try:
+            _path, payload = _read_private_json(
+                self.path,
+                variable="read-only resource ledger",
+                exact_keys={
+                    "schema",
+                    "provider",
+                    "run_id",
+                    "scope",
+                    "created_at",
+                    "resources",
+                },
+            )
+        except HarnessError as error:
+            raise LedgerError("The read-only resource ledger could not be read.") from error
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != 1
+            or payload.get("provider") != self.provider
+            or payload.get("run_id") != self.run_id
+            or payload.get("scope") != self.scope
+            or not isinstance(payload.get("resources"), list)
+        ):
+            raise LedgerError("The read-only resource ledger scope is malformed.")
+        return payload
+
+    def entries(self, kind=None):
+        rows = [dict(row) for row in self._payload()["resources"]]
+        return rows if kind is None else [row for row in rows if row.get("kind") == str(kind)]
+
+    def get(self, kind, resource_id):
+        matches = [
+            row
+            for row in self.entries(kind)
+            if str(row.get("resource_id")) == str(resource_id)
+        ]
+        if len(matches) > 1:
+            raise LedgerError("The read-only ledger contains duplicate provider IDs.")
+        return matches[0] if matches else None
+
+    def record(self, *_args, **_kwargs):
+        raise LedgerError("Read-only verification cannot write the resource ledger.")
+
+    mark_cleanup = record
 
 
 def _required(environment, name):
@@ -192,6 +751,22 @@ def _require_customer_secret_key_id(value):
     value = str(value or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9]{16,128}", value):
         raise HarnessError("customer secret key ID is malformed.")
+    return value
+
+
+def _safe_backup_marker(value, *, field="backup marker"):
+    raw = str(value or "")
+    value = raw.strip()
+    if (
+        raw != value
+        or not SAFE_BACKUP_MARKER_RE.fullmatch(value)
+        or value in {".", ".."}
+        or ".." in value
+        or "/" in value
+        or "\\" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise HarnessError(f"Oracle UI manifest {field} is not a safe BackupSheep marker.")
     return value
 
 
@@ -359,6 +934,109 @@ def iter_pages(method, **kwargs):
 
 
 @dataclass(frozen=True)
+class RuntimeScope:
+    run_id: str
+    profile: str
+    tenancy_id: str
+    compartment_id: str
+    subnet_id: str
+    availability_domain: str
+    region: str
+    ui_ledger_path: Path
+    network_ledger_path: Path
+    source_path: Path
+    digest: str
+
+    @classmethod
+    def load(cls, path_value, *, environment=None):
+        path, payload = _read_private_json(
+            path_value,
+            variable="ORACLE_E2E_RUNTIME_SCOPE_FILE",
+            exact_keys=RUNTIME_SCOPE_KEYS,
+        )
+        if payload.get("schema") != RUNTIME_SCOPE_SCHEMA:
+            raise HarnessError("Oracle runtime scope schema is unsupported.")
+        run_id = require_run_id(payload.get("run_id"))
+        profile = str(payload.get("profile") or "")
+        if not PROFILE_RE.fullmatch(profile):
+            raise HarnessError("Oracle runtime scope profile is malformed.")
+        tenancy_id = _require_ocid(
+            payload.get("tenancy_id"), label="runtime tenancy", resource_type="tenancy"
+        )
+        compartment_id = _require_ocid(
+            payload.get("compartment_id"),
+            label="runtime compartment",
+            resource_type="compartment",
+        )
+        subnet_id = _require_ocid(
+            payload.get("subnet_id"), label="runtime subnet", resource_type="subnet"
+        )
+        availability_domain = str(payload.get("availability_domain") or "").strip()
+        region = str(payload.get("region") or "").strip()
+        if not availability_domain or len(availability_domain) > 128:
+            raise HarnessError("Oracle runtime availability domain is malformed.")
+        if not re.fullmatch(r"[a-z0-9-]{3,64}", region):
+            raise HarnessError("Oracle runtime region is malformed.")
+        ui_ledger_path = _external_nonsymlink_path(
+            payload.get("ui_ledger_path"), variable="runtime ui_ledger_path"
+        )
+        network_ledger_path = _external_nonsymlink_path(
+            payload.get("network_ledger_path"), variable="runtime network_ledger_path"
+        )
+        if ui_ledger_path == network_ledger_path:
+            raise HarnessError("Oracle runtime ledgers must use separate paths.")
+        expected_environment = {
+            "BACKUPSHEEP_E2E_RUN_ID": run_id,
+            "OCI_CLI_PROFILE": profile,
+            "ORACLE_E2E_ALLOWED_TENANCY_OCID": tenancy_id,
+            "ORACLE_E2E_COMPARTMENT_OCID": compartment_id,
+            "ORACLE_E2E_ALLOWED_COMPARTMENT_OCID": compartment_id,
+            "ORACLE_E2E_SUBNET_OCID": subnet_id,
+            "ORACLE_E2E_AVAILABILITY_DOMAIN": availability_domain,
+            "ORACLE_E2E_REGION": region,
+            "BACKUPSHEEP_E2E_LEDGER_PATH": str(ui_ledger_path),
+            "BACKUPSHEEP_E2E_NETWORK_LEDGER_PATH": str(network_ledger_path),
+        }
+        environment = dict(environment or {})
+        for name, expected in expected_environment.items():
+            actual = str(environment.get(name) or "").strip()
+            if actual and (
+                str(_external_nonsymlink_path(actual, variable=name))
+                if name.endswith("LEDGER_PATH")
+                else actual
+            ) != str(expected):
+                raise HarnessError(f"{name} does not match the protected runtime scope.")
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return cls(
+            run_id=run_id,
+            profile=profile,
+            tenancy_id=tenancy_id,
+            compartment_id=compartment_id,
+            subnet_id=subnet_id,
+            availability_domain=availability_domain,
+            region=region,
+            ui_ledger_path=ui_ledger_path,
+            network_ledger_path=network_ledger_path,
+            source_path=path,
+            digest=hashlib.sha256(canonical).hexdigest(),
+        )
+
+    def payload(self):
+        return {
+            "schema": RUNTIME_SCOPE_SCHEMA,
+            "run_id": self.run_id,
+            "profile": self.profile,
+            "tenancy_id": self.tenancy_id,
+            "compartment_id": self.compartment_id,
+            "subnet_id": self.subnet_id,
+            "availability_domain": self.availability_domain,
+            "region": self.region,
+            "ui_ledger_path": str(self.ui_ledger_path),
+            "network_ledger_path": str(self.network_ledger_path),
+        }
+
+
+@dataclass(frozen=True)
 class HarnessConfig:
     run_id: str
     ledger_path: Path
@@ -370,28 +1048,18 @@ class HarnessConfig:
     cleanup: bool
     poll_seconds: int
     timeout_seconds: int
+    runtime_scope: RuntimeScope
 
     @classmethod
     def from_environment(cls, environment=None):
         environment = dict(os.environ if environment is None else environment)
-        run_id = require_run_id(_required(environment, "BACKUPSHEEP_E2E_RUN_ID"))
-        requested = _require_ocid(
-            _required(environment, "ORACLE_E2E_COMPARTMENT_OCID"),
-            label="ORACLE_E2E_COMPARTMENT_OCID",
-            resource_type="compartment",
+        runtime_scope = RuntimeScope.load(
+            _required(environment, "ORACLE_E2E_RUNTIME_SCOPE_FILE"),
+            environment=environment,
         )
-        allowed = _require_ocid(
-            _required(environment, "ORACLE_E2E_ALLOWED_COMPARTMENT_OCID"),
-            label="ORACLE_E2E_ALLOWED_COMPARTMENT_OCID",
-            resource_type="compartment",
-        )
-        if requested != allowed:
-            raise HarnessError(
-                "Requested and explicitly allowed Oracle compartments must match exactly."
-            )
-        profile = _required(environment, "OCI_CLI_PROFILE")
-        if not PROFILE_RE.fullmatch(profile):
-            raise HarnessError("OCI_CLI_PROFILE contains unsupported characters.")
+        run_id = runtime_scope.run_id
+        requested = runtime_scope.compartment_id
+        profile = runtime_scope.profile
         config_file = _safe_path(
             environment.get("OCI_CLI_CONFIG_FILE", "~/.oci/config"),
             variable="OCI_CLI_CONFIG_FILE",
@@ -403,31 +1071,38 @@ class HarnessConfig:
             raise HarnessError("Oracle E2E wait settings must be integers.") from error
         return cls(
             run_id=run_id,
-            ledger_path=_safe_path(
-                _required(environment, "BACKUPSHEEP_E2E_LEDGER_PATH"),
-                variable="BACKUPSHEEP_E2E_LEDGER_PATH",
-            ),
+            ledger_path=runtime_scope.ui_ledger_path,
             profile=profile,
             config_file=config_file,
             compartment_id=requested,
-            availability_domain=_required(environment, "ORACLE_E2E_AVAILABILITY_DOMAIN"),
+            availability_domain=runtime_scope.availability_domain,
             apply=environment.get("BACKUPSHEEP_E2E_APPLY") == "YES",
             cleanup=environment.get("BACKUPSHEEP_E2E_CLEANUP") == "YES",
             poll_seconds=poll_seconds,
             timeout_seconds=min(timeout_seconds, 7200),
+            runtime_scope=runtime_scope,
         )
 
 
 class OracleLiveUIHarness:
     """Provision exact test sources, verify UI outputs, and clean a run ledger."""
 
-    def __init__(self, config, *, environment=None, clients=None, sleep=time.sleep):
+    def __init__(
+        self,
+        config,
+        *,
+        environment=None,
+        clients=None,
+        sleep=time.sleep,
+        read_only=False,
+    ):
         self.config = config
         self.environment = dict(os.environ if environment is None else environment)
         provided_clients = dict(clients or {})
         self._oci_config = provided_clients.pop("_config", None)
         self._clients = provided_clients
         self._sleep = sleep
+        self.read_only = bool(read_only)
         self.names = {
             "source_block_volume": f"{config.run_id}-block-source",
             "source_block_attachment": f"{config.run_id}-block-attachment",
@@ -444,21 +1119,44 @@ class OracleLiveUIHarness:
             "iam_policy": f"{config.run_id}-s3-policy",
             "customer_secret_key": f"{config.run_id}-s3-key",
         }
-        scope = f"oci:{config.profile}:{config.compartment_id}:{config.availability_domain}"
-        self.ledger = DurableResourceLedger(
+        scope = (
+            f"oci:{config.profile}:{config.compartment_id}:"
+            f"{config.availability_domain}"
+        )
+        durable_paths = {
+            config.ledger_path,
+            config.ledger_path.with_name(config.ledger_path.name + ".lock"),
+            config.ledger_path.with_name(
+                config.ledger_path.name + ".oracle-intents.json"
+            ),
+            config.ledger_path.with_name(
+                config.ledger_path.name + ".oracle-intents.json.lock"
+            ),
+            config.ledger_path.with_name(
+                config.ledger_path.name + ".oracle-evidence.json"
+            ),
+            config.ledger_path.with_name(
+                config.ledger_path.name + ".oracle-evidence.json.lock"
+            ),
+        }
+        for path in durable_paths:
+            _reject_symlink_components(path, variable="Oracle durable state")
+        ledger_class = _ReadOnlyResourceLedger if self.read_only else DurableResourceLedger
+        intent_class = _ReadOnlyIntentStore if self.read_only else DurableMutationIntentStore
+        self.ledger = ledger_class(
             config.ledger_path,
             provider="oracle_cloud",
             run_id=config.run_id,
             scope=scope,
         )
-        self.intents = DurableMutationIntentStore(
+        self.intents = intent_class(
             config.ledger_path,
             provider="oracle_cloud",
             run_id=config.run_id,
             scope=scope,
             suffix=".oracle-intents.json",
         )
-        self.evidence = DurableMutationIntentStore(
+        self.evidence = intent_class(
             config.ledger_path,
             provider="oracle_cloud",
             run_id=config.run_id,
@@ -484,6 +1182,14 @@ class OracleLiveUIHarness:
             required = {"identity", "compute", "block", "network", "object"}
             if not required.issubset(self._clients):
                 raise HarnessError("Injected OCI clients are incomplete.")
+            configured = self._oci_config or {}
+            if (
+                str(configured.get("tenancy") or "")
+                != self.config.runtime_scope.tenancy_id
+                or str(configured.get("region") or "")
+                != self.config.runtime_scope.region
+            ):
+                raise HarnessError("Injected OCI scope does not match the protected runtime scope.")
             return self._clients
         try:
             import oci
@@ -493,6 +1199,15 @@ class OracleLiveUIHarness:
                 profile_name=self.config.profile,
             )
             oci.config.validate_config(config)
+            if (
+                str(config.get("tenancy") or "")
+                != self.config.runtime_scope.tenancy_id
+                or str(config.get("region") or "")
+                != self.config.runtime_scope.region
+            ):
+                raise HarnessError(
+                    "OCI profile tenancy/region does not match the protected runtime scope."
+                )
             retry = oci.retry.NoneRetryStrategy()
             kwargs = {"timeout": REQUEST_TIMEOUT, "retry_strategy": retry}
             self._clients = {
@@ -571,7 +1286,7 @@ class OracleLiveUIHarness:
     def _require_apply(self):
         if not self.config.apply:
             raise HarnessError(
-                "Provider creates require BACKUPSHEEP_E2E_APPLY=YES."
+                "Provider or guest mutations require BACKUPSHEEP_E2E_APPLY=YES."
             )
 
     def _require_cleanup(self):
@@ -583,6 +1298,16 @@ class OracleLiveUIHarness:
 
     def _validate_scope(self):
         clients = self._load_clients()
+        tenancy = str((self._oci_config or {}).get("tenancy") or "")
+        region = str((self._oci_config or {}).get("region") or "")
+        if (
+            tenancy != self.config.runtime_scope.tenancy_id
+            or region != self.config.runtime_scope.region
+            or self.config.compartment_id != self.config.runtime_scope.compartment_id
+            or self.config.availability_domain
+            != self.config.runtime_scope.availability_domain
+        ):
+            raise HarnessError("Oracle scope drifted from the protected runtime artifact.")
         compartment = _data(
             self._call(
                 clients["identity"].get_compartment,
@@ -591,11 +1316,11 @@ class OracleLiveUIHarness:
         )
         if (
             str(_value(compartment, "id") or "") != self.config.compartment_id
+            or str(_value(compartment, "compartment_id") or "") != tenancy
             or str(_value(compartment, "lifecycle_state") or "").upper() != "ACTIVE"
         ):
             raise HarnessError("The explicitly allowed compartment is not active.")
 
-        tenancy = (self._oci_config or {}).get("tenancy")
         if tenancy:
             domains = self._list_unpaged(
                 clients["identity"].list_availability_domains,
@@ -690,6 +1415,9 @@ class OracleLiveUIHarness:
         actual_tags = _tags(resource)
         if any(actual_tags.get(key) != value for key, value in proof["tags"].items()):
             raise HarnessError("Oracle resource ownership tags did not match exactly.")
+        exact_tags = proof.get("exact_freeform_tags")
+        if exact_tags is not None and actual_tags != exact_tags:
+            raise HarnessError("Oracle resource exact freeform tags changed.")
         for field in (
             "instance_id",
             "volume_id",
@@ -841,11 +1569,7 @@ class OracleLiveUIHarness:
         return resource
 
     def _validate_instance_inputs(self):
-        subnet_id = _require_ocid(
-            _required(self.environment, "ORACLE_E2E_SUBNET_OCID"),
-            label="ORACLE_E2E_SUBNET_OCID",
-            resource_type="subnet",
-        )
+        subnet_id = self.config.runtime_scope.subnet_id
         image_id = _require_ocid(
             _required(self.environment, "ORACLE_E2E_IMAGE_OCID"),
             label="ORACLE_E2E_IMAGE_OCID",
@@ -1041,23 +1765,15 @@ class OracleLiveUIHarness:
 
     @staticmethod
     def _atomic_private_write(path, payload, mode):
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            os.fchmod(descriptor, mode)
-            with os.fdopen(descriptor, "wb") as target:
-                target.write(payload)
-                target.flush()
-                os.fsync(target.fileno())
-            os.replace(temporary, path)
-            directory = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        path = Path(path)
+        if mode != 0o600:
+            raise HarnessError("Protected Oracle files must be created with mode 0600.")
+        _reject_symlink_components(path, variable="protected Oracle file")
+        if path.exists():
+            raise HarnessError("Protected Oracle file already exists; refusing overwrite.")
+        return _publish_private_bytes(
+            path, bytes(payload), variable="protected Oracle file"
+        )
 
     def _ensure_ssh_key(self):
         private_path, public_path, _known_hosts = self._key_paths()
@@ -2067,10 +2783,13 @@ class OracleLiveUIHarness:
 
     def _storage_scope(self, *, bucket_name, namespace, region, user_ocid):
         tenancy_id = _require_ocid(
-            (self._oci_config or {}).get("tenancy"),
+            self.config.runtime_scope.tenancy_id,
             label="OCI profile tenancy",
             resource_type="tenancy",
         )
+        configured_tenancy = str((self._oci_config or {}).get("tenancy") or "")
+        if configured_tenancy and configured_tenancy != tenancy_id:
+            raise HarnessError("OCI profile tenancy drifted from the protected runtime scope.")
         compartment_id = _require_ocid(
             self.config.compartment_id,
             label="Oracle E2E compartment",
@@ -2131,6 +2850,62 @@ class OracleLiveUIHarness:
                     "Oracle storage scope does not match durable configuration evidence."
                 )
         return expected
+
+    def _storage_ledger_witness(self, kind):
+        """Return only immutable, non-secret ownership fields for one exact row."""
+
+        if kind not in {"object_bucket", "iam_user", "customer_secret_key"}:
+            raise HarnessError("Unsupported Oracle storage-scope witness kind.")
+        row = self._active_ledger_entry(kind)
+        if not isinstance(row, dict):
+            raise HarnessError(f"Oracle storage scope lacks the exact {kind} row.")
+        ownership = row.get("ownership")
+        if not isinstance(ownership, dict) or not ownership:
+            raise HarnessError("Oracle storage ownership witness is malformed.")
+        witness = {
+            "kind": kind,
+            "resource_id": str(row.get("resource_id") or ""),
+            "name": str(row.get("name") or ""),
+            "ownership": ownership,
+            "source_witness": str(row.get("source_witness") or ""),
+        }
+        if set(witness) != STORAGE_LEDGER_WITNESS_KEYS:
+            raise HarnessError("Oracle storage ownership witness is incomplete.")
+        _assert_no_credential_fields(witness, path=f"storage_scope.{kind}")
+        if kind == "customer_secret_key":
+            _require_customer_secret_key_id(witness["resource_id"])
+        else:
+            _require_ocid(witness["resource_id"], label=f"{kind} ledger ID")
+        return json.loads(json.dumps(witness, sort_keys=True))
+
+    def _storage_scope_identity(self, scope, witnesses):
+        if set(scope) != STORAGE_SCOPE_KEYS or set(witnesses) != {
+            "bucket_witness",
+            "user_witness",
+            "customer_secret_witness",
+        }:
+            raise HarnessError("Oracle storage immutable scope identity is incomplete.")
+        identity = {
+            "run_id": self.config.run_id,
+            "profile": self.config.runtime_scope.profile,
+            "tenancy_id": self.config.runtime_scope.tenancy_id,
+            "compartment_id": self.config.runtime_scope.compartment_id,
+            "region": self.config.runtime_scope.region,
+            "storage_scope": scope,
+            **witnesses,
+        }
+        return hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def _storage_scope_witnesses(self):
+        return {
+            "bucket_witness": self._storage_ledger_witness("object_bucket"),
+            "user_witness": self._storage_ledger_witness("iam_user"),
+            "customer_secret_witness": self._storage_ledger_witness(
+                "customer_secret_key"
+            ),
+        }
 
     def _persist_storage_scope(self, expected):
         """Persist the non-secret S3 scope before any S3 client is created."""
@@ -2213,7 +2988,7 @@ class OracleLiveUIHarness:
             raise HarnessError("Oracle storage credential file permissions are unsafe.")
         return path
 
-    def _read_storage_secret(self, *, expected_scope=None):
+    def _read_storage_secret(self, *, expected_scope=None, require_evidence=True):
         """Load one exact, non-symlinked, scope-bound credential document."""
 
         path = self._secret_path()
@@ -2232,6 +3007,7 @@ class OracleLiveUIHarness:
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
+        descriptor = None
         try:
             descriptor = os.open(path, flags)
             with os.fdopen(descriptor, "r", encoding="utf-8") as source:
@@ -2258,7 +3034,9 @@ class OracleLiveUIHarness:
         if expected_scope is not None:
             if set(expected_scope) != STORAGE_SCOPE_KEYS:
                 raise HarnessError("Oracle storage scope is incomplete.")
-            self._assert_storage_scope_ledger(expected_scope)
+            self._assert_storage_scope_ledger(
+                expected_scope, require_evidence=require_evidence
+            )
             if any(
                 payload[field] != str(expected_scope[field])
                 for field in STORAGE_SCOPE_KEYS
@@ -2428,10 +3206,12 @@ class OracleLiveUIHarness:
 
     def _storage_scope_for_s3(self):
         durable = self.evidence.get("storage_scope")
+        repaired = False
         if not isinstance(durable, dict) or any(
             not str(durable.get(field) or "") for field in STORAGE_SCOPE_KEYS
         ):
-            raise HarnessError("Oracle S3 use requires durable storage scope evidence.")
+            durable = self._load_repaired_storage_scope()
+            repaired = True
         expected = self._storage_scope(
             bucket_name=durable["bucket"],
             namespace=durable["namespace"],
@@ -2443,7 +3223,117 @@ class OracleLiveUIHarness:
             for field in STORAGE_SCOPE_KEYS
         ):
             raise HarnessError("Oracle S3 storage scope does not match OCI configuration.")
-        return self._assert_storage_scope_ledger(expected)
+        return self._assert_storage_scope_ledger(expected, require_evidence=not repaired)
+
+    def _load_repaired_storage_scope(self):
+        path_value = self.environment.get("ORACLE_E2E_STORAGE_SCOPE_FILE")
+        if not path_value:
+            raise HarnessError(
+                "Oracle S3 use requires durable storage scope evidence or an exact "
+                "protected repaired scope artifact."
+            )
+        _path, payload = _read_private_json(
+            path_value,
+            variable="ORACLE_E2E_STORAGE_SCOPE_FILE",
+            exact_keys=STORAGE_SCOPE_REPAIR_KEYS,
+        )
+        if (
+            payload.get("schema") != STORAGE_SCOPE_REPAIR_SCHEMA
+            or payload.get("run_id") != self.config.run_id
+            or payload.get("runtime_scope_digest") != self.config.runtime_scope.digest
+        ):
+            raise HarnessError("Repaired Oracle storage scope does not match this exact run.")
+        scope = payload.get("storage_scope")
+        if not isinstance(scope, dict) or set(scope) != STORAGE_SCOPE_KEYS:
+            raise HarnessError("Repaired Oracle storage scope is malformed.")
+        expected = self._storage_scope(
+            bucket_name=scope.get("bucket"),
+            namespace=scope.get("namespace"),
+            region=scope.get("region"),
+            user_ocid=scope.get("user_ocid"),
+        )
+        if any(str(scope.get(key) or "") != str(expected[key]) for key in STORAGE_SCOPE_KEYS):
+            raise HarnessError("Repaired Oracle storage scope drifted from runtime scope.")
+        witnesses = self._storage_scope_witnesses()
+        if any(payload.get(key) != value for key, value in witnesses.items()):
+            raise HarnessError("Repaired Oracle storage scope ledger witnesses changed.")
+        secret = self._read_storage_secret(require_evidence=False)
+        if secret is None:
+            raise HarnessError("Oracle Object Storage credential file is missing.")
+        if (
+            secret["access_key_id"]
+            != witnesses["customer_secret_witness"]["resource_id"]
+            or secret["user_ocid"] != witnesses["user_witness"]["resource_id"]
+            or secret["bucket"] != witnesses["bucket_witness"]["name"]
+            or any(secret[key] != str(expected[key]) for key in STORAGE_SCOPE_KEYS)
+        ):
+            raise HarnessError("Repaired Oracle storage scope no longer binds the exact key row.")
+        identity = self._storage_scope_identity(expected, witnesses)
+        if payload.get("scope_identity_sha256") != identity:
+            raise HarnessError("Repaired Oracle storage immutable identity changed.")
+        return scope
+
+    def repair_storage_scope(self, output_path):
+        """Create a new non-secret scope artifact; never alter legacy evidence."""
+
+        secret = self._read_storage_secret()
+        if secret is None:
+            raise HarnessError("Oracle Object Storage credential file is missing.")
+        expected = self._storage_scope(
+            bucket_name=secret["bucket"],
+            namespace=secret["namespace"],
+            region=secret["region"],
+            user_ocid=secret["user_ocid"],
+        )
+        self._assert_storage_scope_ledger(expected, require_evidence=False)
+        if any(secret[field] != str(expected[field]) for field in STORAGE_SCOPE_KEYS):
+            raise HarnessError("Oracle storage secret and exact ledger/runtime scope disagree.")
+        witnesses = self._storage_scope_witnesses()
+        if (
+            witnesses["bucket_witness"]["name"] != expected["bucket"]
+            or witnesses["user_witness"]["resource_id"] != expected["user_ocid"]
+            or witnesses["customer_secret_witness"]["resource_id"]
+            != secret["access_key_id"]
+            or str(
+                (
+                    witnesses["customer_secret_witness"]["ownership"].get(
+                        "relationships"
+                    )
+                    or {}
+                ).get("user_id")
+                or ""
+            )
+            != expected["user_ocid"]
+        ):
+            raise HarnessError("Oracle storage repair witnesses do not bind one exact key graph.")
+        raw_output = Path(str(output_path or "")).expanduser()
+        _reject_symlink_components(raw_output, variable="--output")
+        output = _external_path(raw_output, variable="--output")
+        protected_sources = {
+            self.config.runtime_scope.source_path,
+            self._secret_path(),
+            self.config.ledger_path,
+            self.evidence.path,
+        }
+        if output in protected_sources:
+            raise HarnessError("Storage-scope repair must not overwrite a source artifact.")
+        payload = {
+            "schema": STORAGE_SCOPE_REPAIR_SCHEMA,
+            "run_id": self.config.run_id,
+            "runtime_scope_digest": self.config.runtime_scope.digest,
+            "scope_identity_sha256": self._storage_scope_identity(
+                expected, witnesses
+            ),
+            "storage_scope": expected,
+            **witnesses,
+        }
+        written = _atomic_private_json(output, payload, variable="--output")
+        return {
+            "phase": "STORAGE_SCOPE_REPAIRED",
+            "run_id": self.config.run_id,
+            "output": str(written),
+            "source_overwritten": False,
+        }
 
     def _storage_s3_client(self, secret_path=None):
         expected_scope = self._storage_scope_for_s3()
@@ -2458,7 +3348,9 @@ class OracleLiveUIHarness:
             )
             if requested_path != canonical_path:
                 raise HarnessError("Oracle S3 client received an unexpected credential path.")
-        secret = self._read_storage_secret(expected_scope=expected_scope)
+        secret = self._read_storage_secret(
+            expected_scope=expected_scope, require_evidence=False
+        )
         if secret is None:
             raise HarnessError("Oracle Object Storage credential file is missing.")
         try:
@@ -2535,36 +3427,947 @@ class OracleLiveUIHarness:
             "preflight": preflight,
         }
 
-    def _load_ui_manifest(self, path):
-        path = _safe_path(path, variable="--ui-manifest")
+    @staticmethod
+    def _positive_row_id(value, *, field):
         try:
-            if path.stat().st_size > 256 * 1024:
-                raise HarnessError("Oracle UI manifest exceeds the safety limit.")
-            manifest = json.loads(path.read_text(encoding="utf-8"))
-        except HarnessError:
-            raise
-        except (OSError, ValueError) as error:
-            raise HarnessError("Oracle UI manifest is unreadable or malformed.") from error
+            value = int(value)
+        except (TypeError, ValueError) as error:
+            raise HarnessError(f"Oracle UI manifest {field} must be a positive row ID.") from error
+        if value <= 0:
+            raise HarnessError(f"Oracle UI manifest {field} must be a positive row ID.")
+        return value
+
+    @staticmethod
+    def _backup_marker(value, *, field):
+        return _safe_backup_marker(value, field=field)
+
+    @staticmethod
+    def _exact_mapping(value, keys, *, field):
+        if not isinstance(value, dict) or set(value) != set(keys):
+            raise HarnessError(f"Oracle UI manifest {field} has an unsupported schema.")
+        return value
+
+    @staticmethod
+    def _hash_evidence(value, *, field, database=False):
+        keys = (
+            {"schema_sha256", "table_count", "row_count", "data_sha256"}
+            if database
+            else {"tree_sha256", "file_count", "byte_count", "mode_sha256"}
+        )
+        value = OracleLiveUIHarness._exact_mapping(value, keys, field=field)
+        hashes = ("schema_sha256", "data_sha256") if database else ("tree_sha256", "mode_sha256")
+        counts = ("table_count", "row_count") if database else ("file_count", "byte_count")
+        result = {}
+        for name in hashes:
+            token = str(value.get(name) or "").lower()
+            if not re.fullmatch(r"[a-f0-9]{64}", token):
+                raise HarnessError(f"Oracle UI manifest {field}.{name} is malformed.")
+            result[name] = token
+        for name in counts:
+            try:
+                count = int(value.get(name))
+            except (TypeError, ValueError) as error:
+                raise HarnessError(f"Oracle UI manifest {field}.{name} is malformed.") from error
+            if count < 0:
+                raise HarnessError(f"Oracle UI manifest {field}.{name} is malformed.")
+            result[name] = count
+        return result
+
+    def _validate_workload_row_witness(self, value, *, field, target):
+        value = self._exact_mapping(value, WORKLOAD_ROW_WITNESS_KEYS, field=field)
+        normalized = {
+            "node_row_id": self._positive_row_id(
+                value.get("node_row_id"), field=f"{field}.node_row_id"
+            ),
+            "backup_row_id": self._positive_row_id(
+                value.get("backup_row_id"), field=f"{field}.backup_row_id"
+            ),
+            "backup_status": str(value.get("backup_status") or ""),
+            "backup_marker": self._backup_marker(
+                value.get("backup_marker"), field=f"{field}.backup_marker"
+            ),
+            "restore_row_id": self._positive_row_id(
+                value.get("restore_row_id"), field=f"{field}.restore_row_id"
+            ),
+            "restore_status": str(value.get("restore_status") or ""),
+            "restore_target": str(value.get("restore_target") or ""),
+        }
         if (
-            not isinstance(manifest, dict)
-            or manifest.get("schema") != 1
-            or manifest.get("run_id") != self.config.run_id
-            or manifest.get("compartment_id") != self.config.compartment_id
+            normalized["backup_status"] != "Complete"
+            or normalized["restore_status"] != "Complete"
+            or normalized["restore_target"] != target
         ):
-            raise HarnessError("Oracle UI manifest does not match this exact run.")
+            raise HarnessError(f"Oracle UI manifest {field} row witness is inconsistent.")
+        return normalized
+
+    def _validate_workload_guest_scope(self, value):
+        value = self._exact_mapping(
+            value, WORKLOAD_GUEST_SCOPE_KEYS, field="workload_guest_scope"
+        )
+        provider = str(value.get("provider") or "")
+        guest_run_id = require_run_id(value.get("run_id"))
+        if provider != "upcloud" or not guest_run_id.startswith("bs-e2e-upcloud-"):
+            raise HarnessError("Workload guest scope must identify the exact UpCloud E2E run.")
+        safe_root = str(value.get("safe_root") or "")
+        website_root = str(value.get("website_source_root") or "")
+        source_database = str(value.get("source_database") or "")
+        if (
+            safe_root != f"/srv/backupsheep-e2e/{guest_run_id}"
+            or website_root != f"{safe_root}/website"
+            or not re.fullmatch(r"bs_e2e_[a-z0-9_]{8,54}", source_database)
+        ):
+            raise HarnessError("Workload guest source paths or database are not run-scoped.")
+        try:
+            ssh_host = str(ipaddress.ip_address(str(value.get("ssh_host") or "")))
+            ssh_port = int(value.get("ssh_port"))
+        except (ValueError, TypeError) as error:
+            raise HarnessError("Workload guest SSH endpoint is malformed.") from error
+        ssh_user = str(value.get("ssh_user") or "")
+        if ssh_port != 22 or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", ssh_user):
+            raise HarnessError("Workload guest SSH user or port is outside the safe contract.")
+        key_path = _external_nonsymlink_path(
+            value.get("ssh_private_key_path"), variable="workload SSH private key"
+        )
+        known_hosts_path = _external_nonsymlink_path(
+            value.get("known_hosts_path"), variable="workload known-hosts file"
+        )
+        ledger_path = _external_nonsymlink_path(
+            value.get("durable_ledger_path"), variable="workload durable ledger"
+        )
+        if len({key_path, known_hosts_path, ledger_path}) != 3:
+            raise HarnessError("Workload guest protected artifacts must use distinct paths.")
+        hashes = {
+            "ssh_private_key_sha256": str(
+                value.get("ssh_private_key_sha256") or ""
+            ).lower(),
+            "known_hosts_sha256": str(value.get("known_hosts_sha256") or "").lower(),
+        }
+        if any(not re.fullmatch(r"[a-f0-9]{64}", item) for item in hashes.values()):
+            raise HarnessError("Workload guest protected-file digest is malformed.")
+        key_type = str(value.get("known_host_key_type") or "")
+        fingerprint = str(value.get("known_host_fingerprint") or "")
+        if (
+            not re.fullmatch(r"ssh-(?:rsa|ed25519)|ecdsa-sha2-nistp(?:256|384|521)", key_type)
+            or not SSH_FINGERPRINT_RE.fullmatch(fingerprint)
+        ):
+            raise HarnessError("Workload known-host fingerprint is malformed.")
+        source_server_id = str(value.get("source_server_id") or "")
+        if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", source_server_id):
+            raise HarnessError("Workload UpCloud source server ID is malformed.")
+        ledger_scope = str(value.get("durable_ledger_scope") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", ledger_scope):
+            raise HarnessError("Workload durable-ledger scope is malformed.")
+        return {
+            "provider": provider,
+            "run_id": guest_run_id,
+            "durable_ledger_path": str(ledger_path),
+            "durable_ledger_scope": ledger_scope,
+            "source_server_id": source_server_id,
+            "safe_root": safe_root,
+            "website_source_root": website_root,
+            "source_database": source_database,
+            "ssh_host": ssh_host,
+            "ssh_port": ssh_port,
+            "ssh_user": ssh_user,
+            "ssh_private_key_path": str(key_path),
+            **hashes,
+            "known_hosts_path": str(known_hosts_path),
+            "known_host_key_type": key_type,
+            "known_host_fingerprint": fingerprint,
+        }
+
+    def _validate_ui_manifest(self, manifest):
+        _assert_no_credential_fields(manifest)
+        top_keys = {
+            "schema",
+            "run_id",
+            "profile",
+            "tenancy_id",
+            "compartment_id",
+            "compute",
+            "block",
+            "boot",
+            "storage",
+            "workload_guest_scope",
+            "workloads",
+        }
+        self._exact_mapping(manifest, top_keys, field="root")
+        runtime = self.config.runtime_scope
+        if (
+            manifest.get("schema") != UI_MANIFEST_SCHEMA
+            or manifest.get("run_id") != runtime.run_id
+            or manifest.get("profile") != runtime.profile
+            or manifest.get("tenancy_id") != runtime.tenancy_id
+            or manifest.get("compartment_id") != runtime.compartment_id
+        ):
+            raise HarnessError("Oracle UI manifest does not match the protected runtime scope.")
+
+        normalized = {key: manifest[key] for key in top_keys}
+        native_backup_keys = {
+            "backup_row_id",
+            "backup_uuid",
+            "ocid",
+            "marker",
+            "request_token",
+        }
+        native_restore_keys = {
+            "restore_row_id",
+            "ocid",
+            "name",
+            "marker",
+            "request_token",
+        }
         for kind in ("compute", "block", "boot"):
-            section = manifest.get(kind)
-            if not isinstance(section, dict):
-                raise HarnessError(f"Oracle UI manifest is missing {kind} evidence.")
-            for field in ("source_ocid", "backup", "restore"):
-                if field not in section:
-                    raise HarnessError(f"Oracle UI manifest {kind}.{field} is required.")
-            if not isinstance(section["backup"], dict) or not isinstance(section["restore"], dict):
-                raise HarnessError(f"Oracle UI manifest {kind} evidence is malformed.")
-        storage = manifest.get("storage")
-        if not isinstance(storage, dict) or not isinstance(storage.get("objects"), list):
-            raise HarnessError("Oracle UI manifest storage.objects is required.")
-        return manifest
+            section = self._exact_mapping(
+                manifest.get(kind), {"source_ocid", "backup", "restore"}, field=kind
+            )
+            source_type = {"compute": "instance", "block": "volume", "boot": "bootvolume"}[kind]
+            source_ocid = _require_ocid(
+                section.get("source_ocid"),
+                label=f"{kind} source OCID",
+                resource_type=source_type,
+            )
+            backup = self._exact_mapping(section.get("backup"), native_backup_keys, field=f"{kind}.backup")
+            backup_uuid = self._backup_marker(
+                backup.get("backup_uuid"), field=f"{kind}.backup.backup_uuid"
+            )
+            marker = self._backup_marker(
+                backup.get("marker"), field=f"{kind}.backup.marker"
+            )
+            if marker != backup_uuid or str(backup.get("request_token") or "") != _retry_token(marker):
+                raise HarnessError(f"Oracle UI manifest {kind} backup witness is inconsistent.")
+            backup_ocid = _require_ocid(backup.get("ocid"), label=f"{kind} backup OCID")
+            restore = self._exact_mapping(
+                section.get("restore"), native_restore_keys, field=f"{kind}.restore"
+            )
+            restore_type = {"compute": "instance", "block": "volume", "boot": "bootvolume"}[kind]
+            restore_ocid = _require_ocid(
+                restore.get("ocid"), label=f"{kind} restore OCID", resource_type=restore_type
+            )
+            restore_marker = self._backup_marker(
+                restore.get("marker"), field=f"{kind}.restore.marker"
+            )
+            restore_name = str(restore.get("name") or "")
+            restore_token = str(restore.get("request_token") or "")
+            if (
+                not restore_name
+                or len(restore_name) > 255
+                or any(
+                    ord(character) < 32 or ord(character) == 127
+                    for character in restore_name
+                )
+                or restore_token != _retry_token(restore_marker)
+            ):
+                raise HarnessError(f"Oracle UI manifest {kind} restore witness is malformed.")
+            normalized[kind] = {
+                "source_ocid": source_ocid,
+                "backup": {
+                    "backup_row_id": self._positive_row_id(
+                        backup.get("backup_row_id"), field=f"{kind}.backup.backup_row_id"
+                    ),
+                    "backup_uuid": backup_uuid,
+                    "ocid": backup_ocid,
+                    "marker": marker,
+                    "request_token": _retry_token(marker),
+                },
+                "restore": {
+                    "restore_row_id": self._positive_row_id(
+                        restore.get("restore_row_id"), field=f"{kind}.restore.restore_row_id"
+                    ),
+                    "ocid": restore_ocid,
+                    "name": restore_name,
+                    "marker": restore_marker,
+                    "request_token": _retry_token(restore_marker),
+                },
+            }
+
+        storage = self._exact_mapping(manifest.get("storage"), {"objects"}, field="storage")
+        objects = storage.get("objects")
+        if not isinstance(objects, list) or len(objects) != 2:
+            raise HarnessError("Oracle UI manifest must contain exactly two storage objects.")
+        object_keys = {
+            "kind",
+            "backup_row_id",
+            "backup_uuid",
+            "storage_point_id",
+            "restore_row_id",
+            "key",
+            "sha256",
+            "byte_count",
+            "etag",
+            "version_id",
+        }
+        normalized_objects = []
+        seen_kinds = set()
+        seen_identity = set()
+        for index, item in enumerate(objects):
+            item = self._exact_mapping(item, object_keys, field=f"storage.objects[{index}]")
+            kind = str(item.get("kind") or "")
+            if kind not in {"website", "database"} or kind in seen_kinds:
+                raise HarnessError("Oracle UI manifest storage kinds must be exactly website and database.")
+            seen_kinds.add(kind)
+            key = str(item.get("key") or "")
+            backup_marker = self._backup_marker(
+                item.get("backup_uuid"), field=f"storage.{kind}.backup_uuid"
+            )
+            checksum = str(item.get("sha256") or "").lower()
+            etag = str(item.get("etag") or "").strip('"')
+            version_id = str(item.get("version_id") or "")
+            try:
+                byte_count = int(item.get("byte_count"))
+            except (TypeError, ValueError) as error:
+                raise HarnessError("Oracle UI manifest storage byte count is malformed.") from error
+            identity = (key, version_id)
+            if (
+                not key.startswith(f"{self.config.run_id}/")
+                or ".." in Path(key).parts
+                or Path(key).name != f"{backup_marker}.zip"
+                or not re.fullmatch(r"[a-f0-9]{64}", checksum)
+                or byte_count <= 0
+                or not etag
+                or len(etag) > 1024
+                or any(
+                    ord(character) < 32 or ord(character) == 127
+                    for character in etag
+                )
+                or not version_id
+                or len(version_id) > 1024
+                or any(
+                    ord(character) < 32 or ord(character) == 127
+                    for character in version_id
+                )
+                or version_id == "null"
+                or identity in seen_identity
+            ):
+                raise HarnessError("Oracle UI manifest storage witness is malformed.")
+            seen_identity.add(identity)
+            normalized_objects.append(
+                {
+                    "kind": kind,
+                    "backup_row_id": self._positive_row_id(
+                        item.get("backup_row_id"), field=f"storage.{kind}.backup_row_id"
+                    ),
+                    "backup_uuid": backup_marker,
+                    "storage_point_id": self._positive_row_id(
+                        item.get("storage_point_id"), field=f"storage.{kind}.storage_point_id"
+                    ),
+                    "restore_row_id": self._positive_row_id(
+                        item.get("restore_row_id"), field=f"storage.{kind}.restore_row_id"
+                    ),
+                    "key": key,
+                    "sha256": checksum,
+                    "byte_count": byte_count,
+                    "etag": etag,
+                    "version_id": version_id,
+                }
+            )
+        normalized["storage"] = {"objects": sorted(normalized_objects, key=lambda row: row["kind"])}
+
+        guest_scope = self._validate_workload_guest_scope(
+            manifest.get("workload_guest_scope")
+        )
+        normalized["workload_guest_scope"] = guest_scope
+        workloads = self._exact_mapping(
+            manifest.get("workloads"), {"website", "database"}, field="workloads"
+        )
+        website = self._exact_mapping(
+            workloads.get("website"),
+            {
+                "backup_row_id",
+                "restore_row_id",
+                "restore_path",
+                "row_witness",
+                "source",
+                "restored",
+            },
+            field="workloads.website",
+        )
+        database = self._exact_mapping(
+            workloads.get("database"),
+            {
+                "backup_row_id",
+                "restore_row_id",
+                "restore_database",
+                "row_witness",
+                "source",
+                "restored",
+            },
+            field="workloads.database",
+        )
+        restore_path = str(website.get("restore_path") or "")
+        restore_database = str(database.get("restore_database") or "")
+        website_restore_id = self._positive_row_id(
+            website.get("restore_row_id"), field="workloads.website.restore_row_id"
+        )
+        database_restore_id = self._positive_row_id(
+            database.get("restore_row_id"), field="workloads.database.restore_row_id"
+        )
+        if restore_path != f"{guest_scope['safe_root']}/restores/{website_restore_id}":
+            raise HarnessError("Website restore path is not bound to the UpCloud run and row.")
+        if not re.fullmatch(r"bs_restore_[a-z0-9_]{8,52}", restore_database):
+            raise HarnessError("Database restore target is not a safe BackupSheep restore name.")
+        website_row = self._validate_workload_row_witness(
+            website.get("row_witness"),
+            field="workloads.website.row_witness",
+            target=restore_path,
+        )
+        database_row = self._validate_workload_row_witness(
+            database.get("row_witness"),
+            field="workloads.database.row_witness",
+            target=restore_database,
+        )
+        normalized["workloads"] = {
+            "website": {
+                "backup_row_id": self._positive_row_id(
+                    website.get("backup_row_id"), field="workloads.website.backup_row_id"
+                ),
+                "restore_row_id": website_restore_id,
+                "restore_path": restore_path,
+                "row_witness": website_row,
+                "source": self._hash_evidence(
+                    website.get("source"), field="workloads.website.source"
+                ),
+                "restored": self._hash_evidence(
+                    website.get("restored"), field="workloads.website.restored"
+                ),
+            },
+            "database": {
+                "backup_row_id": self._positive_row_id(
+                    database.get("backup_row_id"), field="workloads.database.backup_row_id"
+                ),
+                "restore_row_id": database_restore_id,
+                "restore_database": restore_database,
+                "row_witness": database_row,
+                "source": self._hash_evidence(
+                    database.get("source"), field="workloads.database.source", database=True
+                ),
+                "restored": self._hash_evidence(
+                    database.get("restored"), field="workloads.database.restored", database=True
+                ),
+            },
+        }
+        by_kind = {row["kind"]: row for row in normalized["storage"]["objects"]}
+        for kind in ("website", "database"):
+            workload = normalized["workloads"][kind]
+            if (
+                workload["backup_row_id"] != by_kind[kind]["backup_row_id"]
+                or workload["restore_row_id"] != by_kind[kind]["restore_row_id"]
+                or workload["row_witness"]["backup_row_id"]
+                != workload["backup_row_id"]
+                or workload["row_witness"]["restore_row_id"]
+                != workload["restore_row_id"]
+                or workload["row_witness"]["backup_marker"]
+                != by_kind[kind]["backup_uuid"]
+            ):
+                raise HarnessError(f"Oracle {kind} object and workload row IDs do not match.")
+        if (
+            normalized["workloads"]["website"]["row_witness"]["node_row_id"]
+            == normalized["workloads"]["database"]["row_witness"]["node_row_id"]
+        ):
+            raise HarnessError("Website and database workload node rows must be distinct.")
+        return normalized
+
+    def _load_ui_manifest(self, path):
+        _path, manifest = _read_private_json(path, variable="--ui-manifest")
+        return self._validate_ui_manifest(manifest)
+
+    def build_manifest(self, source_path, output_path):
+        source, candidate = _read_private_json(
+            source_path, variable="--manifest-source"
+        )
+        raw_output = Path(str(output_path or "")).expanduser()
+        _reject_symlink_components(raw_output, variable="--output")
+        output = _external_path(raw_output, variable="--output")
+        if source == output:
+            raise HarnessError("Manifest output must not overwrite the source evidence artifact.")
+        normalized = self._validate_ui_manifest(candidate)
+        written = _atomic_private_json(output, normalized, variable="--output")
+        return {
+            "phase": "MANIFEST_BUILT",
+            "run_id": self.config.run_id,
+            "output": str(written),
+            "source_overwritten": False,
+        }
+
+    @staticmethod
+    def _normalize_exact_tags(value, *, field):
+        if not isinstance(value, dict) or len(value) > 64:
+            raise HarnessError(f"Oracle orphan manifest {field} tags are malformed.")
+        normalized = {}
+        for key, item in value.items():
+            if (
+                not isinstance(key, str)
+                or not isinstance(item, str)
+                or key not in ORPHAN_ALLOWED_TAG_KEYS
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", key)
+                or len(item) > 255
+                or any(ord(character) < 32 or ord(character) == 127 for character in item)
+            ):
+                raise HarnessError(
+                    f"Oracle orphan manifest {field} tags are malformed."
+                )
+            normalized[key] = item
+        return normalized
+
+    def _validate_orphan_manifest(self, payload):
+        _assert_no_credential_fields(payload, path="orphan_manifest")
+        if not isinstance(payload, dict) or set(payload) != ORPHAN_MANIFEST_KEYS:
+            raise HarnessError("Oracle orphan manifest has an unsupported schema.")
+        runtime = self.config.runtime_scope
+        if (
+            payload.get("schema") != ORPHAN_RECONCILIATION_SCHEMA
+            or payload.get("run_id") != runtime.run_id
+            or payload.get("profile") != runtime.profile
+            or payload.get("tenancy_id") != runtime.tenancy_id
+            or payload.get("compartment_id") != runtime.compartment_id
+        ):
+            raise HarnessError("Oracle orphan manifest does not match protected scope.")
+        resources = payload.get("resources")
+        if not isinstance(resources, list) or not 1 <= len(resources) <= len(
+            ORPHAN_ADOPTION_KINDS
+        ):
+            raise HarnessError("Oracle orphan manifest resource inventory is malformed.")
+        normalized = []
+        seen_kinds = set()
+        seen_ids = set()
+        for index, value in enumerate(resources):
+            field = f"resources[{index}]"
+            if not isinstance(value, dict) or set(value) != ORPHAN_RESOURCE_KEYS:
+                raise HarnessError(f"Oracle orphan manifest {field} has an unsupported schema.")
+            kind = str(value.get("kind") or "")
+            if kind not in ORPHAN_ADOPTION_KINDS or kind in seen_kinds:
+                raise HarnessError("Oracle orphan manifest kinds are unsupported or duplicated.")
+            seen_kinds.add(kind)
+            provider_ocid = _require_ocid(
+                value.get("provider_ocid"),
+                label=f"orphan {kind} OCID",
+                resource_type=ORPHAN_RESOURCE_TYPES[kind],
+            )
+            if provider_ocid in seen_ids:
+                raise HarnessError("Oracle orphan manifest reuses a provider OCID.")
+            seen_ids.add(provider_ocid)
+            name = str(value.get("name") or "")
+            if (
+                not 1 <= len(name) <= 255
+                or any(ord(character) < 32 or ord(character) == 127 for character in name)
+            ):
+                raise HarnessError("Oracle orphan manifest resource name is malformed.")
+            lifecycle = str(value.get("lifecycle_state") or "")
+            ready_states = {
+                "ui_compute_backup": {"AVAILABLE"},
+                "ui_block_backup": {"AVAILABLE"},
+                "ui_boot_backup": {"AVAILABLE"},
+                "ui_compute_restore": {"RUNNING", "STOPPED"},
+                "ui_block_restore": {"AVAILABLE"},
+                "ui_boot_restore": {"AVAILABLE"},
+                "ui_compute_restore_boot_volume": {"AVAILABLE"},
+                "ui_compute_restore_vnic": {"AVAILABLE"},
+            }[kind]
+            if lifecycle not in ready_states:
+                raise HarnessError("Oracle orphan manifest lifecycle is not cleanup-safe.")
+            tags = self._normalize_exact_tags(value.get("freeform_tags"), field=field)
+            relation = value.get("source_relationship")
+            if not isinstance(relation, dict) or set(relation) != ORPHAN_RELATIONSHIP_KEYS:
+                raise HarnessError("Oracle orphan source relationship is malformed.")
+            relation_kind = str(relation.get("kind") or "")
+            if relation_kind != ORPHAN_RELATION_KINDS[kind]:
+                raise HarnessError("Oracle orphan source relationship kind is incorrect.")
+            relation_ocid = _require_ocid(
+                relation.get("ocid"), label="orphan source relationship"
+            )
+            witness = value.get("demo_row_witness")
+            if not isinstance(witness, dict) or set(witness) != ORPHAN_ROW_WITNESS_KEYS:
+                raise HarnessError("Oracle orphan demo-row witness is malformed.")
+            row_type = str(witness.get("row_type") or "")
+            expected_row_type = (
+                "backup" if kind.endswith("_backup") else "restore"
+            )
+            marker = self._backup_marker(
+                witness.get("marker"), field=f"orphan.{kind}.demo_row_witness.marker"
+            )
+            row_provider_ocid = _require_ocid(
+                witness.get("provider_ocid"), label="orphan demo-row provider OCID"
+            )
+            dependency = kind in {
+                "ui_compute_restore_boot_volume",
+                "ui_compute_restore_vnic",
+            }
+            if (
+                row_type != expected_row_type
+                or str(witness.get("status") or "") not in {"Complete", "Failed"}
+                or row_provider_ocid != (relation_ocid if dependency else provider_ocid)
+            ):
+                raise HarnessError("Oracle orphan demo-row witness is inconsistent.")
+            normalized_witness = {
+                "row_type": row_type,
+                "row_id": self._positive_row_id(
+                    witness.get("row_id"), field=f"orphan.{kind}.row_id"
+                ),
+                "status": str(witness.get("status") or ""),
+                "marker": marker,
+                "provider_ocid": row_provider_ocid,
+            }
+            if kind.endswith("_backup"):
+                provider_kind = {
+                    "ui_compute_backup": "compute_image",
+                    "ui_block_backup": "block",
+                    "ui_boot_backup": "boot",
+                }[kind]
+                required_tags = self._backup_tags(
+                    marker, relation_ocid, provider_kind
+                )
+                if any(tags.get(key) != item for key, item in required_tags.items()):
+                    raise HarnessError("Oracle orphan backup tags do not bind its row marker.")
+            elif not dependency:
+                target_type = {
+                    "ui_compute_restore": "instance",
+                    "ui_block_restore": "volume",
+                    "ui_boot_restore": "boot_volume",
+                }[kind]
+                required_tags = {
+                    RESTORE_MARKER_TAG: marker,
+                    RESTORE_SOURCE_TAG: relation_ocid,
+                    BACKUP_KIND_TAG: target_type,
+                    BACKUP_REQUEST_TAG: _retry_token(marker),
+                }
+                if any(tags.get(key) != item for key, item in required_tags.items()):
+                    raise HarnessError("Oracle orphan restore tags do not bind its row marker.")
+            else:
+                run_tag = tags.get(E2E_RUN_TAG)
+                if run_tag and (
+                    run_tag != self.config.run_id
+                    or tags.get(E2E_OWNED_TAG) != "true"
+                    or tags.get(E2E_KIND_TAG) != kind
+                ):
+                    raise HarnessError("Oracle orphan dependency carries foreign ownership tags.")
+            normalized.append(
+                {
+                    "kind": kind,
+                    "provider_ocid": provider_ocid,
+                    "name": name,
+                    "freeform_tags": tags,
+                    "lifecycle_state": lifecycle,
+                    "source_relationship": {
+                        "kind": relation_kind,
+                        "ocid": relation_ocid,
+                    },
+                    "demo_row_witness": normalized_witness,
+                }
+            )
+        return {
+            "schema": ORPHAN_RECONCILIATION_SCHEMA,
+            "run_id": runtime.run_id,
+            "profile": runtime.profile,
+            "tenancy_id": runtime.tenancy_id,
+            "compartment_id": runtime.compartment_id,
+            "resources": normalized,
+        }
+
+    def _load_orphan_manifest(self, path):
+        _path, payload = _read_private_json(
+            path, variable="--reconciliation-manifest"
+        )
+        return self._validate_orphan_manifest(payload)
+
+    def _orphan_relation_target(self, row, manifest_by_kind):
+        relation = row["source_relationship"]
+        related = manifest_by_kind.get(relation["kind"])
+        if related is not None:
+            if related["provider_ocid"] != relation["ocid"]:
+                raise HarnessError("Oracle orphan manifest source graph is inconsistent.")
+            return related
+        matches = [
+            item
+            for item in self.ledger.entries(relation["kind"])
+            if item.get("cleanup_state") in {"eligible", "failed", "manual_review"}
+        ]
+        if (
+            len(matches) != 1
+            or str(matches[0].get("resource_id") or "") != relation["ocid"]
+        ):
+            raise HarnessError("Oracle orphan source is not exactly ledgered or adopted.")
+        return matches[0]
+
+    def _orphan_provider_relationship(self, row, resource, *, attachments):
+        kind = row["kind"]
+        if kind == "ui_compute_backup":
+            return str(_tags(resource).get(BACKUP_SOURCE_TAG) or "")
+        if kind == "ui_block_backup":
+            return str(_value(resource, "volume_id") or "")
+        if kind == "ui_boot_backup":
+            return str(_value(resource, "boot_volume_id") or "")
+        if kind == "ui_compute_restore":
+            return str(_value(resource, "image_id") or _source_id(resource) or "")
+        if kind in {"ui_block_restore", "ui_boot_restore"}:
+            return _source_id(resource)
+        if kind == "ui_compute_restore_boot_volume":
+            matches = [
+                item
+                for item in attachments["boot"]
+                if str(_value(item, "boot_volume_id") or "") == row["provider_ocid"]
+                and str(_value(item, "instance_id") or "")
+                == row["source_relationship"]["ocid"]
+                and str(_value(item, "lifecycle_state") or "").upper()
+                not in {"DETACHED", "DETACHING"}
+            ]
+        elif kind == "ui_compute_restore_vnic":
+            matches = [
+                item
+                for item in attachments["vnic"]
+                if str(_value(item, "vnic_id") or "") == row["provider_ocid"]
+                and str(_value(item, "instance_id") or "")
+                == row["source_relationship"]["ocid"]
+                and str(_value(item, "lifecycle_state") or "").upper()
+                not in {"DETACHED", "DETACHING"}
+            ]
+        else:  # pragma: no cover - schema validation makes this unreachable
+            raise HarnessError("Unsupported Oracle orphan relationship kind.")
+        if len(matches) != 1:
+            raise HarnessError("Oracle orphan dependency relationship is zero or duplicated.")
+        return row["source_relationship"]["ocid"]
+
+    def _orphan_ledger_entry(self, row, resource):
+        kind = row["kind"]
+        relationship = row["source_relationship"]
+        proof = self._expected_proof(
+            name=row["name"],
+            tags=row["freeform_tags"],
+            availability_domain=(
+                self.config.availability_domain
+                if kind
+                in {
+                    "ui_compute_restore",
+                    "ui_block_restore",
+                    "ui_boot_restore",
+                    "ui_compute_restore_boot_volume",
+                }
+                else ""
+            ),
+            source_id=(
+                relationship["ocid"]
+                if kind
+                not in {
+                    "ui_compute_restore_boot_volume",
+                    "ui_compute_restore_vnic",
+                }
+                else ""
+            ),
+        )
+        proof["exact_freeform_tags"] = row["freeform_tags"]
+        proof["adoption_relationship"] = relationship
+        proof["demo_row_witness"] = row["demo_row_witness"]
+        if kind == "ui_compute_restore_vnic":
+            proof["subnet_id"] = _require_ocid(
+                _value(resource, "subnet_id"),
+                label="adopted restore VNIC subnet",
+                resource_type="subnet",
+            )
+        return {
+            "kind": kind,
+            "resource_id": row["provider_ocid"],
+            "name": row["name"],
+            "ownership": proof,
+            "source_witness": relationship["ocid"],
+        }
+
+    def _atomic_adopt_orphan_entries(self, entries):
+        if self.read_only:
+            raise HarnessError("Orphan reconciliation requires a mutable ledger harness.")
+        with self.ledger._locked():
+            payload = self.ledger._validate(self.ledger._read_unlocked())
+            candidate = json.loads(json.dumps(payload))
+            proposed_by_kind = {entry["kind"]: entry for entry in entries}
+            for entry in entries:
+                relation = (entry.get("ownership") or {}).get(
+                    "adoption_relationship"
+                ) or {}
+                related = proposed_by_kind.get(str(relation.get("kind") or ""))
+                if related is not None:
+                    if related["resource_id"] != str(relation.get("ocid") or ""):
+                        raise HarnessError(
+                            "Oracle orphan source graph changed before ledger publication."
+                        )
+                    continue
+                exact_sources = [
+                    row
+                    for row in candidate["resources"]
+                    if row.get("kind") == relation.get("kind")
+                    and str(row.get("resource_id") or "")
+                    == str(relation.get("ocid") or "")
+                    and row.get("cleanup_state")
+                    in {"eligible", "failed", "manual_review"}
+                ]
+                active_same_kind = [
+                    row
+                    for row in candidate["resources"]
+                    if row.get("kind") == relation.get("kind")
+                    and row.get("cleanup_state")
+                    in {"eligible", "failed", "manual_review"}
+                ]
+                if len(exact_sources) != 1 or len(active_same_kind) != 1:
+                    raise HarnessError(
+                        "Oracle orphan source graph changed before ledger publication."
+                    )
+            additions = []
+            existing_count = 0
+            for entry in entries:
+                same_id = [
+                    row
+                    for row in candidate["resources"]
+                    if str(row.get("resource_id") or "") == entry["resource_id"]
+                ]
+                same_kind_active = [
+                    row
+                    for row in candidate["resources"]
+                    if row.get("kind") == entry["kind"]
+                    and row.get("cleanup_state")
+                    in {"eligible", "failed", "manual_review"}
+                ]
+                exact = [
+                    row
+                    for row in same_id
+                    if row.get("kind") == entry["kind"]
+                    and all(
+                        row.get(key) == entry[key]
+                        for key in (
+                            "kind",
+                            "resource_id",
+                            "name",
+                            "ownership",
+                            "source_witness",
+                        )
+                    )
+                ]
+                if exact:
+                    if (
+                        len(exact) != 1
+                        or len(same_id) != 1
+                        or len(same_kind_active) != 1
+                    ):
+                        raise HarnessError("Oracle orphan ledger contains duplicate ownership rows.")
+                    existing_count += 1
+                    continue
+                if same_id or same_kind_active:
+                    raise HarnessError("Oracle orphan conflicts with an existing ledger witness.")
+                additions.append(entry)
+            if not additions:
+                return 0, existing_count
+            created_at = DurableResourceLedger._now()
+            for entry in additions:
+                candidate["resources"].append(
+                    {
+                        **entry,
+                        "created_at": created_at,
+                        "cleanup_state": "eligible",
+                        "cleanup_error": "",
+                    }
+                )
+            self.ledger._validate(candidate)
+            self.ledger._write_unlocked(candidate)
+            return len(additions), existing_count
+
+    def reconcile_orphans(self, manifest_path):
+        """Adopt exact old UI resources after complete inventory/readback proof."""
+
+        self._require_apply()
+        manifest = self._load_orphan_manifest(manifest_path)
+        if self.intents.pending():
+            raise HarnessError("Oracle orphan adoption is blocked by mutation intents.")
+        self._load_clients()
+        self._validate_scope()
+        manifest_by_kind = {row["kind"]: row for row in manifest["resources"]}
+        # Enumerate every supported orphan family before any ledger write. A
+        # manifest cannot turn a direct GET into ownership proof, and a partial
+        # inventory cannot establish zero/one cardinality safely.
+        inventory_family = {
+            "ui_boot_restore": "boot_volumes",
+            "ui_compute_restore_boot_volume": "boot_volumes",
+        }
+        family_cache = {}
+        inventories = {}
+        for kind in sorted(ORPHAN_ADOPTION_KINDS):
+            family = inventory_family.get(kind, kind)
+            if family not in family_cache:
+                family_cache[family] = self._graph_inventory(kind)
+            inventories[kind] = family_cache[family]
+        attachments = {
+            "boot": self._list(
+                self._clients["compute"].list_boot_volume_attachments,
+                compartment_id=self.config.compartment_id,
+                availability_domain=self.config.availability_domain,
+            ),
+            "vnic": self._list(
+                self._clients["compute"].list_vnic_attachments,
+                compartment_id=self.config.compartment_id,
+            ),
+        }
+        entries = []
+        for row in manifest["resources"]:
+            self._orphan_relation_target(row, manifest_by_kind)
+            matches = [
+                item
+                for item in inventories[row["kind"]]
+                if str(_value(item, "id") or "") == row["provider_ocid"]
+            ]
+            if len(matches) != 1:
+                raise HarnessError("Oracle orphan inventory returned zero or duplicate exact IDs.")
+            resource = matches[0]
+            if (
+                str(_value(resource, "compartment_id") or "")
+                != self.config.compartment_id
+                or str(
+                    _value(resource, "display_name")
+                    or _value(resource, "name")
+                    or ""
+                )
+                != row["name"]
+                or _tags(resource) != row["freeform_tags"]
+                or str(_value(resource, "lifecycle_state") or "").upper()
+                != row["lifecycle_state"]
+            ):
+                raise HarnessError("Oracle orphan provider readback does not match manifest.")
+            if row["kind"] in {
+                "ui_compute_restore",
+                "ui_block_restore",
+                "ui_boot_restore",
+                "ui_compute_restore_boot_volume",
+            } and str(_value(resource, "availability_domain") or "") != str(
+                self.config.availability_domain
+            ):
+                raise HarnessError("Oracle orphan availability domain changed.")
+            relationship = self._orphan_provider_relationship(
+                row, resource, attachments=attachments
+            )
+            if relationship != row["source_relationship"]["ocid"]:
+                raise HarnessError("Oracle orphan provider source relationship changed.")
+            if row["kind"] in {
+                "ui_compute_restore_boot_volume",
+                "ui_compute_restore_vnic",
+            }:
+                related = self._orphan_relation_target(row, manifest_by_kind)
+                if "demo_row_witness" in related:
+                    related_marker = str(
+                        (related.get("demo_row_witness") or {}).get("marker") or ""
+                    )
+                else:
+                    related_marker = str(
+                        ((related.get("ownership") or {}).get("tags") or {}).get(
+                            RESTORE_MARKER_TAG
+                        )
+                        or ""
+                    )
+                if related_marker != row["demo_row_witness"]["marker"]:
+                    raise HarnessError("Oracle orphan dependency demo row marker changed.")
+            entries.append(self._orphan_ledger_entry(row, resource))
+        added, existing = self._atomic_adopt_orphan_entries(entries)
+        return {
+            "phase": "ORPHANS_RECONCILED",
+            "run_id": self.config.run_id,
+            "provider_mutations": False,
+            "ledger_rows_added": added,
+            "ledger_rows_already_exact": existing,
+            "resource_ids": sorted(entry["resource_id"] for entry in entries),
+        }
 
     @staticmethod
     def _backup_tags(marker, source_id, kind):
@@ -2589,7 +4392,7 @@ class OracleLiveUIHarness:
             BACKUP_REQUEST_TAG: request_token,
         }
 
-    def _verify_ui_backup(self, kind, section, source_row):
+    def _verify_ui_backup(self, kind, section, source_row, *, record=True):
         evidence = section["backup"]
         marker = str(evidence.get("marker") or "")
         if not marker:
@@ -2629,16 +4432,23 @@ class OracleLiveUIHarness:
             raise HarnessError(f"Oracle UI {kind} backup is not AVAILABLE.")
         tags = self._backup_tags(marker, source_id, provider_kind)
         proof = self._expected_proof(name=marker, tags=tags, source_id=source_id)
-        self._record(
-            ledger_kind,
+        self._assert_exact(
             resource,
-            proof,
-            source_witness=source_id,
+            resource_id=backup_id,
+            proof=proof,
             source_id=actual_source,
         )
+        if record:
+            self._record(
+                ledger_kind,
+                resource,
+                proof,
+                source_witness=source_id,
+                source_id=actual_source,
+            )
         return resource
 
-    def _verify_ui_restore(self, kind, section, source_row, backup):
+    def _verify_ui_restore(self, kind, section, source_row, backup, *, record=True):
         evidence = section["restore"]
         source_id = source_row["resource_id"]
         backup_id = str(_value(backup, "id") or "")
@@ -2684,13 +4494,20 @@ class OracleLiveUIHarness:
             availability_domain=self.config.availability_domain,
             source_id=backup_id,
         )
-        self._record(
-            ledger_kind,
+        self._assert_exact(
             resource,
-            proof,
-            source_witness=backup_id,
+            resource_id=restore_id,
+            proof=proof,
             source_id=_source_id(resource),
         )
+        if record:
+            self._record(
+                ledger_kind,
+                resource,
+                proof,
+                source_witness=backup_id,
+                source_id=_source_id(resource),
+            )
         return resource
 
     def _record_instance_vnic(self, instance, *, ledger_kind, name, tags):
@@ -3091,7 +4908,7 @@ class OracleLiveUIHarness:
         )
         return result
 
-    def _verify_storage_objects(self, storage_manifest):
+    def _verify_storage_objects(self, storage_manifest, *, record=True):
         client, secret = self._storage_s3_client()
         objects = storage_manifest.get("objects") or []
         kinds = {str(item.get("kind") or "") for item in objects if isinstance(item, dict)}
@@ -3168,7 +4985,7 @@ class OracleLiveUIHarness:
                 or digest.hexdigest() != checksum
             ):
                 raise HarnessError("Oracle storage object failed hash/version/size verification.")
-            record = {
+            witness = {
                 "kind": str(item.get("kind") or ""),
                 "key": key,
                 "version_id": version_id,
@@ -3176,18 +4993,334 @@ class OracleLiveUIHarness:
                 "sha256": checksum,
                 "byte_count": byte_count,
             }
+            if record:
+                self.evidence.put(
+                    f"storage-{hashlib.sha256(f'{key}:{version_id}'.encode()).hexdigest()[:24]}",
+                    {
+                        "operation": "evidence",
+                        "kind": "storage_object",
+                        "name": key,
+                        "marker": self.config.run_id,
+                        **witness,
+                    },
+                )
+            verified.append(witness)
+        return {"objects_verified": len(verified), "objects": verified}
+
+    def _validate_workload_guest_durable_scope(self, scope):
+        _path, payload = _read_private_json(
+            scope["durable_ledger_path"],
+            variable="workload durable ledger",
+            exact_keys={
+                "schema",
+                "provider",
+                "run_id",
+                "scope",
+                "created_at",
+                "resources",
+            },
+        )
+        if (
+            payload.get("schema") != 1
+            or payload.get("provider") != "upcloud"
+            or payload.get("run_id") != scope["run_id"]
+            or payload.get("scope") != scope["durable_ledger_scope"]
+            or not isinstance(payload.get("resources"), list)
+        ):
+            raise HarnessError("Workload durable ledger does not match the guest scope.")
+        matches = []
+        for row in payload["resources"]:
+            if not isinstance(row, dict):
+                raise HarnessError("Workload durable ledger contains a malformed row.")
+            ownership = row.get("ownership") or {}
+            if (
+                row.get("kind") == "compute_workload_fixture"
+                and str(row.get("resource_id") or "") == scope["source_server_id"]
+                and row.get("cleanup_state") in {"eligible", "failed"}
+                and isinstance(ownership, dict)
+                and ownership.get("account") == scope["durable_ledger_scope"]
+                and ownership.get("run_id") == scope["run_id"]
+                and ownership.get("server_id") == scope["source_server_id"]
+                and ownership.get("website_root") == scope["website_source_root"]
+                and ownership.get("database_name") == scope["source_database"]
+                and str(row.get("name") or "") == scope["safe_root"]
+                and str(row.get("source_witness") or "") == scope["source_server_id"]
+            ):
+                matches.append(row)
+        if len(matches) != 1:
+            raise HarnessError(
+                "Workload guest scope requires one exact durable UpCloud fixture row."
+            )
+        return matches[0]
+
+    def _validate_workload_guest_files(self, scope):
+        key_path, key_bytes, key_digest = _read_private_bytes(
+            scope["ssh_private_key_path"], variable="workload SSH private key"
+        )
+        known_hosts_path, _known_hosts, known_hosts_digest = _read_private_bytes(
+            scope["known_hosts_path"], variable="workload known-hosts file"
+        )
+        if (
+            key_digest != scope["ssh_private_key_sha256"]
+            or known_hosts_digest != scope["known_hosts_sha256"]
+        ):
+            raise HarnessError("Workload SSH protected-file binding changed.")
+        return key_path, known_hosts_path, key_bytes
+
+    @staticmethod
+    def _ssh_key_fingerprint(key):
+        try:
+            raw = key.asbytes()
+        except Exception as error:
+            raise HarnessError("Pinned workload SSH host key is unreadable.") from error
+        if not isinstance(raw, bytes) or not raw:
+            raise HarnessError("Pinned workload SSH host key is malformed.")
+        return "SHA256:" + base64.b64encode(hashlib.sha256(raw).digest()).decode(
+            "ascii"
+        ).rstrip("=")
+
+    def _readonly_workload_ssh_client(self, scope):
+        """Connect only through preexisting key material and a pinned host key."""
+
+        self._validate_workload_guest_durable_scope(scope)
+        _key_path, known_hosts_path, key_bytes = self._validate_workload_guest_files(
+            scope
+        )
+        try:
+            import paramiko
+        except Exception as error:
+            raise HarnessError("Paramiko is required for workload verification.") from error
+        client = paramiko.SSHClient()
+        try:
+            client.load_host_keys(str(known_hosts_path))
+            host_keys = client.get_host_keys().lookup(scope["ssh_host"])
+            if not isinstance(host_keys, Mapping):
+                raise HarnessError("Workload SSH host is absent from the pinned file.")
+            key = host_keys.get(scope["known_host_key_type"])
+            if (
+                key is None
+                or self._ssh_key_fingerprint(key)
+                != scope["known_host_fingerprint"]
+            ):
+                raise HarnessError("Workload SSH host fingerprint does not match.")
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+            try:
+                private_key_text = key_bytes.decode("ascii", "strict")
+            except UnicodeDecodeError as error:
+                raise HarnessError("Workload SSH private key is not canonical text.") from error
+            private_key = paramiko.RSAKey.from_private_key(
+                io.StringIO(private_key_text)
+            )
+            client.connect(
+                hostname=scope["ssh_host"],
+                port=scope["ssh_port"],
+                username=scope["ssh_user"],
+                pkey=private_key,
+                allow_agent=False,
+                look_for_keys=False,
+                timeout=REQUEST_TIMEOUT[0],
+                banner_timeout=REQUEST_TIMEOUT[1],
+                auth_timeout=REQUEST_TIMEOUT[1],
+            )
+            remote = client.get_transport().get_remote_server_key()
+            if (
+                remote.get_name() != scope["known_host_key_type"]
+                or self._ssh_key_fingerprint(remote)
+                != scope["known_host_fingerprint"]
+            ):
+                raise HarnessError("Workload SSH server changed after connection.")
+            # Re-read both files after connection. This proves the read-only
+            # path neither chmods nor performs TOFU/known-host publication.
+            self._validate_workload_guest_files(scope)
+            return client
+        except HarnessError:
+            client.close()
+            raise
+        except Exception as error:
+            client.close()
+            raise HarnessError("Pinned workload SSH connection failed.") from error
+
+    def _website_workload_evidence(self, client, path, *, safe_root):
+        path = str(path or "")
+        if (
+            not path.startswith(f"{safe_root}/")
+            or ".." in Path(path).parts
+        ):
+            raise HarnessError("Website evidence path escaped the exact guest root.")
+        program = (
+            "import hashlib,json,os,stat,sys;root=sys.argv[1];rows=[];modes=[];total=0;"
+            "\nif not os.path.isdir(root) or os.path.islink(root): raise SystemExit(3)"
+            "\nroot_stat=os.lstat(root);modes.append(['D','.',stat.S_IMODE(root_stat.st_mode)])"
+            "\nfor base,dirs,files in os.walk(root,followlinks=False):"
+            "\n dirs.sort();files.sort()"
+            "\n for name in dirs:"
+            "\n  p=os.path.join(base,name);s=os.lstat(p)"
+            "\n  if not stat.S_ISDIR(s.st_mode): raise SystemExit(4)"
+            "\n  rel=os.path.relpath(p,root);rows.append(['D',rel]);modes.append(['D',rel,stat.S_IMODE(s.st_mode)])"
+            "\n for name in files:"
+            "\n  p=os.path.join(base,name);s=os.lstat(p)"
+            "\n  if not stat.S_ISREG(s.st_mode): raise SystemExit(4)"
+            "\n  rel=os.path.relpath(p,root);h=hashlib.sha256()"
+            "\n  with open(p,'rb') as f:"
+            "\n   while True:"
+            "\n    b=f.read(1048576)"
+            "\n    if not b: break"
+            "\n    h.update(b)"
+            "\n  rows.append(['F',rel,s.st_size,h.hexdigest()]);modes.append(['F',rel,stat.S_IMODE(s.st_mode)]);total+=s.st_size"
+            "\ncanon=json.dumps(rows,separators=(',',':'),ensure_ascii=True).encode();"
+            "mode=json.dumps(modes,separators=(',',':'),ensure_ascii=True).encode();"
+            "file_count=sum(1 for row in rows if row[0]=='F');"
+            "print(json.dumps({'tree_sha256':hashlib.sha256(canon).hexdigest(),'file_count':file_count,'byte_count':total,'mode_sha256':hashlib.sha256(mode).hexdigest()},sort_keys=True))"
+        )
+        output = self._ssh_run(
+            client,
+            f"python3 -c {shlex.quote(program)} {shlex.quote(path)}",
+        )
+        try:
+            evidence = json.loads(output)
+        except (TypeError, ValueError) as error:
+            raise HarnessError("Oracle website evidence output is malformed.") from error
+        return self._hash_evidence(evidence, field="website readback")
+
+    def _database_workload_evidence(self, client, database, *, allowed_databases):
+        database = str(database or "")
+        if (
+            not re.fullmatch(r"[a-z][a-z0-9_]{2,62}", database)
+            or database not in {str(item) for item in allowed_databases}
+        ):
+            raise HarnessError("Database evidence target escaped the exact workload manifest.")
+        db = shlex.quote(database)
+        psql = (
+            "sudo -n -u postgres psql --no-psqlrc -At -v ON_ERROR_STOP=1 "
+            f"-d {db}"
+        )
+        schema_query = (
+            "SELECT table_schema || '|' || table_name || '|' || column_name || '|' || "
+            "ordinal_position::text || '|' || data_type || '|' || udt_schema || '.' || "
+            "udt_name || '|' || is_nullable || '|' || coalesce(column_default,'') "
+            "FROM information_schema.columns WHERE table_schema NOT IN "
+            "('pg_catalog','information_schema') ORDER BY table_schema,table_name,ordinal_position;"
+        )
+        data_query = (
+            "SELECT format('SELECT %L || ''|'' || to_jsonb(t)::text FROM %I.%I AS t "
+            "ORDER BY to_jsonb(t)::text COLLATE \"C\";', schemaname || '.' || tablename, "
+            "schemaname, tablename) FROM pg_catalog.pg_tables WHERE schemaname NOT IN "
+            "('pg_catalog','information_schema') ORDER BY schemaname,tablename;"
+        )
+        schema_pipeline = (
+            f"LC_ALL=C {psql} -c {shlex.quote(schema_query)} "
+            "| sha256sum | awk '{print $1}'"
+        )
+        data_pipeline = (
+            f"LC_ALL=C {psql} -c {shlex.quote(data_query)} | {psql} "
+            "| sha256sum | awk '{print $1}'"
+        )
+        schema_command = "bash -o pipefail -c " + shlex.quote(schema_pipeline)
+        data_command = "bash -o pipefail -c " + shlex.quote(data_pipeline)
+        table_command = (
+            f"{psql} -c "
+            + shlex.quote(
+                "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname NOT IN "
+                "('pg_catalog','information_schema');"
+            )
+        )
+        row_query = (
+            "SELECT format('SELECT count(*) FROM %I.%I;',schemaname,tablename) "
+            "FROM pg_catalog.pg_tables WHERE schemaname NOT IN "
+            "('pg_catalog','information_schema') ORDER BY schemaname,tablename;"
+        )
+        row_pipeline = (
+            f"{psql} -c {shlex.quote(row_query)} | {psql} "
+            "| awk '{s+=$1} END {print s+0}'"
+        )
+        row_command = "bash -o pipefail -c " + shlex.quote(row_pipeline)
+        values = {
+            "schema_sha256": self._ssh_run(client, schema_command).strip(),
+            "data_sha256": self._ssh_run(client, data_command).strip(),
+            "table_count": self._ssh_run(client, table_command).strip(),
+            "row_count": self._ssh_run(client, row_command).strip(),
+        }
+        return self._hash_evidence(values, field="database readback", database=True)
+
+    def _verify_workloads_manifest(self, manifest, *, record=False):
+        """Perform guest readbacks for an already preflighted exact manifest."""
+
+        scope = manifest["workload_guest_scope"]
+        website = manifest["workloads"]["website"]
+        database = manifest["workloads"]["database"]
+        allowed_databases = {
+            scope["source_database"],
+            database["restore_database"],
+        }
+        client = self._readonly_workload_ssh_client(scope)
+        try:
+            actual = {
+                "website": {
+                    "source": self._website_workload_evidence(
+                        client,
+                        scope["website_source_root"],
+                        safe_root=scope["safe_root"],
+                    ),
+                    "restored": self._website_workload_evidence(
+                        client,
+                        website["restore_path"],
+                        safe_root=scope["safe_root"],
+                    ),
+                },
+                "database": {
+                    "source": self._database_workload_evidence(
+                        client,
+                        scope["source_database"],
+                        allowed_databases=allowed_databases,
+                    ),
+                    "restored": self._database_workload_evidence(
+                        client,
+                        database["restore_database"],
+                        allowed_databases=allowed_databases,
+                    ),
+                },
+            }
+        finally:
+            client.close()
+        for kind in ("website", "database"):
+            if (
+                actual[kind]["source"] != manifest["workloads"][kind]["source"]
+                or actual[kind]["restored"] != manifest["workloads"][kind]["restored"]
+                or actual[kind]["source"] != actual[kind]["restored"]
+            ):
+                raise HarnessError(f"Oracle {kind} UI restore failed application verification.")
+        result = {
+            "website": actual["website"]["restored"],
+            "database": actual["database"]["restored"],
+            "all_evidence_matches": True,
+        }
+        if record:
             self.evidence.put(
-                f"storage-{hashlib.sha256(f'{key}:{version_id}'.encode()).hexdigest()[:24]}",
+                "workload_restore_verification",
                 {
                     "operation": "evidence",
-                    "kind": "storage_object",
-                    "name": key,
+                    "kind": "workload_restore_verification",
+                    "name": self.config.run_id,
                     "marker": self.config.run_id,
-                    **record,
+                    **result,
                 },
             )
-            verified.append(record)
-        return {"objects_verified": len(verified), "objects": verified}
+        return result
+
+    def verify_workloads(self, manifest_path, *, record=False):
+        """Verify workloads only after complete local/storage/scope preflight."""
+
+        if record:
+            self._require_apply()
+        local = self._local_verification_preflight(manifest_path)
+        return self._verify_workloads_manifest(local["manifest"], record=record)
+
+    def verify_workloads_read_only(self, manifest_path):
+        """Run workload reads only after every local/storage preflight passes."""
+
+        if not self.read_only:
+            raise HarnessError("Read-only workload verification requires a read-only harness.")
+        return self.verify_workloads(manifest_path, record=False)
 
     def provision(self):
         """Create only run-owned sources and destination fixtures under APPLY."""
@@ -3232,15 +5365,9 @@ class OracleLiveUIHarness:
             "object_storage": storage,
         }
 
-    def verify(self, manifest_path):
-        """Verify UI outputs, including exact resource identity and payload bytes."""
+    def _local_verification_preflight(self, manifest_path):
+        """Validate every local artifact before provider or guest I/O."""
 
-        # Block attach and boot verifier launch are provider mutations.  They are
-        # never hidden inside a read-only verification invocation.
-        self._require_apply()
-        self._load_clients()
-        self._validate_scope()
-        subnet_id, _image_id, shape = self._validate_instance_inputs()
         manifest = self._load_ui_manifest(manifest_path)
         source_rows = {
             "compute": self._active_ledger_entry("source_instance"),
@@ -3249,6 +5376,50 @@ class OracleLiveUIHarness:
         }
         if any(row is None for row in source_rows.values()):
             raise HarnessError("All Oracle source OCIDs must exist in the durable ledger.")
+        for kind, row in source_rows.items():
+            if manifest[kind]["source_ocid"] != row["resource_id"]:
+                raise HarnessError(f"Oracle {kind} manifest source is not ledger-owned.")
+        payload = self.evidence.get("payload")
+        try:
+            payload_bytes = int(payload.get("byte_count") or 0) if isinstance(payload, dict) else 0
+        except (TypeError, ValueError):
+            payload_bytes = 0
+        if (
+            not isinstance(payload, dict)
+            or not payload.get("filesystem_flushed")
+            or not re.fullmatch(r"[a-f0-9]{64}", str(payload.get("sha256") or ""))
+            or payload_bytes <= 0
+        ):
+            raise HarnessError("Durable source payload evidence is missing or malformed.")
+        storage_scope = self._storage_scope_for_s3()
+        secret = self._read_storage_secret(
+            expected_scope=storage_scope, require_evidence=False
+        )
+        if secret is None:
+            raise HarnessError("Oracle Object Storage credential file is missing.")
+        self._validate_workload_guest_durable_scope(
+            manifest["workload_guest_scope"]
+        )
+        self._validate_workload_guest_files(manifest["workload_guest_scope"])
+        if self.intents.pending():
+            raise HarnessError("Oracle verification is blocked by unresolved mutation intents.")
+        return {
+            "manifest": manifest,
+            "source_rows": source_rows,
+            "storage_scope": storage_scope,
+            "ui_ledger_digest": _file_digest(
+                self.config.ledger_path, variable="Oracle UI ledger"
+            ),
+        }
+
+    def _provider_verification_preflight(self, local):
+        """Perform readbacks only; this method cannot write durable state."""
+
+        self._load_clients()
+        self._validate_scope()
+        subnet_id, _image_id, shape = self._validate_instance_inputs()
+        manifest = local["manifest"]
+        source_rows = local["source_rows"]
         source_instance = self._source_from_ledger(
             "source_instance", self._clients["compute"].get_instance, "instance_id"
         )
@@ -3256,7 +5427,9 @@ class OracleLiveUIHarness:
             "source_vnic", self._clients["network"].get_vnic, "vnic_id"
         )
         backups = {
-            kind: self._verify_ui_backup(kind, manifest[kind], source_rows[kind])
+            kind: self._verify_ui_backup(
+                kind, manifest[kind], source_rows[kind], record=False
+            )
             for kind in ("compute", "block", "boot")
         }
         restores = {
@@ -3265,6 +5438,75 @@ class OracleLiveUIHarness:
                 manifest[kind],
                 source_rows[kind],
                 backups[kind],
+                record=False,
+            )
+            for kind in ("compute", "block", "boot")
+        }
+        storage = self._verify_storage_objects(manifest["storage"], record=False)
+        return {
+            **local,
+            "subnet_id": subnet_id,
+            "shape": shape,
+            "source_instance": source_instance,
+            "source_vnic": source_vnic,
+            "backups": backups,
+            "restores": restores,
+            "storage": storage,
+        }
+
+    def report(self, manifest_path):
+        """Read-only ownership/object/workload report with no durable writes."""
+
+        if not self.read_only:
+            raise HarnessError("Read-only report requires a read-only harness instance.")
+        local = self._local_verification_preflight(manifest_path)
+        checked = self._provider_verification_preflight(local)
+        workloads = self._verify_workloads_manifest(
+            checked["manifest"], record=False
+        )
+        return {
+            "phase": "READ_ONLY_REPORT",
+            "run_id": self.config.run_id,
+            "provider_mutations": False,
+            "guest_mutations": False,
+            "local_writes": False,
+            "backup_ocids": {
+                kind: str(_value(resource, "id") or "")
+                for kind, resource in checked["backups"].items()
+            },
+            "restore_ocids": {
+                kind: str(_value(resource, "id") or "")
+                for kind, resource in checked["restores"].items()
+            },
+            "storage_evidence": checked["storage"],
+            "workload_evidence": workloads,
+            "requires_verify_apply": [
+                "compute restore boot-filesystem bytes",
+                "restored block-volume read-only attachment bytes",
+                "restored boot-volume verifier bytes",
+            ],
+        }
+
+    def verify_apply(self, manifest_path):
+        """Apply-gated byte verification after complete read-only preflight."""
+
+        self._require_apply()
+        local = self._local_verification_preflight(manifest_path)
+        checked = self._provider_verification_preflight(local)
+        # Workload reads occur only after every local/storage/provider preflight
+        # has passed. They are read-only, but still guest actions.
+        workload_readback = self._verify_workloads_manifest(
+            checked["manifest"], record=False
+        )
+        manifest = checked["manifest"]
+        source_rows = checked["source_rows"]
+        backups = {
+            kind: self._verify_ui_backup(kind, manifest[kind], source_rows[kind])
+            for kind in ("compute", "block", "boot")
+        }
+        restores = {
+            kind: self._verify_ui_restore(
+                kind, manifest[kind], source_rows[kind], backups[kind]
             )
             for kind in ("compute", "block", "boot")
         }
@@ -3276,19 +5518,30 @@ class OracleLiveUIHarness:
             target_type="instance",
         )
         data = self._verify_restored_data(
-            source_instance=source_instance,
-            source_vnic=source_vnic,
+            source_instance=checked["source_instance"],
+            source_vnic=checked["source_vnic"],
             compute_restore=restores["compute"],
             block_restore=restores["block"],
             boot_restore=restores["boot"],
             compute_restore_tags=compute_tags,
             compute_restore_name=str(compute_restore_evidence["name"]),
-            subnet_id=subnet_id,
-            shape=shape,
+            subnet_id=checked["subnet_id"],
+            shape=checked["shape"],
         )
         storage = self._verify_storage_objects(manifest["storage"])
+        self.evidence.put(
+            "workload_restore_verification",
+            {
+                "operation": "evidence",
+                "kind": "workload_restore_verification",
+                "name": self.config.run_id,
+                "marker": self.config.run_id,
+                **workload_readback,
+            },
+        )
+        workloads = workload_readback
         return {
-            "phase": "VERIFIED",
+            "phase": "VERIFIED_APPLY",
             "run_id": self.config.run_id,
             "backup_ocids": {
                 kind: str(_value(resource, "id") or "")
@@ -3300,6 +5553,7 @@ class OracleLiveUIHarness:
             },
             "data_evidence": data,
             "storage_evidence": storage,
+            "workload_evidence": workloads,
             "metadata_only": False,
         }
 
@@ -4020,75 +6274,16 @@ class OracleLiveUIHarness:
         )
 
     def _cleanup_storage_kind(self, kind, *, tenancy_id, namespace):
+        if kind in USER_RETAINED_STORAGE_KINDS:
+            raise HarnessError(
+                "Oracle cleanup preserves customer credentials and their IAM dependencies."
+            )
         row = self._active_ledger_entry(kind)
         if row is None:
             return "NOT_LEDGERED"
         if kind == "object_bucket":
             return self._cleanup_bucket(row, namespace=namespace)
-        operation = {
-            "customer_secret_key": "delete_customer_secret_key",
-            "iam_policy": "delete_policy",
-            "iam_membership": "remove_user_from_group",
-            "iam_group": "delete_group",
-            "iam_user": "delete_user",
-        }.get(kind)
-        if not operation:
-            raise HarnessError("Unsupported Oracle IAM cleanup kind.")
-        identity = self._clients["identity"]
-        if kind == "customer_secret_key":
-            user_id = (row["ownership"].get("relationships") or {})["user_id"]
-            operation_kwargs = {
-                "user_id": user_id,
-                "customer_secret_key_id": row["resource_id"],
-            }
-            method = identity.delete_customer_secret_key
-        elif kind == "iam_policy":
-            operation_kwargs = {"policy_id": row["resource_id"]}
-            method = identity.delete_policy
-        elif kind == "iam_membership":
-            operation_kwargs = {"user_group_membership_id": row["resource_id"]}
-            method = identity.remove_user_from_group
-        elif kind == "iam_group":
-            operation_kwargs = {"group_id": row["resource_id"]}
-            method = identity.delete_group
-        else:
-            operation_kwargs = {"user_id": row["resource_id"]}
-            method = identity.delete_user
-        probe = lambda: self._exact_storage_resource(
-            kind, row, tenancy_id=tenancy_id, namespace=namespace
-        )
-        key = self._cleanup_intent_key(kind, row["resource_id"], operation)
-        if self.intents.get(key):
-            return self._reconcile_cleanup_intent(
-                key, row, probe=probe, operation=operation
-            )
-        resource = self._exact_storage_resource(
-            kind,
-            row,
-            tenancy_id=tenancy_id,
-            namespace=namespace,
-        )
-        if resource is None:
-            self.ledger.mark_cleanup(kind, row["resource_id"], state="absent")
-            return "ABSENT"
-        try:
-            return self._run_cleanup_mutation(
-                row,
-                operation=operation,
-                method=method,
-                operation_kwargs=operation_kwargs,
-                probe=probe,
-            )
-        except Exception as error:
-            current = self.ledger.get(kind, row["resource_id"])
-            if not current or current.get("cleanup_state") != "manual_review":
-                self.ledger.mark_cleanup(
-                    kind,
-                    row["resource_id"],
-                    state="failed",
-                    error=_provider_error_code(error),
-                )
-            raise
+        raise HarnessError("Unsupported Oracle storage cleanup kind.")
 
     def _assert_cleanup_graph_complete(self):
         requirements = {
@@ -4106,13 +6301,290 @@ class OracleLiveUIHarness:
                     f"Oracle cleanup is blocked because {parent} has an incomplete dependency ledger."
                 )
 
-    def cleanup(self):
-        """Delete only exact ledger-owned resources under the separate gate."""
+    def _validate_preserved_storage_credentials_local(self):
+        """Bind the retained access key to its exact local IAM dependency graph."""
 
-        self._require_cleanup()
+        rows = {}
+        for kind in USER_RETAINED_STORAGE_KINDS:
+            matches = self.ledger.entries(kind)
+            if len(matches) > 1:
+                raise HarnessError("Oracle credential ledger contains duplicate dependency rows.")
+            rows[kind] = matches[0] if matches else None
+        present = {kind for kind, row in rows.items() if row is not None}
+        if not present:
+            if self._secret_path().exists():
+                raise HarnessError(
+                    "Oracle cleanup found an unledgered credential file and stopped."
+                )
+            return {"retained": False, "resource_ids": []}
+        if present != set(USER_RETAINED_STORAGE_KINDS):
+            raise HarnessError(
+                "Oracle credential preservation requires the complete key/user/group/policy/membership ledger graph."
+            )
+        if any(
+            str(row.get("cleanup_state") or "")
+            not in {"eligible", "failed", "manual_review"}
+            for row in rows.values()
+        ):
+            raise HarnessError(
+                "Oracle credential preservation cannot prove a terminal credential row is still user-retained."
+            )
+        secret = self._read_storage_secret(require_evidence=False)
+        if secret is None:
+            raise HarnessError("Oracle cleanup will not revoke a key whose secret file is missing.")
+        bucket_rows = self.ledger.entries("object_bucket")
+        if len(bucket_rows) != 1 or secret["bucket"] != str(
+            bucket_rows[0].get("name") or ""
+        ):
+            raise HarnessError("Oracle retained credential bucket witness changed.")
+        user = rows["iam_user"]
+        group = rows["iam_group"]
+        membership = rows["iam_membership"]
+        customer = rows["customer_secret_key"]
+        membership_relationships = (membership.get("ownership") or {}).get(
+            "relationships"
+        ) or {}
+        customer_relationships = (customer.get("ownership") or {}).get(
+            "relationships"
+        ) or {}
+        if (
+            secret["access_key_id"] != customer["resource_id"]
+            or secret["user_ocid"] != user["resource_id"]
+            or customer_relationships.get("user_id") != user["resource_id"]
+            or membership_relationships.get("user_id") != user["resource_id"]
+            or membership_relationships.get("group_id") != group["resource_id"]
+        ):
+            raise HarnessError("Oracle retained credential dependency graph changed.")
+        return {
+            "retained": True,
+            "resource_ids": sorted(
+                str(rows[kind]["resource_id"])
+                for kind in USER_RETAINED_STORAGE_KINDS
+            ),
+            "secret_path": str(self._secret_path()),
+        }
+
+    def _validate_preserved_storage_credentials_provider(
+        self, credential_scope, *, tenancy_id, namespace
+    ):
+        """Prove every retained IAM/key dependency exists before cleanup mutates."""
+
+        if not credential_scope["retained"]:
+            return {}
+        verified = {}
+        for kind in sorted(USER_RETAINED_STORAGE_KINDS):
+            row = self._active_ledger_entry(kind)
+            if row is None:
+                raise HarnessError(
+                    "Oracle retained credential graph changed before cleanup."
+                )
+            resource = self._exact_storage_resource(
+                kind, row, tenancy_id=tenancy_id, namespace=namespace
+            )
+            if resource is None:
+                raise HarnessError(
+                    "Oracle retained credential dependency is absent; cleanup stopped before mutation."
+                )
+            verified[kind] = resource
+        return verified
+
+    def _retain_storage_kind(self, kind, *, tenancy_id, namespace):
+        if kind not in USER_RETAINED_STORAGE_KINDS:
+            raise HarnessError("Unsupported Oracle retained credential kind.")
+        row = self._active_ledger_entry(kind)
+        if row is None:
+            return "NOT_LEDGERED"
+        resource = self._exact_storage_resource(
+            kind, row, tenancy_id=tenancy_id, namespace=namespace
+        )
+        if resource is None:
+            raise HarnessError(
+                "Oracle retained credential dependency disappeared; cleanup stopped without revocation."
+            )
+        return "USER_RETAINED"
+
+    def cleanup_plan(self):
+        """Read-only exact-ID cleanup inventory; never alters ledger state."""
+
+        if not self.read_only:
+            raise HarnessError("Cleanup plan requires a read-only harness instance.")
         self._load_clients()
         self._validate_scope()
         tenancy_id, _region, namespace = self._storage_context()
+        credential_scope = self._validate_preserved_storage_credentials_local()
+        unknown = sorted(
+            {
+                str(row.get("kind") or "")
+                for row in self.ledger.entries()
+                if str(row.get("kind") or "") not in ALL_KINDS
+            }
+        )
+        if unknown:
+            raise HarnessError("Oracle ledger contains unsupported resource kinds.")
+        self._assert_cleanup_graph_complete()
+        blockers = []
+        resources = []
+        for row in self.ledger.entries():
+            kind = str(row.get("kind") or "")
+            if row.get("cleanup_state") in {"deleted", "absent"}:
+                resources.append(
+                    {"kind": kind, "resource_id": row["resource_id"], "state": row["cleanup_state"]}
+                )
+                continue
+            try:
+                resource = (
+                    self._exact_storage_resource(
+                        kind, row, tenancy_id=tenancy_id, namespace=namespace
+                    )
+                    if kind in STORAGE_KINDS
+                    else self._exact_graph_resource(kind, row)
+                )
+            except HarnessError:
+                blockers.append({"kind": kind, "resource_id": row.get("resource_id"), "reason": "OWNERSHIP_OR_READBACK_FAILED"})
+                continue
+            resources.append(
+                {
+                    "kind": kind,
+                    "resource_id": row["resource_id"],
+                    "state": (
+                        "USER_RETAINED"
+                        if kind in USER_RETAINED_STORAGE_KINDS
+                        and resource is not None
+                        else "PRESENT" if resource is not None else "ABSENT"
+                    ),
+                }
+            )
+        pending = sorted(self.intents.pending())
+        if pending:
+            blockers.append({"reason": "UNRESOLVED_MUTATION_INTENTS", "keys": pending})
+        return {
+            "phase": "CLEANUP_PLAN",
+            "run_id": self.config.run_id,
+            "provider_mutations": False,
+            "local_writes": False,
+            "resources": resources,
+            "credentials_preserved": credential_scope["retained"],
+            "blockers": blockers,
+            "cleanup_allowed": not blockers,
+        }
+
+    def _cleanup_receipt_payload(self):
+        unknown = sorted(
+            {
+                str(row.get("kind") or "")
+                for row in self.ledger.entries()
+                if str(row.get("kind") or "") not in ALL_KINDS
+            }
+        )
+        if unknown:
+            raise HarnessError("Oracle cleanup receipt contains unsupported resource kinds.")
+        terminal = []
+        for row in self.ledger.entries():
+            state = str(row.get("cleanup_state") or "")
+            if str(row.get("kind") or "") in USER_RETAINED_STORAGE_KINDS:
+                if state not in {"eligible", "failed", "manual_review"}:
+                    raise HarnessError(
+                        "Oracle cleanup receipt cannot mark a terminal credential row as user-retained."
+                    )
+                state = "user_retained"
+            elif state not in {"deleted", "absent"}:
+                raise HarnessError("Oracle cleanup receipt requires every UI ledger row terminal.")
+            terminal.append(
+                {
+                    "kind": str(row.get("kind") or ""),
+                    "resource_id": str(row.get("resource_id") or ""),
+                    "state": state,
+                }
+            )
+        terminal.sort(key=lambda row: (row["kind"], row["resource_id"]))
+        return {
+            "schema": CLEANUP_RECEIPT_SCHEMA,
+            "run_id": self.config.run_id,
+            "tenancy_id": self.config.runtime_scope.tenancy_id,
+            "compartment_id": self.config.compartment_id,
+            "runtime_scope_digest": self.config.runtime_scope.digest,
+            "ui_ledger_path": str(self.config.ledger_path),
+            "ui_ledger_digest": _file_digest(
+                self.config.ledger_path, variable="Oracle UI ledger"
+            ),
+            "terminal_resources": terminal,
+        }
+
+    def _validate_existing_cleanup_receipt(self, receipt_path):
+        _path, existing = _read_private_json(
+            receipt_path,
+            variable="ORACLE_E2E_UI_CLEANUP_RECEIPT",
+            exact_keys={
+                "schema",
+                "run_id",
+                "tenancy_id",
+                "compartment_id",
+                "runtime_scope_digest",
+                "ui_ledger_path",
+                "ui_ledger_digest",
+                "terminal_resources",
+            },
+        )
+        expected = self._cleanup_receipt_payload()
+        if existing != expected:
+            raise HarnessError("Existing Oracle cleanup receipt does not match exact ledger state.")
+        return existing
+
+    def _write_cleanup_receipt(self, receipt_path):
+        raw = Path(str(receipt_path or "")).expanduser()
+        _reject_symlink_components(raw, variable="ORACLE_E2E_UI_CLEANUP_RECEIPT")
+        receipt_path = _external_path(
+            raw, variable="ORACLE_E2E_UI_CLEANUP_RECEIPT"
+        )
+        if receipt_path.exists():
+            self._validate_existing_cleanup_receipt(receipt_path)
+            return str(receipt_path)
+        payload = self._cleanup_receipt_payload()
+        written = _atomic_private_json(
+            receipt_path,
+            payload,
+            variable="ORACLE_E2E_UI_CLEANUP_RECEIPT",
+        )
+        return str(written)
+
+    def cleanup(self, receipt_path=None):
+        """Delete only exact ledger-owned resources under the separate gate."""
+
+        self._require_cleanup()
+        receipt_path = receipt_path or self.environment.get(
+            "ORACLE_E2E_UI_CLEANUP_RECEIPT"
+        )
+        if not receipt_path:
+            raise HarnessError("Oracle UI cleanup requires a new cleanup receipt path.")
+        raw_receipt_path = Path(str(receipt_path)).expanduser()
+        _reject_symlink_components(
+            raw_receipt_path, variable="ORACLE_E2E_UI_CLEANUP_RECEIPT"
+        )
+        receipt_path = _external_path(
+            raw_receipt_path, variable="ORACLE_E2E_UI_CLEANUP_RECEIPT"
+        )
+        _reject_symlink_components(
+            receipt_path, variable="ORACLE_E2E_UI_CLEANUP_RECEIPT"
+        )
+        if receipt_path.exists():
+            self._validate_existing_cleanup_receipt(receipt_path)
+            credential_scope = self._validate_preserved_storage_credentials_local()
+            return {
+                "phase": "ALREADY_CLEANED",
+                "run_id": self.config.run_id,
+                "provider_mutations": False,
+                "credentials_preserved": credential_scope["retained"],
+                "cleanup_receipt": str(receipt_path),
+            }
+        credential_scope = self._validate_preserved_storage_credentials_local()
+        self._load_clients()
+        self._validate_scope()
+        tenancy_id, _region, namespace = self._storage_context()
+        self._validate_preserved_storage_credentials_provider(
+            credential_scope,
+            tenancy_id=tenancy_id,
+            namespace=namespace,
+        )
         unknown = sorted(
             {
                 str(row.get("kind") or "")
@@ -4153,30 +6625,25 @@ class OracleLiveUIHarness:
             report["graph"][kind] = self._cleanup_graph_kind(kind)
 
         storage_order = [
-            "customer_secret_key",
             "object_bucket",
+            "customer_secret_key",
             "iam_policy",
             "iam_membership",
             "iam_group",
             "iam_user",
         ]
         for kind in storage_order:
-            report["storage"][kind] = self._cleanup_storage_kind(
-                kind,
-                tenancy_id=tenancy_id,
-                namespace=namespace,
+            method = (
+                self._retain_storage_kind
+                if kind in USER_RETAINED_STORAGE_KINDS
+                else self._cleanup_storage_kind
             )
-            if kind == "customer_secret_key":
-                secret_path = self._secret_path()
-                if secret_path.exists():
-                    if report["storage"][kind] not in {"DELETED", "ABSENT"}:
-                        raise HarnessError(
-                            "Credential file cleanup requires a revoked ledgered key."
-                        )
-                    secret_path.unlink()
-                    report["local_artifacts"]["storage_credentials"] = "DELETED"
-                else:
-                    report["local_artifacts"]["storage_credentials"] = "ABSENT"
+            report["storage"][kind] = method(
+                kind, tenancy_id=tenancy_id, namespace=namespace
+            )
+        report["local_artifacts"]["storage_credentials"] = (
+            "USER_RETAINED" if credential_scope["retained"] else "NOT_LEDGERED"
+        )
 
         remaining_graph = [
             row
@@ -4191,10 +6658,13 @@ class OracleLiveUIHarness:
             report["local_artifacts"]["ssh_material"] = "DELETED"
         else:
             report["local_artifacts"]["ssh_material"] = "RETAINED"
+        receipt = self._write_cleanup_receipt(receipt_path)
         return {
             "phase": "CLEANED",
             "run_id": self.config.run_id,
+            "credentials_preserved": credential_scope["retained"],
             "cleanup": report,
+            "cleanup_receipt": receipt,
         }
 
 
@@ -4204,13 +6674,32 @@ def build_parser():
     )
     parser.add_argument(
         "--phase",
-        choices=("plan", "provision", "verify", "cleanup"),
+        choices=(
+            "plan",
+            "provision",
+            "build-manifest",
+            "report",
+            "verify-workloads",
+            "verify-apply",
+            "verify",
+            "reconcile-orphans",
+            "repair-storage-scope",
+            "cleanup-plan",
+            "cleanup",
+        ),
         default="plan",
     )
     parser.add_argument(
         "--ui-manifest",
         help="Exact UI-created OCIDs, markers, and artifact integrity evidence.",
     )
+    parser.add_argument("--manifest-source", help="Protected non-secret manifest source.")
+    parser.add_argument(
+        "--reconciliation-manifest",
+        help="Protected exact-ID orphan reconciliation manifest.",
+    )
+    parser.add_argument("--output", help="New protected output path outside the repository.")
+    parser.add_argument("--cleanup-receipt", help="New protected UI cleanup receipt path.")
     return parser
 
 
@@ -4219,18 +6708,67 @@ def main(argv=None, *, environment=None):
     if args.phase == "plan":
         print(json.dumps(OracleLiveUIHarness.inert_plan(), indent=2, sort_keys=True))
         return 0
+    if args.phase == "verify":
+        print(
+            json.dumps(
+                {
+                    "status": "FAILED_SAFE",
+                    "error": (
+                        "Legacy verify is disabled: byte-level verification may create "
+                        "provider resources and write guest/evidence state. Use report for "
+                        "read-only checks or verify-apply with the explicit apply gate."
+                    ),
+                }
+            )
+        )
+        return 2
     environment = dict(os.environ if environment is None else environment)
     try:
         config = HarnessConfig.from_environment(environment)
-        harness = OracleLiveUIHarness(config, environment=environment)
+        read_only = args.phase in {
+            "build-manifest",
+            "report",
+            "verify-workloads",
+            "repair-storage-scope",
+            "cleanup-plan",
+        }
+        harness = OracleLiveUIHarness(
+            config, environment=environment, read_only=read_only
+        )
         if args.phase == "provision":
             result = harness.provision()
-        elif args.phase == "verify":
+        elif args.phase == "build-manifest":
+            if not args.manifest_source or not args.output:
+                raise HarnessError(
+                    "--manifest-source and --output are required for build-manifest."
+                )
+            result = harness.build_manifest(args.manifest_source, args.output)
+        elif args.phase == "report":
             if not args.ui_manifest:
-                raise HarnessError("--ui-manifest is required for verify.")
-            result = harness.verify(args.ui_manifest)
+                raise HarnessError("--ui-manifest is required for report.")
+            result = harness.report(args.ui_manifest)
+        elif args.phase == "verify-workloads":
+            if not args.ui_manifest:
+                raise HarnessError("--ui-manifest is required for verify-workloads.")
+            result = harness.verify_workloads_read_only(args.ui_manifest)
+        elif args.phase == "verify-apply":
+            if not args.ui_manifest:
+                raise HarnessError("--ui-manifest is required for verify-apply.")
+            result = harness.verify_apply(args.ui_manifest)
+        elif args.phase == "reconcile-orphans":
+            if not args.reconciliation_manifest:
+                raise HarnessError(
+                    "--reconciliation-manifest is required for reconcile-orphans."
+                )
+            result = harness.reconcile_orphans(args.reconciliation_manifest)
+        elif args.phase == "repair-storage-scope":
+            if not args.output:
+                raise HarnessError("--output is required for repair-storage-scope.")
+            result = harness.repair_storage_scope(args.output)
+        elif args.phase == "cleanup-plan":
+            result = harness.cleanup_plan()
         else:
-            result = harness.cleanup()
+            result = harness.cleanup(args.cleanup_receipt)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except (HarnessError, LedgerError) as error:
