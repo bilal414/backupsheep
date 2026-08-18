@@ -1639,19 +1639,45 @@ def _ensure_mysql_target(
             if not row or not _marker_matches(row, expected):
                 raise RestoreError("MySQL target ownership is ambiguous; no changes were retried.") from None
     else:
-        row_text = _mysql_query(
-            node,
-            backup,
-            auth,
-            defaults_arg,
-            _mysql_marker_query(target),
-            username,
-            password,
-            "check MySQL restore marker",
-            ssh=ssh,
-            restore=restore,
-        )
-        row = _parse_marker_row(row_text, marker_fields)
+        try:
+            row_text = _mysql_query(
+                node,
+                backup,
+                auth,
+                defaults_arg,
+                _mysql_marker_query(target),
+                username,
+                password,
+                "check MySQL restore marker",
+                ssh=ssh,
+                restore=restore,
+            )
+        except NodeBackupFailedError:
+            # A marker query against a foreign database fails when the marker
+            # table does not exist.  Distinguish that expected collision from
+            # connection and query failures without mutating the target.
+            marker_exists_sql = (
+                "SELECT TABLE_NAME FROM information_schema.TABLES "
+                f"WHERE TABLE_SCHEMA={_sql_literal(target)} "
+                f"AND TABLE_NAME={_sql_literal(MYSQL_MARKER_TABLE)} LIMIT 1;"
+            )
+            marker_exists = _mysql_query(
+                node,
+                backup,
+                auth,
+                defaults_arg,
+                marker_exists_sql,
+                username,
+                password,
+                "check MySQL restore marker table",
+                ssh=ssh,
+                restore=restore,
+            ).strip()
+            if marker_exists:
+                raise
+            row = None
+        else:
+            row = _parse_marker_row(row_text, marker_fields)
         if row is None:
             if not in_place:
                 raise RestoreError("fork target name collision: existing MySQL database is not BackupSheep-owned.")

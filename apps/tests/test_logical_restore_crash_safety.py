@@ -529,6 +529,44 @@ class LogicalRestoreCrashSafetyTests(RestoreBackendBase):
         self.assertFalse(any("CREATE DATABASE" in statement for statement in sql))
         self.assertFalse(any("DROP DATABASE" in statement for statement in sql))
 
+    def test_markerless_database_collision_is_classified_without_mutation(self):
+        """A missing marker table is a collision, not a generic client failure."""
+        node, backup, restore, _sql_path, _digests, _mapping = self._database_restore()
+        auth = node.connection.auth_database
+        target = "bs_restore_markerless_collision"
+        digest = "e" * 64
+        missing_marker = NodeBackupFailedError(
+            None,
+            message="marker table does not exist",
+        )
+
+        with mock.patch.object(
+            RD,
+            "_mysql_query",
+            side_effect=["1\n", missing_marker, ""],
+        ) as query:
+            with self.assertRaisesRegex(RestoreError, "name collision"):
+                RD._ensure_mysql_target(
+                    node,
+                    backup,
+                    restore,
+                    auth,
+                    "appdb",
+                    target,
+                    digest,
+                    "dbuser",
+                    "db-password",
+                    in_place=False,
+                    defaults_arg="--defaults-extra-file=/tmp/restore.cnf",
+                )
+
+        sql = [call.args[4] for call in query.call_args_list]
+        self.assertEqual(len(sql), 3)
+        self.assertIn("information_schema.TABLES", sql[-1])
+        self.assertIn(RD.MYSQL_MARKER_TABLE, sql[-1])
+        self.assertFalse(any("CREATE DATABASE" in statement for statement in sql))
+        self.assertFalse(any("DROP DATABASE" in statement for statement in sql))
+
     def test_completed_database_checkpoint_retry_skips_drop_and_import(self):
         """A completed owned target is adopted without replaying DDL."""
         node, backup, restore, sql_path, source_digests, mapping = self._database_restore()
