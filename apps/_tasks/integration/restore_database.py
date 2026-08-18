@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 from collections import OrderedDict
@@ -91,6 +92,55 @@ REMOTE_RESTORE_SQL_KINDS = {"mysql_sql", "postgres_sql"}
 _LEGACY_BACKUP_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
+
+# Historical BackupSheep PostgreSQL dumps used ``pg_dump --clean`` without
+# ``--if-exists``. A strict import into a fresh fork therefore stopped at the
+# first absent source object. Compatibility is deliberately limited to the
+# database-local object classes emitted by pg_dump's cleanup preamble. Cluster
+# scoped statements such as DROP DATABASE, DROP ROLE, DROP OWNED, and DROP
+# TABLESPACE are not accepted.
+POSTGRES_HISTORICAL_CLEANUP_OBJECTS = tuple(
+    value.encode("ascii")
+    for value in (
+        "TEXT SEARCH CONFIGURATION",
+        "TEXT SEARCH DICTIONARY",
+        "TEXT SEARCH TEMPLATE",
+        "TEXT SEARCH PARSER",
+        "FOREIGN DATA WRAPPER",
+        "MATERIALIZED VIEW",
+        "OPERATOR FAMILY",
+        "OPERATOR CLASS",
+        "EVENT TRIGGER",
+        "USER MAPPING",
+        "FOREIGN TABLE",
+        "AGGREGATE",
+        "COLLATION",
+        "CONVERSION",
+        "PUBLICATION",
+        "STATISTICS",
+        "PROCEDURE",
+        "EXTENSION",
+        "TRANSFORM",
+        "FUNCTION",
+        "LANGUAGE",
+        "OPERATOR",
+        "POLICY",
+        "ROUTINE",
+        "SEQUENCE",
+        "TRIGGER",
+        "DOMAIN",
+        "INDEX",
+        "RULE",
+        "SCHEMA",
+        "SERVER",
+        "TABLE",
+        "TYPE",
+        "VIEW",
+        "CAST",
+    )
+)
+POSTGRES_COMPAT_PREAMBLE_MAX_LINE_BYTES = 1024 * 1024
+POSTGRES_COMPAT_TAIL_BYTES = 64 * 1024
 
 
 class RemoteRestoreCleanupError(RestoreError):
@@ -2631,6 +2681,17 @@ def _postgres_relation_exists(text):
     return values[0] in {"t", "true", "1"}
 
 
+def _postgres_dump_options(backup):
+    """Return the exact persisted pg_dump option tokens, or ``None``."""
+    raw_options = getattr(backup, "option_postgres", None)
+    if not isinstance(raw_options, str) or not raw_options.strip():
+        return None
+    try:
+        return set(shlex.split(raw_options))
+    except ValueError:
+        return None
+
+
 def _postgres_in_place_dump_is_safe(backup):
     """Return whether persisted pg_dump options safely support in-place replay.
 
@@ -2640,15 +2701,19 @@ def _postgres_in_place_dump_is_safe(backup):
     options persisted on the backup are trusted; the current node settings
     may have changed since that backup was created.
     """
-    raw_options = getattr(backup, "option_postgres", None)
-    if not isinstance(raw_options, str) or not raw_options.strip():
-        return False
-    try:
-        options = set(shlex.split(raw_options))
-    except ValueError:
+    options = _postgres_dump_options(backup)
+    if options is None:
         return False
     has_clean = bool({"-c", "--clean"}.intersection(options))
     return has_clean and "--if-exists" in options
+
+
+def _postgres_historical_clean_compatibility_required(backup):
+    """Return whether an exact persisted legacy cleanup contract needs repair."""
+    options = _postgres_dump_options(backup)
+    if options is None:
+        return False
+    return bool({"-c", "--clean"}.intersection(options)) and "--if-exists" not in options
 
 
 def _ensure_postgresql_in_place_dump_is_safe(backup):
@@ -2838,15 +2903,180 @@ def _ensure_postgres_target(
     return row
 
 
-def _build_combined_postgres_sql(sql_paths, marker):
+def _validate_postgres_cleanup_statement(statement):
+    """Reject anything other than one complete pg_dump cleanup statement."""
+    if (
+        not statement.endswith(b";")
+        or statement.count(b";") != 1
+        or b"\x00" in statement
+    ):
+        raise RestoreError(
+            "Historical PostgreSQL cleanup compatibility rejected an unsupported "
+            "dump statement before the restore target was changed."
+        )
+
+
+def _rewrite_postgres_cleanup_line(line):
+    """Add IF EXISTS to one recognized pg_dump cleanup line.
+
+    Return ``(payload, recognized)``. A drop-like but unrecognized line fails
+    closed instead of being passed to a target that may already exist.
+    """
+    ending = b""
+    statement = line
+    if statement.endswith(b"\r\n"):
+        statement, ending = statement[:-2], b"\r\n"
+    elif statement.endswith(b"\n"):
+        statement, ending = statement[:-1], b"\n"
+
+    stripped = statement.lstrip()
+    drop_like = stripped.startswith(b"DROP ") or (
+        stripped.startswith(b"ALTER ") and b" DROP " in stripped
+    )
+    if drop_like and stripped != statement:
+        raise RestoreError(
+            "Historical PostgreSQL cleanup compatibility rejected an unsupported "
+            "dump statement before the restore target was changed."
+        )
+
+    for object_type in POSTGRES_HISTORICAL_CLEANUP_OBJECTS:
+        safe_prefix = b"DROP " + object_type + b" IF EXISTS "
+        unsafe_prefix = b"DROP " + object_type + b" "
+        if statement.startswith(safe_prefix):
+            _validate_postgres_cleanup_statement(statement)
+            return line, True
+        if statement.startswith(unsafe_prefix):
+            _validate_postgres_cleanup_statement(statement)
+            return (
+                unsafe_prefix
+                + b"IF EXISTS "
+                + statement[len(unsafe_prefix) :]
+                + ending,
+                True,
+            )
+
+    constraint = b" DROP CONSTRAINT "
+    safe_constraint = b" DROP CONSTRAINT IF EXISTS "
+    table_prefixes = (
+        (b"ALTER TABLE IF EXISTS ONLY ", b"ALTER TABLE IF EXISTS ONLY "),
+        (b"ALTER TABLE IF EXISTS ", b"ALTER TABLE IF EXISTS "),
+        (b"ALTER TABLE ONLY ", b"ALTER TABLE IF EXISTS ONLY "),
+        (b"ALTER TABLE ", b"ALTER TABLE IF EXISTS "),
+    )
+    for input_prefix, output_prefix in table_prefixes:
+        if not statement.startswith(input_prefix):
+            continue
+        if safe_constraint in statement:
+            _validate_postgres_cleanup_statement(statement)
+            return output_prefix + statement[len(input_prefix) :] + ending, True
+        if constraint in statement:
+            _validate_postgres_cleanup_statement(statement)
+            if statement.count(constraint) != 1:
+                break
+            normalized = output_prefix + statement[len(input_prefix) :]
+            return normalized.replace(constraint, safe_constraint, 1) + ending, True
+        break
+
+    if drop_like:
+        raise RestoreError(
+            "Historical PostgreSQL cleanup compatibility rejected an unsupported "
+            "dump statement before the restore target was changed."
+        )
+    return line, False
+
+
+def _copy_historical_postgres_dump(source_path, output):
+    """Copy a pg_dump file while bounding legacy cleanup repair.
+
+    Only the signed pg_dump preamble is examined line-by-line. Once object
+    creation begins, the remainder is copied in bounded binary chunks so large
+    COPY rows and non-UTF-8 database encodings never enter Python text parsing.
+    """
+    saw_header = False
+    saw_dumped_by = False
+    cleanup_started = False
+    tail = b""
+
+    def write(payload):
+        nonlocal tail
+        output.write(payload)
+        tail = (tail + payload)[-POSTGRES_COMPAT_TAIL_BYTES:]
+
+    with open(source_path, "rb") as source:
+        while True:
+            line = source.readline(POSTGRES_COMPAT_PREAMBLE_MAX_LINE_BYTES + 1)
+            if not line:
+                break
+            if (
+                len(line) > POSTGRES_COMPAT_PREAMBLE_MAX_LINE_BYTES
+                and not line.endswith(b"\n")
+            ):
+                raise RestoreError(
+                    "Historical PostgreSQL cleanup compatibility rejected a malformed "
+                    "dump preamble before the restore target was changed."
+                )
+
+            stripped = line.strip()
+            if stripped == b"-- PostgreSQL database dump":
+                saw_header = True
+            elif stripped.startswith(b"-- Dumped by pg_dump version "):
+                saw_dumped_by = True
+
+            rewritten, recognized = _rewrite_postgres_cleanup_line(line)
+            if recognized:
+                cleanup_started = True
+                write(rewritten)
+                continue
+
+            is_comment_or_blank = not stripped or stripped.startswith(b"--")
+            is_psql_guard = stripped.startswith((b"\\restrict ", b"\\unrestrict "))
+            is_setup = stripped.startswith(b"SET ") or stripped.startswith(
+                b"SELECT pg_catalog.set_config("
+            )
+            is_large_object_cleanup = stripped.startswith(
+                b"SELECT pg_catalog.lo_unlink("
+            )
+            if (
+                is_comment_or_blank
+                or is_psql_guard
+                or (not cleanup_started and is_setup)
+                or (cleanup_started and is_large_object_cleanup)
+            ):
+                write(line)
+                continue
+
+            # The first non-cleanup SQL statement starts the ordinary dump
+            # body. It remains byte-for-byte unchanged and strict psql error
+            # handling applies to it and every following statement.
+            write(line)
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                write(chunk)
+            break
+
+    if (
+        not saw_header
+        or not saw_dumped_by
+        or b"-- PostgreSQL database dump complete" not in tail
+    ):
+        raise RestoreError(
+            "Historical PostgreSQL cleanup compatibility rejected a malformed "
+            "pg_dump artifact before the restore target was changed."
+        )
+
+
+def _build_combined_postgres_sql(
+    sql_paths, marker, *, historical_clean_compatibility=False
+):
     descriptor, path = tempfile.mkstemp(prefix="bs_restore_", suffix=".sql", dir="_storage")
     os.chmod(path, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as output:
             for sql_path in sql_paths:
-                with open(sql_path, "rb") as source:
-                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                        output.write(chunk)
+                if historical_clean_compatibility:
+                    _copy_historical_postgres_dump(sql_path, output)
+                else:
+                    with open(sql_path, "rb") as source:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
                 output.write(b"\n")
             output.write(_postgres_marker_update(marker).encode("utf-8"))
             output.write(b"\n")
@@ -2874,6 +3104,7 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
     ssh_key_path = None
     remote_pgpass = None
     local_pgpass = None
+    combined_sql_paths = set()
     try:
         mode, _params = _restore_mode(restore)
         in_place = mode == "in_place"
@@ -2917,6 +3148,25 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
             target = mapping[source]
             digest = _source_digest(source_digests, source)
             file_specs = _file_checkpoint_specs(source_digests, source)
+            if _has_restore_fence(restore):
+                _verify_source_files(source_digests, source, sql_paths)
+            marker_for_update = _marker_values(
+                restore, backup, source, target, digest, "importing"
+            )
+            historical_clean_compatibility = (
+                not in_place
+                and _postgres_historical_clean_compatibility_required(backup)
+            )
+            local_sql = None
+            if historical_clean_compatibility:
+                # Build and validate the compatibility artifact before
+                # _ensure_postgres_target can create a database or marker.
+                local_sql = _build_combined_postgres_sql(
+                    sql_paths,
+                    marker_for_update,
+                    historical_clean_compatibility=True,
+                )
+                combined_sql_paths.add(local_sql)
             marker = _ensure_postgres_target(
                 node, backup, restore, auth, source, target, digest,
                 username, password, in_place=in_place, pg_env=pg_env,
@@ -3042,11 +3292,12 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                 }},
                 progress_total=len(mapping),
             )
-            if _has_restore_fence(restore):
-                _verify_source_files(source_digests, source, sql_paths)
             _ensure_restore_fence(restore)
-            marker_for_update = _marker_values(restore, backup, source, target, digest, "importing")
-            local_sql = _build_combined_postgres_sql(sql_paths, marker_for_update)
+            if local_sql is None:
+                local_sql = _build_combined_postgres_sql(
+                    sql_paths, marker_for_update
+                )
+                combined_sql_paths.add(local_sql)
             remote_sql = None
             try:
                 if ssh is not None:
@@ -3103,6 +3354,7 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                     os.remove(local_sql)
                 except OSError:
                     pass
+                combined_sql_paths.discard(local_sql)
             # The marker update was part of the transaction.  Query it before
             # recording the database checkpoint so a lost client response can
             # be adopted only from exact provider-side evidence.
@@ -3130,6 +3382,11 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                 progress_total=len(mapping),
             )
     finally:
+        for combined_sql_path in combined_sql_paths:
+            try:
+                os.remove(combined_sql_path)
+            except OSError:
+                pass
         if local_pgpass and os.path.exists(local_pgpass):
             try:
                 os.remove(local_pgpass)

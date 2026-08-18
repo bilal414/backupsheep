@@ -470,14 +470,15 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
         backup = _fake_backup()
         auth = self._auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
         sql_path = os.path.join(tempfile.gettempdir(), "bs-postgres-restore.sql")
+        sql = b"CREATE TABLE restored(id integer);\n"
         with open(sql_path, "wb") as output:
-            output.write(b"CREATE TABLE restored(id integer);\n")
+            output.write(sql)
         self.addCleanup(lambda: os.path.exists(sql_path) and os.remove(sql_path))
         source_digests = {
             "source_db": [{
                 "file": os.path.basename(sql_path),
-                "bytes": 36,
-                "sha256": hashlib.sha256(b"CREATE TABLE restored(id integer);\n").hexdigest(),
+                "bytes": len(sql),
+                "sha256": hashlib.sha256(sql).hexdigest(),
             }]
         }
         mapping = {"source_db": "bs_restore_new_target"}
@@ -538,6 +539,45 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
                     "db-password",
                 )
         reimport.assert_not_called()
+
+    def test_postgresql_source_checksum_change_stops_before_target_mutation(self):
+        backup = _fake_backup()
+        restore = self._fenced_restore()
+        auth = self._auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        sql_path = os.path.join(tempfile.gettempdir(), "bs-postgres-changed.sql")
+        sql = b"CREATE TABLE restored(id integer);\n"
+        with open(sql_path, "wb") as output:
+            output.write(sql)
+        self.addCleanup(lambda: os.path.exists(sql_path) and os.remove(sql_path))
+        source_digests = {
+            "source_db": [
+                {
+                    "file": os.path.basename(sql_path),
+                    "bytes": len(sql),
+                    "sha256": "0" * 64,
+                }
+            ]
+        }
+
+        with mock.patch.object(RD, "_ensure_postgres_target") as ensure_target, \
+             mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaisesRegex(
+                RestoreError, "staged database dump changed after validation"
+            ):
+                RD._restore_postgresql(
+                    SimpleNamespace(),
+                    backup,
+                    restore,
+                    auth,
+                    OrderedDict({"source_db": [sql_path]}),
+                    {"source_db": "bs_restore_owned"},
+                    source_digests,
+                    "dbuser",
+                    "db-password",
+                )
+
+        ensure_target.assert_not_called()
+        run.assert_not_called()
 
     def test_permission_error_classification_and_api_allowlist_are_public_safe(self):
         error = RD._database_restore_permission_error(
@@ -1692,6 +1732,108 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(payload.count(source_sql), 1)
         self.assertEqual(payload.count(b"SET state='complete'"), 1)
         self.assertEqual(stat.S_IMODE(os.stat(combined).st_mode), 0o600)
+
+    def test_postgresql_historical_clean_dump_is_repaired_before_strict_import(self):
+        backup = _fake_backup(option_postgres="-w --clean")
+        restore = _FakeRestore()
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        source_sql = (
+            b"--\n-- PostgreSQL database dump\n--\n"
+            b"-- Dumped from database version 16.15\n"
+            b"-- Dumped by pg_dump version 16.15\n\n"
+            b"SET statement_timeout = 0;\n"
+            b"ALTER TABLE ONLY app.child DROP CONSTRAINT child_parent_fkey;\n"
+            b"DROP TRIGGER child_guard ON app.child;\n"
+            b"DROP INDEX app.child_parent_idx;\n"
+            b"DROP VIEW app.child_view;\n"
+            b"DROP TABLE app.child;\n"
+            b"DROP SEQUENCE app.child_seq;\n"
+            b"DROP FUNCTION app.guard();\n"
+            b"DROP TYPE app.mood;\n"
+            b"DROP SCHEMA app;\n"
+            b"CREATE SCHEMA app;\n"
+            b"CREATE TABLE app.child(id integer);\n"
+            b"SELECT missing_function_for_strict_failure();\n"
+            b"-- PostgreSQL database dump complete\n"
+        )
+        with open(sql_path, "wb") as output:
+            output.write(source_sql)
+        marker = RD._marker_values(
+            restore,
+            backup,
+            "source_db",
+            "bs_restore_owned",
+            "a" * 64,
+            "importing",
+        )
+
+        combined = RD._build_combined_postgres_sql(
+            [sql_path], marker, historical_clean_compatibility=True
+        )
+        self.addCleanup(lambda: os.path.exists(combined) and os.remove(combined))
+        with open(combined, "rb") as input_file:
+            payload = input_file.read()
+
+        for expected in (
+            b"ALTER TABLE IF EXISTS ONLY app.child DROP CONSTRAINT IF EXISTS child_parent_fkey;",
+            b"DROP TRIGGER IF EXISTS child_guard ON app.child;",
+            b"DROP INDEX IF EXISTS app.child_parent_idx;",
+            b"DROP VIEW IF EXISTS app.child_view;",
+            b"DROP TABLE IF EXISTS app.child;",
+            b"DROP SEQUENCE IF EXISTS app.child_seq;",
+            b"DROP FUNCTION IF EXISTS app.guard();",
+            b"DROP TYPE IF EXISTS app.mood;",
+            b"DROP SCHEMA IF EXISTS app;",
+        ):
+            self.assertIn(expected, payload)
+        self.assertIn(b"SELECT missing_function_for_strict_failure();", payload)
+        self.assertEqual(payload.count(b"SET state='complete'"), 1)
+        self.assertTrue(
+            RD._postgres_historical_clean_compatibility_required(backup)
+        )
+
+    def test_postgresql_historical_clean_rejects_unsupported_drop_before_target(self):
+        backup = _fake_backup(option_postgres="-w --clean")
+        restore = _FakeRestore()
+        auth = _fake_auth(CoreAuthDatabase.DatabaseType.POSTGRESQL)
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        source_sql = (
+            b"--\n-- PostgreSQL database dump\n--\n"
+            b"-- Dumped by pg_dump version 16.15\n"
+            b"DROP DATABASE production;\n"
+            b"-- PostgreSQL database dump complete\n"
+        )
+        with open(sql_path, "wb") as output:
+            output.write(source_sql)
+        source_digests = {
+            "source_db": [
+                {
+                    "file": "source_db.sql",
+                    "bytes": len(source_sql),
+                    "sha256": hashlib.sha256(source_sql).hexdigest(),
+                }
+            ]
+        }
+
+        with mock.patch.object(RD, "_ensure_postgres_target") as ensure_target, \
+             mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaisesRegex(
+                RestoreError, "unsupported dump statement.*before.*target"
+            ):
+                RD._restore_postgresql(
+                    SimpleNamespace(),
+                    backup,
+                    restore,
+                    auth,
+                    OrderedDict({"source_db": [sql_path]}),
+                    {"source_db": "bs_restore_owned"},
+                    source_digests,
+                    "dbuser",
+                    "db-password",
+                )
+
+        ensure_target.assert_not_called()
+        run.assert_not_called()
 
     def test_archive_cannot_overwrite_restore_ownership_marker(self):
         sql_path = os.path.join(self.tmp, "source_db.sql")
