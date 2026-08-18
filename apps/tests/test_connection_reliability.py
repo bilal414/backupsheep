@@ -8,6 +8,7 @@ from django.test import SimpleTestCase, override_settings
 from apps.console.connection.reliability import (
     ClassifiedConnectionError,
     DatabaseClientCapabilityError,
+    DatabaseEventPrivilegeError,
     classify_connection_error,
 )
 from apps.console.connection.models import CoreAuthDatabase
@@ -58,6 +59,20 @@ class ConnectionErrorClassificationTests(SimpleTestCase):
         self.assertIn("MariaDB", failure.detail)
         self.assertIn("mariadb-dump", failure.remediation)
         self.assertNotIn("do-not-return-this", str(failure.as_dict()))
+
+    def test_database_event_privilege_failure_has_safe_actionable_contract(self):
+        failure = classify_connection_error(
+            DatabaseEventPrivilegeError(
+                internal_detail="password=do-not-return-this host=db.internal"
+            )
+        )
+
+        self.assertEqual(failure.code, "DATABASE_EVENT_PRIVILEGE_REQUIRED")
+        self.assertEqual(failure.stage, "authorization")
+        self.assertFalse(failure.retryable)
+        self.assertIn("EVENT privilege", failure.remediation)
+        self.assertNotIn("do-not-return-this", str(failure.as_dict()))
+        self.assertNotIn("db.internal", str(failure.as_dict()))
 
 
 class DatabaseClientCapabilityTests(SimpleTestCase):
@@ -243,6 +258,208 @@ class DatabaseClientCapabilityTests(SimpleTestCase):
         self.assertIn("mariadb --defaults-extra-file=", calls[2])
         self.assertIn("enable the sandbox mode", calls[2])
         self.assertNotIn("secret", calls[2])
+
+    def test_local_full_object_probe_verifies_event_privilege(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MYSQL,
+            CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+        )
+        calls = []
+
+        def run(argv):
+            calls.append(argv)
+            if argv[-1] == "--version":
+                return "mysql Ver 8.4.10 MySQL Community Server"
+            if argv[-1] == "SELECT 1;":
+                return "1"
+            return ""
+
+        with mock.patch.object(auth, "bin_path", return_value="/opt/mysql/bin/"), \
+             mock.patch.object(
+                 auth,
+                 "_install_local_database_credentials",
+                 return_value="/tmp/bs-capability.cnf",
+             ), \
+             mock.patch.object(
+                 auth, "_run_local_database_client_command", side_effect=run
+             ), \
+             mock.patch("apps.console.connection.models.os.remove"):
+            auth._validate_mysql_family_client_capability(
+                database_type=auth.type,
+                version=auth.version,
+                host="db.internal",
+                port=3306,
+                database_name="appdb",
+                username="backup",
+                password="secret",
+                use_ssl=False,
+                include_database_objects=True,
+            )
+
+        event_calls = [call for call in calls if "SHOW EVENTS" in " ".join(call)]
+        self.assertEqual(len(event_calls), 1)
+        self.assertIn("SHOW EVENTS FROM `appdb`;", event_calls[0])
+        self.assertNotIn("secret", " ".join(event_calls[0]))
+
+    def test_ssh_full_object_probe_verifies_event_privilege(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MARIADB,
+            CoreAuthDatabase.DatabaseVersion.MARIADB_11_8,
+        )
+        calls = []
+
+        def run(_ssh, command):
+            calls.append(command)
+            if command.endswith("--version"):
+                return "mariadb Ver 15.1 Distrib 10.11.14-MariaDB", ""
+            if "SELECT 1" in command:
+                return "1", ""
+            return "", ""
+
+        with mock.patch.object(
+            auth, "_run_remote_database_command", side_effect=run
+        ):
+            auth._validate_mysql_family_client_capability(
+                database_type=auth.type,
+                version=auth.version,
+                host="127.0.0.1",
+                port=3307,
+                database_name="appdb",
+                username="backup",
+                password="secret",
+                use_ssl=False,
+                include_database_objects=True,
+                ssh=mock.sentinel.ssh,
+                remote_credentials={
+                    "mysql_option": '--defaults-extra-file="$HOME/.bs.cnf"'
+                },
+            )
+
+        event_calls = [command for command in calls if "SHOW EVENTS" in command]
+        self.assertEqual(len(event_calls), 1)
+        self.assertIn("SHOW EVENTS FROM `appdb`;", event_calls[0])
+        self.assertNotIn("secret", event_calls[0])
+
+    def test_event_probe_failure_uses_event_privilege_contract(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MYSQL,
+            CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+        )
+
+        def run(argv):
+            if argv[-1] == "--version":
+                return "mysql Ver 8.4.10 MySQL Community Server"
+            if argv[-1] == "SELECT 1;":
+                return "1"
+            raise RuntimeError("Access denied password=event-secret host=db.internal")
+
+        with mock.patch.object(auth, "bin_path", return_value="/opt/mysql/bin/"), \
+             mock.patch.object(
+                 auth,
+                 "_install_local_database_credentials",
+                 return_value="/tmp/bs-capability.cnf",
+             ), \
+             mock.patch.object(
+                 auth, "_run_local_database_client_command", side_effect=run
+             ), \
+             mock.patch("apps.console.connection.models.os.remove"):
+            with self.assertRaises(DatabaseEventPrivilegeError) as raised:
+                auth._validate_mysql_family_client_capability(
+                    database_type=auth.type,
+                    version=auth.version,
+                    host="db.internal",
+                    port=3306,
+                    database_name="appdb",
+                    username="backup",
+                    password="event-secret",
+                    use_ssl=False,
+                    include_database_objects=True,
+                )
+
+        failure = classify_connection_error(raised.exception)
+        self.assertEqual(failure.code, "DATABASE_EVENT_PRIVILEGE_REQUIRED")
+        self.assertNotIn("event-secret", str(failure.as_dict()))
+
+    def test_all_databases_event_probe_checks_each_non_system_database(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MYSQL,
+            CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+        )
+        calls = []
+
+        def run(argv):
+            calls.append(argv)
+            if argv[-1] == "--version":
+                return "mysql Ver 8.4.10 MySQL Community Server"
+            if argv[-1] == "SELECT 1;":
+                return "1"
+            if argv[-1] == "SHOW DATABASES;":
+                return "mysql\nanalytics\ninformation_schema\nappdb\n"
+            return ""
+
+        with mock.patch.object(auth, "bin_path", return_value="/opt/mysql/bin/"), \
+             mock.patch.object(
+                 auth,
+                 "_install_local_database_credentials",
+                 return_value="/tmp/bs-capability.cnf",
+             ), \
+             mock.patch.object(
+                 auth, "_run_local_database_client_command", side_effect=run
+             ), \
+             mock.patch("apps.console.connection.models.os.remove"):
+            auth._validate_mysql_family_client_capability(
+                database_type=auth.type,
+                version=auth.version,
+                host="db.internal",
+                port=3306,
+                database_name=None,
+                username="backup",
+                password="secret",
+                use_ssl=False,
+                all_databases=True,
+                include_database_objects=True,
+            )
+
+        event_sql = sorted(
+            call[-1] for call in calls if "SHOW EVENTS" in " ".join(call)
+        )
+        self.assertEqual(
+            event_sql,
+            ["SHOW EVENTS FROM `analytics`;", "SHOW EVENTS FROM `appdb`;"],
+        )
+
+    def test_check_connection_passes_full_object_policy_to_capability_probe(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MYSQL,
+            CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+        )
+        connection = mock.Mock()
+        cursor = connection.cursor.return_value
+        cursor.fetchall.return_value = []
+        data = {
+            "host": "db.internal",
+            "port": 3306,
+            "database_name": "appdb",
+            "username": "backup",
+            "password": "secret",
+            "all_databases": False,
+            "use_ssl": False,
+            "type": CoreAuthDatabase.DatabaseType.MYSQL,
+            "version": CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+            "include_stored_procedure": True,
+            "use_public_key": False,
+            "use_private_key": False,
+        }
+
+        with mock.patch.object(
+            auth, "_validate_mysql_family_client_capability"
+        ) as validate, mock.patch.object(
+            auth, "_direct_mysql_connect", return_value=connection
+        ):
+            auth.check_connection(data=data)
+
+        self.assertTrue(validate.call_args.kwargs["include_database_objects"])
+        self.assertFalse(validate.call_args.kwargs["all_databases"])
 
 
 @override_settings(

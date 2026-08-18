@@ -60,6 +60,21 @@ class DatabaseClientCapabilityError(Exception):
         super().__init__(f"database client capability check failed for {self.engine}")
 
 
+DATABASE_EVENT_PRIVILEGE_DETAIL = (
+    "The database account cannot export scheduled event definitions. Grant the "
+    "EVENT privilege for every selected database, validate the connection, and "
+    "retry the backup."
+)
+
+
+class DatabaseEventPrivilegeError(Exception):
+    """Internal signal that a full-object policy cannot read scheduled events."""
+
+    def __init__(self, *, internal_detail: str = ""):
+        self.internal_detail = str(internal_detail or "")
+        super().__init__("database event privilege validation failed")
+
+
 def _failure(code, detail, stage, retryable, remediation):
     return ConnectionFailure(code, detail, stage, retryable, remediation)
 
@@ -93,6 +108,15 @@ def classify_connection_error(error: BaseException, stage: str = "connection") -
             "worker_preflight",
             False,
             "Install compatible database client tools on every relevant worker or SSH server, then validate again.",
+        )
+
+    if isinstance(error, DatabaseEventPrivilegeError):
+        return _failure(
+            "DATABASE_EVENT_PRIVILEGE_REQUIRED",
+            DATABASE_EVENT_PRIVILEGE_DETAIL,
+            "authorization",
+            False,
+            "Grant the EVENT privilege on every database selected for backup, then validate the connection again.",
         )
 
     # Import optional client libraries lazily so this helper remains usable from

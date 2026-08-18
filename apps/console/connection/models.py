@@ -49,6 +49,7 @@ from ..vultr import iter_vultr_collection, vultr_request_timeout
 from .reliability import (
     ClassifiedConnectionError,
     DatabaseClientCapabilityError,
+    DatabaseEventPrivilegeError,
     classified_connection_error,
 )
 from .ssh import cleanup_temporary_key, configure_host_keys, open_ssh_client
@@ -2395,6 +2396,8 @@ class CoreAuthDatabase(TimeStampedModel):
         username,
         password,
         use_ssl,
+        all_databases=False,
+        include_database_objects=False,
         ssh=None,
         remote_credentials=None,
     ):
@@ -2420,6 +2423,28 @@ class CoreAuthDatabase(TimeStampedModel):
                 else "--ssl-mode=PREFERRED"
             )
 
+        def event_database_names(discovered=""):
+            if all_databases:
+                system_databases = {
+                    "information_schema",
+                    "mysql",
+                    "performance_schema",
+                    "sys",
+                }
+                return sorted(
+                    {
+                        line.strip()
+                        for line in str(discovered or "").splitlines()
+                        if line.strip()
+                        and line.strip().lower() not in system_databases
+                    }
+                )
+            if database_name:
+                return [str(database_name)]
+            raise DatabaseEventPrivilegeError(
+                internal_detail="database_name_missing"
+            )
+
         local_credentials = None
         try:
             if ssh is not None:
@@ -2437,16 +2462,43 @@ class CoreAuthDatabase(TimeStampedModel):
                     client_output,
                     dump_output,
                 )
-                parts = [client, remote_credentials["mysql_option"]]
-                if ssl_option:
-                    parts.append(ssl_option)
-                parts.extend(["--batch", "--skip-column-names"])
-                if database_name:
-                    parts.append(f"--database={shlex.quote(str(database_name))}")
-                parts.append(f"--execute={shlex.quote(probe)}")
-                probe_output, _ = self._run_remote_database_command(
-                    ssh, " ".join(parts)
+
+                def remote_query(sql, *, selected_database=None):
+                    parts = [client, remote_credentials["mysql_option"]]
+                    if ssl_option:
+                        parts.append(ssl_option)
+                    parts.extend(["--batch", "--skip-column-names"])
+                    if selected_database:
+                        parts.append(
+                            f"--database={shlex.quote(str(selected_database))}"
+                        )
+                    parts.append(f"--execute={shlex.quote(str(sql))}")
+                    output, _error = self._run_remote_database_command(
+                        ssh, " ".join(parts)
+                    )
+                    return output
+
+                probe_output = remote_query(
+                    probe,
+                    selected_database=database_name,
                 )
+                if include_database_objects:
+                    discovered = (
+                        remote_query("SHOW DATABASES;")
+                        if all_databases
+                        else ""
+                    )
+                    for event_database in event_database_names(discovered):
+                        event_sql = (
+                            "SHOW EVENTS FROM "
+                            f"{self._mysql_identifier(event_database)};"
+                        )
+                        try:
+                            remote_query(event_sql)
+                        except Exception as error:
+                            raise DatabaseEventPrivilegeError(
+                                internal_detail=error.__class__.__name__
+                            ) from error
             else:
                 binary_path = self.bin_path()
                 client_path = f"{binary_path}{client}"
@@ -2469,20 +2521,44 @@ class CoreAuthDatabase(TimeStampedModel):
                     username=username,
                     password=password,
                 )
-                argv = [
-                    client_path,
-                    f"--defaults-extra-file={local_credentials}",
-                ]
-                if ssl_option:
-                    argv.append(ssl_option)
-                argv.extend(["--batch", "--skip-column-names"])
-                if database_name:
-                    argv.append(f"--database={database_name}")
-                argv.extend(["--execute", probe])
-                probe_output = self._run_local_database_client_command(argv)
+
+                def local_query(sql, *, selected_database=None):
+                    argv = [
+                        client_path,
+                        f"--defaults-extra-file={local_credentials}",
+                    ]
+                    if ssl_option:
+                        argv.append(ssl_option)
+                    argv.extend(["--batch", "--skip-column-names"])
+                    if selected_database:
+                        argv.append(f"--database={selected_database}")
+                    argv.extend(["--execute", str(sql)])
+                    return self._run_local_database_client_command(argv)
+
+                probe_output = local_query(
+                    probe,
+                    selected_database=database_name,
+                )
+                if include_database_objects:
+                    discovered = (
+                        local_query("SHOW DATABASES;")
+                        if all_databases
+                        else ""
+                    )
+                    for event_database in event_database_names(discovered):
+                        event_sql = (
+                            "SHOW EVENTS FROM "
+                            f"{self._mysql_identifier(event_database)};"
+                        )
+                        try:
+                            local_query(event_sql)
+                        except Exception as error:
+                            raise DatabaseEventPrivilegeError(
+                                internal_detail=error.__class__.__name__
+                            ) from error
             if str(probe_output or "").strip() != "1":
                 raise RuntimeError("database client capability probe returned no result")
-        except DatabaseClientCapabilityError:
+        except (DatabaseClientCapabilityError, DatabaseEventPrivilegeError):
             raise
         except Exception as error:
             raise DatabaseClientCapabilityError(
@@ -2774,6 +2850,9 @@ class CoreAuthDatabase(TimeStampedModel):
             username = data.get("username")
             password = data.get("password")
             all_databases = data.get("all_databases")
+            include_database_objects = bool(
+                data.get("include_stored_procedure")
+            )
             use_ssl = data.get("use_ssl", False)
 
             type = self.DatabaseType(data.get("type"))
@@ -2785,6 +2864,7 @@ class CoreAuthDatabase(TimeStampedModel):
             port = self.port
             database_name = self.database_name
             all_databases = self.all_databases
+            include_database_objects = bool(self.include_stored_procedure)
             username = bs_decrypt(self.username, encryption_key)
             password = bs_decrypt(self.password, encryption_key)
             type = self.type
@@ -2821,6 +2901,8 @@ class CoreAuthDatabase(TimeStampedModel):
                         username=username,
                         password=password,
                         use_ssl=use_ssl,
+                        all_databases=all_databases,
+                        include_database_objects=include_database_objects,
                         ssh=ssh,
                         remote_credentials=remote_credentials,
                     )
@@ -2910,6 +2992,8 @@ class CoreAuthDatabase(TimeStampedModel):
                         username=username,
                         password=password,
                         use_ssl=use_ssl,
+                        all_databases=all_databases,
+                        include_database_objects=include_database_objects,
                     )
                     db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
                     cursor = db_con.cursor()
@@ -2930,6 +3014,8 @@ class CoreAuthDatabase(TimeStampedModel):
                         username=username,
                         password=password,
                         use_ssl=use_ssl,
+                        all_databases=all_databases,
+                        include_database_objects=include_database_objects,
                     )
                     db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
                     cursor = db_con.cursor()

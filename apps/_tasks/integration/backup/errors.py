@@ -9,7 +9,10 @@ from dataclasses import dataclass
 
 from celery.exceptions import SoftTimeLimitExceeded
 
-from apps.console.connection.reliability import classify_connection_error
+from apps.console.connection.reliability import (
+    DATABASE_EVENT_PRIVILEGE_DETAIL,
+    classify_connection_error,
+)
 
 
 @dataclass(frozen=True)
@@ -17,13 +20,6 @@ class SafeBackupFailure:
     code: str
     detail: str
     retryable: bool
-
-
-DATABASE_EVENT_PRIVILEGE_DETAIL = (
-    "The database account cannot export scheduled event definitions. Grant the "
-    "EVENT privilege for every selected database, validate the connection, and "
-    "retry the backup."
-)
 
 
 def safe_backup_failure(error, *, stage="backup"):
