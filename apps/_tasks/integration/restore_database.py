@@ -669,7 +669,24 @@ def _lock_params_mapping(restore, params, mapping):
     return params
 
 
-def _validate_extracted_archive(backup, auth, tree_root):
+_UNSAFE_SQL_CLIENT_DIRECTIVE_RE = re.compile(
+    rb"(?im)^\s*(?:\\(?:connect|include|ir|!|copy)\b|"
+    rb"(?:source|system)\b|(?:drop|create|alter)\s+database\b|"
+    rb"use\s+[^;]+;)"
+)
+_SQL_TRANSACTION_CONTROL_RE = re.compile(
+    rb"(?i)^\s*(begin|commit|rollback|end)\s*;\s*$"
+)
+_MYSQL_DUMP_AUTOCOMMIT_OFF_RE = re.compile(
+    rb"(?i)^\s*set\s+@old_autocommit\s*=\s*@@autocommit\s*,\s*"
+    rb"@@autocommit\s*=\s*0\s*;\s*$"
+)
+_MYSQL_DUMP_AUTOCOMMIT_RESTORE_RE = re.compile(
+    rb"(?i)^\s*set\s+autocommit\s*=\s*@old_autocommit\s*;\s*$"
+)
+
+
+def _validate_extracted_archive(backup, auth, tree_root, *, mode="fork"):
     """Validate every extracted dump before opening a database client."""
     sql_files = []
     for root, directories, files in os.walk(tree_root, followlinks=False):
@@ -705,21 +722,62 @@ def _validate_extracted_archive(backup, auth, tree_root):
         source = _validate_database_name(source, "source database")
         digest = hashlib.sha256()
         byte_count = 0
+        mysql_fork_scaffolding = (
+            mode == "fork"
+            and auth.type
+            in (
+                CoreAuthDatabase.DatabaseType.MYSQL,
+                CoreAuthDatabase.DatabaseType.MARIADB,
+            )
+        )
+        autocommit_state = "idle"
         # Read the complete file.  ZIP CRC validation happens in
         # extract_backup_zip; this second pass validates the actual restore
         # input and gives the marker an immutable content identity.
         with open(path, "rb") as sql_file:
             for line in sql_file:
+                if (
+                    mysql_fork_scaffolding
+                    and _MYSQL_DUMP_AUTOCOMMIT_OFF_RE.fullmatch(line)
+                ):
+                    if autocommit_state != "idle":
+                        raise RestoreError(
+                            "stored SQL contains malformed vendor transaction scaffolding."
+                        )
+                    autocommit_state = "open"
+                elif (
+                    mysql_fork_scaffolding
+                    and _MYSQL_DUMP_AUTOCOMMIT_RESTORE_RE.fullmatch(line)
+                ):
+                    if autocommit_state != "committed":
+                        raise RestoreError(
+                            "stored SQL contains malformed vendor transaction scaffolding."
+                        )
+                    autocommit_state = "idle"
+
                 # Plain logical dumps do not need psql client meta-commands
                 # that can switch databases, read arbitrary local files, or
-                # execute a shell command.  ``\\.`` is deliberately allowed:
-                # it is the normal COPY-data terminator.
-                if re.search(
-                    rb"(?im)^\s*(?:\\(?:connect|include|ir|!|copy)\b|"
-                    rb"(?:source|system)\b|(?:drop|create|alter)\s+database\b|"
-                    rb"use\s+[^;]+;|(?:begin|commit|rollback|end)\s*;)",
-                    line,
-                ):
+                # execute a shell command. ``\\.`` is deliberately allowed:
+                # it is the normal COPY-data terminator. MariaDB/MySQL dumps
+                # produced with --single-transaction include one exact
+                # AUTOCOMMIT-off / COMMIT / AUTOCOMMIT-restore wrapper. Permit
+                # that vendor wrapper only for an isolated fork; PostgreSQL
+                # and in-place restores continue to reject every transaction
+                # boundary supplied by the archive.
+                transaction = _SQL_TRANSACTION_CONTROL_RE.fullmatch(line)
+                if transaction:
+                    command = transaction.group(1).lower()
+                    if (
+                        mysql_fork_scaffolding
+                        and command == b"commit"
+                        and autocommit_state == "open"
+                    ):
+                        autocommit_state = "committed"
+                    else:
+                        raise RestoreError(
+                            "stored SQL contains an unsafe client directive."
+                        )
+                if _UNSAFE_SQL_CLIENT_DIRECTIVE_RE.search(line):
                     raise RestoreError("stored SQL contains an unsafe client directive.")
                 lowered = line.lower()
                 if (
@@ -731,6 +789,10 @@ def _validate_extracted_archive(backup, auth, tree_root):
                     )
                 byte_count += len(line)
                 digest.update(line)
+        if mysql_fork_scaffolding and autocommit_state != "idle":
+            raise RestoreError(
+                "stored SQL contains malformed vendor transaction scaffolding."
+            )
         if byte_count <= 0:
             raise RestoreError("stored database backup contains an empty SQL dump.")
         source_digests.setdefault(source, []).append(
@@ -3120,7 +3182,9 @@ def restore_database(backup, restore):
         _ensure_restore_fence(restore)
         extract_backup_zip(local_zip, local_dir)
         _ensure_restore_fence(restore)
-        targets, source_digests = _validate_extracted_archive(backup, auth, local_dir)
+        targets, source_digests = _validate_extracted_archive(
+            backup, auth, local_dir, mode=mode
+        )
         mapping = _load_or_create_mapping(restore, params, targets.keys())
         _checkpoint(
             restore,

@@ -1703,6 +1703,78 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
                 _fake_backup(), _fake_auth(), self.tmp
             )
 
+    def test_mariadb_fork_accepts_exact_vendor_transaction_scaffolding(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        payload = (
+            b"/*M!999999\\- enable the sandbox mode */\n"
+            b"SET @OLD_AUTOCOMMIT=@@AUTOCOMMIT, @@AUTOCOMMIT=0;\n"
+            b"CREATE TABLE restored(id integer);\n"
+            b"INSERT INTO restored VALUES (1);\n"
+            b"COMMIT;\n"
+            b"SET AUTOCOMMIT=@OLD_AUTOCOMMIT;\n"
+        )
+        with open(sql_path, "wb") as output:
+            output.write(payload)
+        auth = _fake_auth(CoreAuthDatabase.DatabaseType.MARIADB)
+
+        targets, digests = RD._validate_extracted_archive(
+            _fake_backup(), auth, self.tmp, mode="fork"
+        )
+
+        self.assertEqual(targets, {"source_db": [sql_path]})
+        self.assertEqual(digests["source_db"][0]["bytes"], len(payload))
+        self.assertEqual(
+            digests["source_db"][0]["sha256"], hashlib.sha256(payload).hexdigest()
+        )
+
+    def test_mariadb_transaction_scaffolding_is_rejected_for_in_place_restore(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        with open(sql_path, "wb") as output:
+            output.write(
+                b"SET @OLD_AUTOCOMMIT=@@AUTOCOMMIT, @@AUTOCOMMIT=0;\n"
+                b"CREATE TABLE restored(id integer);\n"
+                b"COMMIT;\n"
+                b"SET AUTOCOMMIT=@OLD_AUTOCOMMIT;\n"
+            )
+
+        with self.assertRaisesRegex(RestoreError, "unsafe client directive"):
+            RD._validate_extracted_archive(
+                _fake_backup(),
+                _fake_auth(CoreAuthDatabase.DatabaseType.MARIADB),
+                self.tmp,
+                mode="in_place",
+            )
+
+    def test_mariadb_fork_rejects_unpaired_commit(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        with open(sql_path, "wb") as output:
+            output.write(b"CREATE TABLE restored(id integer);\nCOMMIT;\n")
+
+        with self.assertRaisesRegex(RestoreError, "unsafe client directive"):
+            RD._validate_extracted_archive(
+                _fake_backup(),
+                _fake_auth(CoreAuthDatabase.DatabaseType.MARIADB),
+                self.tmp,
+                mode="fork",
+            )
+
+    def test_mariadb_fork_rejects_incomplete_vendor_transaction_scaffolding(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        with open(sql_path, "wb") as output:
+            output.write(
+                b"SET @OLD_AUTOCOMMIT=@@AUTOCOMMIT, @@AUTOCOMMIT=0;\n"
+                b"CREATE TABLE restored(id integer);\n"
+                b"COMMIT;\n"
+            )
+
+        with self.assertRaisesRegex(RestoreError, "malformed vendor transaction"):
+            RD._validate_extracted_archive(
+                _fake_backup(),
+                _fake_auth(CoreAuthDatabase.DatabaseType.MARIADB),
+                self.tmp,
+                mode="fork",
+            )
+
     def test_client_stderr_is_not_returned_or_persisted(self):
         backup = _fake_backup()
         node = SimpleNamespace(
