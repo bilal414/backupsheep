@@ -113,3 +113,15 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
         )
         self.assertNotIn("downloadTransferLog", self.source)
         self.assertNotIn("Log File", self.source)
+
+    def test_recent_restore_history_exposes_phase_and_safe_diagnostics(self):
+        for marker in (
+            'x-show="restoreExecutionSummary(restoreItem)"',
+            "restoreExecutionErrorMessage(item)",
+            "restoreExecutionCorrelationId(item)",
+            "restoreExecutionErrorCode(item)",
+            'aria-label="Copy historical restore correlation ID"',
+            "The restore state is ambiguous, so automatic destination writes were stopped.",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.source)
