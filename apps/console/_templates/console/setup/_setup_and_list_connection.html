@@ -1020,9 +1020,9 @@
                              x-show="integrationCode === 'database' && (selectedAuth.type?.code===1 || selectedAuth.type?.code===2)">
                             <div class="flex items-center justify-between gap-4">
                                 <span class="flex grow flex-col">
-                                    <span class="text-sm font-medium text-slate-700" id="availability-label">Include Stored Procedures?</span>
-                                    <span class="text-xs text-slate-500" id="availability-description">Include stored procedures, functions & triggers in backups.
-                                        Please ensure your database user has permissions; otherwise, the backup will fail.</span>
+                                    <span class="text-sm font-medium text-slate-700" id="availability-label">Include Database Objects?</span>
+                                    <span class="text-xs text-slate-500" id="availability-description">Include stored procedures, functions, triggers, and scheduled event definitions in backups.
+                                        The database user must have permission to read these objects, including the EVENT privilege for MySQL and MariaDB.</span>
                                 </span>
                                 <button type="button"
                                         @click="toggleIncludeStoredProcedure()"

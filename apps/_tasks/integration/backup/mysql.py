@@ -231,6 +231,7 @@ def snapshot_mysql(backup):
         if node.connection.auth_database.include_stored_procedure:
             option_flags.append("--routines")
             option_flags.append("--triggers")
+            option_flags.append("--events")
 
         if "mysql_8" in node.connection.auth_database.version:
             option_flags.append("--column-statistics=0")

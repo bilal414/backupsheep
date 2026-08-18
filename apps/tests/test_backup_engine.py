@@ -1276,6 +1276,8 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
     def test_direct_success(self):
         node, backup = self._make_backup(
             db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0")
+        node.connection.auth_database.include_stored_procedure = True
+        node.connection.auth_database.save(update_fields=["include_stored_procedure"])
         calls = []
         self._run_engine(backup, _recorded_run(calls, dump=self.DUMP))
 
@@ -1295,6 +1297,9 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         self.assertTrue(argv[0].endswith("mysqldump"))
         self.assertEqual(argv[1], f"--defaults-extra-file=_storage/my_{backup.uuid}.cnf")
         self.assertIn("--column-statistics=0", argv)  # mysql_8
+        self.assertIn("--routines", argv)
+        self.assertIn("--triggers", argv)
+        self.assertIn("--events", argv)
         self.assertNotIn(DB_PASS, " ".join(argv))
         self.assertNotIn(DB_USER, " ".join(argv))
         self.assertFalse(kwargs.get("shell"))
@@ -1315,6 +1320,34 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         self.assertEqual(len(calls), 1)
         self.assertFalse(os.path.exists(f"_storage/{backup.uuid}.zip"))
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
+
+    def test_event_privilege_failure_contract_is_stable_and_not_retryable(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0")
+        node.connection.auth_database.include_stored_procedure = True
+        node.connection.auth_database.save(update_fields=["include_stored_procedure"])
+        canary = "password=event-secret host=db.internal"
+        calls = []
+
+        with self.assertRaises(NodeBackupFailedError) as ctx:
+            self._run_engine(
+                backup,
+                _recorded_run(
+                    calls,
+                    dump=b"partial",
+                    stderr=(
+                        "mysqldump: Couldn't execute 'show events': Access denied "
+                        f"for user 'backup' ({canary})"
+                    ).encode(),
+                    returncode=1,
+                ),
+            )
+
+        self.assertEqual(ctx.exception.error_code, "DATABASE_EVENT_PRIVILEGE_REQUIRED")
+        self.assertFalse(ctx.exception.retryable)
+        self.assertIn("EVENT privilege", str(ctx.exception.detail))
+        self.assertNotIn(canary, str(ctx.exception.detail))
+        self.assertNotIn(canary, self._read_log(backup))
 
     def test_stale_worker_does_not_delete_successor_artifacts(self):
         _node, backup = self._make_backup(
@@ -1390,6 +1423,8 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
     def test_direct_success_flags(self):
         node, backup = self._make_backup(
             db_type=CoreAuthDatabase.DatabaseType.MARIADB, version="mariadb_10_11")
+        node.connection.auth_database.include_stored_procedure = True
+        node.connection.auth_database.save(update_fields=["include_stored_procedure"])
         calls = []
         with self._patch_check_connection(), \
              mock.patch.object(MDB_ENGINE.subprocess, "run",
@@ -1403,6 +1438,9 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
         self.assertTrue(argv[0].endswith("mariadb-dump"))
         self.assertEqual(argv[1], f"--defaults-extra-file=_storage/my_{backup.uuid}.cnf")
         self.assertIn("--compress", argv)
+        self.assertIn("--routines", argv)
+        self.assertIn("--triggers", argv)
+        self.assertIn("--events", argv)
         self.assertFalse(any("column-statistics" in a for a in argv))
         self.assertNotIn(DB_PASS, " ".join(argv))
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
@@ -1417,6 +1455,8 @@ class MariadbSshEngineTests(DatabaseEngineBase):
             version="mariadb_11_8",
             use_private_key=True,
         )
+        node.connection.auth_database.include_stored_procedure = True
+        node.connection.auth_database.save(update_fields=["include_stored_procedure"])
         dump = b"/*M!999999\\- enable the sandbox mode */\nCREATE TABLE t (id int);\n"
         ssh = _FakeSSH(lambda command: (dump, b"", 0))
         key_path = self._key_file()
@@ -1434,6 +1474,9 @@ class MariadbSshEngineTests(DatabaseEngineBase):
             if command.startswith("mariadb-dump ")
         ]
         self.assertEqual(len(dump_commands), 1)
+        self.assertIn("--routines", dump_commands[0])
+        self.assertIn("--triggers", dump_commands[0])
+        self.assertIn("--events", dump_commands[0])
         self.assertNotIn(DB_PASS, dump_commands[0])
         with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
             self.assertEqual(archive.read("appdb.sql"), dump)
@@ -1499,6 +1542,8 @@ class MysqlSshEngineTests(DatabaseEngineBase):
 
     def test_ssh_success_contract(self):
         node, backup = self._ssh_backup()
+        node.connection.auth_database.include_stored_procedure = True
+        node.connection.auth_database.save(update_fields=["include_stored_procedure"])
         ssh = _FakeSSH(lambda command: (self.DUMP, b"", 0))
         key_path = self._key_file()
         with self._patch_check_connection(), \
@@ -1515,6 +1560,9 @@ class MysqlSshEngineTests(DatabaseEngineBase):
         self.assertEqual(len(dump_cmds), 1)
         self.assertIn(f"--defaults-extra-file={remote_name}", dump_cmds[0])
         self.assertIn("--column-statistics=0", dump_cmds[0])  # mysql_8 over SSH too
+        self.assertIn("--routines", dump_cmds[0])
+        self.assertIn("--triggers", dump_cmds[0])
+        self.assertIn("--events", dump_cmds[0])
         self.assertNotIn(DB_PASS, dump_cmds[0])
 
         # Credentials file SFTP-uploaded with 0600, then removed best-effort.

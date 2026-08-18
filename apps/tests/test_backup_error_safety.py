@@ -9,6 +9,40 @@ from apps.console.vultr import record_provider_result
 
 
 class BackupErrorSafetyTests(SimpleTestCase):
+    def test_database_event_privilege_failure_is_actionable_and_not_retryable(self):
+        canary = "password=database-secret host=db.internal"
+
+        failure = safe_backup_failure(
+            RuntimeError(
+                "mysqldump: Couldn't execute 'show events': Access denied "
+                f"for user 'backup' ({canary})"
+            ),
+            stage="database_backup",
+        )
+
+        self.assertEqual(failure.code, "DATABASE_EVENT_PRIVILEGE_REQUIRED")
+        self.assertFalse(failure.retryable)
+        self.assertIn("EVENT privilege", failure.detail)
+        self.assertNotIn(canary, failure.detail)
+        self.assertNotIn("db.internal", failure.detail)
+
+    def test_database_event_privilege_public_detail_reclassifies_stably(self):
+        first = safe_backup_failure(
+            RuntimeError(
+                "mariadb-dump: Access denied; you need (at least one of) the "
+                "EVENT privilege(s) for this operation"
+            ),
+            stage="database_backup",
+        )
+        self.assertEqual(first.code, "DATABASE_EVENT_PRIVILEGE_REQUIRED")
+
+        second = safe_backup_failure(
+            RuntimeError(first.detail),
+            stage="backup",
+        )
+
+        self.assertEqual(second, first)
+
     def test_secret_bearing_provider_error_is_never_returned(self):
         canary = "Bearer live-token password=database-secret host=db.internal"
 

@@ -218,6 +218,14 @@ class ConnectionSetupTemplateResilienceTests(SimpleTestCase):
     def test_structured_error_contract_is_rendered_inline(self):
         for field in ("code", "detail", "remediation", "retryable"):
             self.assertIn(f"connectionFailure?.{field}", self.source)
+
+    def test_full_mysql_object_option_discloses_events_and_privilege(self):
+        self.assertIn("Include Database Objects?", self.source)
+        self.assertIn(
+            "stored procedures, functions, triggers, and scheduled event definitions",
+            self.source,
+        )
+        self.assertIn("EVENT privilege", self.source)
         for code in (
             "REQUEST_TIMEOUT",
             "TCP_TIMEOUT",

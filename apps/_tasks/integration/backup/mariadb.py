@@ -231,6 +231,7 @@ def snapshot_mariadb(backup):
         if node.connection.auth_database.include_stored_procedure:
             option_flags.append("--routines")
             option_flags.append("--triggers")
+            option_flags.append("--events")
 
         database_version_path = node.connection.auth_database.bin_path()
         client_binary = node.connection.auth_database.mysql_family_client_binary(
