@@ -12,7 +12,7 @@ from apps.api.v1.utils.api_permissions import MemberPermissions
 from .filters import CoreDatabaseFilter
 from .permissions import CoreDatabaseViewPermissions
 from .serializers import CoreDatabaseConnectionReadSerializer, CoreDatabaseConnectionWriteSerializer
-from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, IntegrationValidationFailed
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
 from ..view_helpers import safe_connection_action
@@ -84,12 +84,12 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
-        try:
-            connection = self.get_object()
-            connection.auth_database.check_connection(check_errors=True)
-            return Response({"detail": "Validation passed. Integration is good for backups."}, status=status.HTTP_200_OK)
-        except Exception as e:
-            return Response({"detail": e.__str__()}, status=status.HTTP_400_BAD_REQUEST)
+        connection = self.get_object()
+        connection.auth_database.check_connection(check_errors=True)
+        return Response(
+            {"detail": "Validation passed. Integration is good for backups."},
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["get"])
     @safe_connection_action(stage="metadata_discovery")

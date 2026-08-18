@@ -13,7 +13,8 @@ from apps.api.v1.connection.view_helpers import (
     connection_error_response,
     safe_connection_action,
 )
-from apps.console.connection.models import CoreAuthWebsite
+from apps.console.connection.models import CoreAuthDatabase, CoreAuthWebsite
+from apps.console.connection.reliability import DatabaseEventPrivilegeError
 from apps.console.setting.models import CoreSiteSettings
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -143,6 +144,45 @@ class LiveConnectionViewContractTests(BaseTestCase):
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertEqual(response.json()["connection_error"]["code"], "DNS_FAILURE")
         self.assertNotIn("private.database.internal", response.content.decode())
+
+    def test_database_event_privilege_validation_keeps_specific_safe_contract(self):
+        connection = factories.make_connection(
+            self.account,
+            self.member,
+            code="database",
+        )
+        CoreAuthDatabase.objects.create(
+            connection=connection,
+            host="db.example.com",
+            port=3306,
+            database_name="appdb",
+            type=CoreAuthDatabase.DatabaseType.MYSQL,
+            version=CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+            include_stored_procedure=True,
+        )
+
+        with mock.patch.object(
+            CoreAuthDatabase,
+            "check_connection",
+            side_effect=DatabaseEventPrivilegeError(
+                internal_detail="password=api-secret host=db.internal"
+            ),
+        ):
+            response = self.client.get(
+                f"/api/v1/connections/database/{connection.id}/validate/"
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            payload["connection_error"]["code"],
+            "DATABASE_EVENT_PRIVILEGE_REQUIRED",
+        )
+        self.assertEqual(payload["connection_error"]["stage"], "authorization")
+        self.assertFalse(payload["connection_error"]["retryable"])
+        self.assertIn("EVENT privilege", payload["connection_error"]["remediation"])
+        self.assertNotIn("api-secret", response.content.decode())
+        self.assertNotIn("db.internal", response.content.decode())
 
     def test_provider_specific_validation_keeps_cross_account_resource_hidden(self):
         other_account, other_member, _ = factories.make_account()
