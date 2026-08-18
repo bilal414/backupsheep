@@ -9,15 +9,33 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
 
+from django.db import connection
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
+from django.urls import reverse
 from django.utils import timezone
 from botocore.exceptions import ClientError
 
 from apps._tasks.integration.storage.aws_s3 import storage_aws_s3
 from apps._tasks.integration.storage.local import storage_local
 from apps.api.v1.utils.api_helpers import bs_encrypt
-from apps.console.backup.models import CoreWebsiteBackup, CoreWebsiteBackupStoragePoints
+from apps.console.backup.models import (
+    CoreBasecampBackup,
+    CoreBasecampBackupStoragePoints,
+    CoreDatabaseBackup,
+    CoreDatabaseBackupStoragePoints,
+    CoreWebsiteBackup,
+    CoreWebsiteBackupStoragePoints,
+    CoreWordPressBackup,
+    CoreWordPressBackupStoragePoints,
+)
 from apps.console.connection.models import CoreDoSpacesRegion
+from apps.console.node.models import (
+    CoreBasecamp,
+    CoreDatabase,
+    CoreNode,
+    CoreWordPress,
+)
 from apps.console.storage.models import (
     CoreStorage,
     CoreStorageAWSS3,
@@ -49,6 +67,56 @@ def make_website_backup_point(member, storage, *, status, storage_file_id=None):
     return CoreWebsiteBackupStoragePoints.objects.create(
         backup=backup, storage=storage, status=status,
         storage_file_id=storage_file_id,
+    )
+
+
+def make_category_backup_point(member, storage, *, category, size, status=None):
+    connection = factories.make_connection(
+        storage.account,
+        member,
+        code=category,
+        name=f"{category}-{uuid.uuid4().hex[:8]}",
+    )
+    node = CoreNode.objects.create(
+        connection=connection,
+        type=(
+            CoreNode.Type.DATABASE
+            if category == "database"
+            else CoreNode.Type.SAAS
+        ),
+        name=f"{category}-source",
+        added_by=member,
+    )
+    suffix = uuid.uuid4().hex
+    if category == "database":
+        source = CoreDatabase.objects.create(node=node, name="database-source")
+        backup_model = CoreDatabaseBackup
+        point_model = CoreDatabaseBackupStoragePoints
+        source_field = "database"
+    elif category == "wordpress":
+        source = CoreWordPress.objects.create(node=node, name="wordpress-source")
+        backup_model = CoreWordPressBackup
+        point_model = CoreWordPressBackupStoragePoints
+        source_field = "wordpress"
+    elif category == "basecamp":
+        source = CoreBasecamp.objects.create(node=node, name="basecamp-source")
+        backup_model = CoreBasecampBackup
+        point_model = CoreBasecampBackupStoragePoints
+        source_field = "basecamp"
+    else:
+        raise ValueError(f"Unsupported category: {category}")
+
+    backup = backup_model.objects.create(
+        **{source_field: source},
+        uuid=f"storage-summary-{category}-{suffix}",
+        status=UtilBackup.Status.COMPLETE,
+        type=UtilBackup.Type.ON_DEMAND,
+        size=size,
+    )
+    return point_model.objects.create(
+        backup=backup,
+        storage=storage,
+        status=status or point_model.Status.UPLOAD_COMPLETE,
     )
 
 
@@ -309,6 +377,107 @@ class StorageCostSummaryTests(BaseTestCase):
         response = self.client.get("/api/v1/storage/costs/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["estimated_monthly_storage_usd"], 0.04)
+
+    def test_category_usage_is_completed_account_scoped_and_fixed_query_count(self):
+        storage = factories.make_storage(self.account, self.member, code="aws_s3")
+        website_point = make_website_backup_point(
+            self.member,
+            storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+        )
+        website_point.backup.size = 100
+        website_point.backup.save(update_fields=["size", "modified"])
+        make_category_backup_point(
+            self.member, storage, category="database", size=200
+        )
+        make_category_backup_point(
+            self.member, storage, category="wordpress", size=300
+        )
+        make_category_backup_point(
+            self.member, storage, category="basecamp", size=400
+        )
+
+        failed_point = make_website_backup_point(
+            self.member,
+            storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_FAILED,
+        )
+        failed_point.backup.size = 500
+        failed_point.backup.save(update_fields=["size", "modified"])
+
+        other_account, other_member, _other_user = factories.make_account()
+        other_storage = factories.make_storage(
+            other_account, other_member, code="aws_s3"
+        )
+        other_point = make_website_backup_point(
+            other_member,
+            other_storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE,
+        )
+        other_point.backup.size = 600
+        other_point.backup.save(update_fields=["size", "modified"])
+
+        # The storage lookup plus one grouped query for each of website,
+        # database, WordPress, and Basecamp stays constant as destinations grow.
+        with CaptureQueriesContext(connection) as captured:
+            summary = CoreStorage.cost_summary_for_account(self.account)
+        self.assertLessEqual(len(captured), 5)
+
+        destination = next(
+            item
+            for item in summary["destinations"]
+            if item["storage_id"] == storage.id
+        )
+        self.assertEqual(destination["categories"]["website"], {
+            "source_count": 1,
+            "backup_count": 1,
+            "stored_bytes": 100,
+        })
+        self.assertEqual(destination["categories"]["database"], {
+            "source_count": 1,
+            "backup_count": 1,
+            "stored_bytes": 200,
+        })
+        self.assertEqual(destination["categories"]["saas"], {
+            "source_count": 2,
+            "backup_count": 2,
+            "stored_bytes": 700,
+        })
+        self.assertEqual(destination["stored_bytes"], 1000)
+        self.assertEqual(
+            sum(
+                category["stored_bytes"]
+                for category in destination["categories"].values()
+            ),
+            destination["stored_bytes"],
+        )
+        self.assertNotIn(
+            other_storage.id,
+            {item["storage_id"] for item in summary["destinations"]},
+        )
+
+        self.client.force_login(self.user)
+        response = self.client.get(
+            reverse(
+                "console:setup:integration_storage_open",
+                args=[storage.type.code],
+            )
+        )
+        self.assertEqual(response.status_code, 200)
+        storage_row = next(
+            item
+            for item in response.context["page"].object_list
+            if item.id == storage.id
+        )
+        self.assertEqual(storage_row.stats_website_count, 1)
+        self.assertEqual(storage_row.stats_website_backup_count, 1)
+        self.assertEqual(storage_row.stats_website_size, 100)
+        self.assertEqual(storage_row.stats_database_count, 1)
+        self.assertEqual(storage_row.stats_database_backup_count, 1)
+        self.assertEqual(storage_row.stats_database_size, 200)
+        self.assertEqual(storage_row.stats_wordpress_count, 2)
+        self.assertEqual(storage_row.stats_wordpress_backup_count, 2)
+        self.assertEqual(storage_row.stats_wordpress_size, 700)
 
 
 class LocalStorageModelTests(BaseTestCase):

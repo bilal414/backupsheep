@@ -17,6 +17,8 @@ from apps._tasks.integration.storage.s3_verified import (
     S3UploadInventoryFailure,
     S3UploadOutcomePending,
     S3UploadReconciliationRequired,
+    _list_parts,
+    _multipart_part_size,
     upload_verified_s3,
 )
 
@@ -653,6 +655,10 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             ],
             1,
         )
+        self.assertEqual(
+            pending_state["multipart"]["part_size_bytes"],
+            5 * 1024 * 1024,
+        )
 
         with self.assertRaises(S3UploadOutcomePending):
             self._upload(client, key=key)
@@ -1158,3 +1164,130 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             client.list_multipart_uploads.call_args_list[0].kwargs["MaxUploads"],
             1,
         )
+
+    @override_settings(
+        S3_MULTIPART_PART_SIZE_BYTES=8 * 1024 * 1024,
+        S3_MULTIPART_TARGET_PARTS=8000,
+        S3_RECONCILIATION_MAX_PARTS=10000,
+    )
+    def test_large_object_geometry_keeps_headroom_below_provider_part_limit(self):
+        object_size = 107_421_554_763
+
+        part_size = _multipart_part_size(object_size)
+
+        self.assertGreaterEqual(part_size, 8 * 1024 * 1024)
+        self.assertEqual(part_size % (1024 * 1024), 0)
+        self.assertLessEqual(
+            (object_size + part_size - 1) // part_size,
+            8000,
+        )
+
+    @override_settings(
+        S3_RECONCILIATION_MAX_PAGES=3,
+        S3_RECONCILIATION_PAGE_SIZE=1000,
+        S3_RECONCILIATION_MAX_PARTS=2000,
+    )
+    def test_part_inventory_resumes_past_the_1000_part_page(self):
+        first_page = [
+            {"PartNumber": number, "ETag": f'"etag-{number}"', "Size": 8}
+            for number in range(1, 1001)
+        ]
+        client = mock.MagicMock()
+        client.list_parts.side_effect = [
+            {
+                "Parts": first_page,
+                "IsTruncated": True,
+                "NextPartNumberMarker": 1000,
+            },
+            {
+                "Parts": [
+                    {"PartNumber": 1001, "ETag": '"etag-1001"', "Size": 8}
+                ],
+                "IsTruncated": False,
+            },
+        ]
+
+        parts = _list_parts(
+            client, "test-bucket", "backups/object.zip", "upload-1"
+        )
+
+        self.assertEqual(len(parts), 1001)
+        self.assertEqual(parts[-1]["PartNumber"], 1001)
+        self.assertEqual(
+            client.list_parts.call_args_list[1].kwargs["PartNumberMarker"],
+            1000,
+        )
+
+    def test_part_inventory_rejects_malformed_and_repeated_pages(self):
+        malformed_pages = (
+            {"Parts": {}, "IsTruncated": False},
+            {"Parts": [{"ETag": '"missing-number"'}], "IsTruncated": False},
+            {
+                "Parts": [{"PartNumber": 1, "ETag": '"etag-1"'}],
+                "IsTruncated": True,
+            },
+            {
+                "Parts": [{"PartNumber": 1, "ETag": '"etag-1"'}],
+                "IsTruncated": True,
+                "NextPartNumberMarker": "not-a-number",
+            },
+        )
+        for page in malformed_pages:
+            with self.subTest(page=page):
+                client = mock.MagicMock()
+                client.list_parts.return_value = page
+                with self.assertRaises(S3UploadReconciliationRequired):
+                    _list_parts(
+                        client,
+                        "test-bucket",
+                        "backups/object.zip",
+                        "upload-1",
+                    )
+
+        client = mock.MagicMock()
+        client.list_parts.side_effect = [
+            {
+                "Parts": [{"PartNumber": 1, "ETag": '"etag-1"'}],
+                "IsTruncated": True,
+                "NextPartNumberMarker": 1,
+            },
+            {
+                "Parts": [{"PartNumber": 1, "ETag": '"etag-1-again"'}],
+                "IsTruncated": False,
+            },
+        ]
+        with self.assertRaises(S3UploadReconciliationRequired):
+            _list_parts(
+                client, "test-bucket", "backups/object.zip", "upload-1"
+            )
+
+    @override_settings(S3_RECONCILIATION_MAX_PARTS=1)
+    def test_part_inventory_enforces_configured_item_bound(self):
+        client = mock.MagicMock()
+        client.list_parts.return_value = {
+            "Parts": [
+                {"PartNumber": 1, "ETag": '"etag-1"'},
+                {"PartNumber": 2, "ETag": '"etag-2"'},
+            ],
+            "IsTruncated": False,
+        }
+
+        with self.assertRaises(S3UploadReconciliationRequired):
+            _list_parts(
+                client, "test-bucket", "backups/object.zip", "upload-1"
+            )
+
+    @override_settings(S3_RECONCILIATION_MAX_PAGES=1)
+    def test_part_inventory_enforces_configured_page_bound(self):
+        client = mock.MagicMock()
+        client.list_parts.return_value = {
+            "Parts": [{"PartNumber": 1, "ETag": '"etag-1"'}],
+            "IsTruncated": True,
+            "NextPartNumberMarker": 1,
+        }
+
+        with self.assertRaises(S3UploadReconciliationRequired):
+            _list_parts(
+                client, "test-bucket", "backups/object.zip", "upload-1"
+            )
+        client.list_parts.assert_called_once()

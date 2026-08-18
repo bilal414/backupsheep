@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import math
 import os
 import uuid
 from datetime import datetime, timedelta, timezone as datetime_timezone
@@ -27,6 +26,10 @@ SHA256_METADATA = "backupsheep-sha256"
 SIZE_METADATA = "backupsheep-bytes"
 BACKUP_METADATA = "backupsheep-backup-id"
 MULTIPART_METADATA = "backupsheep-multipart-id"
+S3_MIN_MULTIPART_PART_SIZE = 5 * 1024 * 1024
+S3_MAX_MULTIPART_PART_SIZE = 5 * 1024 ** 3
+S3_MAX_OBJECT_SIZE = 5 * 1024 ** 4
+S3_MULTIPART_ALIGNMENT = 1024 * 1024
 NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound", "NoSuchBucket"}
 NO_UPLOAD_CODES = {"NoSuchUpload", "404", "NotFound"}
 
@@ -157,6 +160,77 @@ class S3UploadInventoryFailure(RuntimeError):
         super().__init__(message)
         self.error_code = str(error_code)
         self.code = self.error_code
+
+
+def _validated_multipart_geometry(size_bytes, part_size_bytes, *, state=False):
+    error_class = S3UploadReconciliationRequired if state else S3ObjectIntegrityError
+    try:
+        size_bytes = int(size_bytes)
+        part_size_bytes = int(part_size_bytes)
+    except (TypeError, ValueError) as error:
+        raise error_class("Multipart upload geometry is malformed.") from error
+    if size_bytes < 1 or size_bytes > S3_MAX_OBJECT_SIZE:
+        raise error_class("Object size is outside the supported S3 multipart range.")
+    if not S3_MIN_MULTIPART_PART_SIZE <= part_size_bytes <= S3_MAX_MULTIPART_PART_SIZE:
+        raise error_class("Multipart part size is outside the supported S3 range.")
+    total_parts = (size_bytes + part_size_bytes - 1) // part_size_bytes
+    if total_parts > _reconciliation_max_parts():
+        raise error_class(
+            "Multipart geometry exceeds the bounded provider inventory limit."
+        )
+    return part_size_bytes
+
+
+def _multipart_part_size(size_bytes):
+    """Choose bounded geometry before creating a new multipart upload."""
+    try:
+        configured_minimum = int(
+            getattr(settings, "S3_MULTIPART_PART_SIZE_BYTES", 8 * 1024 * 1024)
+        )
+    except (TypeError, ValueError):
+        configured_minimum = 8 * 1024 * 1024
+    configured_minimum = max(S3_MIN_MULTIPART_PART_SIZE, configured_minimum)
+    target_parts = min(
+        _bounded_setting("S3_MULTIPART_TARGET_PARTS", 8000, maximum=10000),
+        _reconciliation_max_parts(),
+    )
+    required_size = (int(size_bytes) + target_parts - 1) // target_parts
+    aligned_size = (
+        (required_size + S3_MULTIPART_ALIGNMENT - 1)
+        // S3_MULTIPART_ALIGNMENT
+        * S3_MULTIPART_ALIGNMENT
+    )
+    return _validated_multipart_geometry(
+        size_bytes,
+        max(configured_minimum, aligned_size),
+    )
+
+
+def _legacy_multipart_part_size(size_bytes, remote_parts):
+    """Recover immutable geometry for uploads created before it was persisted."""
+    remote_sizes = []
+    for part in remote_parts:
+        try:
+            part_size = int(part.get("Size"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if part_size > 0:
+            remote_sizes.append(part_size)
+    if remote_sizes and max(remote_sizes) >= S3_MIN_MULTIPART_PART_SIZE:
+        candidate = max(remote_sizes)
+    else:
+        try:
+            candidate = int(
+                getattr(
+                    settings,
+                    "S3_MULTIPART_PART_SIZE_BYTES",
+                    8 * 1024 * 1024,
+                )
+            )
+        except (TypeError, ValueError):
+            candidate = 8 * 1024 * 1024
+        candidate = max(S3_MIN_MULTIPART_PART_SIZE, candidate)
+    return _validated_multipart_geometry(size_bytes, candidate, state=True)
 
 
 def _exception_chain(error):
@@ -583,19 +657,80 @@ def _list_parts(client, bucket, key, upload_id, expected_owner=None):
     if expected_owner:
         args["ExpectedBucketOwner"] = expected_owner
     parts = []
+    seen_part_numbers = set()
     marker = 0
+    page_count = 0
+    max_pages = _reconciliation_max_pages()
     max_parts = _reconciliation_max_parts()
     while True:
+        page_count += 1
+        if page_count > max_pages:
+            raise S3UploadReconciliationRequired(
+                "Object storage multipart parts exceeded the reconciliation page limit."
+            )
         payload = client.list_parts(**args, PartNumberMarker=marker)
-        parts.extend(payload.get("Parts") or [])
+        if not isinstance(payload, dict):
+            raise S3UploadReconciliationRequired(
+                "Object storage returned a malformed multipart parts page."
+            )
+        page_parts = payload.get("Parts")
+        if page_parts is None:
+            page_parts = []
+        elif not isinstance(page_parts, list):
+            raise S3UploadReconciliationRequired(
+                "Object storage returned a malformed multipart parts collection."
+            )
+        previous_number = marker
+        for raw_part in page_parts:
+            if not isinstance(raw_part, dict):
+                raise S3UploadReconciliationRequired(
+                    "Object storage returned a malformed multipart part."
+                )
+            try:
+                part_number = int(raw_part.get("PartNumber"))
+            except (TypeError, ValueError) as error:
+                raise S3UploadReconciliationRequired(
+                    "Object storage returned a multipart part without a valid number."
+                ) from error
+            etag = raw_part.get("ETag")
+            if (
+                part_number <= previous_number
+                or part_number > max_parts
+                or part_number in seen_part_numbers
+                or not isinstance(etag, str)
+                or not etag.strip()
+            ):
+                raise S3UploadReconciliationRequired(
+                    "Object storage returned an invalid or repeated multipart part."
+                )
+            if raw_part.get("Size") is not None:
+                try:
+                    if int(raw_part["Size"]) < 0:
+                        raise ValueError
+                except (TypeError, ValueError) as error:
+                    raise S3UploadReconciliationRequired(
+                        "Object storage returned an invalid multipart part size."
+                    ) from error
+            part = dict(raw_part)
+            part["PartNumber"] = part_number
+            parts.append(part)
+            seen_part_numbers.add(part_number)
+            previous_number = part_number
         if len(parts) > max_parts:
             raise S3UploadReconciliationRequired(
                 "Object storage multipart parts exceeded the reconciliation item limit."
             )
         if not payload.get("IsTruncated"):
             return parts
-        next_marker = int(payload.get("NextPartNumberMarker") or 0)
-        if next_marker <= marker:
+        try:
+            next_marker = int(payload["NextPartNumberMarker"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise S3UploadReconciliationRequired(
+                "Object storage returned a malformed multipart part cursor."
+            ) from error
+        if next_marker <= marker or (
+            page_parts and next_marker < previous_number
+        ):
             raise S3UploadReconciliationRequired(
                 "Object storage returned a non-advancing part cursor."
             )
@@ -1064,6 +1199,14 @@ def _multipart_upload(
         )
     multipart = dict(state.get("multipart") or {})
     upload_id = multipart.get("upload_id")
+    persisted_part_size = multipart.get("part_size_bytes")
+    part_size = (
+        _validated_multipart_geometry(
+            identity["size_bytes"], persisted_part_size, state=True
+        )
+        if persisted_part_size is not None
+        else None
+    )
     if state.get("phase") == "multipart_complete_outcome_unknown":
         if not upload_id:
             raise S3UploadReconciliationRequired(
@@ -1133,6 +1276,9 @@ def _multipart_upload(
 
     if not upload_id:
         multipart = dict(multipart)
+        if part_size is None:
+            part_size = _multipart_part_size(identity["size_bytes"])
+            multipart["part_size_bytes"] = part_size
         multipart.setdefault("operation_marker", uuid.uuid4().hex)
         existing_baseline = dict(multipart.get("create_baseline") or {})
         reconcile_only = (
@@ -1199,12 +1345,15 @@ def _multipart_upload(
         _save_state(stored_backup, metadata_key, state)
         remote_parts = _list_parts(client, bucket, key, upload_id, expected_owner)
 
-    part_size = max(
-        5 * 1024 * 1024,
-        int(getattr(settings, "S3_MULTIPART_PART_SIZE_BYTES", 8 * 1024 * 1024)),
-    )
+    if part_size is None:
+        part_size = _legacy_multipart_part_size(
+            identity["size_bytes"], remote_parts
+        )
+        multipart["part_size_bytes"] = part_size
+        state["multipart"] = multipart
+        _save_state(stored_backup, metadata_key, state)
     remote_by_number = {int(part["PartNumber"]): part for part in remote_parts}
-    total_parts = int(math.ceil(identity["size_bytes"] / part_size))
+    total_parts = (identity["size_bytes"] + part_size - 1) // part_size
     completed = []
     with open(local_path, "rb") as source:
         for number in range(1, total_parts + 1):

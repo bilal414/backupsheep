@@ -2,7 +2,7 @@ import os
 
 from django.conf import settings
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.db.models import Q, Sum, Count
+from django.db.models import Q
 from django.shortcuts import redirect
 from django.urls import reverse
 from django.views.generic import TemplateView, DetailView
@@ -119,20 +119,31 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                         "stored_bytes": 0,
                         "estimated_monthly_storage_usd": 0,
                         "estimated_full_retrieval_usd": 0,
+                        "categories": {},
                     },
                 )
-            # storage_list = (
-            #     CoreStorage.objects.filter(query)
-            #     .annotate(
-            #         Sum("website_backups__size"),
-            #         Sum("database_backups__size"),
-            #         Count("database_backups", distinct=True),
-            #         Count("website_backups", distinct=True),
-            #         Count("database_backups__database", distinct=True),
-            #         Count("website_backups__website", distinct=True),
-            #     )
-            #     .order_by("-created")
-            # )
+                categories = storage_item.cost_estimate.get("categories", {})
+                for field_name, category_name in (
+                    ("website", "website"),
+                    ("database", "database"),
+                    ("wordpress", "saas"),
+                ):
+                    usage = categories.get(category_name, {})
+                    setattr(
+                        storage_item,
+                        f"stats_{field_name}_count",
+                        usage.get("source_count", 0),
+                    )
+                    setattr(
+                        storage_item,
+                        f"stats_{field_name}_backup_count",
+                        usage.get("backup_count", 0),
+                    )
+                    setattr(
+                        storage_item,
+                        f"stats_{field_name}_size",
+                        usage.get("stored_bytes", 0),
+                    )
             context["storage_count"] = len(storage_list)
             context["heading"] = f"Integrations - {storage_type.name}"
 

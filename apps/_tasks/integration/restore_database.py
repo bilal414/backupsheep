@@ -1229,6 +1229,14 @@ def _postgres_marker_result(text, fields):
     return row, relation_exists or row is not None
 
 
+def _mysql_family_client(auth):
+    """Select the vendor CLI from the authenticated database engine."""
+    try:
+        return CoreAuthDatabase.mysql_family_client_binary(auth.type)
+    except (AttributeError, TypeError, ValueError):
+        raise RestoreError("database restore received an unsupported MySQL-family engine.") from None
+
+
 def _mysql_query(
     node,
     backup,
@@ -1242,9 +1250,11 @@ def _mysql_query(
     ssh=None,
     restore=None,
 ):
+    client = _mysql_family_client(auth)
+    label = client.upper()
     if ssh is not None:
         command = (
-            f'mysql --defaults-extra-file="$HOME/{defaults_arg}" '
+            f'{client} --defaults-extra-file="$HOME/{defaults_arg}" '
             f"--connect-timeout={CLIENT_CONNECT_TIMEOUT} --batch "
             f"--skip-column-names -e {shlex.quote(sql)}"
         )
@@ -1255,7 +1265,7 @@ def _mysql_query(
             command,
             username,
             password,
-            "MYSQL",
+            label,
             what,
             restore=restore,
         )
@@ -1263,7 +1273,7 @@ def _mysql_query(
         node,
         backup,
         [
-            f"{auth.bin_path()}mysql",
+            f"{auth.bin_path()}{client}",
             defaults_arg,
             f"--connect-timeout={CLIENT_CONNECT_TIMEOUT}",
             "--batch",
@@ -1273,7 +1283,7 @@ def _mysql_query(
         ],
         username,
         password,
-        "MYSQL",
+        label,
         what,
         restore=restore,
     )
@@ -1803,6 +1813,8 @@ def _reset_mysql_fork_checkpoint(
 
 def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_digests, username, password):
     """Restore MySQL/MariaDB sources into owned forks or explicit targets."""
+    client = _mysql_family_client(auth)
+    label = client.upper()
     local_defaults_path = None
     ssh_key_path = None
     ssh = None
@@ -2041,14 +2053,14 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                         node,
                         backup,
                         [
-                            f"{auth.bin_path()}mysql",
+                            f"{auth.bin_path()}{client}",
                             defaults_arg,
                             f"--connect-timeout={CLIENT_CONNECT_TIMEOUT}",
                             target,
                         ],
                         username,
                         password,
-                        "MYSQL",
+                        label,
                         f"import source database {source}",
                         stdin_path=sql_path,
                         restore=restore,
@@ -2070,12 +2082,12 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                             node,
                             backup,
                             ssh,
-                            f'mysql --defaults-extra-file="$HOME/{remote_defaults_name}" '
+                            f'{client} --defaults-extra-file="$HOME/{remote_defaults_name}" '
                             f"--connect-timeout={CLIENT_CONNECT_TIMEOUT} "
                             f"{shlex.quote(target)} < \"$HOME/{remote_sql}\"",
                             username,
                             password,
-                            "MYSQL",
+                            label,
                             f"import source database {source}",
                             restore=restore,
                         )

@@ -621,6 +621,44 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(query.call_count, 2)
         self.assertNotIn("CREATE DATABASE", " ".join(str(call) for call in query.call_args_list))
 
+    def test_mysql_family_queries_use_the_authenticated_vendor_client(self):
+        for database_type, client in (
+            (CoreAuthDatabase.DatabaseType.MYSQL, "mysql"),
+            (CoreAuthDatabase.DatabaseType.MARIADB, "mariadb"),
+        ):
+            with self.subTest(database_type=database_type, mode="direct"):
+                auth = _fake_auth(database_type)
+                with mock.patch.object(RD, "_run_direct", return_value="") as run:
+                    RD._mysql_query(
+                        SimpleNamespace(),
+                        _fake_backup(),
+                        auth,
+                        "--defaults-extra-file=/tmp/credentials",
+                        "SELECT 1;",
+                        "dbuser",
+                        "password",
+                        "query database",
+                    )
+                self.assertEqual(run.call_args.args[2][0], f"/usr/bin/{client}")
+                self.assertEqual(run.call_args.args[5], client.upper())
+
+            with self.subTest(database_type=database_type, mode="ssh"):
+                auth = _fake_auth(database_type)
+                with mock.patch.object(RD, "_ssh_run", return_value="") as run:
+                    RD._mysql_query(
+                        SimpleNamespace(),
+                        _fake_backup(),
+                        auth,
+                        "credentials.cnf",
+                        "SELECT 1;",
+                        "dbuser",
+                        "password",
+                        "query database",
+                        ssh=SimpleNamespace(),
+                    )
+                self.assertTrue(run.call_args.args[3].startswith(f"{client} "))
+                self.assertEqual(run.call_args.args[6], client.upper())
+
     def _mysql_partial_fixture(
         self,
         *,
@@ -864,6 +902,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         )
 
         self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[2][0], "/usr/bin/mariadb")
         self.assertEqual(
             restore.execution_metadata["target_checkpoints"][target]["status"],
             "complete",

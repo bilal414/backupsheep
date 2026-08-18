@@ -44,6 +44,7 @@ from apps._tasks.integration.backup._sanitize import (
 )
 
 COMMAND_TIMEOUT = 12 * 3600
+DEFAULT_POSTGRES_OPTIONS = "-w --clean --if-exists"
 
 
 def _redact(text, username, password):
@@ -201,7 +202,7 @@ def snapshot_postgresql(backup):
         if node.database.option_postgres:
             option_postgres = f"-w {safe_options(node.database.option_postgres, 'option_postgres')}"
         else:
-            option_postgres = "-w --clean"
+            option_postgres = DEFAULT_POSTGRES_OPTIONS
 
         # Save backup options used
         backup.option_postgres = option_postgres

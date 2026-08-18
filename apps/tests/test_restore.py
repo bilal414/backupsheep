@@ -1078,6 +1078,7 @@ class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
         auth = self._auth(CoreAuthDatabase.DatabaseType.MARIADB, "mariadb_10_11")
         command = self._capture_command(
             auth, "find_db_type_and_version", "10.11.6-MariaDB\n")
+        self.assertTrue(command.startswith("mariadb "))
         self.assertIn("--ssl", command)
         self.assertNotIn("ssl-mode", command)
 
@@ -1085,12 +1086,14 @@ class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
         auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL, "mysql_8_0")
         command = self._capture_command(
             auth, "find_db_type_and_version", "8.0.36\n")
+        self.assertTrue(command.startswith("mysql "))
         self.assertIn("--ssl-mode=PREFERRED", command)
 
     def test_check_connection_mariadb_uses_ssl_flag_not_ssl_mode(self):
         auth = self._auth(CoreAuthDatabase.DatabaseType.MARIADB, "mariadb_10_11")
         command = self._capture_command(
             auth, "check_connection", "Server version: 10.11.6-MariaDB\n")
+        self.assertTrue(command.startswith("mariadb "))
         self.assertIn("--ssl", command)
         self.assertNotIn("ssl-mode", command)
 
@@ -1098,6 +1101,7 @@ class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
         auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL, "mysql_8_0")
         command = self._capture_command(
             auth, "check_connection", "Server version: 8.0.36\n")
+        self.assertTrue(command.startswith("mysql "))
         self.assertIn("--ssl-mode=PREFERRED", command)
 
     def test_remote_command_never_contains_database_password(self):
@@ -1785,6 +1789,7 @@ class DatabaseRestoreEngineTests(RestoreBackendBase):
 
         self.assertEqual(len(calls), 1)
         import_argv, import_kwargs = calls[0]["argv"], calls[0]["kwargs"]
+        self.assertTrue(import_argv[0].endswith("/mysql"))
         self.assertEqual(
             import_argv[1],
             f"--defaults-extra-file=_storage/my_restore_{backup.uuid_str}.cnf",
@@ -1802,6 +1807,35 @@ class DatabaseRestoreEngineTests(RestoreBackendBase):
         self.assertFalse(
             os.path.exists(f"_storage/my_restore_{backup.uuid_str}.cnf")
         )
+
+    def test_mariadb_import_uses_vendor_client_and_preserves_sandbox_header(self):
+        node, backup = self._database_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MARIADB,
+            version="mariadb_11_8",
+        )
+        dump = (
+            b"/*M!999999\\- enable the sandbox mode */\n"
+            b"CREATE TABLE restored(id int);\n"
+        )
+        restore = self._db_restore(backup, {"appdb.sql": dump})
+        calls = []
+        imported = []
+
+        def fake_run(argv, **kwargs):
+            calls.append({"argv": list(argv), "kwargs": kwargs})
+            imported.append(kwargs["stdin"].read())
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        with mock.patch.object(
+            RD,
+            "_ensure_mysql_target",
+            side_effect=[{"state": "importing", "_new": True}, {"state": "complete"}],
+        ), mock.patch.object(RD, "_mysql_query", return_value=""):
+            self._run_engine(backup, restore, fake_run)
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["argv"][0].endswith("/mariadb"))
+        self.assertEqual(imported, [dump])
 
     def test_mysql_import_failure_raises_with_server_message(self):
         node, backup = self._database_backup(

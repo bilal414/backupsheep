@@ -23,6 +23,7 @@ _PUBLIC_PHASES = {
     "pending",
     "preparing",
     "capturing",
+    "source_ready",
     "validating",
     "uploading",
     "reconciling",
@@ -35,6 +36,63 @@ _PUBLIC_PHASES = {
     "cancelled",
     "in_progress",
     "unknown",
+}
+
+# Legacy backup/restore rows pre-date the durable execution ledger. Their parent
+# status is still authoritative for terminal outcomes, and a few intermediate
+# statuses describe a product stage more precisely than substring matching can.
+_LEGACY_STATUS_PHASES = {
+    "pending": "pending",
+    "in_progress": "in_progress",
+    "complete": "complete",
+    "failed": "failed",
+    "retrying": "retrying",
+    "started": "preparing",
+    "max_retries_failed": "failed",
+    "ready_for_upload": "source_ready",
+    "upload_in_progress": "uploading",
+    "upload_complete": "validating",
+    "upload_validation": "validating",
+    "partial": "complete",
+    "partial_some_destinations_failed": "complete",
+    "upload_failed": "failed",
+    "delete_requested": "preparing",
+    "delete_in_progress": "in_progress",
+    "delete_completed": "complete",
+    "delete_failed": "failed",
+    "delete_failed_not_found": "failed",
+    "delete_max_retries_failed": "failed",
+    "download_in_progress": "capturing",
+    "download_complete": "source_ready",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+    "timeout": "failed",
+    "storage_validation_failed": "failed",
+}
+_TERMINAL_STATUS_PHASES = {
+    status: phase
+    for status, phase in _LEGACY_STATUS_PHASES.items()
+    if status
+    in {
+        "complete",
+        "failed",
+        "max_retries_failed",
+        "partial",
+        "partial_some_destinations_failed",
+        "upload_failed",
+        "delete_completed",
+        "delete_failed",
+        "delete_failed_not_found",
+        "delete_max_retries_failed",
+        "cancelled",
+        "canceled",
+        "timeout",
+        "storage_validation_failed",
+    }
+}
+_AUTHORITATIVE_ACTIVE_STATUS_PHASES = {
+    "ready_for_upload": "source_ready",
+    "download_complete": "source_ready",
 }
 _PUBLIC_PROVIDER_STATUSES = {
     "active",
@@ -312,6 +370,13 @@ def _public_phase(value, fallback="unknown"):
         return "unknown"
     if raw in _PUBLIC_PHASES:
         return raw
+    legacy_phase = _LEGACY_STATUS_PHASES.get(raw)
+    if legacy_phase:
+        return legacy_phase
+    if "download" in raw and "complete" in raw:
+        return "source_ready"
+    if "upload" in raw and "complete" in raw:
+        return "validating"
     if any(token in raw for token in ("manual", "review")):
         return "manual_review"
     if any(token in raw for token in ("cancel", "abort")):
@@ -337,6 +402,20 @@ def _public_phase(value, fallback="unknown"):
     if any(token in raw for token in ("start", "prepare", "connect", "queue")):
         return "preparing"
     return "in_progress"
+
+
+def _execution_phase(legacy_status, phase_value=None):
+    """Return a non-contradictory public phase for a durable or legacy row."""
+    status_token = _safe_token(legacy_status, max_length=64) or "unknown"
+    if status_token in _TERMINAL_STATUS_PHASES:
+        return _TERMINAL_STATUS_PHASES[status_token]
+    if status_token in _AUTHORITATIVE_ACTIVE_STATUS_PHASES:
+        return _AUTHORITATIVE_ACTIVE_STATUS_PHASES[status_token]
+
+    phase_token = _safe_token(phase_value, max_length=64)
+    if phase_token:
+        return _public_phase(phase_token)
+    return _LEGACY_STATUS_PHASES.get(status_token, "unknown")
 
 
 def _safe_error_code(value):
@@ -529,9 +608,9 @@ def _backup_execution_status(obj, state=None, artifact=None):
         "durable": bool(state),
         "correlation_id": str(state.correlation_id) if state else None,
         "status": legacy_status,
-        "phase": _public_phase(
+        "phase": _execution_phase(
+            legacy_status,
             getattr(state, "phase", None) if state else None,
-            fallback=legacy_status,
         ),
         "last_error_code": error_code,
         "last_error_message": _safe_error_message(error_code),
@@ -623,7 +702,7 @@ def _restore_execution_status(obj):
         ),
         "recovery_id": _restore_recovery_id(obj),
         "status": legacy_status,
-        "phase": _public_phase(phase_value, fallback=legacy_status),
+        "phase": _execution_phase(legacy_status, phase_value),
         "last_error_code": error_code,
         "last_error_message": _safe_error_message(error_code),
         "last_error_at": _isoformat(getattr(obj, "last_error_at", None)),

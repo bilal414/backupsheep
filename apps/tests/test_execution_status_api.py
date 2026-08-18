@@ -14,7 +14,7 @@ from apps.api.v1.backup.website.serializers import (
     CoreWebsiteBackupSerializer,
     CoreWebsiteRestoreSerializer,
 )
-from apps.api.v1.backup.serializers import _safe_provider_status
+from apps.api.v1.backup.serializers import _execution_phase, _safe_provider_status
 from apps.console.backup.models import (
     CoreBackupArtifact,
     CoreBackupExecution,
@@ -27,6 +27,26 @@ from apps.tests.base import BaseTestCase
 
 
 class ExecutionStatusApiTests(BaseTestCase):
+    def test_legacy_status_phase_map_overrides_stale_terminal_and_source_phases(self):
+        cases = {
+            ("complete", "uploading"): "complete",
+            ("failed", "restoring"): "failed",
+            ("timeout", "polling"): "failed",
+            ("cancelled", "capturing"): "cancelled",
+            ("partial_some_destinations_failed", "uploading"): "complete",
+            ("download_complete", "capturing"): "source_ready",
+            ("ready_for_upload", "preparing"): "source_ready",
+            ("upload_validation", None): "validating",
+            ("in_progress", "download_complete"): "source_ready",
+            ("in_progress", "upload_complete"): "validating",
+            ("in_progress", "destination_upload_complete"): "validating",
+            ("retrying", None): "retrying",
+            ("in_progress", "reconciling"): "reconciling",
+        }
+        for (status, phase), expected in cases.items():
+            with self.subTest(status=status, phase=phase):
+                self.assertEqual(_execution_phase(status, phase), expected)
+
     def test_documented_provider_lifecycle_statuses_remain_visible(self):
         self.assertEqual(
             _safe_provider_status("configuring-enhanced-monitoring"),
@@ -158,7 +178,7 @@ class ExecutionStatusApiTests(BaseTestCase):
         backup = self._backup(status=UtilBackup.Status.IN_PROGRESS)
         state = self._execution(
             backup,
-            phase="complete",
+            phase="uploading",
             reconciliation_state="resolved",
             reconciliation_reason="provider_reconciled",
             last_error_code="",
@@ -296,7 +316,7 @@ class ExecutionStatusApiTests(BaseTestCase):
         status = data["execution_status"]
         self.assertEqual(status["correlation_id"], str(restore.correlation_id))
         self.assertEqual(status["recovery_id"], recovery_id)
-        self.assertEqual(status["phase"], "reconciling")
+        self.assertEqual(status["phase"], "failed")
         self.assertEqual(status["attempts"], 2)
         self.assertEqual(status["progress"], {
             "completed": 2,

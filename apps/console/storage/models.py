@@ -2437,11 +2437,11 @@ class CoreStorage(TimeStampedModel):
         actual provider billing remains authoritative because transitions can be
         asynchronous and contracts vary by customer and region.
 
-        Byte totals are aggregated in SQL (one grouped query per destination per
-        backup type) instead of iterating every storage-point row in Python, so the
-        dashboard and /api/v1/storage/costs/ stay fast on installs with many backups.
+        Byte totals are aggregated in SQL (one grouped query per backup type)
+        instead of iterating every destination or storage-point row in Python, so
+        the dashboard and /api/v1/storage/costs/ stay fast as destinations grow.
         """
-        from django.db.models import Q, Sum
+        from django.db.models import BigIntegerField, Case, Count, F, Sum, Value, When
 
         from ..backup.models import (
             CoreBasecampBackupStoragePoints,
@@ -2452,7 +2452,9 @@ class CoreStorage(TimeStampedModel):
 
         storages = {
             storage.id: storage
-            for storage in cls.objects.filter(account=account).select_related("type")
+            for storage in cls.objects.filter(account=account).select_related(
+                "type", "storage_aws_s3"
+            )
         }
         destinations = {
             storage.id: {
@@ -2465,6 +2467,14 @@ class CoreStorage(TimeStampedModel):
                 "cold_stored_bytes": 0,
                 "estimated_monthly_storage_usd": Decimal("0"),
                 "estimated_full_retrieval_usd": Decimal("0"),
+                "categories": {
+                    category: {
+                        "source_count": 0,
+                        "backup_count": 0,
+                        "stored_bytes": 0,
+                    }
+                    for category in ("website", "database", "saas")
+                },
             }
             for storage in storages.values()
         }
@@ -2474,21 +2484,25 @@ class CoreStorage(TimeStampedModel):
                 CoreWebsiteBackupStoragePoints,
                 "backup__website__node_id",
                 "backup__website__node__name",
+                "website",
             ),
             (
                 CoreDatabaseBackupStoragePoints,
                 "backup__database__node_id",
                 "backup__database__node__name",
+                "database",
             ),
             (
                 CoreWordPressBackupStoragePoints,
                 "backup__wordpress__node_id",
                 "backup__wordpress__node__name",
+                "saas",
             ),
             (
                 CoreBasecampBackupStoragePoints,
                 "backup__basecamp__node_id",
                 "backup__basecamp__node__name",
+                "saas",
             ),
         )
         gib = Decimal(1024 ** 3)
@@ -2497,56 +2511,97 @@ class CoreStorage(TimeStampedModel):
             storage.id: cls._storage_cold_cutoff(storage, now)
             for storage in storages.values()
         }
+        cold_size_conditions = [
+            When(
+                storage_id=storage_id,
+                backup__created__lte=cutoff,
+                then=F("backup__size"),
+            )
+            for storage_id, cutoff in cold_cutoffs.items()
+            if cutoff is not None
+        ]
+        category_sources = {}
 
-        for storage in storages.values():
-            cutoff = cold_cutoffs[storage.id]
-            destination = destinations[storage.id]
-            for point_model, node_id_field, node_name_field in point_models:
-                annotations = {"stored": Sum("backup__size")}
-                if cutoff:
-                    annotations["cold_stored"] = Sum(
-                        "backup__size", filter=Q(backup__created__lte=cutoff)
+        # One grouped query per backup family keeps the query count fixed as the
+        # number of destinations grows. Querying the concrete through tables also
+        # avoids the cross-join multiplication caused by annotating every M2M on
+        # CoreStorage in one queryset.
+        for point_model, node_id_field, node_name_field, category in point_models:
+            annotations = {
+                "stored": Sum("backup__size"),
+                "backup_count": Count("backup_id", distinct=True),
+            }
+            if cold_size_conditions:
+                annotations["cold_stored"] = Sum(
+                    Case(
+                        *cold_size_conditions,
+                        default=Value(0),
+                        output_field=BigIntegerField(),
                     )
-                rows = (
-                    point_model.objects.filter(
-                        storage_id=storage.id,
-                        status=point_model.Status.UPLOAD_COMPLETE,
-                        backup__size__isnull=False,
-                    )
-                    .values(node_id_field, node_name_field)
-                    .annotate(**annotations)
                 )
-                for row in rows:
-                    stored = int(row["stored"] or 0)
-                    cold = int(row.get("cold_stored") or 0) if cutoff else 0
-                    standard = stored - cold
+            rows = (
+                point_model.objects.filter(
+                    storage_id__in=storages,
+                    storage__account=account,
+                    status=point_model.Status.UPLOAD_COMPLETE,
+                )
+                .values("storage_id", node_id_field, node_name_field)
+                .annotate(**annotations)
+                .order_by()
+            )
+            for row in rows:
+                storage_id = row["storage_id"]
+                storage = storages[storage_id]
+                destination = destinations[storage_id]
+                stored = int(row["stored"] or 0)
+                cold = int(row.get("cold_stored") or 0)
+                standard = max(0, stored - cold)
 
-                    monthly_cost = (
-                        (Decimal(cold) / gib) * storage.cold_storage_cost_usd_per_gib_month
-                        + (Decimal(standard) / gib) * storage.storage_cost_usd_per_gib_month
-                    )
-                    retrieval_cost = (Decimal(stored) / gib) * storage.retrieval_cost_usd_per_gib
+                monthly_cost = (
+                    (Decimal(cold) / gib)
+                    * storage.cold_storage_cost_usd_per_gib_month
+                    + (Decimal(standard) / gib)
+                    * storage.storage_cost_usd_per_gib_month
+                )
+                retrieval_cost = (
+                    (Decimal(stored) / gib) * storage.retrieval_cost_usd_per_gib
+                )
 
-                    destination["stored_bytes"] += stored
-                    destination["cold_stored_bytes"] += cold
-                    destination["standard_stored_bytes"] += standard
-                    destination["estimated_monthly_storage_usd"] += monthly_cost
-                    destination["estimated_full_retrieval_usd"] += retrieval_cost
+                destination["stored_bytes"] += stored
+                destination["cold_stored_bytes"] += cold
+                destination["standard_stored_bytes"] += standard
+                destination["estimated_monthly_storage_usd"] += monthly_cost
+                destination["estimated_full_retrieval_usd"] += retrieval_cost
+                destination["categories"][category]["backup_count"] += int(
+                    row["backup_count"] or 0
+                )
+                destination["categories"][category]["stored_bytes"] += stored
+                category_sources.setdefault((storage_id, category), set()).add(
+                    (point_model._meta.label_lower, row.get(node_id_field))
+                )
 
-                    source_key = (row.get(node_id_field), row.get(node_name_field) or "Unknown source")
-                    source = sources.setdefault(
-                        source_key,
-                        {
-                            "source_id": source_key[0],
-                            "source_name": source_key[1],
-                            "stored_bytes": 0,
-                            "estimated_monthly_storage_usd": Decimal("0"),
-                            "estimated_full_retrieval_usd": Decimal("0"),
-                        },
-                    )
-                    source["stored_bytes"] += stored
-                    source["estimated_monthly_storage_usd"] += monthly_cost
-                    source["estimated_full_retrieval_usd"] += retrieval_cost
+                source_key = (
+                    row.get(node_id_field),
+                    row.get(node_name_field) or "Unknown source",
+                )
+                source = sources.setdefault(
+                    source_key,
+                    {
+                        "source_id": source_key[0],
+                        "source_name": source_key[1],
+                        "stored_bytes": 0,
+                        "estimated_monthly_storage_usd": Decimal("0"),
+                        "estimated_full_retrieval_usd": Decimal("0"),
+                    },
+                )
+                source["stored_bytes"] += stored
+                source["estimated_monthly_storage_usd"] += monthly_cost
+                source["estimated_full_retrieval_usd"] += retrieval_cost
+
+        for (storage_id, category), source_ids in category_sources.items():
+            destinations[storage_id]["categories"][category]["source_count"] = len(
+                source_ids
+            )
 
         destination_rows = []
         for destination in destinations.values():

@@ -194,6 +194,7 @@
 
                     <div x-show="!errorObjectList">
                         <button @click="saveDatabase()" type="button"
+                                :disabled="loading || !hasValidSelection()"
                                 class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
                             {% if not node.id %}
                                 <span>Create Node</span>
@@ -261,8 +262,8 @@
             objectList: null,
             connection: {},
             database: {
-                all_databases: false,
-                all_tables: false,
+                all_databases: {% if connection.auth_database.all_databases %}true{% else %}false{% endif %},
+                all_tables: {% if connection.auth_database.database_name %}true{% else %}false{% endif %},
                 databases: [],
                 tables: [],
                 name: null,
@@ -282,6 +283,15 @@
 
             openUrl(url) {
                 window.location.href = url;
+            },
+            hasValidSelection() {
+                {% if connection.auth_database.database_name %}
+                    return this.database.all_tables === true || this.database.tables?.length > 0;
+                {% elif connection.auth_database.all_databases %}
+                    return this.database.all_databases === true || this.database.databases?.length > 0;
+                {% else %}
+                    return false;
+                {% endif %}
             },
             addTable(object) {
                 if (!this.database.tables.includes(object)) {

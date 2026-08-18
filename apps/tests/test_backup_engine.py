@@ -1429,10 +1429,15 @@ class PostgresDirectEngineTests(DatabaseEngineBase):
         self.assertTrue(argv[0].endswith("pg_dump"))
         self.assertIn("-w", argv)
         self.assertIn("--clean", argv)
+        self.assertIn("--if-exists", argv)
         self.assertIn("appdb", argv)
         self.assertNotIn(DB_PASS, " ".join(argv))
         self.assertEqual(kwargs["env"]["PGPASSWORD"], DB_PASS)
         self.assertFalse(kwargs.get("shell"))
+        self.assertEqual(
+            backup.option_postgres,
+            PG_ENGINE.DEFAULT_POSTGRES_OPTIONS,
+        )
 
         with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as zf:
             self.assertEqual(zf.read("appdb.sql"), b"-- pg dump\n")
@@ -1546,8 +1551,14 @@ class PostgresSshEngineTests(DatabaseEngineBase):
         dump_cmds = [c for c in work_cmds if " pg_dump " in c]
         self.assertEqual(len(dump_cmds), 1)
         self.assertIn("-d db_one", dump_cmds[0])
+        self.assertIn("--clean", dump_cmds[0])
+        self.assertIn("--if-exists", dump_cmds[0])
         self.assertNotIn("template0", " ".join(dump_cmds))
         self.assertNotIn("template1", " ".join(dump_cmds))
+        self.assertEqual(
+            backup.option_postgres,
+            PG_ENGINE.DEFAULT_POSTGRES_OPTIONS,
+        )
 
         # pgpass uploaded with 0600 and removed afterwards.
         self.assertEqual(ssh.sftp.chmods, [(remote_name, 0o600)])

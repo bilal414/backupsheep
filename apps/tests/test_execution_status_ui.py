@@ -98,8 +98,18 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
         )[1].split("]);", 1)[0]
         self.assertNotIn("upload_complete", complete_set)
         self.assertNotIn("download_complete", complete_set)
-        self.assertIn("status === 'partial'", self.source)
+        self.assertIn("partial_some_destinations_failed", self.source)
+        self.assertIn("partialStatuses.has(status)", self.source)
         self.assertIn(
             ":aria-valuenow=\"view && view.progressDeterminate ? view.progressCompleted : null\"",
             self.source,
         )
+
+    def test_source_ready_label_and_diagnostics_do_not_offer_a_dead_log_action(self):
+        self.assertIn("Source archive ready", self.source)
+        self.assertIn(
+            "Diagnostics: use the correlation ID under Technical details.",
+            self.source,
+        )
+        self.assertNotIn("downloadTransferLog", self.source)
+        self.assertNotIn("Log File", self.source)

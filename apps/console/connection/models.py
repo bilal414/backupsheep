@@ -2250,6 +2250,15 @@ class CoreAuthDatabase(TimeStampedModel):
     class Meta:
         db_table = "core_auth_database"
 
+    @classmethod
+    def mysql_family_client_binary(cls, database_type):
+        """Return the vendor client required by a MySQL-family connection."""
+        if database_type == cls.DatabaseType.MYSQL:
+            return "mysql"
+        if database_type == cls.DatabaseType.MARIADB:
+            return "mariadb"
+        raise ValueError("database type is not part of the MySQL family")
+
     def bin_path(self):
         """Local directory of the version-matched client tools for direct-mode backups.
 
@@ -2557,8 +2566,9 @@ class CoreAuthDatabase(TimeStampedModel):
                     self.DatabaseType.MYSQL,
                     self.DatabaseType.MARIADB,
                 ):
+                    client_binary = self.mysql_family_client_binary(type)
                     execstr = (
-                        f"mysql"
+                        f"{client_binary}"
                         f" {remote_credentials['mysql_option']}"
                         f" {option_ssl_mode}"
                         f" --disable-column-names"
@@ -2720,8 +2730,9 @@ class CoreAuthDatabase(TimeStampedModel):
                     self.DatabaseType.MYSQL,
                     self.DatabaseType.MARIADB,
                 ):
+                    client_binary = self.mysql_family_client_binary(type)
                     execstr = (
-                        f"mysql"
+                        f"{client_binary}"
                         f" {remote_credentials['mysql_option']}"
                         f" {option_ssl_mode}"
                         f" --disable-column-names"
@@ -2899,8 +2910,9 @@ class CoreAuthDatabase(TimeStampedModel):
                             if self.database_name
                             else "SHOW DATABASES;"
                         )
+                        client_binary = self.mysql_family_client_binary(self.type)
                         execstr = (
-                            f"mysql"
+                            f"{client_binary}"
                             f" {remote_credentials['mysql_option']}"
                             f" {option_ssl_mode}"
                             f" --disable-column-names"
