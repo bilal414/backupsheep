@@ -1400,12 +1400,43 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
         self.assertEqual(backup.status, UtilBackup.Status.DOWNLOAD_COMPLETE)
         self.assertEqual(len(calls), 1)
         argv = calls[0]["argv"]
-        self.assertTrue(argv[0].endswith("mysqldump"))
+        self.assertTrue(argv[0].endswith("mariadb-dump"))
         self.assertEqual(argv[1], f"--defaults-extra-file=_storage/my_{backup.uuid}.cnf")
         self.assertIn("--compress", argv)
         self.assertFalse(any("column-statistics" in a for a in argv))
         self.assertNotIn(DB_PASS, " ".join(argv))
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
+
+
+class MariadbSshEngineTests(DatabaseEngineBase):
+    """MariaDB SSH mode uses MariaDB-native query and dump clients."""
+
+    def test_ssh_success_uses_mariadb_dump(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MARIADB,
+            version="mariadb_11_8",
+            use_private_key=True,
+        )
+        dump = b"/*M!999999\\- enable the sandbox mode */\nCREATE TABLE t (id int);\n"
+        ssh = _FakeSSH(lambda command: (dump, b"", 0))
+        key_path = self._key_file()
+        with self._patch_check_connection(), \
+             mock.patch.object(
+                 CoreAuthDatabase,
+                 "get_ssh_client",
+                 return_value=(ssh, key_path),
+             ), \
+             mock.patch.object(MDB_ENGINE, "delete_from_disk"):
+            MDB_ENGINE.snapshot_mariadb(backup)
+
+        dump_commands = [
+            command for command in ssh.commands
+            if command.startswith("mariadb-dump ")
+        ]
+        self.assertEqual(len(dump_commands), 1)
+        self.assertNotIn(DB_PASS, dump_commands[0])
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(archive.read("appdb.sql"), dump)
 
 
 class PostgresDirectEngineTests(DatabaseEngineBase):
@@ -1660,8 +1691,17 @@ class AuthDatabaseCheckConnectionSshTests(BaseTestCase):
             db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0",
             use_private_key=True)
         auth = node.connection.auth_database
-        ssh = _FakeSSH(lambda command: (b"mysql  Ver 8.0\nServer version: 8.0.35\n",
-                                        b"", 0))
+
+        def handler(command):
+            if command == "mysql --version":
+                return b"mysql  Ver 8.0.36 for Linux (MySQL Community Server)\n", b"", 0
+            if command == "mysqldump --version":
+                return b"mysqldump  Ver 8.0.36 for Linux (MySQL Community Server)\n", b"", 0
+            if "SELECT 1" in command:
+                return b"1\n", b"", 0
+            return b"mysql  Ver 8.0\nServer version: 8.0.35\n", b"", 0
+
+        ssh = _FakeSSH(handler)
         fd, key_path = tempfile.mkstemp(dir="_storage", prefix="sshkey_")
         os.write(fd, b"fake-key")
         os.close(fd)

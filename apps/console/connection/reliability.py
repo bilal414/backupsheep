@@ -47,6 +47,19 @@ class ClassifiedConnectionError(Exception):
         return self.failure.as_dict()
 
 
+class DatabaseClientCapabilityError(Exception):
+    """Internal signal for a missing or incompatible logical-database client.
+
+    ``internal_detail`` is retained only for exception telemetry.  The shared
+    classifier deliberately never places it in the public validation contract.
+    """
+
+    def __init__(self, engine: str, *, internal_detail: str = ""):
+        self.engine = str(engine or "").lower()
+        self.internal_detail = str(internal_detail or "")
+        super().__init__(f"database client capability check failed for {self.engine}")
+
+
 def _failure(code, detail, stage, retryable, remediation):
     return ConnectionFailure(code, detail, stage, retryable, remediation)
 
@@ -56,6 +69,31 @@ def classify_connection_error(error: BaseException, stage: str = "connection") -
 
     if isinstance(error, ClassifiedConnectionError):
         return error.failure
+
+    if isinstance(error, DatabaseClientCapabilityError):
+        if error.engine == "mariadb":
+            return _failure(
+                "DATABASE_CLIENT_UNSUPPORTED",
+                "BackupSheep cannot use the configured MariaDB client tools for this connection.",
+                "worker_preflight",
+                False,
+                "Install a MariaDB client and mariadb-dump release that supports the sandbox dump header on every relevant worker or SSH server, then validate again.",
+            )
+        if error.engine == "mysql":
+            return _failure(
+                "DATABASE_CLIENT_UNSUPPORTED",
+                "BackupSheep cannot use the configured MySQL client tools for this connection.",
+                "worker_preflight",
+                False,
+                "Install MySQL mysql and mysqldump clients at least as new as the configured server version on every relevant worker or SSH server, then validate again.",
+            )
+        return _failure(
+            "DATABASE_CLIENT_UNSUPPORTED",
+            "BackupSheep cannot use the required database client tools for this connection.",
+            "worker_preflight",
+            False,
+            "Install compatible database client tools on every relevant worker or SSH server, then validate again.",
+        )
 
     # Import optional client libraries lazily so this helper remains usable from
     # migration/test environments where a provider dependency may be unavailable.

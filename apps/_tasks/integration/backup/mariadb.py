@@ -1,13 +1,13 @@
-"""MariaDB logical backup engine (mysqldump from the MariaDB client).
+"""MariaDB logical backup engine (mariadb-dump from the MariaDB client).
 
 Two modes:
 
-- DIRECT: runs the local mysqldump binary via subprocess with an argv list (no
+- DIRECT: runs the local mariadb-dump binary via subprocess with an argv list (no
   ``shell=True``, no ``>`` redirect). Credentials are passed through a temporary
   defaults file ``_storage/my_{backup.uuid}.cnf`` (mode 0600) referenced with
   ``--defaults-extra-file=`` as the first option, and deleted in ``finally``.
   Dump stdout is streamed to ``_storage/{uuid}/{db|table}.sql``.
-- SSH: runs mysql/mysqldump on the remote host via paramiko. A defaults file
+- SSH: runs mariadb/mariadb-dump on the remote host via paramiko. A defaults file
   ``bs_{backup.uuid_str}.cnf`` (chmod 600) is SFTP-uploaded to the remote home
   directory, referenced with ``--defaults-extra-file=`` as the first flag, and
   removed (best-effort) in ``finally``. stdout is streamed back over the
@@ -107,7 +107,7 @@ def _run_direct_dump(node, backup, argv, db_file, log_file, username, password):
             backup.uuid_str,
             backup.attempt_no,
             backup.type,
-            message=f"mysqldump failed with exit code {proc.returncode}: "
+            message=f"mariadb-dump failed with exit code {proc.returncode}: "
                     f"{_redact(err_text[-2000:], username, password)}",
         )
     for line in err_text.splitlines():
@@ -119,7 +119,7 @@ def _run_direct_dump(node, backup, argv, db_file, log_file, username, password):
             backup.uuid_str,
             backup.attempt_no,
             backup.type,
-            message="mysqldump produced an empty dump file (0 bytes).",
+            message="mariadb-dump produced an empty dump file (0 bytes).",
         )
 
 
@@ -155,7 +155,7 @@ def _ssh_run_capture(node, backup, ssh, command, log_file, username, password, w
 
 
 def _ssh_dump_to_file(node, backup, ssh, command, db_file, log_file, username, password):
-    """Run a remote mysqldump, streaming stdout to db_file (binary append); raise on failure."""
+    """Run remote mariadb-dump, streaming stdout to a local binary file."""
     log_file.write(f"MariaDB: {_redact(command, username, password)}\n")
     stdin, stdout, stderr = ssh.exec_command(
         command,
@@ -168,14 +168,14 @@ def _ssh_dump_to_file(node, backup, ssh, command, db_file, log_file, username, p
             if not chunk:
                 break
             tmp.write(chunk)
-    _ssh_check_result(node, backup, stdout, stderr, log_file, username, password, "mysqldump")
+    _ssh_check_result(node, backup, stdout, stderr, log_file, username, password, "mariadb-dump")
     if os.path.getsize(db_file) == 0:
         raise NodeBackupFailedError(
             node,
             backup.uuid_str,
             backup.attempt_no,
             backup.type,
-            message="mysqldump produced an empty dump file (0 bytes).",
+            message="mariadb-dump produced an empty dump file (0 bytes).",
         )
 
 
@@ -233,6 +233,12 @@ def snapshot_mariadb(backup):
             option_flags.append("--triggers")
 
         database_version_path = node.connection.auth_database.bin_path()
+        client_binary = node.connection.auth_database.mysql_family_client_binary(
+            node.connection.auth_database.type
+        )
+        dump_binary = node.connection.auth_database.mysql_family_dump_binary(
+            node.connection.auth_database.type
+        )
 
         username = bs_decrypt(node.connection.auth_database.username, encryption_key)
         password = bs_decrypt(node.connection.auth_database.password, encryption_key)
@@ -285,7 +291,7 @@ def snapshot_mariadb(backup):
 
                 def remote_mysqldump(targets):
                     return " ".join(
-                        ["mysqldump", f"--defaults-extra-file={remote_defaults_name}"]
+                        [dump_binary, f"--defaults-extra-file={remote_defaults_name}"]
                         + dump_flags
                         + targets
                     )
@@ -299,7 +305,7 @@ def snapshot_mariadb(backup):
                         node,
                         backup,
                         ssh,
-                        f"mysql --defaults-extra-file={remote_defaults_name}"
+                        f"{client_binary} --defaults-extra-file={remote_defaults_name}"
                         f' --disable-column-names -e "show databases;"',
                         log_file,
                         username,
@@ -383,7 +389,7 @@ def snapshot_mariadb(backup):
 
             def local_mysqldump(targets):
                 return (
-                    [f"{database_version_path}mysqldump", f"--defaults-extra-file={local_defaults_path}"]
+                    [f"{database_version_path}{dump_binary}", f"--defaults-extra-file={local_defaults_path}"]
                     + dump_flags
                     + targets
                 )

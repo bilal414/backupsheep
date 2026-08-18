@@ -7,8 +7,10 @@ from django.test import SimpleTestCase, override_settings
 
 from apps.console.connection.reliability import (
     ClassifiedConnectionError,
+    DatabaseClientCapabilityError,
     classify_connection_error,
 )
+from apps.console.connection.models import CoreAuthDatabase
 from apps.console.connection.ssh import open_ssh_client
 from apps.api.v1.utils.http import TimeoutSession, _retry_policy
 
@@ -43,6 +45,204 @@ class ConnectionErrorClassificationTests(SimpleTestCase):
         )
         self.assertEqual(failure.code, "HOST_KEY_CHANGED")
         self.assertFalse(failure.retryable)
+
+    def test_database_client_capability_failure_has_safe_actionable_contract(self):
+        failure = classify_connection_error(
+            DatabaseClientCapabilityError(
+                "mariadb", internal_detail="password=do-not-return-this"
+            )
+        )
+        self.assertEqual(failure.code, "DATABASE_CLIENT_UNSUPPORTED")
+        self.assertEqual(failure.stage, "worker_preflight")
+        self.assertFalse(failure.retryable)
+        self.assertIn("MariaDB", failure.detail)
+        self.assertIn("mariadb-dump", failure.remediation)
+        self.assertNotIn("do-not-return-this", str(failure.as_dict()))
+
+
+class DatabaseClientCapabilityTests(SimpleTestCase):
+    def _auth(self, database_type, version):
+        return CoreAuthDatabase(
+            type=database_type,
+            version=version,
+            database_name="appdb",
+        )
+
+    def test_engine_aware_dump_binary_selection(self):
+        self.assertEqual(
+            CoreAuthDatabase.mysql_family_dump_binary(
+                CoreAuthDatabase.DatabaseType.MYSQL
+            ),
+            "mysqldump",
+        )
+        self.assertEqual(
+            CoreAuthDatabase.mysql_family_dump_binary(
+                CoreAuthDatabase.DatabaseType.MARIADB
+            ),
+            "mariadb-dump",
+        )
+
+    def test_local_mariadb_probe_uses_exact_sandbox_header_without_secret_argv(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MARIADB,
+            CoreAuthDatabase.DatabaseVersion.MARIADB_10_11,
+        )
+        calls = []
+
+        def run(argv):
+            calls.append(argv)
+            if argv[-1] == "--version":
+                return "mariadb Ver 15.1 Distrib 10.11.14-MariaDB"
+            return "1"
+
+        with mock.patch.object(auth, "bin_path", return_value="/usr/bin/"), \
+             mock.patch.object(
+                 auth,
+                 "_install_local_database_credentials",
+                 return_value="/tmp/bs-capability.cnf",
+             ), \
+             mock.patch.object(
+                 auth, "_run_local_database_client_command", side_effect=run
+             ), \
+             mock.patch("apps.console.connection.models.os.remove") as remove:
+            auth._validate_mysql_family_client_capability(
+                database_type=auth.type,
+                version=auth.version,
+                host="db.internal",
+                port=3306,
+                database_name="appdb",
+                username="backup",
+                password="super-secret",
+                use_ssl=False,
+            )
+
+        self.assertEqual(calls[0], ["/usr/bin/mariadb", "--version"])
+        self.assertEqual(calls[1], ["/usr/bin/mariadb-dump", "--version"])
+        probe_argv = calls[2]
+        self.assertEqual(probe_argv[0], "/usr/bin/mariadb")
+        self.assertEqual(
+            probe_argv[1],
+            "--defaults-extra-file=/tmp/bs-capability.cnf",
+        )
+        self.assertIn(
+            "/*M!999999\\- enable the sandbox mode */\nSELECT 1;",
+            probe_argv,
+        )
+        self.assertNotIn("super-secret", " ".join(probe_argv))
+        remove.assert_called_once_with("/tmp/bs-capability.cnf")
+
+    def test_mariadb_rejects_mysql_client_before_database_mutation(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MARIADB,
+            CoreAuthDatabase.DatabaseVersion.MARIADB_11_8,
+        )
+        with mock.patch.object(auth, "bin_path", return_value="/usr/bin/"), \
+             mock.patch.object(
+                 auth,
+                 "_run_local_database_client_command",
+                 return_value="mysql Ver 8.4.10 MySQL Community Server",
+             ):
+            with self.assertRaises(DatabaseClientCapabilityError):
+                auth._validate_mysql_family_client_capability(
+                    database_type=auth.type,
+                    version=auth.version,
+                    host="db.internal",
+                    port=3306,
+                    database_name="appdb",
+                    username="backup",
+                    password="secret",
+                    use_ssl=False,
+                )
+
+    def test_missing_mariadb_binary_is_classified_before_credentials_file(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MARIADB,
+            CoreAuthDatabase.DatabaseVersion.MARIADB_11_8,
+        )
+        with mock.patch.object(auth, "bin_path", return_value="/missing/"), \
+             mock.patch.object(
+                 auth,
+                 "_run_local_database_client_command",
+                 side_effect=FileNotFoundError("/missing/mariadb"),
+             ), \
+             mock.patch.object(
+                 auth, "_install_local_database_credentials"
+             ) as install_credentials:
+            with self.assertRaises(DatabaseClientCapabilityError) as raised:
+                auth._validate_mysql_family_client_capability(
+                    database_type=auth.type,
+                    version=auth.version,
+                    host="db.internal",
+                    port=3306,
+                    database_name="appdb",
+                    username="backup",
+                    password="secret",
+                    use_ssl=False,
+                )
+        install_credentials.assert_not_called()
+        self.assertEqual(
+            classify_connection_error(raised.exception).code,
+            "DATABASE_CLIENT_UNSUPPORTED",
+        )
+
+    def test_mysql_rejects_client_older_than_configured_server_contract(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MYSQL,
+            CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+        )
+        with mock.patch.object(auth, "bin_path", return_value="/opt/mysql/bin/"), \
+             mock.patch.object(
+                 auth,
+                 "_run_local_database_client_command",
+                 return_value="mysql Ver 8.0.36 MySQL Community Server",
+             ):
+            with self.assertRaises(DatabaseClientCapabilityError):
+                auth._validate_mysql_family_client_capability(
+                    database_type=auth.type,
+                    version=auth.version,
+                    host="db.internal",
+                    port=3306,
+                    database_name="appdb",
+                    username="backup",
+                    password="secret",
+                    use_ssl=False,
+                )
+
+    def test_ssh_mariadb_probe_checks_both_binaries_and_exact_dump_contract(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MARIADB,
+            CoreAuthDatabase.DatabaseVersion.MARIADB_11_8,
+        )
+        calls = []
+
+        def run(_ssh, command):
+            calls.append(command)
+            if command.endswith("--version"):
+                return "mariadb Ver 15.1 Distrib 10.11.14-MariaDB", ""
+            return "1", ""
+
+        with mock.patch.object(
+            auth, "_run_remote_database_command", side_effect=run
+        ):
+            auth._validate_mysql_family_client_capability(
+                database_type=auth.type,
+                version=auth.version,
+                host="127.0.0.1",
+                port=3307,
+                database_name="appdb",
+                username="backup",
+                password="secret",
+                use_ssl=False,
+                ssh=mock.sentinel.ssh,
+                remote_credentials={
+                    "mysql_option": '--defaults-extra-file="$HOME/.bs.cnf"'
+                },
+            )
+
+        self.assertEqual(calls[:2], ["mariadb --version", "mariadb-dump --version"])
+        self.assertIn("mariadb --defaults-extra-file=", calls[2])
+        self.assertIn("enable the sandbox mode", calls[2])
+        self.assertNotIn("secret", calls[2])
 
 
 @override_settings(

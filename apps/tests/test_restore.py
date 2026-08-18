@@ -1070,7 +1070,11 @@ class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
             close=mock.Mock(),
         )
         with mock.patch.object(CoreAuthDatabase, "get_ssh_client",
-                               return_value=(ssh, None)):
+                               return_value=(ssh, None)), \
+             mock.patch.object(
+                 CoreAuthDatabase,
+                 "_validate_mysql_family_client_capability",
+             ):
             getattr(auth, method)()
         return captured[0]
 

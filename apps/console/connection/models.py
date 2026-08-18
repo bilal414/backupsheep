@@ -2,7 +2,10 @@ import ipaddress
 import json
 import math
 import os
+import re
 import shlex
+import subprocess
+import tempfile
 import uuid
 
 from apps.api.v1.utils.http import request_timeout, requests
@@ -43,7 +46,11 @@ from model_utils.models import TimeStampedModel
 from ..member.models import CoreMember
 from ..utils.models import UtilBase
 from ..vultr import iter_vultr_collection, vultr_request_timeout
-from .reliability import ClassifiedConnectionError, classified_connection_error
+from .reliability import (
+    ClassifiedConnectionError,
+    DatabaseClientCapabilityError,
+    classified_connection_error,
+)
 from .ssh import cleanup_temporary_key, configure_host_keys, open_ssh_client
 
 
@@ -2259,6 +2266,236 @@ class CoreAuthDatabase(TimeStampedModel):
             return "mariadb"
         raise ValueError("database type is not part of the MySQL family")
 
+    @classmethod
+    def mysql_family_dump_binary(cls, database_type):
+        """Return the vendor dump client required by a MySQL-family connection."""
+        if database_type == cls.DatabaseType.MYSQL:
+            return "mysqldump"
+        if database_type == cls.DatabaseType.MARIADB:
+            return "mariadb-dump"
+        raise ValueError("database type is not part of the MySQL family")
+
+    @classmethod
+    def _mysql_family_engine_name(cls, database_type):
+        if database_type == cls.DatabaseType.MYSQL:
+            return "mysql"
+        if database_type == cls.DatabaseType.MARIADB:
+            return "mariadb"
+        raise ValueError("database type is not part of the MySQL family")
+
+    @staticmethod
+    def _mysql_cli_version(output):
+        match = re.search(
+            r"\b(?:Distrib|Ver)\s+(\d+)\.(\d+)",
+            str(output or ""),
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return int(match.group(1)), int(match.group(2))
+
+    @classmethod
+    def _validate_mysql_family_version_output(
+        cls,
+        database_type,
+        configured_version,
+        client_output,
+        dump_output,
+    ):
+        engine = cls._mysql_family_engine_name(database_type)
+        client_text = str(client_output or "").lower()
+        dump_text = str(dump_output or "").lower()
+        if database_type == cls.DatabaseType.MARIADB:
+            if "mariadb" not in client_text or "mariadb" not in dump_text:
+                raise DatabaseClientCapabilityError(engine)
+            return
+
+        if (
+            "mysql" not in client_text
+            or "mysql" not in dump_text
+            or "mariadb" in client_text
+            or "mariadb" in dump_text
+        ):
+            raise DatabaseClientCapabilityError(engine)
+        configured_match = re.fullmatch(
+            r"mysql_(\d+)_(\d+)", str(configured_version or "")
+        )
+        client_version = cls._mysql_cli_version(client_output)
+        dump_version = cls._mysql_cli_version(dump_output)
+        if not configured_match or not client_version or not dump_version:
+            raise DatabaseClientCapabilityError(engine)
+        configured = (
+            int(configured_match.group(1)),
+            int(configured_match.group(2)),
+        )
+        if client_version < configured or dump_version < configured:
+            raise DatabaseClientCapabilityError(engine)
+
+    @staticmethod
+    def _run_local_database_client_command(argv):
+        process = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=int(
+                getattr(settings, "DATABASE_VALIDATION_COMMAND_TIMEOUT", 30)
+            ),
+            check=False,
+        )
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"database client exited with status {process.returncode}"
+            )
+        output = (process.stdout or b"") + b"\n" + (process.stderr or b"")
+        return output.decode("utf-8", "replace").strip()
+
+    def _install_local_database_credentials(
+        self,
+        *,
+        host,
+        port,
+        username,
+        password,
+    ):
+        content = "\n".join(
+            [
+                "[client]",
+                f"host={self._mysql_option_value(host)}",
+                f"port={self._mysql_option_value(port)}",
+                f"user={self._mysql_option_value(username)}",
+                f"password={self._mysql_option_value(password)}",
+                "",
+            ]
+        ).encode("utf-8")
+        descriptor, path = tempfile.mkstemp(
+            prefix=".backupsheep-database-capability-",
+            suffix=".cnf",
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            os.write(descriptor, content)
+        except Exception:
+            os.close(descriptor)
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise
+        os.close(descriptor)
+        return path
+
+    def _validate_mysql_family_client_capability(
+        self,
+        *,
+        database_type,
+        version,
+        host,
+        port,
+        database_name,
+        username,
+        password,
+        use_ssl,
+        ssh=None,
+        remote_credentials=None,
+    ):
+        """Prove query/import and dump clients before backup or restore mutation.
+
+        MariaDB's exact sandbox header is executed with a read-only ``SELECT 1``
+        probe.  MariaDB documents that older MariaDB clients and MySQL's client
+        reject this header, so the feature probe is stronger than a patch-version
+        allowlist.  MySQL clients must be vendor-correct and no older than the
+        configured server contract.
+        """
+        engine = self._mysql_family_engine_name(database_type)
+        client = self.mysql_family_client_binary(database_type)
+        dump = self.mysql_family_dump_binary(database_type)
+        probe = "SELECT 1;"
+        if database_type == self.DatabaseType.MARIADB:
+            probe = "/*M!999999\\- enable the sandbox mode */\nSELECT 1;"
+        ssl_option = None
+        if use_ssl:
+            ssl_option = (
+                "--ssl"
+                if database_type == self.DatabaseType.MARIADB
+                else "--ssl-mode=PREFERRED"
+            )
+
+        local_credentials = None
+        try:
+            if ssh is not None:
+                if not remote_credentials:
+                    raise RuntimeError("remote credentials were not installed")
+                client_output, _ = self._run_remote_database_command(
+                    ssh, f"{client} --version"
+                )
+                dump_output, _ = self._run_remote_database_command(
+                    ssh, f"{dump} --version"
+                )
+                self._validate_mysql_family_version_output(
+                    database_type,
+                    version,
+                    client_output,
+                    dump_output,
+                )
+                parts = [client, remote_credentials["mysql_option"]]
+                if ssl_option:
+                    parts.append(ssl_option)
+                parts.extend(["--batch", "--skip-column-names"])
+                if database_name:
+                    parts.append(f"--database={shlex.quote(str(database_name))}")
+                parts.append(f"--execute={shlex.quote(probe)}")
+                probe_output, _ = self._run_remote_database_command(
+                    ssh, " ".join(parts)
+                )
+            else:
+                binary_path = self.bin_path()
+                client_path = f"{binary_path}{client}"
+                dump_path = f"{binary_path}{dump}"
+                client_output = self._run_local_database_client_command(
+                    [client_path, "--version"]
+                )
+                dump_output = self._run_local_database_client_command(
+                    [dump_path, "--version"]
+                )
+                self._validate_mysql_family_version_output(
+                    database_type,
+                    version,
+                    client_output,
+                    dump_output,
+                )
+                local_credentials = self._install_local_database_credentials(
+                    host=host,
+                    port=port,
+                    username=username,
+                    password=password,
+                )
+                argv = [
+                    client_path,
+                    f"--defaults-extra-file={local_credentials}",
+                ]
+                if ssl_option:
+                    argv.append(ssl_option)
+                argv.extend(["--batch", "--skip-column-names"])
+                if database_name:
+                    argv.append(f"--database={database_name}")
+                argv.extend(["--execute", probe])
+                probe_output = self._run_local_database_client_command(argv)
+            if str(probe_output or "").strip() != "1":
+                raise RuntimeError("database client capability probe returned no result")
+        except DatabaseClientCapabilityError:
+            raise
+        except Exception as error:
+            raise DatabaseClientCapabilityError(
+                engine,
+                internal_detail=error.__class__.__name__,
+            ) from error
+        finally:
+            if local_credentials:
+                try:
+                    os.remove(local_credentials)
+                except OSError:
+                    pass
+
     def bin_path(self):
         """Local directory of the version-matched client tools for direct-mode backups.
 
@@ -2490,8 +2727,17 @@ class CoreAuthDatabase(TimeStampedModel):
                 getattr(settings, "DATABASE_VALIDATION_COMMAND_TIMEOUT", 30)
             ),
         )
-        output = " ".join(map(str, stdout.readlines() or "")).strip()
-        error = " ".join(map(str, stderr.readlines() or "")).strip()
+
+        def decode_lines(stream):
+            return "".join(
+                line.decode("utf-8", "replace")
+                if isinstance(line, bytes)
+                else str(line)
+                for line in (stream.readlines() or [])
+            ).strip()
+
+        output = decode_lines(stdout)
+        error = decode_lines(stderr)
         channel = getattr(stdout, "channel", None)
         status = channel.recv_exit_status() if channel is not None else 0
         if status != 0:
@@ -2566,6 +2812,18 @@ class CoreAuthDatabase(TimeStampedModel):
                     self.DatabaseType.MYSQL,
                     self.DatabaseType.MARIADB,
                 ):
+                    self._validate_mysql_family_client_capability(
+                        database_type=type,
+                        version=(data or {}).get("version", self.version),
+                        host=host,
+                        port=port,
+                        database_name=database_name,
+                        username=username,
+                        password=password,
+                        use_ssl=use_ssl,
+                        ssh=ssh,
+                        remote_credentials=remote_credentials,
+                    )
                     client_binary = self.mysql_family_client_binary(type)
                     execstr = (
                         f"{client_binary}"
@@ -2643,6 +2901,16 @@ class CoreAuthDatabase(TimeStampedModel):
         else:
             if type == self.DatabaseType.MYSQL:
                 try:
+                    self._validate_mysql_family_client_capability(
+                        database_type=type,
+                        version=(data or {}).get("version", self.version),
+                        host=host,
+                        port=port,
+                        database_name=database_name,
+                        username=username,
+                        password=password,
+                        use_ssl=use_ssl,
+                    )
                     db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
                     cursor = db_con.cursor()
                     cursor.execute("SHOW TABLES")
@@ -2653,6 +2921,16 @@ class CoreAuthDatabase(TimeStampedModel):
                     raise classified_connection_error(e, stage="database") from e
             elif type == self.DatabaseType.MARIADB:
                 try:
+                    self._validate_mysql_family_client_capability(
+                        database_type=type,
+                        version=(data or {}).get("version", self.version),
+                        host=host,
+                        port=port,
+                        database_name=database_name,
+                        username=username,
+                        password=password,
+                        use_ssl=use_ssl,
+                    )
                     db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
                     cursor = db_con.cursor()
                     cursor.execute("SHOW TABLES")
