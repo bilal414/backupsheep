@@ -834,8 +834,10 @@ def _reserve_restore_recovery(model, restore_id, *, now, retry_seconds):
         metadata["recovery_dispatch_count"] = int(
             metadata.get("recovery_dispatch_count") or 0
         ) + 1
+        reserved_until = now + timedelta(seconds=retry_seconds)
+        metadata["recovery_dispatch_reserved_until"] = reserved_until.isoformat()
         restore.execution_metadata = metadata
-        restore.next_retry_at = now + timedelta(seconds=retry_seconds)
+        restore.next_retry_at = reserved_until
         restore.save(
             update_fields=["execution_metadata", "next_retry_at", "modified"]
         )

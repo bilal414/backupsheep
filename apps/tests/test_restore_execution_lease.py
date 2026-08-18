@@ -451,6 +451,115 @@ class RestoreExecutionLeaseTests(BaseTestCase):
 
     @override_settings(
         RESTORE_RECOVERY_STALE_SECONDS=1,
+        RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS=120,
+        RESTORE_RECOVERY_BATCH_SIZE=10,
+    )
+    def test_recovery_delivery_consumes_exact_dispatch_reservation(self):
+        node, backup, restore = self._restore()
+        CoreWebsiteRestore.objects.filter(pk=restore.pk).update(
+            status=restore.Status.IN_PROGRESS,
+            lease_owner="crashed-worker",
+            lease_token=uuid.uuid4(),
+            lease_expires_at=timezone.now() - timedelta(seconds=1),
+        )
+
+        with mock.patch.object(restore_tasks.current_app, "send_task"):
+            restore_tasks.resume_in_progress_restores.run()
+
+        restore.refresh_from_db()
+        reservation = restore.next_retry_at
+        recovery_task_id = (
+            f"recover-restore-{CoreWebsiteRestore.__name__}-{restore.pk}"
+        )
+        recovery = DurableRestoreLease(
+            restore,
+            phase="website_restore",
+            task_id=recovery_task_id,
+        )
+        claimed = recovery.claim()
+        self.addCleanup(recovery.release)
+
+        self.assertEqual(claimed.attempt_count, 1)
+        self.assertIsNone(claimed.next_retry_at)
+        self.assertEqual(
+            claimed.execution_metadata["recovery_claimed_task_id"],
+            recovery_task_id,
+        )
+        self.assertIn("recovery_claimed_at", claimed.execution_metadata)
+        self.assertNotIn(
+            "recovery_dispatch_reserved_until", claimed.execution_metadata
+        )
+        self.assertGreater(reservation, timezone.now())
+
+    @override_settings(
+        RESTORE_RECOVERY_STALE_SECONDS=1,
+        RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS=120,
+        RESTORE_RECOVERY_BATCH_SIZE=10,
+    )
+    def test_ordinary_delivery_cannot_consume_recovery_reservation(self):
+        _node, _backup, restore = self._restore()
+        CoreWebsiteRestore.objects.filter(pk=restore.pk).update(
+            status=restore.Status.IN_PROGRESS,
+            lease_owner="crashed-worker",
+            lease_token=uuid.uuid4(),
+            lease_expires_at=timezone.now() - timedelta(seconds=1),
+        )
+
+        with mock.patch.object(restore_tasks.current_app, "send_task"):
+            restore_tasks.resume_in_progress_restores.run()
+
+        restore.refresh_from_db()
+        ordinary = DurableRestoreLease(
+            restore,
+            phase="website_restore",
+            task_id="ordinary-redelivery",
+        )
+        with self.assertRaises(RestoreLeaseBusy):
+            ordinary.claim()
+
+    @override_settings(
+        RESTORE_RECOVERY_STALE_SECONDS=1,
+        RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS=120,
+        RESTORE_RECOVERY_BATCH_SIZE=10,
+    )
+    def test_consumed_recovery_reservation_does_not_bypass_later_backoff(self):
+        _node, _backup, restore = self._restore()
+        CoreWebsiteRestore.objects.filter(pk=restore.pk).update(
+            status=restore.Status.IN_PROGRESS,
+            lease_owner="crashed-worker",
+            lease_token=uuid.uuid4(),
+            lease_expires_at=timezone.now() - timedelta(seconds=1),
+        )
+
+        with mock.patch.object(restore_tasks.current_app, "send_task"):
+            restore_tasks.resume_in_progress_restores.run()
+
+        restore.refresh_from_db()
+        recovery_task_id = (
+            f"recover-restore-{CoreWebsiteRestore.__name__}-{restore.pk}"
+        )
+        recovery = DurableRestoreLease(
+            restore,
+            phase="website_restore",
+            task_id=recovery_task_id,
+        )
+        recovery.claim()
+        recovery.release()
+        CoreWebsiteRestore.objects.filter(pk=restore.pk).update(
+            next_retry_at=timezone.now() + timedelta(seconds=60)
+        )
+        restore.refresh_from_db()
+
+        delayed_recovery = DurableRestoreLease(
+            restore,
+            phase="website_restore",
+            task_id=recovery_task_id,
+        )
+        with self.assertRaises(RestoreLeaseBusy):
+            delayed_recovery.claim()
+
+    @override_settings(
+        RESTORE_RECOVERY_STALE_SECONDS=1,
         RESTORE_RECOVERY_BATCH_SIZE=10,
     )
     def test_recovery_sweep_does_not_requeue_live_restore(self):

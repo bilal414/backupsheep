@@ -10,6 +10,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.db import close_old_connections, transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from sentry_sdk import capture_exception
 
 
@@ -66,7 +67,29 @@ class DurableRestoreLease:
             restore = self.model.objects.select_for_update().get(pk=self.restore_id)
             if restore.status in self._terminal_statuses(restore):
                 raise RestoreAlreadyTerminal()
+            metadata = dict(restore.execution_metadata or {})
+            reservation_consumable = False
+            reserved_until_value = metadata.get(
+                "recovery_dispatch_reserved_until"
+            )
+            if isinstance(reserved_until_value, str):
+                reserved_until = parse_datetime(reserved_until_value)
+            else:
+                reserved_until = None
+            expected_recovery_task_id = (
+                f"recover-restore-{self.model.__name__}-{self.restore_id}"
+            )
             if restore.next_retry_at and restore.next_retry_at > now:
+                reservation_consumable = (
+                    self.task_id == expected_recovery_task_id
+                    and reserved_until is not None
+                    and reserved_until == restore.next_retry_at
+                )
+            if (
+                restore.next_retry_at
+                and restore.next_retry_at > now
+                and not reservation_consumable
+            ):
                 raise RestoreLeaseBusy(
                     min((restore.next_retry_at - now).total_seconds(), 300)
                 )
@@ -79,7 +102,10 @@ class DurableRestoreLease:
                     min((restore.lease_expires_at - now).total_seconds(), 60)
                 )
 
-            metadata = dict(restore.execution_metadata or {})
+            if reservation_consumable:
+                metadata.pop("recovery_dispatch_reserved_until", None)
+                metadata["recovery_claimed_at"] = now.isoformat()
+                metadata["recovery_claimed_task_id"] = self.task_id
             if restore.lease_owner or restore.lease_token:
                 takeovers = list(metadata.get("stale_lease_takeovers") or [])
                 takeovers.append(
