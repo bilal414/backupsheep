@@ -14,7 +14,10 @@ from apps.api.v1.connection.view_helpers import (
     safe_connection_action,
 )
 from apps.console.connection.models import CoreAuthDatabase, CoreAuthWebsite
-from apps.console.connection.reliability import DatabaseEventPrivilegeError
+from apps.console.connection.reliability import (
+    DatabaseEventPrivilegeError,
+    classified_connection_error,
+)
 from apps.console.setting.models import CoreSiteSettings
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
@@ -161,12 +164,24 @@ class LiveConnectionViewContractTests(BaseTestCase):
             include_stored_procedure=True,
         )
 
+        def event_privilege_failure(*_args, **_kwargs):
+            try:
+                raise RuntimeError("password=api-secret host=db.internal")
+            except RuntimeError as raw_error:
+                try:
+                    raise DatabaseEventPrivilegeError(
+                        internal_detail=raw_error.__class__.__name__
+                    ) from raw_error
+                except DatabaseEventPrivilegeError as event_error:
+                    raise classified_connection_error(
+                        event_error,
+                        stage="database",
+                    ) from event_error
+
         with mock.patch.object(
             CoreAuthDatabase,
             "check_connection",
-            side_effect=DatabaseEventPrivilegeError(
-                internal_detail="password=api-secret host=db.internal"
-            ),
+            side_effect=event_privilege_failure,
         ):
             response = self.client.get(
                 f"/api/v1/connections/database/{connection.id}/validate/"

@@ -7,7 +7,10 @@ from rest_framework import status
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.response import Response
 
-from apps.console.connection.reliability import classify_connection_error
+from apps.console.connection.reliability import (
+    ClassifiedConnectionError,
+    classify_connection_error,
+)
 
 
 _STATUS_BY_CODE = {
@@ -36,6 +39,8 @@ def connection_error_response(error, *, stage, status_code=None):
                 {"detail": "You do not have permission to perform this action."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if isinstance(classified_error, ClassifiedConnectionError):
+            break
         next_error = getattr(classified_error, "__context__", None)
         if next_error is None:
             break
