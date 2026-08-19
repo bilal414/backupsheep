@@ -211,7 +211,14 @@ def classify_connection_error(error: BaseException, stage: str = "connection") -
             True,
             "Allow the BackupSheep worker address through the firewall and confirm the configured port is reachable.",
         )
-    if isinstance(error, ConnectionRefusedError) or getattr(error, "errno", None) == errno.ECONNREFUSED:
+    if (
+        isinstance(error, ConnectionRefusedError)
+        or getattr(error, "errno", None) == errno.ECONNREFUSED
+        or (
+            "can't connect to mysql server" in str(error).lower()
+            and "(111)" in str(error).lower()
+        )
+    ):
         return _failure(
             "CONNECTION_REFUSED",
             "The destination refused the network connection.",

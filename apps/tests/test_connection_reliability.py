@@ -118,6 +118,20 @@ class DatabaseClientCapabilityTests(SimpleTestCase):
             "mariadb-dump",
         )
 
+    @mock.patch(
+        "apps.console.connection.models.os.path.exists", return_value=True
+    )
+    def test_unsaved_mysql_connection_selects_submitted_client_version(self, exists):
+        auth = CoreAuthDatabase()
+
+        self.assertEqual(
+            auth.bin_path(
+                version=CoreAuthDatabase.DatabaseVersion.MYSQL_8_4
+            ),
+            "/opt/mysql/bin/",
+        )
+        exists.assert_called_once_with("/opt/mysql/bin/mysqldump")
+
     def test_mysql_tls_switch_maps_to_required_or_disabled_without_fallback(self):
         self.assertEqual(
             CoreAuthDatabase._mysql_family_ssl_option(
@@ -153,6 +167,127 @@ class DatabaseClientCapabilityTests(SimpleTestCase):
             CoreAuthDatabase._run_local_database_client_command(
                 ["mysql", "--execute", "SELECT 1"]
             )
+
+    @mock.patch("apps.console.connection.models.subprocess.run")
+    def test_local_client_wrong_password_keeps_auth_contract(self, run):
+        run.return_value = mock.Mock(
+            returncode=1,
+            stdout=b"",
+            stderr=b"ERROR 1045 (28000): Access denied for user 'backup'@'worker'",
+        )
+
+        with self.assertRaises(ClassifiedConnectionError) as context:
+            CoreAuthDatabase._run_local_database_client_command(
+                ["mysql", "--execute", "SELECT 1"]
+            )
+
+        self.assertEqual(context.exception.code, "AUTH_FAILED")
+
+    @mock.patch("apps.console.connection.models.subprocess.run")
+    def test_local_client_refused_host_keeps_tcp_contract(self, run):
+        run.return_value = mock.Mock(
+            returncode=1,
+            stdout=b"",
+            stderr=(
+                b"ERROR 2003 (HY000): Can't connect to MySQL server on "
+                b"'db.example.test:65000' (111)"
+            ),
+        )
+
+        with self.assertRaises(ClassifiedConnectionError) as context:
+            CoreAuthDatabase._run_local_database_client_command(
+                ["mysql", "--execute", "SELECT 1"]
+            )
+
+        self.assertEqual(context.exception.code, "CONNECTION_REFUSED")
+
+    def test_mysql_require_ssl_1045_is_distinguished_from_wrong_password(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MYSQL,
+            CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+        )
+        query_calls = []
+        auth_failure = ClassifiedConnectionError(
+            classify_connection_error(
+                RuntimeError("ERROR 1045: Access denied for user 'backup'")
+            )
+        )
+
+        def run(argv):
+            if argv[-1] == "--version":
+                return "mysql Ver 8.4.10 MySQL Community Server"
+            query_calls.append(argv)
+            if "--ssl-mode=DISABLED" in argv:
+                raise auth_failure
+            if "--ssl-mode=REQUIRED" in argv:
+                return "1"
+            self.fail(f"unexpected capability command: {argv}")
+
+        with mock.patch.object(auth, "bin_path", return_value="/opt/mysql/bin/"), \
+             mock.patch.object(
+                 auth,
+                 "_install_local_database_credentials",
+                 return_value="/tmp/bs-capability.cnf",
+             ), \
+             mock.patch.object(
+                 auth, "_run_local_database_client_command", side_effect=run
+             ), \
+             mock.patch("apps.console.connection.models.os.remove"):
+            with self.assertRaises(DatabaseTLSRequiredError):
+                auth._validate_mysql_family_client_capability(
+                    database_type=auth.type,
+                    version=auth.version,
+                    host="db.internal",
+                    port=3306,
+                    database_name="appdb",
+                    username="backup",
+                    password="secret",
+                    use_ssl=False,
+                )
+
+        self.assertEqual(len(query_calls), 2)
+        self.assertIn("--ssl-mode=DISABLED", query_calls[0])
+        self.assertIn("--ssl-mode=REQUIRED", query_calls[1])
+
+    def test_mysql_wrong_password_remains_auth_failed_after_tls_hint_probe(self):
+        auth = self._auth(
+            CoreAuthDatabase.DatabaseType.MYSQL,
+            CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+        )
+        auth_failure = ClassifiedConnectionError(
+            classify_connection_error(
+                RuntimeError("ERROR 1045: Access denied for user 'backup'")
+            )
+        )
+
+        def run(argv):
+            if argv[-1] == "--version":
+                return "mysql Ver 8.4.10 MySQL Community Server"
+            raise auth_failure
+
+        with mock.patch.object(auth, "bin_path", return_value="/opt/mysql/bin/"), \
+             mock.patch.object(
+                 auth,
+                 "_install_local_database_credentials",
+                 return_value="/tmp/bs-capability.cnf",
+             ), \
+             mock.patch.object(
+                 auth, "_run_local_database_client_command", side_effect=run
+             ), \
+             mock.patch("apps.console.connection.models.os.remove"):
+            with self.assertRaises(ClassifiedConnectionError) as context:
+                auth._validate_mysql_family_client_capability(
+                    database_type=auth.type,
+                    version=auth.version,
+                    host="db.internal",
+                    port=3306,
+                    database_name="appdb",
+                    username="backup",
+                    password="wrong-secret",
+                    use_ssl=False,
+                )
+
+        self.assertEqual(context.exception.code, "AUTH_FAILED")
 
     def test_local_mariadb_probe_uses_exact_sandbox_header_without_secret_argv(self):
         auth = self._auth(

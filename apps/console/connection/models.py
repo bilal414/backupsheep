@@ -51,6 +51,7 @@ from .reliability import (
     DatabaseClientCapabilityError,
     DatabaseEventPrivilegeError,
     DatabaseTLSRequiredError,
+    classify_connection_error,
     classified_connection_error,
     database_tls_required_message,
 )
@@ -2364,6 +2365,11 @@ class CoreAuthDatabase(TimeStampedModel):
         if process.returncode != 0:
             if database_tls_required_message(output):
                 raise DatabaseTLSRequiredError()
+            failure = classify_connection_error(
+                RuntimeError(output), stage="database"
+            )
+            if failure.code != "CONNECTION_VALIDATION_FAILED":
+                raise ClassifiedConnectionError(failure)
             raise RuntimeError(
                 f"database client exited with status {process.returncode}"
             )
@@ -2515,7 +2521,10 @@ class CoreAuthDatabase(TimeStampedModel):
                                 internal_detail=error.__class__.__name__
                             ) from error
             else:
-                binary_path = self.bin_path()
+                # New-connection validation runs on an unsaved model instance,
+                # so select the client bundle from the submitted version rather
+                # than the instance's still-empty ``self.version`` field.
+                binary_path = self.bin_path(version=version)
                 client_path = f"{binary_path}{client}"
                 dump_path = f"{binary_path}{dump}"
                 client_output = self._run_local_database_client_command(
@@ -2575,6 +2584,34 @@ class CoreAuthDatabase(TimeStampedModel):
                             ) from error
             if str(probe_output or "").strip() != "1":
                 raise RuntimeError("database client capability probe returned no result")
+        except ClassifiedConnectionError as error:
+            if not use_ssl and error.code == "AUTH_FAILED":
+                # MySQL accounts declared with REQUIRE SSL may deliberately
+                # return the same 1045 response as a wrong password on a
+                # plaintext attempt. Prove the distinction with one bounded
+                # TLS-required SELECT probe using the same credentials. A
+                # successful probe means configuration, not authentication,
+                # is the problem; any failure preserves the original auth
+                # result. Do not run object/event checks in this hint probe.
+                try:
+                    self._validate_mysql_family_client_capability(
+                        database_type=database_type,
+                        version=version,
+                        host=host,
+                        port=port,
+                        database_name=database_name,
+                        username=username,
+                        password=password,
+                        use_ssl=True,
+                        all_databases=all_databases,
+                        include_database_objects=False,
+                        ssh=ssh,
+                        remote_credentials=remote_credentials,
+                    )
+                except Exception:
+                    raise error
+                raise DatabaseTLSRequiredError()
+            raise
         except (
             DatabaseClientCapabilityError,
             DatabaseEventPrivilegeError,
@@ -2593,7 +2630,7 @@ class CoreAuthDatabase(TimeStampedModel):
                 except OSError:
                     pass
 
-    def bin_path(self):
+    def bin_path(self, *, version=None):
         """Local directory of the version-matched client tools for direct-mode backups.
 
         The SaaS build ran `docker exec <version-container> <tool>`; the self-hosted
@@ -2603,7 +2640,7 @@ class CoreAuthDatabase(TimeStampedModel):
         - MySQL: a real MySQL client if dropped in at /opt/mysql/bin, else the system client.
         - MariaDB (and anything else): the system mariadb client (mariadb-dump / mysqldump).
         """
-        version = self.version or ""
+        version = version or self.version or ""
         if version.startswith("postgres_"):
             wanted = version.split("postgres_", 1)[1]
             for v in [wanted, "18", "17", "16", "15", "14"]:
@@ -2838,8 +2875,14 @@ class CoreAuthDatabase(TimeStampedModel):
         channel = getattr(stdout, "channel", None)
         status = channel.recv_exit_status() if channel is not None else 0
         if status != 0:
-            if database_tls_required_message(f"{output}\n{error}"):
+            combined = f"{output}\n{error}"
+            if database_tls_required_message(combined):
                 raise DatabaseTLSRequiredError()
+            failure = classify_connection_error(
+                RuntimeError(combined), stage="database"
+            )
+            if failure.code != "CONNECTION_VALIDATION_FAILED":
+                raise ClassifiedConnectionError(failure)
             # This detail is used only by the classifier and Sentry. Passwords are
             # absent from both the command and client stderr because auth uses files.
             raise RuntimeError(error or f"Database client exited with status {status}.")
