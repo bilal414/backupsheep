@@ -1314,12 +1314,27 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         self.assertIn("--routines", argv)
         self.assertIn("--triggers", argv)
         self.assertIn("--events", argv)
+        self.assertIn("--extended-insert", argv)
+        self.assertNotIn("--skip-extended-insert", argv)
         self.assertNotIn(DB_PASS, " ".join(argv))
         self.assertNotIn(DB_USER, " ".join(argv))
         self.assertFalse(kwargs.get("shell"))
         self.assertNotIn("env", kwargs)
         self.assertEqual(kwargs.get("timeout"), 12 * 3600)
         self.assertEqual(calls[0]["defaults_mode"], 0o600)
+        self.assertEqual(backup.option_mysql, " ".join(argv[2:-1]))
+        self.assertEqual(
+            backup.metadata["logical_dump"],
+            {
+                "contract_version": 1,
+                "engine": "mysql",
+                "version": "mysql_8_0",
+                "client": "mysqldump",
+                "flags": argv[2:-1],
+                "extended_insert": True,
+                "max_allowed_packet_bytes": 512 * 1024 * 1024,
+            },
+        )
 
         # The credentials file is deleted afterwards.
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
@@ -1334,6 +1349,23 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         self.assertEqual(len(calls), 1)
         self.assertFalse(os.path.exists(f"_storage/{backup.uuid}.zip"))
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
+
+    def test_explicit_skip_opt_keeps_row_by_row_format_visible(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0"
+        )
+        node.database.option_skip_opt = True
+        node.database.save(update_fields=["option_skip_opt"])
+        calls = []
+
+        self._run_engine(backup, _recorded_run(calls, dump=self.DUMP))
+
+        backup.refresh_from_db()
+        argv = calls[0]["argv"]
+        self.assertIn("--skip-opt", argv)
+        self.assertNotIn("--extended-insert", argv)
+        self.assertNotIn("--skip-extended-insert", argv)
+        self.assertFalse(backup.metadata["logical_dump"]["extended_insert"])
 
     def test_event_privilege_failure_contract_is_stable_and_not_retryable(self):
         node, backup = self._make_backup(
@@ -1467,9 +1499,48 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
         self.assertIn("--routines", argv)
         self.assertIn("--triggers", argv)
         self.assertIn("--events", argv)
+        self.assertIn("--extended-insert", argv)
+        self.assertNotIn("--skip-extended-insert", argv)
         self.assertFalse(any("column-statistics" in a for a in argv))
         self.assertNotIn(DB_PASS, " ".join(argv))
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
+        self.assertEqual(backup.option_mariadb, " ".join(argv[2:-1]))
+        self.assertEqual(
+            backup.metadata["logical_dump"],
+            {
+                "contract_version": 1,
+                "engine": "mariadb",
+                "version": "mariadb_10_11",
+                "client": "mariadb-dump",
+                "flags": argv[2:-1],
+                "extended_insert": True,
+                "max_allowed_packet_bytes": 512 * 1024 * 1024,
+            },
+        )
+
+    def test_explicit_skip_opt_keeps_row_by_row_format_visible(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MARIADB,
+            version="mariadb_10_11",
+        )
+        node.database.option_skip_opt = True
+        node.database.save(update_fields=["option_skip_opt"])
+        calls = []
+        with self._patch_check_connection(), \
+             mock.patch.object(
+                 MDB_ENGINE.subprocess,
+                 "run",
+                 side_effect=_recorded_run(calls, dump=b"-- dump\n"),
+             ), \
+             mock.patch.object(MDB_ENGINE, "delete_from_disk"):
+            MDB_ENGINE.snapshot_mariadb(backup)
+
+        backup.refresh_from_db()
+        argv = calls[0]["argv"]
+        self.assertIn("--skip-opt", argv)
+        self.assertNotIn("--extended-insert", argv)
+        self.assertNotIn("--skip-extended-insert", argv)
+        self.assertFalse(backup.metadata["logical_dump"]["extended_insert"])
 
 
 class MariadbSshEngineTests(DatabaseEngineBase):
@@ -1503,6 +1574,8 @@ class MariadbSshEngineTests(DatabaseEngineBase):
         self.assertIn("--routines", dump_commands[0])
         self.assertIn("--triggers", dump_commands[0])
         self.assertIn("--events", dump_commands[0])
+        self.assertIn("--extended-insert", dump_commands[0])
+        self.assertNotIn("--skip-extended-insert", dump_commands[0])
         self.assertNotIn(DB_PASS, dump_commands[0])
         with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
             self.assertEqual(archive.read("appdb.sql"), dump)
@@ -1589,6 +1662,8 @@ class MysqlSshEngineTests(DatabaseEngineBase):
         self.assertIn("--routines", dump_cmds[0])
         self.assertIn("--triggers", dump_cmds[0])
         self.assertIn("--events", dump_cmds[0])
+        self.assertIn("--extended-insert", dump_cmds[0])
+        self.assertNotIn("--skip-extended-insert", dump_cmds[0])
         self.assertNotIn(DB_PASS, dump_cmds[0])
 
         # Credentials file SFTP-uploaded with 0600, then removed best-effort.

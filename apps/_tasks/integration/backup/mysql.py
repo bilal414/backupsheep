@@ -269,8 +269,25 @@ def snapshot_mysql(backup):
         dump_flags = option_flags + [
             "--no-tablespaces",
             "--max_allowed_packet=512M",
-            "--skip-extended-insert",
         ]
+        extended_insert = not node.database.option_skip_opt
+        if extended_insert:
+            # Persist the intended format explicitly instead of depending on a
+            # vendor defaults file. Historical row-by-row dumps remain restorable.
+            dump_flags.append("--extended-insert")
+        metadata = dict(backup.metadata or {})
+        metadata["logical_dump"] = {
+            "contract_version": 1,
+            "engine": "mysql",
+            "version": str(node.connection.auth_database.version or ""),
+            "client": "mysqldump",
+            "flags": list(dump_flags),
+            "extended_insert": extended_insert,
+            "max_allowed_packet_bytes": 512 * 1024 * 1024,
+        }
+        backup.option_mysql = " ".join(dump_flags)
+        backup.metadata = metadata
+        backup.save(update_fields=["option_mysql", "metadata", "modified"])
 
         if (
             node.connection.auth_database.use_public_key
