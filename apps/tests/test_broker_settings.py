@@ -76,3 +76,11 @@ class RabbitMQRuntimeContractTests(SimpleTestCase):
             "/etc/rabbitmq/conf.d/90-backupsheep.conf:ro",
             compose,
         )
+
+    def test_compose_uses_a_stable_rabbitmq_hostname(self):
+        compose = COMPOSE_FILE.read_text(encoding="utf-8")
+        rabbitmq_service = compose.split("\n  rabbitmq:\n", 1)[1].split(
+            "\n  migrate:\n", 1
+        )[0]
+
+        self.assertIn("\n    hostname: rabbitmq\n", rabbitmq_service)

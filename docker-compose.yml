@@ -53,6 +53,10 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
+    # RabbitMQ derives its durable node database path from the node hostname.
+    # Container IDs change on recreation, so keep the hostname stable or the same
+    # named volume will appear to contain a brand-new, empty broker.
+    hostname: rabbitmq
     # Celery uses durable queues and persistent delivery, but RabbitMQ still needs
     # its own data directory persisted across container recreation. Without this,
     # `docker compose down && up` can discard queued backups before the database
