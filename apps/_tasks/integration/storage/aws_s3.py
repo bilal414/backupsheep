@@ -26,6 +26,23 @@ from apps.api.v1.utils.boto import bounded_boto3_client
 AWS_S3_OBJECT_METADATA_KEY = "aws_s3_object"
 
 
+def _s3_client(aws_s3, encryption_key):
+    return bounded_boto3_client(
+        "s3",
+        allow_retries=True,
+        region_name=aws_s3.region.code if aws_s3.region else None,
+        aws_access_key_id=bs_decrypt(aws_s3.access_key, encryption_key),
+        aws_secret_access_key=bs_decrypt(aws_s3.secret_key, encryption_key),
+        config=Config(
+            connect_timeout=10,
+            read_timeout=60,
+            retries={"max_attempts": 5, "mode": "standard"},
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
+    )
+
+
 def storage_aws_s3(stored_backup):
     try:
         local_zip = f"_storage/{stored_backup.backup.uuid}.zip"
@@ -36,24 +53,7 @@ def storage_aws_s3(stored_backup):
         prefix = aws_s3.prefix
 
         file_name = f"{stored_backup.backup.uuid}.zip"
-        s3_client = bounded_boto3_client(
-            "s3",
-            allow_retries=True,
-            region_name=aws_s3.region.code if aws_s3.region else None,
-            aws_access_key_id=bs_decrypt(
-                aws_s3.access_key, encryption_key
-            ),
-            aws_secret_access_key=bs_decrypt(
-                aws_s3.secret_key, encryption_key
-            ),
-            config=Config(
-                connect_timeout=10,
-                read_timeout=60,
-                retries={"max_attempts": 5, "mode": "standard"},
-                request_checksum_calculation="when_required",
-                response_checksum_validation="when_required",
-            ),
-        )
+        s3_client = _s3_client(aws_s3, encryption_key)
         if prefix:
             if (prefix != "") and (prefix.endswith("/") is False):
                 prefix += "/"

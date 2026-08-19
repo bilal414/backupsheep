@@ -69,21 +69,32 @@ from apps._tasks.integration.storage.wasabi import (
 from apps._tasks.execution import verify_and_commit_source_artifact
 from apps._tasks.integration.storage.lease import (
     DurableStorageUploadLease,
+    StorageCleanupNotEligible,
     StorageUploadAlreadyComplete,
     StorageUploadLeaseBusy,
     StorageUploadLeaseLost,
 )
 from apps._tasks.integration.storage.s3_verified import (
+    S3MultipartCleanupNotEligible,
+    S3MultipartCleanupPending,
     S3ObjectIntegrityError,
     S3UploadInventoryFailure,
     S3UploadOutcomePending,
     S3UploadReconciliationRequired,
+    cleanup_owned_multipart_upload,
+)
+from apps._tasks.integration.storage.s3_cleanup import (
+    UnsupportedMultipartCleanupBackend,
+    has_owned_multipart_cleanup_candidate,
+    multipart_cleanup_context,
+    multipart_cleanup_metadata_keys,
 )
 from apps.console.backup.models import (
     CoreWebsiteBackup,
     CoreDatabaseBackup,
     CoreWordPressBackup, CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints,
     CoreWordPressBackupStoragePoints, CoreBasecampBackup,
+    CoreBasecampBackupStoragePoints,
     StoragePointLeaseLostError,
 )
 from apps.console.node.models import CoreNode
@@ -115,6 +126,58 @@ _STORAGE_RATE_LIMIT_CODES = {
     "TooManyRequestsException",
 }
 _STORAGE_NOT_FOUND_CODES = {"404", "NoSuchBucket", "NoSuchKey", "NotFound"}
+
+_STORAGE_POINT_MODELS = {
+    "website": CoreWebsiteBackupStoragePoints,
+    "database": CoreDatabaseBackupStoragePoints,
+    "wordpress": CoreWordPressBackupStoragePoints,
+    "basecamp": CoreBasecampBackupStoragePoints,
+}
+_STORAGE_POINT_MODEL_KEYS = {
+    model: key for key, model in _STORAGE_POINT_MODELS.items()
+}
+
+
+def _terminal_cleanup_statuses(model):
+    names = (
+        "UPLOAD_FAILED",
+        "UPLOAD_FAILED_STORAGE_LIMIT",
+        "UPLOAD_FAILED_FILE_NOT_FOUND",
+        "UPLOAD_TIME_LIMIT_REACHED",
+        "STORAGE_VALIDATION_FAILED",
+        "CANCELLED",
+    )
+    return [
+        value
+        for value in (getattr(model.Status, name, None) for name in names)
+        if value is not None
+    ]
+
+
+def _multipart_cleanup_candidate_query():
+    query = Q(pk__in=[])
+    for metadata_key in multipart_cleanup_metadata_keys():
+        proof_path = (
+            f"metadata__{metadata_key}__multipart__creation_proof__version"
+        )
+        cleanup_phase_path = (
+            f"metadata__{metadata_key}__multipart_cleanup__phase"
+        )
+        query |= Q(**{proof_path: 1}) & (
+            Q(**{f"{cleanup_phase_path}__isnull": True})
+            | ~Q(**{f"{cleanup_phase_path}__in": ["complete", "abort_rejected"]})
+        )
+    return query
+
+
+def _schedule_owned_multipart_cleanup(stored_backup):
+    model_key = _STORAGE_POINT_MODEL_KEYS.get(stored_backup.__class__)
+    if not model_key or not has_owned_multipart_cleanup_candidate(stored_backup):
+        return False
+    storage_cleanup_owned_multipart.apply_async(
+        args=[model_key, stored_backup.pk]
+    )
+    return True
 
 
 def _client_error_code(error):
@@ -391,6 +454,7 @@ def _storage_error_outcome(error, point):
 def storage_upload(self, node_id, backup_id, stored_backup_id):
     node = CoreNode.objects.get(id=node_id)
     attempt_no = self.request.retries + 1
+    cleanup_after_release = False
 
     if node.type == CoreNode.Type.WEBSITE:
         backup = CoreWebsiteBackup.objects.get(id=backup_id)
@@ -536,6 +600,10 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
                 "modified",
             ]
         )
+        cleanup_after_release = (
+            not retryable
+            and has_owned_multipart_cleanup_candidate(stored_backup)
+        )
         retry_after = None
         retry_at = None
         if retryable:
@@ -570,12 +638,162 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
                         "modified",
                     ]
                 )
+                cleanup_after_release = has_owned_multipart_cleanup_candidate(
+                    stored_backup
+                )
                 log_file.write(
                     "Error [STORAGE_RETRIES_EXHAUSTED]: automatic retries exhausted.\n"
                 )
     finally:
         log_file.close()
         lease.release()
+        if cleanup_after_release:
+            try:
+                _schedule_owned_multipart_cleanup(stored_backup)
+            except Exception as cleanup_error:
+                # Broker loss cannot make the upload task replay a provider
+                # mutation. The bounded periodic sweep will republish this exact
+                # terminal point.
+                capture_exception(cleanup_error)
+
+
+@current_app.task(
+    name="storage_cleanup_owned_multipart",
+    track_started=True,
+    bind=True,
+    default_retry_delay=300,
+    max_retries=24,
+    time_limit=1800,
+    soft_time_limit=1500,
+)
+def storage_cleanup_owned_multipart(self, model_key, stored_backup_id):
+    """Reconcile and abort one exact-owned terminal multipart upload."""
+
+    model = _STORAGE_POINT_MODELS.get(str(model_key or ""))
+    if model is None:
+        raise TaskParamsNotProvided()
+    point = model.objects.select_related(
+        "storage__type", "storage__account", "backup"
+    ).get(pk=stored_backup_id)
+    if not has_owned_multipart_cleanup_candidate(point):
+        return {"result": "not_eligible"}
+
+    lease = DurableStorageUploadLease(
+        point,
+        task_id=self.request.id,
+        worker_name=getattr(self.request, "hostname", ""),
+        purpose="multipart_cleanup",
+    )
+    try:
+        point = lease.claim()
+    except (StorageUploadAlreadyComplete, StorageCleanupNotEligible):
+        return {"result": "not_eligible"}
+    except StorageUploadLeaseBusy as error:
+        raise self.retry(countdown=error.retry_after)
+
+    try:
+        context = multipart_cleanup_context(point)
+        result = cleanup_owned_multipart_upload(point, **context)
+        lease.ensure_owned()
+        return {
+            "result": result.get("result"),
+            "phase": result.get("phase"),
+        }
+    except S3MultipartCleanupPending as error:
+        raise self.retry(countdown=error.retry_after)
+    except (
+        S3MultipartCleanupNotEligible,
+        S3UploadReconciliationRequired,
+        UnsupportedMultipartCleanupBackend,
+    ):
+        return {"result": "not_eligible"}
+    except (StorageUploadLeaseLost, StoragePointLeaseLostError) as error:
+        capture_exception(error)
+        raise self.retry(countdown=30)
+    except Exception as error:
+        capture_exception(error)
+        delay = min(300 * (2 ** min(self.request.retries, 4)), 3600)
+        raise self.retry(countdown=delay)
+    finally:
+        lease.release()
+
+
+@current_app.task(
+    name="storage_sweep_owned_multipart_cleanup",
+    track_started=True,
+    bind=True,
+    time_limit=900,
+    soft_time_limit=840,
+)
+def storage_sweep_owned_multipart_cleanup(self):
+    """Publish a bounded, keyset-paginated sweep of stale eligible points."""
+
+    stale_seconds = max(
+        300,
+        min(
+            int(
+                getattr(
+                    settings,
+                    "S3_MULTIPART_CLEANUP_STALE_SECONDS",
+                    6 * 3600,
+                )
+            ),
+            30 * 24 * 3600,
+        ),
+    )
+    batch_size = max(
+        1,
+        min(
+            int(getattr(settings, "S3_MULTIPART_CLEANUP_BATCH_SIZE", 50)),
+            500,
+        ),
+    )
+    scan_limit = max(
+        batch_size,
+        min(
+            int(getattr(settings, "S3_MULTIPART_CLEANUP_SCAN_LIMIT", 1000)),
+            10000,
+        ),
+    )
+    page_size = min(100, scan_limit)
+    now = timezone.now()
+    cutoff = now - timedelta(seconds=stale_seconds)
+    enqueued = 0
+    scanned = 0
+
+    for model_key, model in _STORAGE_POINT_MODELS.items():
+        last_id = 0
+        base = (
+            model.objects.select_related("storage__type")
+            .filter(
+                status__in=_terminal_cleanup_statuses(model),
+                modified__lte=cutoff,
+            )
+            .filter(_multipart_cleanup_candidate_query())
+            .filter(
+                Q(upload_lease_expires_at__isnull=True)
+                | Q(upload_lease_expires_at__lte=now)
+            )
+            .exclude(metadata__isnull=True)
+            .order_by("id")
+        )
+        while scanned < scan_limit and enqueued < batch_size:
+            page = list(base.filter(id__gt=last_id)[:page_size])
+            if not page:
+                break
+            for point in page:
+                last_id = point.pk
+                scanned += 1
+                if has_owned_multipart_cleanup_candidate(point):
+                    storage_cleanup_owned_multipart.apply_async(
+                        args=[model_key, point.pk]
+                    )
+                    enqueued += 1
+                    if enqueued >= batch_size:
+                        break
+                if scanned >= scan_limit:
+                    break
+    return {"enqueued": enqueued, "scanned": scanned}
 
 
 @current_app.task(

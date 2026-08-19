@@ -860,6 +860,18 @@ S3_MULTIPART_NO_PROGRESS_SECONDS = int(
 S3_MULTIPART_NO_PROGRESS_RETRY_AFTER_SECONDS = int(
     config.get("S3_MULTIPART_NO_PROGRESS_RETRY_AFTER_SECONDS", 300)
 )
+S3_MULTIPART_CLEANUP_RETRY_AFTER_SECONDS = int(
+    config.get("S3_MULTIPART_CLEANUP_RETRY_AFTER_SECONDS", 300)
+)
+S3_MULTIPART_CLEANUP_STALE_SECONDS = int(
+    config.get("S3_MULTIPART_CLEANUP_STALE_SECONDS", 6 * 3600)
+)
+S3_MULTIPART_CLEANUP_BATCH_SIZE = int(
+    config.get("S3_MULTIPART_CLEANUP_BATCH_SIZE", 50)
+)
+S3_MULTIPART_CLEANUP_SCAN_LIMIT = int(
+    config.get("S3_MULTIPART_CLEANUP_SCAN_LIMIT", 1000)
+)
 DROPBOX_UPLOAD_CHUNK_SIZE_BYTES = int(
     config.get("DROPBOX_UPLOAD_CHUNK_SIZE_BYTES", 8 * 1024 * 1024)
 )
@@ -910,6 +922,12 @@ CELERY_BEAT_SCHEDULE = {
     "retry-protected-storage-deletes": {
         "task": "retry_protected_storage_deletes",
         "schedule": crontab(minute=15, hour="*/6"),  # every 6 hours
+    },
+    # Application-owned multipart cleanup is exact-key and witness-gated. Provider
+    # lifecycle expiry remains defense in depth, not the correctness mechanism.
+    "sweep-owned-multipart-cleanup": {
+        "task": "storage_sweep_owned_multipart_cleanup",
+        "schedule": crontab(minute=45, hour="*/6"),
     },
     # Resume backup rows whose task/poller disappeared without changing them to a
     # terminal state. This is deliberately frequent; the database lease in
@@ -980,6 +998,8 @@ CELERY_TASK_ROUTES = {
     # S3 lifecycle rule application + deferred Object Lock delete retries.
     "storage_aws_s3_sync_lifecycle": {"queue": "storage"},
     "retry_protected_storage_deletes": {"queue": "storage"},
+    "storage_cleanup_owned_multipart": {"queue": "storage"},
+    "storage_sweep_owned_multipart_cleanup": {"queue": "storage"},
     "sync_lightsail_bucket_replications": {"queue": "storage"},
     "resume_lightsail_bucket_replications": {"queue": "storage"},
     "resume_lightsail_bucket_restores": {"queue": "storage"},

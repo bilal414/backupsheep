@@ -27,6 +27,10 @@ class StorageUploadLeaseLost(RuntimeError):
     pass
 
 
+class StorageCleanupNotEligible(RuntimeError):
+    pass
+
+
 class DurableStorageUploadLease:
     """Own and renew a storage-point lease until the provider call returns.
 
@@ -34,12 +38,16 @@ class DurableStorageUploadLease:
     model instance is bound to it, so every adapter save fails after takeover.
     """
 
-    def __init__(self, point, *, task_id="", worker_name=""):
+    def __init__(self, point, *, task_id="", worker_name="", purpose="upload"):
         self.model = point.__class__
         self.point_id = point.pk
+        if purpose not in {"upload", "multipart_cleanup"}:
+            raise ValueError("Unknown storage lease purpose.")
+        self.purpose = purpose
         self.task_id = str(task_id or "")[:255]
         self.owner = (
-            f"storage:{self.task_id or 'delivery'}:{os.getpid()}:{uuid.uuid4().hex}"
+            f"storage-{purpose}:{self.task_id or 'delivery'}:"
+            f"{os.getpid()}:{uuid.uuid4().hex}"
         )[:255]
         self.worker_name = str(worker_name or "")[:255]
         self.lease_seconds = max(
@@ -63,6 +71,27 @@ class DurableStorageUploadLease:
             point = self.model.objects.select_for_update().get(pk=self.point_id)
             if point.status == point.Status.UPLOAD_COMPLETE:
                 raise StorageUploadAlreadyComplete()
+            if self.purpose == "multipart_cleanup":
+                terminal_names = (
+                    "UPLOAD_FAILED",
+                    "UPLOAD_FAILED_STORAGE_LIMIT",
+                    "UPLOAD_FAILED_FILE_NOT_FOUND",
+                    "UPLOAD_TIME_LIMIT_REACHED",
+                    "STORAGE_VALIDATION_FAILED",
+                    "CANCELLED",
+                )
+                terminal_statuses = {
+                    value
+                    for value in (
+                        getattr(point.Status, name, None)
+                        for name in terminal_names
+                    )
+                    if value is not None
+                }
+                if point.status not in terminal_statuses:
+                    raise StorageCleanupNotEligible(
+                        "Storage point is not terminal cleanup state."
+                    )
             if (
                 point.upload_lease_token
                 and point.upload_lease_expires_at
@@ -74,7 +103,12 @@ class DurableStorageUploadLease:
                 raise StorageUploadLeaseBusy(min(retry_after, 60))
 
             metadata = dict(point.metadata or {})
-            execution = dict(metadata.get("_upload_execution") or {})
+            execution_key = (
+                "_multipart_cleanup_execution"
+                if self.purpose == "multipart_cleanup"
+                else "_upload_execution"
+            )
+            execution = dict(metadata.get(execution_key) or {})
             if point.upload_lease_owner or point.upload_lease_token:
                 takeovers = list(execution.get("stale_lease_takeovers") or [])
                 takeovers.append(
@@ -92,12 +126,12 @@ class DurableStorageUploadLease:
             self.token = uuid.uuid4()
             execution.update(
                 {
-                    "phase": "uploading",
+                    "phase": self.purpose,
                     "claimed_at": now.isoformat(),
                     "worker": self.worker_name,
                 }
             )
-            metadata["_upload_execution"] = execution
+            metadata[execution_key] = execution
             point.metadata = metadata
             point.upload_lease_owner = self.owner
             point.upload_lease_token = self.token
@@ -105,12 +139,24 @@ class DurableStorageUploadLease:
                 seconds=self.lease_seconds
             )
             point.upload_heartbeat_at = now
-            point.upload_attempt_count += 1
-            point.celery_task_id = self.task_id or point.celery_task_id
-            point.status = point.Status.UPLOAD_IN_PROGRESS
-            point.last_error_code = ""
-            point.last_error_message = ""
-            point.save()
+            if self.purpose == "upload":
+                point.upload_attempt_count += 1
+                point.celery_task_id = self.task_id or point.celery_task_id
+                point.status = point.Status.UPLOAD_IN_PROGRESS
+                point.last_error_code = ""
+                point.last_error_message = ""
+                point.save()
+            else:
+                point.save(
+                    update_fields=[
+                        "metadata",
+                        "upload_lease_owner",
+                        "upload_lease_token",
+                        "upload_lease_expires_at",
+                        "upload_heartbeat_at",
+                        "modified",
+                    ]
+                )
 
         self.point = point.bind_upload_fence(self.owner, self.token)
         self._thread = threading.Thread(

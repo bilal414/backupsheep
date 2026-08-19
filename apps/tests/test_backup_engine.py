@@ -572,6 +572,8 @@ class CeleryRoutingTests(TestCase):
         self.assertEqual(q("backup_website"), "files")
         self.assertEqual(q("backup_digitalocean"), "cloud")
         self.assertEqual(q("storage_upload"), "storage")
+        self.assertEqual(q("storage_cleanup_owned_multipart"), "storage")
+        self.assertEqual(q("storage_sweep_owned_multipart_cleanup"), "storage")
         self.assertEqual(q("finalize_backup"), "storage")
         self.assertEqual(q("delete_from_disk"), "storage")
         self.assertEqual(q("poll_cloud_backup"), "cloud")
@@ -589,7 +591,9 @@ class CeleryRoutingTests(TestCase):
         for module in settings.CELERY_IMPORTS:
             importlib.import_module(module)
         for name in ["backup_website", "backup_database", "backup_digitalocean",
-                     "backup_hetzner", "backup_aws", "storage_upload", "finalize_backup",
+                     "backup_hetzner", "backup_aws", "storage_upload",
+                     "storage_cleanup_owned_multipart",
+                     "storage_sweep_owned_multipart_cleanup", "finalize_backup",
                      "delete_from_disk", "poll_cloud_backup", "delete_old_logs",
                      "run_scheduled_backup", "resume_in_progress_backups"]:
             self.assertIn(name, app.tasks)

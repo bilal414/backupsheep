@@ -147,12 +147,24 @@ def _multipart_no_progress_retry_after():
     )
 
 
+def _multipart_cleanup_retry_after():
+    return _bounded_setting(
+        "S3_MULTIPART_CLEANUP_RETRY_AFTER_SECONDS", 300, maximum=3600
+    )
+
+
 class S3ObjectIntegrityError(RuntimeError):
     pass
 
 
 class S3UploadReconciliationRequired(RuntimeError):
     outcome_kind = "ambiguous"
+
+
+class S3MalformedMultipartInventory(S3UploadReconciliationRequired):
+    """The provider definitively returned an unusable inventory shape."""
+
+    outcome_kind = "definitive"
 
 
 class S3UploadOutcomePending(S3UploadReconciliationRequired):
@@ -182,6 +194,24 @@ class S3UploadInventoryFailure(RuntimeError):
         super().__init__(message)
         self.error_code = str(error_code)
         self.code = self.error_code
+
+
+class S3MultipartCleanupNotEligible(S3UploadReconciliationRequired):
+    """The durable/provider evidence is insufficient for an automatic abort."""
+
+    retryable = False
+    error_code = "STORAGE_MULTIPART_CLEANUP_NOT_ELIGIBLE"
+    code = error_code
+
+
+class S3MultipartCleanupPending(S3UploadOutcomePending):
+    """An exact-owned abort was issued but provider absence is not proven yet."""
+
+    error_code = "STORAGE_MULTIPART_CLEANUP_PENDING"
+    code = error_code
+
+    def __init__(self, message="Multipart cleanup is pending provider visibility."):
+        super().__init__(message, retry_after=_multipart_cleanup_retry_after())
 
 
 class _BoundedPartBody:
@@ -472,6 +502,32 @@ def _bind_exact_bucket(state, bucket):
     return bucket, False
 
 
+def _bind_exact_storage_context(stored_backup, state, expected_owner=None):
+    """Bind one upload to the owning account, storage row, and bucket owner."""
+
+    storage = getattr(stored_backup, "storage", None)
+    account_id = getattr(storage, "account_id", None)
+    storage_id = getattr(stored_backup, "storage_id", None)
+    if storage_id is None:
+        storage_id = getattr(storage, "id", None)
+    if account_id is None or storage_id is None:
+        raise S3UploadReconciliationRequired(
+            "Object storage upload has no exact account and storage binding."
+        )
+    expected = {
+        "account_id": str(account_id),
+        "storage_id": str(storage_id),
+        "expected_bucket_owner": str(expected_owner or ""),
+    }
+    for field, value in expected.items():
+        if field in state and str(state.get(field)) != value:
+            raise S3UploadReconciliationRequired(
+                "The configured storage context differs from the durable upload binding."
+            )
+        state[field] = value
+    return expected
+
+
 def _save_state(stored_backup, metadata_key, state, *, status=None):
     metadata = dict(stored_backup.metadata or {})
     metadata[metadata_key] = state
@@ -722,9 +778,34 @@ def _list_exact_uploads(client, bucket, key, expected_owner=None):
         if upload_marker:
             page_args["UploadIdMarker"] = upload_marker
         payload = client.list_multipart_uploads(**page_args)
-        uploads.extend(
-            item for item in (payload.get("Uploads") or []) if item.get("Key") == key
-        )
+        if not isinstance(payload, dict):
+            raise S3MalformedMultipartInventory(
+                "Object storage returned a malformed multipart inventory page."
+            )
+        page_uploads = payload.get("Uploads")
+        if page_uploads is None:
+            page_uploads = []
+        if not isinstance(page_uploads, list):
+            raise S3MalformedMultipartInventory(
+                "Object storage returned a malformed multipart inventory collection."
+            )
+        for item in page_uploads:
+            if not isinstance(item, dict):
+                raise S3MalformedMultipartInventory(
+                    "Object storage returned a malformed multipart upload."
+                )
+            item_key = item.get("Key")
+            if not isinstance(item_key, str):
+                raise S3MalformedMultipartInventory(
+                    "Object storage returned a multipart upload without an object key."
+                )
+            upload_id = item.get("UploadId")
+            if not isinstance(upload_id, str) or not upload_id.strip():
+                raise S3MalformedMultipartInventory(
+                    "Object storage returned a multipart upload without an upload identity."
+                )
+            if item_key == key:
+                uploads.append(item)
         if len(uploads) > max_items:
             raise S3UploadReconciliationRequired(
                 "Object storage multipart inventory exceeded the reconciliation item limit."
@@ -733,8 +814,13 @@ def _list_exact_uploads(client, bucket, key, expected_owner=None):
             break
         next_key = payload.get("NextKeyMarker")
         next_upload = payload.get("NextUploadIdMarker")
-        if (next_key, next_upload) == (key_marker, upload_marker):
-            raise S3UploadReconciliationRequired(
+        if (
+            not isinstance(next_key, str)
+            or not next_key
+            or (next_upload is not None and not isinstance(next_upload, str))
+            or (next_key, next_upload) == (key_marker, upload_marker)
+        ):
+            raise S3MalformedMultipartInventory(
                 "Object storage returned a non-advancing multipart cursor."
             )
         key_marker, upload_marker = next_key, next_upload
@@ -829,6 +915,524 @@ def _list_parts(client, bucket, key, upload_id, expected_owner=None):
                 "Object storage returned a non-advancing part cursor."
             )
         marker = next_marker
+
+
+def _multipart_inventory_witness(parts):
+    witness = hashlib.sha256()
+    for part in parts:
+        try:
+            number = int(part["PartNumber"])
+            size = int(part["Size"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise S3MalformedMultipartInventory(
+                "Object storage returned incomplete multipart cleanup evidence."
+            ) from error
+        etag = str(part.get("ETag") or "")
+        checksum = str(part.get("ChecksumSHA256") or "")
+        witness.update(
+            f"{number}\0{size}\0{etag}\0{checksum}\n".encode("utf-8")
+        )
+    return witness.hexdigest()
+
+
+def _cleanup_terminal_statuses(stored_backup):
+    names = (
+        "UPLOAD_FAILED",
+        "UPLOAD_FAILED_STORAGE_LIMIT",
+        "UPLOAD_FAILED_FILE_NOT_FOUND",
+        "UPLOAD_TIME_LIMIT_REACHED",
+        "STORAGE_VALIDATION_FAILED",
+        "CANCELLED",
+    )
+    return {
+        value
+        for value in (getattr(stored_backup.Status, name, None) for name in names)
+        if value is not None
+    }
+
+
+def _cleanup_not_eligible(message):
+    raise S3MultipartCleanupNotEligible(message)
+
+
+def _require_cleanup_bindings(
+    stored_backup,
+    state,
+    multipart,
+    *,
+    bucket,
+    expected_owner,
+):
+    if stored_backup.status not in _cleanup_terminal_statuses(stored_backup):
+        _cleanup_not_eligible(
+            "Multipart cleanup requires a terminal failed or cancelled storage point."
+        )
+
+    storage = getattr(stored_backup, "storage", None)
+    current_account_id = getattr(storage, "account_id", None)
+    current_storage_id = getattr(stored_backup, "storage_id", None)
+    if current_storage_id is None:
+        current_storage_id = getattr(storage, "id", None)
+    expected_bindings = {
+        "account_id": current_account_id,
+        "storage_id": current_storage_id,
+        "bucket": bucket,
+        "expected_bucket_owner": str(expected_owner or ""),
+    }
+    for field, expected in expected_bindings.items():
+        observed = state.get(field)
+        if expected is None or observed is None or str(observed) != str(expected):
+            _cleanup_not_eligible(
+                "Multipart cleanup storage ownership is not bound exactly."
+            )
+
+    key = state.get("object_key")
+    upload_id = multipart.get("upload_id")
+    operation_marker = multipart.get("operation_marker")
+    if (
+        not isinstance(key, str)
+        or not key
+        or str(getattr(stored_backup, "storage_file_id", "") or "") != key
+        or not isinstance(upload_id, str)
+        or not upload_id.strip()
+        or not isinstance(operation_marker, str)
+        or not operation_marker.strip()
+    ):
+        _cleanup_not_eligible(
+            "Multipart cleanup has no exact object, upload, and operation identity."
+        )
+    if str(state.get("ownership_marker") or "") != str(stored_backup.backup_id):
+        _cleanup_not_eligible(
+            "Multipart cleanup belongs to a different backup ownership marker."
+        )
+
+    phase = str(state.get("phase") or "")
+    unsafe_phases = {
+        "committed",
+        "verifying",
+        "creating_multipart",
+        "multipart_create_reconciliation_exhausted",
+        "multipart_complete_outcome_unknown",
+        "multipart_complete_reconciliation_exhausted",
+    }
+    if (
+        phase in unsafe_phases
+        or phase.startswith("put_")
+        or dict(multipart.get("complete_intent") or {}).get("complete")
+    ):
+        _cleanup_not_eligible(
+            "Multipart completion may have crossed its provider mutation boundary."
+        )
+
+    baseline = multipart.get("create_baseline")
+    proof = multipart.get("creation_proof")
+    if not isinstance(baseline, dict) or not baseline.get("complete"):
+        _cleanup_not_eligible(
+            "Multipart cleanup has no complete pre-create inventory boundary."
+        )
+    if baseline.get("object_key") != key:
+        _cleanup_not_eligible(
+            "Multipart cleanup baseline belongs to a different object."
+        )
+    operation_started_at = _upload_time(baseline.get("operation_started_at"))
+    preexisting = {
+        str(value) for value in baseline.get("preexisting_upload_ids") or []
+    }
+    if upload_id in preexisting:
+        _cleanup_not_eligible(
+            "Multipart cleanup upload predates the owned creation boundary."
+        )
+
+    if (
+        not isinstance(proof, dict)
+        or proof.get("version") != 1
+        or proof.get("result") not in {"provider_response", "baseline_adoption"}
+        or str(proof.get("upload_id") or "") != upload_id
+        or str(proof.get("operation_marker") or "") != operation_marker
+    ):
+        _cleanup_not_eligible(
+            "Multipart cleanup has no exact durable creation witness."
+        )
+    _upload_time(proof.get("recorded_at"))
+    return key, upload_id, operation_marker, baseline, operation_started_at
+
+
+def _require_owned_cleanup_upload(
+    upload,
+    *,
+    key,
+    upload_id,
+    baseline,
+    operation_started_at,
+):
+    if upload.get("Key") != key or str(upload.get("UploadId") or "") != upload_id:
+        _cleanup_not_eligible(
+            "Multipart inventory does not contain the exact owned upload."
+        )
+    initiated = _upload_time(upload.get("Initiated"))
+    skew = timedelta(seconds=_reconciliation_clock_skew_seconds())
+    now = timezone.now().astimezone(datetime_timezone.utc)
+    if initiated < operation_started_at - skew or initiated > now + skew:
+        _cleanup_not_eligible(
+            "Multipart upload falls outside the durable creation time boundary."
+        )
+
+    owner_id = _upload_identity(upload, "Owner")
+    initiator_id = _upload_identity(upload, "Initiator")
+    for observed, baseline_key in (
+        (owner_id, "owner_ids"),
+        (initiator_id, "initiator_ids"),
+    ):
+        expected = [str(value) for value in baseline.get(baseline_key) or []]
+        if expected and (len(expected) != 1 or observed != expected[0]):
+            _cleanup_not_eligible(
+                "Multipart upload provider identity differs from the durable baseline."
+            )
+    return initiated, owner_id, initiator_id
+
+
+def _head_absent_for_cleanup(client, bucket, key, expected_owner, stored_backup):
+    _ensure_upload_fence(stored_backup)
+    try:
+        head = _head(client, bucket, key, expected_owner)
+    except ClientError as error:
+        if _error_code(error) in NOT_FOUND_CODES:
+            return True
+        raise
+    if head is not None:
+        return False
+    return True
+
+
+def _fresh_cleanup_inventory(client, bucket, key, expected_owner, stored_backup):
+    _ensure_upload_fence(stored_backup)
+    return _list_exact_uploads(client, bucket, key, expected_owner)
+
+
+def _complete_multipart_cleanup(
+    stored_backup,
+    metadata_key,
+    state,
+    cleanup,
+    *,
+    result,
+):
+    cleanup.update(
+        {
+            "phase": "complete",
+            "result": result,
+            "completed_at": timezone.now().isoformat(),
+        }
+    )
+    state["multipart_cleanup"] = cleanup
+    _save_state(stored_backup, metadata_key, state)
+    return cleanup
+
+
+def _cleanup_inventory_witness(uploads):
+    witness = hashlib.sha256()
+    for upload in uploads:
+        owner = upload.get("Owner")
+        initiator = upload.get("Initiator")
+        owner_id = owner.get("ID") if isinstance(owner, dict) else "<malformed>"
+        initiator_id = (
+            initiator.get("ID")
+            if isinstance(initiator, dict)
+            else "<malformed>"
+        )
+        witness.update(
+            (
+                f"{upload.get('Key')}\0{upload.get('UploadId')}\0"
+                f"{upload.get('Initiated')}\0"
+                f"{owner_id}\0{initiator_id}\n"
+            ).encode("utf-8")
+        )
+    return witness.hexdigest()
+
+
+def _record_blocked_multipart_cleanup(
+    stored_backup,
+    metadata_key,
+    state,
+    *,
+    reason,
+    uploads=None,
+):
+    previous = dict(state.get("multipart_cleanup") or {})
+    try:
+        observation_count = int(previous.get("observation_count") or 0) + 1
+    except (TypeError, ValueError):
+        observation_count = 1
+    observation = {
+        "result": str(reason),
+        "checked_at": timezone.now().isoformat(),
+    }
+    if uploads is not None:
+        observation["exact_inventory_count"] = len(uploads)
+        observation["exact_inventory_sha256"] = _cleanup_inventory_witness(
+            uploads
+        )
+    if previous.get("phase") == "abort_outcome_unknown":
+        previous["observation_count"] = observation_count
+        previous["last_observation"] = observation
+        state["multipart_cleanup"] = previous
+        _save_state(stored_backup, metadata_key, state)
+        return previous
+    cleanup = {
+        "version": 1,
+        "phase": "blocked",
+        "result": str(reason),
+        "observation_count": observation_count,
+        "last_checked_at": observation["checked_at"],
+    }
+    if uploads is not None:
+        cleanup["exact_inventory_count"] = observation[
+            "exact_inventory_count"
+        ]
+        cleanup["exact_inventory_sha256"] = observation[
+            "exact_inventory_sha256"
+        ]
+    state["multipart_cleanup"] = cleanup
+    _save_state(stored_backup, metadata_key, state)
+    return cleanup
+
+
+def cleanup_owned_multipart_upload(
+    stored_backup,
+    *,
+    client,
+    bucket,
+    metadata_key="s3_object",
+    expected_owner=None,
+):
+    """Abort only one terminal upload whose exact ownership is durably proven."""
+
+    _metadata, state = _state(stored_backup, metadata_key)
+    multipart = dict(state.get("multipart") or {})
+    key, upload_id, operation_marker, baseline, operation_started_at = (
+        _require_cleanup_bindings(
+            stored_backup,
+            state,
+            multipart,
+            bucket=bucket,
+            expected_owner=expected_owner,
+        )
+    )
+    cleanup = dict(state.get("multipart_cleanup") or {})
+    if cleanup.get("phase") == "complete":
+        return cleanup
+    if cleanup.get("phase") == "abort_rejected":
+        _cleanup_not_eligible(
+            "A definitive multipart abort rejection requires manual review."
+        )
+
+    if not _head_absent_for_cleanup(
+        client, bucket, key, expected_owner, stored_backup
+    ):
+        _record_blocked_multipart_cleanup(
+            stored_backup,
+            metadata_key,
+            state,
+            reason="object_present",
+        )
+        _cleanup_not_eligible(
+            "An object exists at the exact multipart key; automatic abort was stopped."
+        )
+    try:
+        uploads = _fresh_cleanup_inventory(
+            client, bucket, key, expected_owner, stored_backup
+        )
+    except S3MalformedMultipartInventory:
+        _record_blocked_multipart_cleanup(
+            stored_backup,
+            metadata_key,
+            state,
+            reason="malformed_inventory",
+        )
+        raise
+
+    existing_intent = dict(cleanup.get("intent") or {})
+    if cleanup.get("phase") == "abort_outcome_unknown":
+        expected_intent = {
+            "account_id": str(state["account_id"]),
+            "storage_id": str(state["storage_id"]),
+            "bucket": bucket,
+            "object_key": key,
+            "upload_id": upload_id,
+            "ownership_marker": str(stored_backup.backup_id),
+            "operation_marker": operation_marker,
+        }
+        if not existing_intent.get("complete") or any(
+            str(existing_intent.get(field) or "") != str(value)
+            for field, value in expected_intent.items()
+        ):
+            _cleanup_not_eligible(
+                "Multipart abort reconciliation has no exact durable intent."
+            )
+        if not uploads:
+            return _complete_multipart_cleanup(
+                stored_backup,
+                metadata_key,
+                state,
+                cleanup,
+                result="abort_reconciled",
+            )
+        if len(uploads) == 1 and str(uploads[0].get("UploadId") or "") == upload_id:
+            cleanup["last_checked_at"] = timezone.now().isoformat()
+            state["multipart_cleanup"] = cleanup
+            _save_state(stored_backup, metadata_key, state)
+            raise S3MultipartCleanupPending()
+        cleanup["last_checked_at"] = timezone.now().isoformat()
+        state["multipart_cleanup"] = cleanup
+        _save_state(stored_backup, metadata_key, state)
+        raise S3MultipartCleanupPending(
+            "Multipart abort remains outcome-unknown because exact-key inventory changed."
+        )
+
+    if not uploads:
+        try:
+            second_inventory = _fresh_cleanup_inventory(
+                client, bucket, key, expected_owner, stored_backup
+            )
+        except S3MalformedMultipartInventory:
+            _record_blocked_multipart_cleanup(
+                stored_backup,
+                metadata_key,
+                state,
+                reason="malformed_inventory",
+            )
+            raise
+        if second_inventory:
+            _record_blocked_multipart_cleanup(
+                stored_backup,
+                metadata_key,
+                state,
+                reason="inventory_changed",
+                uploads=second_inventory,
+            )
+            _cleanup_not_eligible(
+                "Multipart inventory changed while proving prior provider absence."
+            )
+        cleanup = {
+            "version": 1,
+            "phase": "complete",
+            "result": "already_absent",
+            "completed_at": timezone.now().isoformat(),
+        }
+        state["multipart_cleanup"] = cleanup
+        _save_state(stored_backup, metadata_key, state)
+        return cleanup
+    if len(uploads) != 1:
+        _record_blocked_multipart_cleanup(
+            stored_backup,
+            metadata_key,
+            state,
+            reason="exact_inventory_not_unique",
+            uploads=uploads,
+        )
+        _cleanup_not_eligible(
+            "Exact-key multipart inventory is foreign or ambiguous; no upload was aborted."
+        )
+
+    try:
+        initiated, owner_id, initiator_id = _require_owned_cleanup_upload(
+            uploads[0],
+            key=key,
+            upload_id=upload_id,
+            baseline=baseline,
+            operation_started_at=operation_started_at,
+        )
+    except S3UploadReconciliationRequired:
+        _record_blocked_multipart_cleanup(
+            stored_backup,
+            metadata_key,
+            state,
+            reason="provider_ownership_mismatch",
+            uploads=uploads,
+        )
+        raise
+    _ensure_upload_fence(stored_backup)
+    try:
+        parts = _list_parts(client, bucket, key, upload_id, expected_owner)
+        part_inventory_sha256 = _multipart_inventory_witness(parts)
+    except S3UploadReconciliationRequired:
+        _record_blocked_multipart_cleanup(
+            stored_backup,
+            metadata_key,
+            state,
+            reason="malformed_part_inventory",
+            uploads=uploads,
+        )
+        raise
+    intent = {
+        "complete": True,
+        "account_id": str(state["account_id"]),
+        "storage_id": str(state["storage_id"]),
+        "bucket": bucket,
+        "expected_bucket_owner": str(expected_owner or ""),
+        "object_key": key,
+        "upload_id": upload_id,
+        "ownership_marker": str(stored_backup.backup_id),
+        "operation_marker": operation_marker,
+        "initiated_at": initiated.isoformat(),
+        "owner_id": owner_id,
+        "initiator_id": initiator_id,
+        "part_count": len(parts),
+        "part_inventory_sha256": part_inventory_sha256,
+        "recorded_at": timezone.now().isoformat(),
+    }
+    cleanup = {
+        "version": 1,
+        "phase": "abort_outcome_unknown",
+        "intent": intent,
+        "abort_attempts": 1,
+    }
+    state["multipart_cleanup"] = cleanup
+    _save_state(stored_backup, metadata_key, state)
+
+    abort_args = {"Bucket": bucket, "Key": key, "UploadId": upload_id}
+    if expected_owner:
+        abort_args["ExpectedBucketOwner"] = expected_owner
+    abort_error = None
+    try:
+        _ensure_upload_fence(stored_backup)
+        client.abort_multipart_upload(**abort_args)
+    except Exception as error:
+        abort_error = error
+        if (
+            not (isinstance(error, ClientError) and _error_code(error) in NO_UPLOAD_CODES)
+            and _create_error_kind(error) != "ambiguous"
+        ):
+            cleanup.update(
+                {
+                    "phase": "abort_rejected",
+                    "result": "definitive_rejection",
+                    "provider_code": _error_code(error),
+                    "http_status": _error_status(error),
+                    "last_checked_at": timezone.now().isoformat(),
+                }
+            )
+            state["multipart_cleanup"] = cleanup
+            _save_state(stored_backup, metadata_key, state)
+            raise S3MultipartCleanupNotEligible(
+                "Object storage definitively rejected the exact multipart abort."
+            ) from error
+
+    remaining = _fresh_cleanup_inventory(
+        client, bucket, key, expected_owner, stored_backup
+    )
+    if not remaining:
+        return _complete_multipart_cleanup(
+            stored_backup,
+            metadata_key,
+            state,
+            cleanup,
+            result="abort_reconciled" if abort_error else "aborted",
+        )
+    cleanup["last_checked_at"] = timezone.now().isoformat()
+    state["multipart_cleanup"] = cleanup
+    _save_state(stored_backup, metadata_key, state)
+    raise S3MultipartCleanupPending()
 
 
 def _completion_parts(remote_parts, *, size_bytes, part_size):
@@ -1267,6 +1871,8 @@ def _create_or_adopt_multipart(
             baseline or {},
             expected_owner=expected_owner,
         )
+    except S3MalformedMultipartInventory as inventory_error:
+        _raise_post_create_inventory_failure(inventory_error)
     except S3UploadReconciliationRequired as reconciliation_error:
         if ambiguous_error is not None:
             raise reconciliation_error from ambiguous_error
@@ -1621,6 +2227,15 @@ def _multipart_upload(
         multipart = {
             **multipart,
             "upload_id": upload_id,
+            "creation_proof": {
+                "version": 1,
+                "result": (
+                    "baseline_adoption" if adoption else "provider_response"
+                ),
+                "upload_id": str(upload_id),
+                "operation_marker": multipart["operation_marker"],
+                "recorded_at": timezone.now().isoformat(),
+            },
         }
         multipart.pop("parts", None)
         if adoption:
@@ -1846,6 +2461,7 @@ def upload_verified_s3(
     metadata, state = _state(stored_backup, metadata_key)
     state_was_empty = not state
     bucket, legacy_bucket_unbound = _bind_exact_bucket(state, bucket)
+    _bind_exact_storage_context(stored_backup, state, expected_owner)
     previous_sha256 = state.get("sha256")
     previous_size = state.get("size_bytes")
     if previous_sha256 and previous_sha256 != identity["sha256"]:

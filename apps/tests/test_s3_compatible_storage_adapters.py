@@ -196,7 +196,11 @@ def _provider(spec, prefix="backups"):
 def _stored_backup(spec, prefix="backups"):
     provider = _provider(spec, prefix)
     storage = SimpleNamespace(
-        account=SimpleNamespace(get_encryption_key=lambda: b"encryption-key")
+        id=9,
+        account_id=7,
+        account=SimpleNamespace(
+            id=7, get_encryption_key=lambda: b"encryption-key"
+        ),
     )
     setattr(storage, spec.relation, provider)
     backup = SimpleNamespace(
@@ -211,6 +215,7 @@ def _stored_backup(spec, prefix="backups"):
         backup=backup,
         backup_id=42,
         storage=storage,
+        storage_id=9,
         storage_file_id=None,
         metadata={},
         status=None,

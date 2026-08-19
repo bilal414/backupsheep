@@ -2,14 +2,21 @@
 
 import uuid
 from datetime import timedelta
+from unittest import mock
 
+from botocore.exceptions import ClientError
 from django.test import override_settings
 from django.utils import timezone
 
 from apps._tasks.helper.tasks import _local_upload_is_active
 from apps._tasks.integration.storage.lease import (
     DurableStorageUploadLease,
+    StorageCleanupNotEligible,
     StorageUploadLeaseBusy,
+)
+from apps._tasks.integration.storage.tasks import (
+    storage_cleanup_owned_multipart,
+    storage_sweep_owned_multipart_cleanup,
 )
 from apps.console.backup.models import (
     CoreWebsiteBackup,
@@ -48,6 +55,51 @@ class StorageExecutionLeaseTests(BaseTestCase):
         lease._stop.set()
         if lease._thread:
             lease._thread.join(timeout=2)
+
+    def _owned_cleanup_point(self):
+        _backup, point = self._point()
+        key = f"cleanup-tests/{point.backup.uuid}.zip"
+        operation_started_at = (
+            timezone.now() - timedelta(hours=1)
+        ).isoformat()
+        point.status = point.Status.UPLOAD_FAILED
+        point.storage_file_id = key
+        point.last_error_code = "STORAGE_RETRIES_EXHAUSTED"
+        point.last_error_message = "Automatic retries were exhausted."
+        point.metadata = {
+            "aws_s3_object": {
+                "phase": "uploading",
+                "account_id": str(point.storage.account_id),
+                "storage_id": str(point.storage_id),
+                "bucket": "cleanup-test-bucket",
+                "expected_bucket_owner": "",
+                "object_key": key,
+                "ownership_marker": str(point.backup_id),
+                "sha256": "a" * 64,
+                "size_bytes": 10,
+                "multipart": {
+                    "upload_id": "owned-upload",
+                    "operation_marker": "owned-operation",
+                    "create_baseline": {
+                        "complete": True,
+                        "object_key": key,
+                        "operation_started_at": operation_started_at,
+                        "preexisting_upload_ids": [],
+                        "owner_ids": ["owner-1"],
+                        "initiator_ids": ["initiator-1"],
+                    },
+                    "creation_proof": {
+                        "version": 1,
+                        "result": "provider_response",
+                        "upload_id": "owned-upload",
+                        "operation_marker": "owned-operation",
+                        "recorded_at": timezone.now().isoformat(),
+                    },
+                },
+            }
+        }
+        point.save()
+        return point, key, operation_started_at
 
     def test_live_lease_blocks_duplicate_delivery(self):
         _backup, point = self._point()
@@ -129,3 +181,112 @@ class StorageExecutionLeaseTests(BaseTestCase):
             upload_lease_expires_at=timezone.now() - timedelta(seconds=1)
         )
         self.assertFalse(_local_upload_is_active(backup))
+
+    def test_cleanup_lease_preserves_terminal_customer_state(self):
+        _backup, point = self._point()
+        point.status = point.Status.UPLOAD_FAILED
+        point.upload_attempt_count = 7
+        point.celery_task_id = "upload-delivery"
+        point.last_error_code = "STORAGE_AUTH_FAILED"
+        point.last_error_message = "Safe customer-facing message."
+        point.save()
+
+        lease = DurableStorageUploadLease(
+            point,
+            task_id="cleanup-delivery",
+            purpose="multipart_cleanup",
+        )
+        claimed = lease.claim()
+        self.addCleanup(lease.release)
+
+        self.assertEqual(claimed.status, point.Status.UPLOAD_FAILED)
+        self.assertEqual(claimed.upload_attempt_count, 7)
+        self.assertEqual(claimed.celery_task_id, "upload-delivery")
+        self.assertEqual(claimed.last_error_code, "STORAGE_AUTH_FAILED")
+        self.assertEqual(
+            claimed.metadata["_multipart_cleanup_execution"]["phase"],
+            "multipart_cleanup",
+        )
+
+    def test_cleanup_lease_rejects_nonterminal_upload(self):
+        _backup, point = self._point()
+        lease = DurableStorageUploadLease(
+            point,
+            task_id="cleanup-delivery",
+            purpose="multipart_cleanup",
+        )
+
+        with self.assertRaises(StorageCleanupNotEligible):
+            lease.claim()
+
+    def test_cleanup_task_aborts_exact_upload_without_changing_terminal_state(self):
+        point, key, initiated = self._owned_cleanup_point()
+        client = mock.MagicMock()
+        client.head_object.side_effect = ClientError(
+            {"Error": {"Code": "404"}}, "HeadObject"
+        )
+        owned = {
+            "Key": key,
+            "UploadId": "owned-upload",
+            "Initiated": initiated,
+            "Owner": {"ID": "owner-1"},
+            "Initiator": {"ID": "initiator-1"},
+        }
+        client.list_multipart_uploads.side_effect = [
+            {"Uploads": [owned], "IsTruncated": False},
+            {"Uploads": [], "IsTruncated": False},
+        ]
+        client.list_parts.return_value = {
+            "Parts": [{"PartNumber": 1, "ETag": '"part"', "Size": 10}],
+            "IsTruncated": False,
+        }
+
+        with mock.patch(
+            "apps._tasks.integration.storage.tasks.multipart_cleanup_context",
+            return_value={
+                "client": client,
+                "bucket": "cleanup-test-bucket",
+                "metadata_key": "aws_s3_object",
+                "expected_owner": None,
+            },
+        ):
+            result = storage_cleanup_owned_multipart.run("website", point.pk)
+
+        self.assertEqual(result, {"result": "aborted", "phase": "complete"})
+        point.refresh_from_db()
+        self.assertEqual(point.status, point.Status.UPLOAD_FAILED)
+        self.assertEqual(point.upload_attempt_count, 0)
+        self.assertEqual(point.last_error_code, "STORAGE_RETRIES_EXHAUSTED")
+        self.assertEqual(point.upload_lease_owner, "")
+        self.assertIsNone(point.upload_lease_token)
+        self.assertEqual(
+            point.metadata["aws_s3_object"]["multipart_cleanup"]["result"],
+            "aborted",
+        )
+        client.abort_multipart_upload.assert_called_once_with(
+            Bucket="cleanup-test-bucket",
+            Key=key,
+            UploadId="owned-upload",
+        )
+
+    @override_settings(
+        S3_MULTIPART_CLEANUP_STALE_SECONDS=300,
+        S3_MULTIPART_CLEANUP_BATCH_SIZE=10,
+        S3_MULTIPART_CLEANUP_SCAN_LIMIT=100,
+    )
+    def test_stale_sweep_enqueues_only_terminal_owned_candidate(self):
+        point, _key, _initiated = self._owned_cleanup_point()
+        point.__class__.objects.filter(pk=point.pk).update(
+            modified=timezone.now() - timedelta(hours=1)
+        )
+        _backup, active = self._point()
+        active.metadata = point.metadata
+        active.save(update_fields=["metadata", "modified"])
+
+        with mock.patch.object(
+            storage_cleanup_owned_multipart, "apply_async"
+        ) as publish:
+            result = storage_sweep_owned_multipart_cleanup.run()
+
+        self.assertEqual(result["enqueued"], 1)
+        publish.assert_called_once_with(args=["website", point.pk])

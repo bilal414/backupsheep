@@ -14,12 +14,15 @@ from django.utils import timezone
 from apps._tasks.integration.storage.s3_verified import (
     BACKUP_METADATA,
     MULTIPART_METADATA,
+    S3MultipartCleanupNotEligible,
+    S3MultipartCleanupPending,
     S3ObjectIntegrityError,
     S3UploadInventoryFailure,
     S3UploadOutcomePending,
     S3UploadReconciliationRequired,
     _list_parts,
     _multipart_part_size,
+    cleanup_owned_multipart_upload,
     upload_verified_s3,
 )
 
@@ -81,15 +84,23 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
                 record_artifact_integrity=mock.Mock(),
             ),
             backup_id=42,
-            storage=SimpleNamespace(),
+            storage=SimpleNamespace(id=9, account_id=7),
+            storage_id=9,
             storage_file_id=None,
             metadata={},
             status=None,
             Status=SimpleNamespace(
                 UPLOAD_VALIDATION="validating",
                 UPLOAD_COMPLETE="complete",
+                UPLOAD_FAILED="failed",
+                UPLOAD_FAILED_STORAGE_LIMIT="storage_limit",
+                UPLOAD_FAILED_FILE_NOT_FOUND="file_missing",
+                UPLOAD_TIME_LIMIT_REACHED="time_limit",
+                STORAGE_VALIDATION_FAILED="validation_failed",
+                CANCELLED="cancelled",
             ),
             save=mock.Mock(),
+            ensure_upload_fence=mock.Mock(),
         )
         os.makedirs("_storage", exist_ok=True)
         self.local_path = f"_storage/{backup_id}.zip"
@@ -129,6 +140,417 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             key=key,
             local_path=self.local_path,
         )
+
+    def _owned_cleanup_state(
+        self,
+        *,
+        key="backups/failed-multipart.zip",
+        upload_id="owned-upload",
+        phase="uploading",
+    ):
+        operation_started_at = (timezone.now() - timedelta(minutes=10)).isoformat()
+        operation_marker = "owned-multipart-operation"
+        self.point.status = self.point.Status.UPLOAD_FAILED
+        self.point.storage_file_id = key
+        self.point.metadata = {
+            "s3_object": {
+                "phase": phase,
+                "account_id": 7,
+                "storage_id": 9,
+                "bucket": "test-bucket",
+                "expected_bucket_owner": "",
+                "object_key": key,
+                "ownership_marker": "42",
+                "sha256": "a" * 64,
+                "size_bytes": 10,
+                "multipart": {
+                    "upload_id": upload_id,
+                    "operation_marker": operation_marker,
+                    "create_baseline": {
+                        "complete": True,
+                        "object_key": key,
+                        "operation_started_at": operation_started_at,
+                        "preexisting_upload_ids": [],
+                        "owner_ids": ["canonical-owner-1"],
+                        "initiator_ids": [
+                            "arn:aws:iam::123456789012:user/backupsheep"
+                        ],
+                    },
+                    "creation_proof": {
+                        "version": 1,
+                        "result": "provider_response",
+                        "upload_id": upload_id,
+                        "operation_marker": operation_marker,
+                        "recorded_at": timezone.now().isoformat(),
+                    },
+                },
+            }
+        }
+        return key, upload_id, operation_started_at
+
+    def _cleanup_client(self, key, upload_id, initiated):
+        client = mock.MagicMock()
+        client.head_object.side_effect = _not_found()
+        client.list_multipart_uploads.side_effect = [
+            {
+                "Uploads": [_multipart_upload_entry(key, upload_id, initiated)],
+                "IsTruncated": False,
+            },
+            {"Uploads": [], "IsTruncated": False},
+        ]
+        client.list_parts.return_value = {
+            "Parts": [
+                {"PartNumber": 1, "ETag": '"part-1"', "Size": 10}
+            ],
+            "IsTruncated": False,
+        }
+        client.abort_multipart_upload.return_value = {}
+        return client
+
+    def test_owned_terminal_multipart_abort_persists_intent_before_mutation(self):
+        key, upload_id, initiated = self._owned_cleanup_state()
+        client = self._cleanup_client(key, upload_id, initiated)
+        persisted = []
+        self.point.save.side_effect = lambda **_kwargs: persisted.append(
+            deepcopy(self.point.metadata)
+        )
+
+        def abort(**kwargs):
+            cleanup = self.point.metadata["s3_object"]["multipart_cleanup"]
+            self.assertEqual(cleanup["phase"], "abort_outcome_unknown")
+            self.assertTrue(cleanup["intent"]["complete"])
+            self.assertEqual(cleanup["intent"]["upload_id"], upload_id)
+            self.assertEqual(kwargs["UploadId"], upload_id)
+            return {}
+
+        client.abort_multipart_upload.side_effect = abort
+
+        result = cleanup_owned_multipart_upload(
+            self.point,
+            client=client,
+            bucket="test-bucket",
+            metadata_key="s3_object",
+        )
+
+        self.assertEqual(result["phase"], "complete")
+        self.assertEqual(result["result"], "aborted")
+        self.assertTrue(persisted)
+        client.abort_multipart_upload.assert_called_once_with(
+            Bucket="test-bucket", Key=key, UploadId=upload_id
+        )
+        self.point.ensure_upload_fence.assert_called()
+
+    def test_ambiguous_completion_never_aborts(self):
+        self._owned_cleanup_state(phase="multipart_complete_outcome_unknown")
+        self.point.metadata["s3_object"]["multipart"]["complete_intent"] = {
+            "complete": True
+        }
+        client = mock.MagicMock()
+
+        with self.assertRaises(S3MultipartCleanupNotEligible):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+
+        client.head_object.assert_not_called()
+        client.list_multipart_uploads.assert_not_called()
+        client.abort_multipart_upload.assert_not_called()
+
+    def test_foreign_or_multiple_same_key_uploads_are_never_aborted(self):
+        key, upload_id, initiated = self._owned_cleanup_state()
+        inventories = (
+            [_multipart_upload_entry(key, "foreign-upload", initiated)],
+            [
+                _multipart_upload_entry(key, upload_id, initiated),
+                _multipart_upload_entry(key, "foreign-upload", initiated),
+            ],
+        )
+        for uploads in inventories:
+            with self.subTest(upload_ids=[item["UploadId"] for item in uploads]):
+                client = mock.MagicMock()
+                client.head_object.side_effect = _not_found()
+                client.list_multipart_uploads.return_value = {
+                    "Uploads": uploads,
+                    "IsTruncated": False,
+                }
+
+                with self.assertRaises(S3MultipartCleanupNotEligible):
+                    cleanup_owned_multipart_upload(
+                        self.point,
+                        client=client,
+                        bucket="test-bucket",
+                        metadata_key="s3_object",
+                    )
+
+                client.abort_multipart_upload.assert_not_called()
+                cleanup = self.point.metadata["s3_object"]["multipart_cleanup"]
+                self.assertEqual(cleanup["phase"], "blocked")
+                self.assertEqual(cleanup["exact_inventory_count"], len(uploads))
+
+    def test_malformed_inventory_never_aborts(self):
+        self._owned_cleanup_state()
+        client = mock.MagicMock()
+        client.head_object.side_effect = _not_found()
+        client.list_multipart_uploads.return_value = {
+            "Uploads": {"not": "a list"},
+            "IsTruncated": False,
+        }
+
+        with self.assertRaises(S3UploadReconciliationRequired):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+
+        client.abort_multipart_upload.assert_not_called()
+        cleanup = self.point.metadata["s3_object"]["multipart_cleanup"]
+        self.assertEqual(cleanup["result"], "malformed_inventory")
+
+    def test_existing_object_stops_cleanup_before_multipart_inventory(self):
+        self._owned_cleanup_state()
+        client = mock.MagicMock()
+        client.head_object.return_value = {"ContentLength": 10}
+
+        with self.assertRaises(S3MultipartCleanupNotEligible):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+
+        client.list_multipart_uploads.assert_not_called()
+        client.abort_multipart_upload.assert_not_called()
+        cleanup = self.point.metadata["s3_object"]["multipart_cleanup"]
+        self.assertEqual(cleanup["result"], "object_present")
+
+    def test_lost_abort_response_reconciles_absence_without_second_abort(self):
+        key, upload_id, initiated = self._owned_cleanup_state()
+        client = self._cleanup_client(key, upload_id, initiated)
+        client.abort_multipart_upload.side_effect = ConnectionError("response lost")
+
+        result = cleanup_owned_multipart_upload(
+            self.point,
+            client=client,
+            bucket="test-bucket",
+            metadata_key="s3_object",
+        )
+
+        self.assertEqual(result["phase"], "complete")
+        self.assertEqual(result["result"], "abort_reconciled")
+        client.abort_multipart_upload.assert_called_once()
+
+    def test_visible_upload_after_abort_remains_durably_pending(self):
+        key, upload_id, initiated = self._owned_cleanup_state()
+        owned = _multipart_upload_entry(key, upload_id, initiated)
+        client = mock.MagicMock()
+        client.head_object.side_effect = _not_found()
+        client.list_multipart_uploads.side_effect = [
+            {"Uploads": [owned], "IsTruncated": False},
+            {"Uploads": [owned], "IsTruncated": False},
+        ]
+        client.list_parts.return_value = {"Parts": [], "IsTruncated": False}
+
+        with self.assertRaises(S3MultipartCleanupPending) as raised:
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+
+        self.assertTrue(raised.exception.retryable)
+        cleanup = self.point.metadata["s3_object"]["multipart_cleanup"]
+        self.assertEqual(cleanup["phase"], "abort_outcome_unknown")
+        self.assertEqual(cleanup["abort_attempts"], 1)
+        client.abort_multipart_upload.assert_called_once()
+
+    def test_pending_abort_retry_reconciles_only_and_never_replays_abort(self):
+        key, upload_id, initiated = self._owned_cleanup_state()
+        owned = _multipart_upload_entry(key, upload_id, initiated)
+        client = mock.MagicMock()
+        client.head_object.side_effect = [_not_found(), _not_found()]
+        client.list_multipart_uploads.side_effect = [
+            {"Uploads": [owned], "IsTruncated": False},
+            {"Uploads": [owned], "IsTruncated": False},
+            {"Uploads": [], "IsTruncated": False},
+        ]
+        client.list_parts.return_value = {
+            "Parts": [{"PartNumber": 1, "ETag": '"one"', "Size": 10}],
+            "IsTruncated": False,
+        }
+
+        with self.assertRaises(S3MultipartCleanupPending):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+        result = cleanup_owned_multipart_upload(
+            self.point,
+            client=client,
+            bucket="test-bucket",
+            metadata_key="s3_object",
+        )
+
+        self.assertEqual(result["result"], "abort_reconciled")
+        client.abort_multipart_upload.assert_called_once()
+
+    def test_pending_abort_malformed_read_preserves_original_abort_intent(self):
+        key, upload_id, initiated = self._owned_cleanup_state()
+        client = self._cleanup_client(key, upload_id, initiated)
+        client.list_multipart_uploads.side_effect = [
+            {
+                "Uploads": [_multipart_upload_entry(key, upload_id, initiated)],
+                "IsTruncated": False,
+            },
+            {
+                "Uploads": [_multipart_upload_entry(key, upload_id, initiated)],
+                "IsTruncated": False,
+            },
+            {"Uploads": "malformed", "IsTruncated": False},
+        ]
+
+        with self.assertRaises(S3MultipartCleanupPending):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+        original_intent = deepcopy(
+            self.point.metadata["s3_object"]["multipart_cleanup"]["intent"]
+        )
+        with self.assertRaises(S3UploadReconciliationRequired):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+
+        cleanup = self.point.metadata["s3_object"]["multipart_cleanup"]
+        self.assertEqual(cleanup["phase"], "abort_outcome_unknown")
+        self.assertEqual(cleanup["intent"], original_intent)
+        self.assertEqual(
+            cleanup["last_observation"]["result"], "malformed_inventory"
+        )
+        client.abort_multipart_upload.assert_called_once()
+
+    def test_definitive_abort_rejection_is_durable_and_never_replayed(self):
+        key, upload_id, initiated = self._owned_cleanup_state()
+        client = self._cleanup_client(key, upload_id, initiated)
+        client.abort_multipart_upload.side_effect = _client_error(
+            "AccessDenied", 403
+        )
+
+        with self.assertRaises(S3MultipartCleanupNotEligible):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+        cleanup = self.point.metadata["s3_object"]["multipart_cleanup"]
+        self.assertEqual(cleanup["phase"], "abort_rejected")
+
+        with self.assertRaises(S3MultipartCleanupNotEligible):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+
+        client.abort_multipart_upload.assert_called_once()
+        client.list_multipart_uploads.assert_called_once()
+
+    def test_active_storage_point_never_reads_or_aborts_provider(self):
+        self._owned_cleanup_state()
+        self.point.status = self.point.Status.UPLOAD_VALIDATION
+        client = mock.MagicMock()
+
+        with self.assertRaises(S3MultipartCleanupNotEligible):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+
+        client.head_object.assert_not_called()
+        client.list_multipart_uploads.assert_not_called()
+        client.abort_multipart_upload.assert_not_called()
+
+    @override_settings(
+        S3_MULTIPART_THRESHOLD_BYTES=1,
+        S3_MULTIPART_PART_SIZE_BYTES=5 * 1024 * 1024,
+    )
+    def test_new_multipart_creation_persists_cleanup_ownership_witness(self):
+        self._write(b"a" * (5 * 1024 * 1024))
+        client = mock.MagicMock()
+        client.head_object.side_effect = _not_found()
+        client.list_multipart_uploads.return_value = {
+            "Uploads": [],
+            "IsTruncated": False,
+        }
+        client.create_multipart_upload.return_value = {"UploadId": "owned-new"}
+        client.list_parts.side_effect = RuntimeError("controlled stop")
+
+        with self.assertRaisesRegex(RuntimeError, "controlled stop"):
+            self._upload(client, key="backups/owned-new.zip")
+
+        state = self.point.metadata["s3_object"]
+        proof = state["multipart"]["creation_proof"]
+        self.assertEqual(proof["version"], 1)
+        self.assertEqual(proof["result"], "provider_response")
+        self.assertEqual(proof["upload_id"], "owned-new")
+        self.assertEqual(
+            proof["operation_marker"],
+            state["multipart"]["operation_marker"],
+        )
+        self.assertEqual(state["account_id"], "7")
+        self.assertEqual(state["storage_id"], "9")
+
+    def test_cleanup_binding_mismatch_never_reads_or_aborts_provider(self):
+        self._owned_cleanup_state()
+        self.point.metadata["s3_object"]["account_id"] = "foreign-account"
+        client = mock.MagicMock()
+
+        with self.assertRaises(S3MultipartCleanupNotEligible):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+
+        client.head_object.assert_not_called()
+        client.list_multipart_uploads.assert_not_called()
+        client.abort_multipart_upload.assert_not_called()
+
+    def test_markerless_creation_state_never_reads_or_aborts_provider(self):
+        self._owned_cleanup_state()
+        del self.point.metadata["s3_object"]["multipart"]["creation_proof"]
+        client = mock.MagicMock()
+
+        with self.assertRaises(S3MultipartCleanupNotEligible):
+            cleanup_owned_multipart_upload(
+                self.point,
+                client=client,
+                bucket="test-bucket",
+                metadata_key="s3_object",
+            )
+
+        client.head_object.assert_not_called()
+        client.list_multipart_uploads.assert_not_called()
+        client.abort_multipart_upload.assert_not_called()
 
     def test_lost_put_response_adopts_only_marker_verified_object_once(self):
         self._write()
