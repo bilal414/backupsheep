@@ -12964,6 +12964,14 @@ class CoreNode(TimeStampedModel):
                 )
                 return None
             backup, created = node_type_object.backups.get_or_create(celery_task_id=celery_task_id)
+            # A delayed Celery retry can remain reserved after the user cancels the
+            # concrete backup, and a broker redelivery can arrive after any other
+            # terminal decision.  The database row is authoritative: never reopen a
+            # terminal backup merely because the same task id was delivered again.
+            # A deliberate new backup uses a new task id and therefore still creates
+            # a new row below.
+            if not created and backup.status not in UtilBackup.ACTIVE_STATUSES:
+                return None
             # A redelivered/recovered task must continue the persisted phase. In
             # particular, DOWNLOAD_COMPLETE and UPLOAD_IN_PROGRESS mean that the
             # local dump already exists and only storage work remains; resetting the

@@ -95,6 +95,26 @@ class BackupInitiateGuardTests(BaseTestCase):
             self.assertIsNotNone(self._initiate(node, "task-new"), status)
             self.assertEqual(node.digitalocean.backups.count(), 2, status)
 
+    def test_same_task_terminal_redelivery_is_a_noop(self):
+        terminal_statuses = [
+            status.value
+            for status in UtilBackup.Status
+            if status.value not in UtilBackup.ACTIVE_STATUSES
+        ]
+        for status in terminal_statuses:
+            with self.subTest(status=status):
+                node = self._node()
+                backup = CoreDigitalOceanBackup.objects.create(
+                    digitalocean=node.digitalocean,
+                    status=status,
+                    celery_task_id="terminal-task",
+                )
+
+                self.assertIsNone(self._initiate(node, "terminal-task"))
+                backup.refresh_from_db()
+                self.assertEqual(backup.status, status)
+                self.assertEqual(node.digitalocean.backups.count(), 1)
+
     def test_website_backup_in_transfer_status_blocks(self):
         # File-based backups hold DOWNLOAD/UPLOAD statuses while their task is
         # still running, so those must block a second dump too.
