@@ -59,6 +59,10 @@ services:
     # recovery sweep gets a chance to republish them.
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      # BackupSheep uses late acknowledgements for durable, externally mutating
+      # work. Database/file/storage commands can legitimately run for many hours,
+      # so the broker timeout must exceed their longest supported command budget.
+      - ./deploy/rabbitmq/90-backupsheep.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s

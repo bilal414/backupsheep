@@ -1,6 +1,13 @@
+from pathlib import Path
+
 from django.test import SimpleTestCase
 
 from backupsheep.settings import _resolve_celery_broker_url
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RABBITMQ_CONFIG = PROJECT_ROOT / "deploy" / "rabbitmq" / "90-backupsheep.conf"
+COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yml"
 
 
 class CeleryBrokerSettingsTests(SimpleTestCase):
@@ -45,3 +52,27 @@ class CeleryBrokerSettingsTests(SimpleTestCase):
     def test_non_amqp_broker_url_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "RabbitMQ"):
             _resolve_celery_broker_url({"CELERY_BROKER_URL": "memory://"})
+
+
+class RabbitMQRuntimeContractTests(SimpleTestCase):
+    def test_late_ack_timeout_exceeds_longest_external_command_budget(self):
+        settings = {}
+        for raw_line in RABBITMQ_CONFIG.read_text(encoding="utf-8").splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if not line or "=" not in line:
+                continue
+            key, value = (part.strip() for part in line.split("=", 1))
+            settings[key] = value
+
+        timeout_ms = int(settings["consumer_timeout"])
+        self.assertGreater(timeout_ms, 23 * 60 * 60 * 1000)
+        self.assertEqual(timeout_ms, 25 * 60 * 60 * 1000)
+
+    def test_compose_mounts_the_broker_timeout_contract_read_only(self):
+        compose = COMPOSE_FILE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "./deploy/rabbitmq/90-backupsheep.conf:"
+            "/etc/rabbitmq/conf.d/90-backupsheep.conf:ro",
+            compose,
+        )
