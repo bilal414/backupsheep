@@ -65,6 +65,11 @@ def _fake_backup(*, option_postgres=None):
 
 
 def _fake_auth(database_type=CoreAuthDatabase.DatabaseType.MYSQL):
+    version = (
+        CoreAuthDatabase.DatabaseVersion.MARIADB_11_8
+        if database_type == CoreAuthDatabase.DatabaseType.MARIADB
+        else CoreAuthDatabase.DatabaseVersion.MYSQL_8_0
+    )
     return SimpleNamespace(
         database_name="source_db",
         host="db.example.test",
@@ -73,6 +78,7 @@ def _fake_auth(database_type=CoreAuthDatabase.DatabaseType.MYSQL):
         use_public_key=False,
         use_private_key=False,
         type=database_type,
+        version=version,
         bin_path=lambda: "/usr/bin/",
         check_connection=lambda: None,
     )
@@ -315,6 +321,100 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
         self.assertEqual(result, {"create": True, "drop": True})
         self.assertEqual(query.call_args.args[4], "SHOW GRANTS;")
         run.assert_not_called()
+
+    def test_mariadb_definer_preflight_requires_set_user_before_mutation(self):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.MARIADB)
+        grants = "GRANT CREATE, DROP, TRIGGER ON *.* TO 'backup'@'%';\n"
+        with mock.patch.object(RD, "_mysql_query", return_value=grants) as query, \
+             mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaises(RestoreError) as raised:
+                RD._preflight_database_restore_permissions(
+                    SimpleNamespace(),
+                    _fake_backup(),
+                    self._fenced_restore(),
+                    auth,
+                    "dbuser",
+                    "password-do-not-persist",
+                    mode="fork",
+                    mapping={"source_db": "bs_restore_target"},
+                    archive_requirements={"mysql_explicit_definer": True},
+                )
+
+        self.assertEqual(
+            raised.exception.code,
+            RD.DATABASE_RESTORE_PERMISSION_ERROR_CODE,
+        )
+        self.assertFalse(raised.exception.retryable)
+        self.assertIn("SET USER", str(raised.exception))
+        self.assertNotIn("password-do-not-persist", str(raised.exception))
+        self.assertEqual(query.call_args.args[4], "SHOW GRANTS;")
+        run.assert_not_called()
+
+    def test_mysql_family_definer_preflight_accepts_vendor_privileges(self):
+        cases = (
+            (
+                CoreAuthDatabase.DatabaseType.MARIADB,
+                CoreAuthDatabase.DatabaseVersion.MARIADB_11_8,
+                "GRANT CREATE, DROP, SET USER ON *.* TO 'backup'@'%';\n",
+            ),
+            (
+                CoreAuthDatabase.DatabaseType.MYSQL,
+                CoreAuthDatabase.DatabaseVersion.MYSQL_8_0,
+                "GRANT CREATE, DROP, SET_USER_ID ON *.* TO 'backup'@'%';\n",
+            ),
+            (
+                CoreAuthDatabase.DatabaseType.MYSQL,
+                CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+                "GRANT CREATE, DROP ON *.* TO 'backup'@'%';\n"
+                "GRANT SET_ANY_DEFINER, ALLOW_NONEXISTENT_DEFINER "
+                "ON *.* TO 'backup'@'%';\n",
+            ),
+        )
+        for database_type, database_version, grants in cases:
+            with self.subTest(
+                database_type=database_type,
+                database_version=database_version,
+                grants=grants,
+            ):
+                auth = self._auth(database_type)
+                auth.version = database_version
+                with mock.patch.object(RD, "_mysql_query", return_value=grants):
+                    result = RD._preflight_database_restore_permissions(
+                        SimpleNamespace(),
+                        _fake_backup(),
+                        self._fenced_restore(),
+                        auth,
+                        "dbuser",
+                        "db-password",
+                        mode="fork",
+                        mapping={"source_db": "bs_restore_target"},
+                        archive_requirements={"mysql_explicit_definer": True},
+                    )
+                self.assertEqual(result, {"create": True, "drop": True})
+
+    def test_definer_privilege_must_be_global(self):
+        grants = (
+            "GRANT CREATE, DROP ON *.* TO 'backup'@'%';\n"
+            "GRANT SET USER ON `bs_restore_target`.* TO 'backup'@'%';\n"
+        )
+        self.assertFalse(
+            RD._mysql_has_definer_privilege(
+                grants, CoreAuthDatabase.DatabaseType.MARIADB
+            )
+        )
+
+    def test_mysql_84_requires_both_definer_privileges(self):
+        grants = (
+            "GRANT CREATE, DROP ON *.* TO 'backup'@'%';\n"
+            "GRANT SET_ANY_DEFINER ON *.* TO 'backup'@'%';\n"
+        )
+        self.assertFalse(
+            RD._mysql_has_definer_privilege(
+                grants,
+                CoreAuthDatabase.DatabaseType.MYSQL,
+                CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+            )
+        )
 
     def test_mysql_scoped_grants_cover_exact_and_matching_wildcard_targets(self):
         exact_result, exact_logs, exact_error = self._mysql_preflight_result(
@@ -1868,6 +1968,50 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(
             digests["source_db"][0]["sha256"], hashlib.sha256(payload).hexdigest()
         )
+
+    def test_mariadb_archive_reports_explicit_definer_requirement(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        payload = (
+            b"CREATE TABLE restored(id integer, note text);\n"
+            b"INSERT INTO restored VALUES (1, 'DEFINER=not_sql');\n"
+            b"/*!50017 DEFINER=`root`@`localhost`*/ CREATE TRIGGER restored_bi "
+            b"BEFORE INSERT ON restored FOR EACH ROW SET NEW.id = NEW.id;\n"
+        )
+        with open(sql_path, "wb") as output:
+            output.write(payload)
+
+        targets, digests, requirements = RD._validate_extracted_archive(
+            _fake_backup(),
+            _fake_auth(CoreAuthDatabase.DatabaseType.MARIADB),
+            self.tmp,
+            mode="fork",
+            include_requirements=True,
+        )
+
+        self.assertEqual(targets, {"source_db": [sql_path]})
+        self.assertEqual(
+            digests["source_db"][0]["sha256"], hashlib.sha256(payload).hexdigest()
+        )
+        self.assertTrue(requirements["mysql_explicit_definer"])
+
+    def test_mysql_row_data_does_not_require_definer_privilege(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        payload = (
+            b"CREATE TABLE restored(id integer, note text);\n"
+            b"INSERT INTO restored VALUES (1, 'DEFINER=not_sql');\n"
+        )
+        with open(sql_path, "wb") as output:
+            output.write(payload)
+
+        _targets, _digests, requirements = RD._validate_extracted_archive(
+            _fake_backup(),
+            _fake_auth(CoreAuthDatabase.DatabaseType.MYSQL),
+            self.tmp,
+            mode="fork",
+            include_requirements=True,
+        )
+
+        self.assertFalse(requirements["mysql_explicit_definer"])
 
     def test_mariadb_transaction_scaffolding_is_rejected_for_in_place_restore(self):
         sql_path = os.path.join(self.tmp, "source_db.sql")

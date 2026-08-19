@@ -190,6 +190,26 @@ def _database_restore_permission_error(database_type):
     return error
 
 
+def _database_restore_definer_permission_error(database_type):
+    """Return safe guidance when a dump contains foreign DEFINER clauses."""
+    if database_type == CoreAuthDatabase.DatabaseType.MARIADB:
+        privilege = "SET USER (or the legacy SUPER privilege)"
+    else:
+        privilege = (
+            "SET_USER_ID for MySQL 8.0, or SET_ANY_DEFINER and "
+            "ALLOW_NONEXISTENT_DEFINER for MySQL 8.4"
+        )
+    error = RestoreError(
+        "The stored database dump contains explicit DEFINER clauses, but the "
+        f"configured account cannot preserve them. Grant {privilege} to a "
+        "dedicated restore account, then resume verification. No target was changed "
+        "by this verification attempt."
+    )
+    error.code = DATABASE_RESTORE_PERMISSION_ERROR_CODE
+    error.retryable = False
+    return error
+
+
 def _write_log(backup, text):
     """Append only safe, already-redacted operational text to the run log."""
     with open(f"_storage/restore_{backup.uuid_str}.log", "a+") as log_file:
@@ -734,9 +754,27 @@ _MYSQL_DUMP_AUTOCOMMIT_OFF_RE = re.compile(
 _MYSQL_DUMP_AUTOCOMMIT_RESTORE_RE = re.compile(
     rb"(?i)^\s*set\s+autocommit\s*=\s*@old_autocommit\s*;\s*$"
 )
+_MYSQL_EXPLICIT_DEFINER_RE = re.compile(rb"(?i)\bDEFINER\s*=")
 
 
-def _validate_extracted_archive(backup, auth, tree_root, *, mode="fork"):
+def _mysql_line_has_explicit_definer(line):
+    """Detect dump object definers without treating row data as SQL metadata."""
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith((b"--", b"#")):
+        return False
+    if re.match(rb"(?i)^(?:INSERT|REPLACE)\s+", stripped):
+        return False
+    return _MYSQL_EXPLICIT_DEFINER_RE.search(stripped) is not None
+
+
+def _validate_extracted_archive(
+    backup,
+    auth,
+    tree_root,
+    *,
+    mode="fork",
+    include_requirements=False,
+):
     """Validate every extracted dump before opening a database client."""
     sql_files = []
     for root, directories, files in os.walk(tree_root, followlinks=False):
@@ -765,6 +803,7 @@ def _validate_extracted_archive(backup, auth, tree_root, *, mode="fork"):
         raise RestoreError("the backup archive does not contain any .sql dumps.")
 
     source_digests = {}
+    requirements = {"mysql_explicit_definer": False}
     targets = OrderedDict()
     tables_mode = bool(backup.tables) and not bool(backup.all_tables)
     for filename, path in sorted(sql_files):
@@ -831,6 +870,15 @@ def _validate_extracted_archive(backup, auth, tree_root, *, mode="fork"):
                     raise RestoreError("stored SQL contains an unsafe client directive.")
                 lowered = line.lower()
                 if (
+                    auth.type
+                    in (
+                        CoreAuthDatabase.DatabaseType.MYSQL,
+                        CoreAuthDatabase.DatabaseType.MARIADB,
+                    )
+                    and _mysql_line_has_explicit_definer(line)
+                ):
+                    requirements["mysql_explicit_definer"] = True
+                if (
                     MYSQL_MARKER_TABLE.encode("ascii") in lowered
                     or POSTGRES_MARKER_SCHEMA.encode("ascii") in lowered
                 ):
@@ -858,6 +906,8 @@ def _validate_extracted_archive(backup, auth, tree_root, *, mode="fork"):
         source: sorted(files, key=lambda item: item["file"])
         for source, files in sorted(source_digests.items())
     }
+    if include_requirements:
+        return targets, source_digests, requirements
     return targets, source_digests
 
 
@@ -1473,6 +1523,49 @@ def _mysql_grant_capabilities(grants, target_names):
     return capabilities
 
 
+def _mysql_has_definer_privilege(grants, database_type, database_version=None):
+    """Return whether global grants can preserve explicit object definers."""
+    privilege_tokens = set()
+    for line in str(grants or "").splitlines():
+        match = re.search(
+            r"^\s*GRANT\s+(?P<privileges>.+?)\s+ON\s+(?P<scope>[^\s]+)\s+TO\s+",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if not match or match.group("scope").replace("`", "") != "*.*":
+            continue
+        privilege_tokens.update(
+            token.strip().upper().replace("`", "")
+            for token in match.group("privileges").split(",")
+        )
+
+    if database_type == CoreAuthDatabase.DatabaseType.MARIADB:
+        return bool(
+            privilege_tokens.intersection(
+                {"ALL", "ALL PRIVILEGES", "SUPER", "SET USER"}
+            )
+        )
+
+    if database_version == CoreAuthDatabase.DatabaseVersion.MYSQL_8_4:
+        return {
+            "SET_ANY_DEFINER",
+            "ALLOW_NONEXISTENT_DEFINER",
+        }.issubset(privilege_tokens)
+
+    # MySQL 8.0 uses SET_USER_ID (or its legacy SUPER equivalent).  Accept the
+    # 8.4 pair too so an upgraded server remains compatible with a connection
+    # whose saved version has not yet been refreshed.
+    return bool(
+        privilege_tokens.intersection(
+            {"ALL", "ALL PRIVILEGES", "SUPER", "SET_USER_ID"}
+        )
+        or {
+            "SET_ANY_DEFINER",
+            "ALLOW_NONEXISTENT_DEFINER",
+        }.issubset(privilege_tokens)
+    )
+
+
 def _preflight_mysql_fork_permissions(
     node,
     backup,
@@ -1483,6 +1576,7 @@ def _preflight_mysql_fork_permissions(
     *,
     defaults_arg,
     target_names,
+    requires_definer_privilege=False,
     ssh=None,
 ):
     """Check fork CREATE/DROP capability without creating or dropping anything."""
@@ -1504,6 +1598,10 @@ def _preflight_mysql_fork_permissions(
         for capability in capabilities.values()
     ):
         raise _database_restore_permission_error(auth.type)
+    if requires_definer_privilege and not _mysql_has_definer_privilege(
+        grants, auth.type, getattr(auth, "version", None)
+    ):
+        raise _database_restore_definer_permission_error(auth.type)
     return {"create": True, "drop": True}
 
 
@@ -2518,6 +2616,7 @@ def _preflight_database_restore_permissions(
     *,
     mode,
     mapping,
+    archive_requirements=None,
 ):
     """Run the no-mutation fork capability check for direct and SSH paths.
 
@@ -2530,6 +2629,9 @@ def _preflight_database_restore_permissions(
 
     worker_suffix = _restore_work_suffix(restore, backup)
     target_names = list(dict.fromkeys((mapping or {}).values()))
+    requires_definer_privilege = bool(
+        (archive_requirements or {}).get("mysql_explicit_definer")
+    )
     ssh = None
     ssh_key_path = None
     remote_name = None
@@ -2563,6 +2665,7 @@ def _preflight_database_restore_permissions(
                     password,
                     defaults_arg=remote_name,
                     target_names=target_names,
+                    requires_definer_privilege=requires_definer_privilege,
                     ssh=ssh,
                 )
             local_path = f"_storage/db_restore_preflight_{worker_suffix}.cnf"
@@ -2581,6 +2684,7 @@ def _preflight_database_restore_permissions(
                 password,
                 defaults_arg=f"--defaults-extra-file={local_path}",
                 target_names=target_names,
+                requires_definer_privilege=requires_definer_privilege,
             )
 
         if auth.type == CoreAuthDatabase.DatabaseType.POSTGRESQL:
@@ -3465,8 +3569,16 @@ def restore_database(backup, restore):
         _ensure_restore_fence(restore)
         extract_backup_zip(local_zip, local_dir)
         _ensure_restore_fence(restore)
-        targets, source_digests = _validate_extracted_archive(
-            backup, auth, local_dir, mode=mode
+        validated_archive = _validate_extracted_archive(
+            backup,
+            auth,
+            local_dir,
+            mode=mode,
+            include_requirements=True,
+        )
+        targets, source_digests = validated_archive[:2]
+        archive_requirements = (
+            validated_archive[2] if len(validated_archive) > 2 else {}
         )
         mapping = _load_or_create_mapping(restore, params, targets.keys())
         _checkpoint(
@@ -3505,6 +3617,7 @@ def restore_database(backup, restore):
             password,
             mode=mode,
             mapping=mapping,
+            archive_requirements=archive_requirements,
         )
         _checkpoint(
             restore,
