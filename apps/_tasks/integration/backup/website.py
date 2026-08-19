@@ -404,6 +404,20 @@ def _finalize_zip(backup, local_dir, *, keep_dir):
         dir=manifest_parent,
         text=True,
     )
+    try:
+        archive_descriptor, staged_archive_members = tempfile.mkstemp(
+            prefix=f".{backup.uuid}.members.",
+            suffix=".partial",
+            dir=manifest_parent,
+            text=True,
+        )
+    except Exception:
+        os.close(descriptor)
+        try:
+            os.remove(staged_manifest)
+        except FileNotFoundError:
+            pass
+        raise
     total_files = 0
 
     def raise_walk_error(error):
@@ -431,8 +445,13 @@ def _finalize_zip(backup, local_dir, *, keep_dir):
             raise ArchiveSourcePolicyError("special", relative_path=relative)
         return relative
 
+    scan_succeeded = False
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as flist:
+        with os.fdopen(
+            descriptor, "w", encoding="utf-8", newline="\n"
+        ) as flist, os.fdopen(
+            archive_descriptor, "w", encoding="utf-8", newline="\n"
+        ) as archive_members:
             for root, dirs, files in os.walk(
                 source_root,
                 topdown=True,
@@ -442,33 +461,52 @@ def _finalize_zip(backup, local_dir, *, keep_dir):
                 dirs.sort()
                 files.sort()
                 for name in dirs:
-                    inspect_member(root, name, expected_directory=True)
+                    relative = inspect_member(
+                        root, name, expected_directory=True
+                    )
+                    archive_members.write(relative + "/\n")
                 for name in files:
                     relative = inspect_member(
                         root, name, expected_directory=False
                     )
                     flist.write(relative + "\n")
+                    archive_members.write(relative + "\n")
                     total_files += 1
             flist.flush()
             os.fsync(flist.fileno())
+            archive_members.flush()
+            os.fsync(archive_members.fileno())
         os.replace(staged_manifest, backup_file_list_path)
+        scan_succeeded = True
     finally:
         try:
             os.remove(staged_manifest)
         except FileNotFoundError:
             pass
+        if not scan_succeeded:
+            try:
+                os.remove(staged_archive_members)
+            except FileNotFoundError:
+                pass
 
-    backup.total_files = total_files
-    backup.save()
+    try:
+        backup.total_files = total_files
+        backup.save()
 
-    # Zip the downloaded tree (no sudo / no chown). The zip path must be absolute:
-    # cwd is local_dir, which in incremental mode is the node's cache directory.
-    create_zip(
-        local_dir,
-        local_zip,
-        timeout=COMMAND_TIMEOUT,
-        before_publish=backup.ensure_execution_fence,
-    )
+        # Feed the exact verified enumeration to Info-ZIP. This avoids a second
+        # directory walk while retaining explicit empty-directory entries.
+        create_zip(
+            local_dir,
+            local_zip,
+            timeout=COMMAND_TIMEOUT,
+            before_publish=backup.ensure_execution_fence,
+            member_list_path=staged_archive_members,
+        )
+    finally:
+        try:
+            os.remove(staged_archive_members)
+        except FileNotFoundError:
+            pass
     backup.size = os.stat(local_zip).st_size
     backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
     backup.save()

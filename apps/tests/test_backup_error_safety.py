@@ -1,3 +1,4 @@
+import subprocess
 from unittest import mock
 
 from django.test import SimpleTestCase
@@ -67,6 +68,16 @@ class BackupErrorSafetyTests(SimpleTestCase):
         self.assertEqual(disk.code, "WORKER_DISK_FULL")
         self.assertTrue(disk.retryable)
         self.assertNotIn("/private/path", disk.detail)
+
+    def test_archive_subprocess_timeout_is_classified_as_timeout(self):
+        failure = safe_backup_failure(
+            subprocess.TimeoutExpired(["zip", "redacted"], 60),
+            stage="website_backup",
+        )
+
+        self.assertEqual(failure.code, "BACKUP_TIMEOUT")
+        self.assertTrue(failure.retryable)
+        self.assertNotIn("redacted", failure.detail)
 
     def test_mysql_secure_transport_failure_is_terminal_and_actionable(self):
         failure = safe_backup_failure(

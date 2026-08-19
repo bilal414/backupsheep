@@ -2244,6 +2244,51 @@ class FinalizeZipManifestTests(WebsiteEngineBase):
         self.assertEqual(backup.size, os.stat(zip_path).st_size)
         self.assertEqual(backup.status, UtilBackup.Status.DOWNLOAD_COMPLETE)
 
+    def test_verified_enumeration_feeds_zip_once_and_keeps_empty_directories(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        os.makedirs(os.path.join(tmp, "empty-directory"))
+        original_walk = os.walk
+
+        with mock.patch.object(W.os, "walk", wraps=original_walk) as walk:
+            self._finalize(backup, tmp, keep_dir=True)
+
+        walk.assert_called_once()
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertIn("empty-directory/", archive.namelist())
+        with open(f"_storage/{backup.uuid}.files") as manifest:
+            self.assertEqual(
+                manifest.read().splitlines(),
+                ["index.html", "sub/world.txt"],
+            )
+        member_prefix = f".{backup.uuid}.members."
+        self.assertFalse(
+            any(
+                name.startswith(member_prefix) and name.endswith(".partial")
+                for name in os.listdir("_storage")
+            )
+        )
+
+    def test_member_list_preserves_unicode_spaces_and_quotes(self):
+        _node, backup = self._make_backup()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        names = (
+            "caf\u00e9 space.txt",
+            "arabic-\u0645\u0631\u062d\u0628\u0627.txt",
+            "quote-'\".txt",
+        )
+        for name in names:
+            with open(os.path.join(tmp, name), "w", encoding="utf-8") as source:
+                source.write(name)
+
+        self._finalize(backup, tmp, keep_dir=True)
+
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(set(archive.namelist()), set(names))
+            for name in names:
+                self.assertEqual(archive.read(name).decode("utf-8"), name)
+
     def test_full_mode_discards_working_dir_via_task(self):
         node, backup = self._make_backup()
         tmp = self._tree()

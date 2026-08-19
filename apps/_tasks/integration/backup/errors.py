@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import re
+import subprocess
 import zipfile
 from dataclasses import dataclass
 
@@ -33,9 +34,10 @@ def safe_backup_failure(error, *, stage="backup"):
             "then run a new backup.",
             False,
         )
-    if isinstance(error, (SoftTimeLimitExceeded, TimeoutError)) or getattr(
-        error, "errno", None
-    ) == errno.ETIMEDOUT:
+    if isinstance(
+        error,
+        (SoftTimeLimitExceeded, TimeoutError, subprocess.TimeoutExpired),
+    ) or getattr(error, "errno", None) == errno.ETIMEDOUT:
         return SafeBackupFailure(
             "BACKUP_TIMEOUT",
             "The source did not finish the backup operation before its timeout.",

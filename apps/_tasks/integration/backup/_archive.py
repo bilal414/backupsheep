@@ -4,6 +4,7 @@ import errno
 import os
 import struct
 import subprocess
+import tempfile
 import uuid
 import zipfile
 from typing import NamedTuple
@@ -570,6 +571,30 @@ def _publish_archive(
     return validate_zip_archive(archive_path, required_suffix=required_suffix)
 
 
+def _run_zip_writer(command, *, source_dir, timeout, stderr_dir, stdin=None):
+    """Run Info-ZIP without retaining per-member console output in memory."""
+    with tempfile.TemporaryFile(dir=stderr_dir) as stderr_file:
+        process = subprocess.Popen(
+            command,
+            stdin=stdin,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+            cwd=source_dir,
+        )
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+        stderr_file.flush()
+        stderr_file.seek(0, os.SEEK_END)
+        stderr_size = stderr_file.tell()
+        stderr_file.seek(max(0, stderr_size - 4096))
+        stderr_tail = _decode_output(stderr_file.read()).strip()[-1000:]
+    return process.returncode, stderr_tail
+
+
 def create_zip(
     source_dir,
     archive_path,
@@ -577,23 +602,37 @@ def create_zip(
     timeout,
     required_suffix=None,
     before_publish=None,
+    member_list_path=None,
 ):
     """Build, fsync, and atomically publish a validated ZIP archive."""
     archive_path = os.path.abspath(archive_path)
     staged_path = _staged_archive_path(archive_path)
     try:
-        result = subprocess.run(
-            ["zip", "-y", "-r", staged_path, ".", "-i", "*"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            cwd=source_dir,
-        )
-        if result.returncode != 0:
-            stderr = _decode_output(result.stderr).strip()
+        if member_list_path:
+            command = ["zip", "-q", "-y", staged_path, "-@"]
+        else:
+            command = ["zip", "-q", "-y", "-r", staged_path, ".", "-i", "*"]
+
+        if member_list_path:
+            with open(member_list_path, "rb") as member_list:
+                returncode, stderr = _run_zip_writer(
+                    command,
+                    source_dir=source_dir,
+                    timeout=timeout,
+                    stderr_dir=os.path.dirname(staged_path) or ".",
+                    stdin=member_list,
+                )
+        else:
+            returncode, stderr = _run_zip_writer(
+                command,
+                source_dir=source_dir,
+                timeout=timeout,
+                stderr_dir=os.path.dirname(staged_path) or ".",
+            )
+        if returncode != 0:
             raise RuntimeError(
-                f"zip failed with exit code {result.returncode}"
-                + (f": {stderr[-1000:]}" if stderr else "")
+                f"zip failed with exit code {returncode}"
+                + (f": {stderr}" if stderr else "")
             )
         mark_utf8_zip_names(staged_path)
         return _publish_archive(
