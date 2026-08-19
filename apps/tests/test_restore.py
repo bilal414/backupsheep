@@ -1038,8 +1038,8 @@ class AuthDatabaseDirectConnectRobustnessTests(BaseTestCase):
 class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
     """SSH-mode mysql/mariadb commands must be engine-aware about the TLS flag:
     the MariaDB client rejects the MySQL-style --ssl-mode flag (exit 7,
-    "unknown variable"), so mariadb gets bare --ssl while mysql keeps
-    --ssl-mode=PREFERRED."""
+    "unknown variable"), so mariadb gets bare --ssl while mysql requires
+    --ssl-mode=REQUIRED."""
 
     def _auth(self, db_type, version):
         node = make_database_node(
@@ -1086,12 +1086,12 @@ class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
         self.assertIn("--ssl", command)
         self.assertNotIn("ssl-mode", command)
 
-    def test_find_version_mysql_keeps_ssl_mode_preferred(self):
+    def test_find_version_mysql_requires_tls(self):
         auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL, "mysql_8_0")
         command = self._capture_command(
             auth, "find_db_type_and_version", "8.0.36\n")
         self.assertTrue(command.startswith("mysql "))
-        self.assertIn("--ssl-mode=PREFERRED", command)
+        self.assertIn("--ssl-mode=REQUIRED", command)
 
     def test_check_connection_mariadb_uses_ssl_flag_not_ssl_mode(self):
         auth = self._auth(CoreAuthDatabase.DatabaseType.MARIADB, "mariadb_10_11")
@@ -1101,12 +1101,12 @@ class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
         self.assertIn("--ssl", command)
         self.assertNotIn("ssl-mode", command)
 
-    def test_check_connection_mysql_keeps_ssl_mode_preferred(self):
+    def test_check_connection_mysql_requires_tls(self):
         auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL, "mysql_8_0")
         command = self._capture_command(
             auth, "check_connection", "Server version: 8.0.36\n")
         self.assertTrue(command.startswith("mysql "))
-        self.assertIn("--ssl-mode=PREFERRED", command)
+        self.assertIn("--ssl-mode=REQUIRED", command)
 
     def test_remote_command_never_contains_database_password(self):
         auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL, "mysql_8_0")
