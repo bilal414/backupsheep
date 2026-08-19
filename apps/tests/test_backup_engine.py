@@ -1160,6 +1160,36 @@ def _recorded_run(calls, *, dump=b"", stderr=b"", returncode=0):
     return fake_run
 
 
+def _recorded_multi_database_run(calls, *, inventory=None):
+    """Record direct client/dump calls for selected/all-database fixtures."""
+    inventory = inventory or []
+
+    def fake_run(argv, **kwargs):
+        call = {"argv": list(argv), "kwargs": kwargs}
+        calls.append(call)
+        defaults = next(
+            (
+                item.split("=", 1)[1]
+                for item in argv
+                if item.startswith("--defaults-extra-file=")
+            ),
+            None,
+        )
+        if defaults:
+            call["defaults_mode"] = stat.S_IMODE(os.stat(defaults).st_mode)
+        if "--execute=SHOW DATABASES;" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=("\n".join(inventory) + "\n").encode(),
+                stderr=b"",
+            )
+        database = argv[-1]
+        kwargs["stdout"].write(f"-- dump of {database}\n".encode())
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    return fake_run
+
+
 class _FakeChannelStream:
     """Stand-in for a paramiko channel file: read/readlines plus
     .channel.recv_exit_status(). The engine calls _set_mode('rb') on stdout."""
@@ -1410,6 +1440,73 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         # The credentials file is deleted afterwards.
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
 
+    def test_direct_selected_databases_dump_each_database(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MYSQL,
+            version="mysql_8_0",
+            database_name=None,
+            all_tables=False,
+            tables=[],
+            databases=["analytics", "appdb"],
+        )
+        calls = []
+
+        self._run_engine(
+            backup,
+            _recorded_multi_database_run(calls),
+        )
+
+        self.assertEqual(
+            [call["argv"][-1] for call in calls],
+            ["analytics", "appdb"],
+        )
+        self.assertTrue(all(call["defaults_mode"] == 0o600 for call in calls))
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["analytics.sql", "appdb.sql", "backupsheep.txt"],
+            )
+
+    def test_direct_all_databases_filters_system_schemas_before_dump(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MYSQL,
+            version="mysql_8_0",
+            database_name=None,
+            all_tables=False,
+            tables=[],
+            databases=[],
+            all_databases=True,
+        )
+        calls = []
+
+        self._run_engine(
+            backup,
+            _recorded_multi_database_run(
+                calls,
+                inventory=[
+                    "mysql",
+                    "analytics",
+                    "information_schema",
+                    "appdb",
+                    "performance_schema",
+                    "sys",
+                ],
+            ),
+        )
+
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(calls[0]["argv"][0].endswith("mysql"))
+        self.assertIn("--execute=SHOW DATABASES;", calls[0]["argv"])
+        self.assertEqual(
+            [call["argv"][-1] for call in calls[1:]],
+            ["analytics", "appdb"],
+        )
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["analytics.sql", "appdb.sql", "backupsheep.txt"],
+            )
+
     def test_direct_failure_raises_and_cleans_up(self):
         node, backup = self._make_backup(
             db_type=CoreAuthDatabase.DatabaseType.MYSQL, version="mysql_8_0")
@@ -1588,6 +1685,75 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
                 "max_allowed_packet_bytes": 512 * 1024 * 1024,
             },
         )
+
+    def test_direct_selected_databases_dump_each_database(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MARIADB,
+            version="mariadb_11_8",
+            database_name=None,
+            all_tables=False,
+            tables=[],
+            databases=["analytics", "appdb"],
+        )
+        calls = []
+        with self._patch_check_connection(), mock.patch.object(
+            MDB_ENGINE.subprocess,
+            "run",
+            side_effect=_recorded_multi_database_run(calls),
+        ), mock.patch.object(MDB_ENGINE, "delete_from_disk"):
+            MDB_ENGINE.snapshot_mariadb(backup)
+
+        self.assertEqual(
+            [call["argv"][-1] for call in calls],
+            ["analytics", "appdb"],
+        )
+        self.assertTrue(all(call["defaults_mode"] == 0o600 for call in calls))
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["analytics.sql", "appdb.sql", "backupsheep.txt"],
+            )
+
+    def test_direct_all_databases_filters_system_schemas_before_dump(self):
+        node, backup = self._make_backup(
+            db_type=CoreAuthDatabase.DatabaseType.MARIADB,
+            version="mariadb_11_8",
+            database_name=None,
+            all_tables=False,
+            tables=[],
+            databases=[],
+            all_databases=True,
+        )
+        calls = []
+        with self._patch_check_connection(), mock.patch.object(
+            MDB_ENGINE.subprocess,
+            "run",
+            side_effect=_recorded_multi_database_run(
+                calls,
+                inventory=[
+                    "mysql",
+                    "analytics",
+                    "information_schema",
+                    "appdb",
+                    "performance_schema",
+                    "sys",
+                ],
+            ),
+        ), mock.patch.object(MDB_ENGINE, "delete_from_disk"):
+            MDB_ENGINE.snapshot_mariadb(backup)
+
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(calls[0]["argv"][0].endswith("mariadb"))
+        self.assertIn("--execute=SHOW DATABASES;", calls[0]["argv"])
+        self.assertEqual(
+            [call["argv"][-1] for call in calls[1:]],
+            ["analytics", "appdb"],
+        )
+        with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["analytics.sql", "appdb.sql", "backupsheep.txt"],
+            )
 
     def test_explicit_skip_opt_keeps_row_by_row_format_visible(self):
         node, backup = self._make_backup(

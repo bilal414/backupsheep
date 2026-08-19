@@ -123,6 +123,32 @@ def _run_direct_dump(node, backup, argv, db_file, log_file, username, password):
         )
 
 
+def _run_direct_capture(node, backup, argv, log_file, username, password, what):
+    """Run a bounded local client query and return its stdout as text."""
+    log_file.write(f"MariaDB: {_redact(' '.join(argv), username, password)}\n")
+    proc = subprocess.run(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=COMMAND_TIMEOUT,
+    )
+    out_text = _decode(proc.stdout)
+    err_text = _decode(proc.stderr)
+    if proc.returncode != 0:
+        raise NodeBackupFailedError(
+            node,
+            backup.uuid_str,
+            backup.attempt_no,
+            backup.type,
+            message=f"{what} failed with exit code {proc.returncode}: "
+                    f"{_redact(err_text[-2000:], username, password)}",
+        )
+    for line in err_text.splitlines():
+        if line.strip():
+            log_file.write(f"WARNING: {_redact(line, username, password)}\n")
+    return out_text
+
+
 def _ssh_check_result(node, backup, stdout, stderr, log_file, username, password, what):
     """Raise NodeBackupFailedError on non-zero remote exit status; log stderr as warnings."""
     err_text = _decode(stderr.read())
@@ -412,7 +438,48 @@ def snapshot_mariadb(backup):
                     + targets
                 )
 
-            if node.database.all_tables:
+            selected_databases = list(node.database.databases or [])
+            if node.database.all_databases:
+                out_text = _run_direct_capture(
+                    node,
+                    backup,
+                    [
+                        f"{database_version_path}{client_binary}",
+                        f"--defaults-extra-file={local_defaults_path}",
+                        "--batch",
+                        "--skip-column-names",
+                        "--execute=SHOW DATABASES;",
+                    ],
+                    log_file,
+                    username,
+                    password,
+                    "mariadb show databases",
+                )
+                system_databases = {
+                    "information_schema",
+                    "mysql",
+                    "performance_schema",
+                    "sys",
+                }
+                selected_databases = [
+                    name
+                    for name in (line.strip() for line in out_text.splitlines())
+                    if name and name.casefold() not in system_databases
+                ]
+
+            if selected_databases:
+                for database in selected_databases:
+                    safe_token(database, "database")
+                    _run_direct_dump(
+                        node,
+                        backup,
+                        local_mysqldump([database]),
+                        f"{local_dir}{database}.sql",
+                        log_file,
+                        username,
+                        password,
+                    )
+            elif node.database.all_tables:
                 _run_direct_dump(
                     node,
                     backup,
@@ -422,7 +489,7 @@ def snapshot_mariadb(backup):
                     username,
                     password,
                 )
-            else:
+            elif node.database.tables:
                 for table in node.database.tables:
                     _run_direct_dump(
                         node,
