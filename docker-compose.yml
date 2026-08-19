@@ -120,7 +120,7 @@ services:
   worker-cloud:
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=8"]
+    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=${CELERY_CLOUD_CONCURRENCY:-4}", "--prefetch-multiplier=${CELERY_CLOUD_PREFETCH_MULTIPLIER:-1}"]
     depends_on:
       db:
         condition: service_healthy
@@ -137,7 +137,7 @@ services:
   worker-database:
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=database@%h", "-Q", "database", "--concurrency=4"]
+    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
     depends_on:
       db:
         condition: service_healthy
@@ -155,7 +155,7 @@ services:
   worker-files:
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=files@%h", "-Q", "files", "--concurrency=4"]
+    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
     depends_on:
       db:
         condition: service_healthy
@@ -176,7 +176,7 @@ services:
   worker-storage:
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=storage@%h", "-Q", "storage", "--concurrency=4"]
+    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=storage@%h", "-Q", "storage", "--concurrency=${CELERY_STORAGE_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_STORAGE_PREFETCH_MULTIPLIER:-1}"]
     depends_on:
       db:
         condition: service_healthy
@@ -196,7 +196,7 @@ services:
   worker-logs:
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=logs@%h", "-Q", "logs", "--concurrency=4"]
+    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=logs@%h", "-Q", "logs", "--concurrency=${CELERY_LOGS_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_LOGS_PREFETCH_MULTIPLIER:-1}"]
     depends_on:
       db:
         condition: service_healthy

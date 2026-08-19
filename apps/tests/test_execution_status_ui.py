@@ -25,6 +25,7 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
 
     def test_backup_and_restore_statuses_expose_operator_contract(self):
         for label in (
+            "Queued",
             "Actively running",
             "Waiting for provider",
             "Scheduled retry",
@@ -54,6 +55,25 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.source)
+
+    def test_pending_backup_is_visibly_queued_and_keeps_polling(self):
+        category = self.source.split(
+            "function categoryFor({status, phase, providerStatus, reconciliationState, errorCode, retryAt})",
+            1,
+        )[1].split("function toneClasses", 1)[0]
+
+        self.assertIn(
+            "if (status === 'pending' || phase === 'pending')",
+            category,
+        )
+        self.assertIn(
+            "return {key: 'queued', label: 'Queued', tone: 'sky'};",
+            category,
+        )
+        self.assertIn(
+            "const shouldPoll = !['complete', 'terminal_failure', 'manual_review'].includes(category.key);",
+            self.source,
+        )
 
     def test_legacy_and_malformed_payloads_keep_existing_status_fallback(self):
         # These guards are intentionally close to the client-side parser so a

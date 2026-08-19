@@ -12,9 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import threading
 import uuid
-import zipfile
 
 from django.conf import settings
 from django.db import close_old_connections
@@ -183,6 +183,38 @@ def _file_identity(path):
     return byte_count, digest.hexdigest()
 
 
+def _verify_zip_crc_bounded(archive_path):
+    """Validate ZIP structure and member CRCs without loading its directory in Python."""
+
+    timeout = max(
+        1,
+        min(
+            int(
+                getattr(
+                    settings,
+                    "SOURCE_ARCHIVE_VERIFY_TIMEOUT_SECONDS",
+                    12 * 3600,
+                )
+            ),
+            24 * 3600,
+        ),
+    )
+    try:
+        result = subprocess.run(
+            ["unzip", "-tqq", archive_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError("The local backup archive validation timed out.") from error
+    except OSError as error:
+        raise ValueError("The local backup archive could not be verified.") from error
+    if result.returncode != 0:
+        raise ValueError("The local backup archive is not a valid ZIP file.")
+
+
 def verify_and_commit_source_artifact(backup):
     """Validate the local ZIP and durably commit its exact identity."""
     storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
@@ -197,13 +229,7 @@ def verify_and_commit_source_artifact(backup):
         raise FileNotFoundError("The local backup archive is missing.")
     if os.path.getsize(archive_path) <= 0:
         raise ValueError("The local backup archive is empty.")
-    try:
-        with zipfile.ZipFile(archive_path, "r") as archive:
-            bad_member = archive.testzip()
-            if bad_member:
-                raise ValueError("The local backup archive failed CRC validation.")
-    except zipfile.BadZipFile as error:
-        raise ValueError("The local backup archive is not a valid ZIP file.") from error
+    _verify_zip_crc_bounded(archive_path)
 
     byte_count, checksum = _file_identity(archive_path)
     verified_at = timezone.now()

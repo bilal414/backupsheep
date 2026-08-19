@@ -2552,6 +2552,9 @@
                 if (phase === 'polling' || (providerStatus && providerWaitStates.has(providerStatus))) {
                     return {key: 'provider_wait', label: 'Waiting for provider', tone: 'sky'};
                 }
+                if (status === 'pending' || phase === 'pending') {
+                    return {key: 'queued', label: 'Queued', tone: 'sky'};
+                }
                 return {key: 'running', label: 'Actively running', tone: 'indigo'};
             }
 

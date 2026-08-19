@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import subprocess
 import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -371,7 +372,18 @@ class BackupExecutionStateTests(BaseTestCase):
             archive.writestr("database.sql", "SELECT 1;")
 
         with override_settings(BASE_DIR=root):
-            artifact = verify_and_commit_source_artifact(backup)
+            with mock.patch(
+                "apps._tasks.execution.subprocess.run",
+                wraps=subprocess.run,
+            ) as bounded_verify:
+                artifact = verify_and_commit_source_artifact(backup)
+            command = bounded_verify.call_args.args[0]
+            options = bounded_verify.call_args.kwargs
+            self.assertEqual(command, ["unzip", "-tqq", archive_path])
+            self.assertIs(options["stdout"], subprocess.DEVNULL)
+            self.assertIs(options["stderr"], subprocess.DEVNULL)
+            self.assertEqual(options["timeout"], 12 * 3600)
+            self.assertFalse(options["check"])
             self.assertEqual(artifact.checksum_algorithm, "sha256")
             self.assertGreater(artifact.byte_count, 0)
             self.assertTrue(
@@ -399,6 +411,31 @@ class BackupExecutionStateTests(BaseTestCase):
         with override_settings(BASE_DIR=root):
             with self.assertRaisesRegex(ValueError, "valid ZIP"):
                 verify_and_commit_source_artifact(backup)
+        self.assertFalse(backup.artifact_records.filter(role="source").exists())
+
+    def test_source_archive_verification_timeout_is_bounded_and_uncommitted(self):
+        _node, backup = self._backup()
+        backup.uuid = f"timeout-source-{backup.pk}"
+        backup.save(update_fields=["uuid", "modified"])
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        storage = os.path.join(root, "_storage")
+        os.makedirs(storage)
+        archive_path = os.path.join(storage, f"{backup.uuid}.zip")
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("database.sql", "SELECT 1;")
+
+        with override_settings(
+            BASE_DIR=root,
+            SOURCE_ARCHIVE_VERIFY_TIMEOUT_SECONDS=17,
+        ), mock.patch(
+            "apps._tasks.execution.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("unzip", 17),
+        ) as bounded_verify:
+            with self.assertRaisesRegex(ValueError, "validation timed out"):
+                verify_and_commit_source_artifact(backup)
+
+        self.assertEqual(bounded_verify.call_args.kwargs["timeout"], 17)
         self.assertFalse(backup.artifact_records.filter(role="source").exists())
 
     def test_provider_and_storage_integrity_metadata_are_idempotent(self):

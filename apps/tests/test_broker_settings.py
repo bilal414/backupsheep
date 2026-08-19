@@ -8,6 +8,7 @@ from backupsheep.settings import _resolve_celery_broker_url
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RABBITMQ_CONFIG = PROJECT_ROOT / "deploy" / "rabbitmq" / "90-backupsheep.conf"
 COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yml"
+ENV_SAMPLE = PROJECT_ROOT / ".env_sample"
 
 
 class CeleryBrokerSettingsTests(SimpleTestCase):
@@ -84,3 +85,55 @@ class RabbitMQRuntimeContractTests(SimpleTestCase):
         )[0]
 
         self.assertIn("\n    hostname: rabbitmq\n", rabbitmq_service)
+
+
+class WorkerCapacityContractTests(SimpleTestCase):
+    DEFAULTS = {
+        "cloud": ("4", "1"),
+        "database": ("1", "1"),
+        "files": ("1", "1"),
+        "storage": ("2", "1"),
+        "logs": ("2", "1"),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.compose = COMPOSE_FILE.read_text(encoding="utf-8")
+        cls.env_sample = ENV_SAMPLE.read_text(encoding="utf-8")
+
+    def _service(self, name):
+        service = self.compose.split(f"\n  worker-{name}:\n", 1)[1]
+        service = service.split("\n  worker-", 1)[0]
+        return service.split("\n  beat:\n", 1)[0]
+
+    def test_each_queue_has_an_independent_bounded_default(self):
+        for queue, (concurrency, prefetch) in self.DEFAULTS.items():
+            with self.subTest(queue=queue):
+                service = self._service(queue)
+                variable = queue.upper()
+                self.assertIn(
+                    f"--concurrency=${{CELERY_{variable}_CONCURRENCY:-{concurrency}}}",
+                    service,
+                )
+                self.assertIn(
+                    f"--prefetch-multiplier=${{CELERY_{variable}_PREFETCH_MULTIPLIER:-{prefetch}}}",
+                    service,
+                )
+
+    def test_sample_environment_matches_compose_capacity_defaults(self):
+        for queue, (concurrency, prefetch) in self.DEFAULTS.items():
+            with self.subTest(queue=queue):
+                variable = queue.upper()
+                self.assertIn(
+                    f"CELERY_{variable}_CONCURRENCY={concurrency}",
+                    self.env_sample,
+                )
+                self.assertIn(
+                    f"CELERY_{variable}_PREFETCH_MULTIPLIER={prefetch}",
+                    self.env_sample,
+                )
+
+    def test_cpu_and_disk_heavy_workers_default_to_one_active_job(self):
+        self.assertEqual(self.DEFAULTS["database"][0], "1")
+        self.assertEqual(self.DEFAULTS["files"][0], "1")
