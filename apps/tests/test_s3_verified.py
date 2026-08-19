@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import os
 import uuid
@@ -53,6 +54,18 @@ def _multipart_upload_entry(
         "Owner": {"ID": owner_id, "DisplayName": "bucket-owner"},
         "Initiator": {"ID": initiator_id, "DisplayName": "backupsheep"},
     }
+
+
+def _one_part_inventory_pages(size, *, etag='"part-etag"'):
+    return [
+        {"Parts": [], "IsTruncated": False},
+        {
+            "Parts": [
+                {"PartNumber": 1, "ETag": etag, "Size": int(size)}
+            ],
+            "IsTruncated": False,
+        },
+    ]
 
 
 class VerifiedS3ReconciliationTests(SimpleTestCase):
@@ -409,7 +422,7 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             {"Uploads": [stale], "IsTruncated": False},
             {"Uploads": [stale, accepted], "IsTruncated": False},
         ]
-        client.list_parts.return_value = {"Parts": [], "IsTruncated": False}
+        client.list_parts.side_effect = _one_part_inventory_pages(len(self.payload))
         client.upload_part.return_value = {"ETag": '"part-etag"'}
         client.create_multipart_upload.side_effect = ConnectionError("response lost")
 
@@ -482,7 +495,7 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             "Uploads": [stale, accepted],
             "IsTruncated": False,
         }
-        client.list_parts.return_value = {"Parts": [], "IsTruncated": False}
+        client.list_parts.side_effect = _one_part_inventory_pages(len(self.payload))
         client.upload_part.return_value = {"ETag": '"part-etag"'}
 
         state = self._upload(client, key=key)
@@ -509,7 +522,7 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             rate_limit,
             {"UploadId": "retry-upload"},
         ]
-        client.list_parts.return_value = {"Parts": [], "IsTruncated": False}
+        client.list_parts.side_effect = _one_part_inventory_pages(len(self.payload))
         client.upload_part.return_value = {"ETag": '"part-etag"'}
 
         with self.assertRaises(ClientError) as raised:
@@ -559,7 +572,7 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             {"Uploads": [accepted], "IsTruncated": False},
         ]
         client.create_multipart_upload.return_value = {}
-        client.list_parts.return_value = {"Parts": [], "IsTruncated": False}
+        client.list_parts.side_effect = _one_part_inventory_pages(len(self.payload))
         client.upload_part.return_value = {"ETag": '"part-etag"'}
 
         state = self._upload(client, key=key)
@@ -594,7 +607,7 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             {"Uploads": [accepted], "IsTruncated": False},
         ]
         client.create_multipart_upload.return_value = {}
-        client.list_parts.return_value = {"Parts": [], "IsTruncated": False}
+        client.list_parts.side_effect = _one_part_inventory_pages(len(self.payload))
         client.upload_part.return_value = {"ETag": '"part-etag"'}
 
         with self.assertRaises(S3UploadOutcomePending):
@@ -632,7 +645,7 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             "IsTruncated": False,
         }
         client.create_multipart_upload.return_value = {"UploadId": "upload-1"}
-        client.list_parts.return_value = {"Parts": [], "IsTruncated": False}
+        client.list_parts.side_effect = _one_part_inventory_pages(len(self.payload))
         client.upload_part.return_value = {"ETag": '"part-etag"'}
         client.complete_multipart_upload.side_effect = ConnectionError(
             "response lost"
@@ -665,14 +678,243 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
 
         client.create_multipart_upload.assert_called_once()
         client.complete_multipart_upload.assert_called_once()
-        client.list_parts.assert_called_once()
+        self.assertEqual(client.list_parts.call_count, 2)
 
         state = self._upload(client, key=key)
 
         client.create_multipart_upload.assert_called_once()
         client.complete_multipart_upload.assert_called_once()
-        client.list_parts.assert_called_once()
+        self.assertEqual(client.list_parts.call_count, 2)
         self.assertEqual(state["phase"], "committed")
+
+    @override_settings(
+        S3_MULTIPART_THRESHOLD_BYTES=1,
+        S3_MULTIPART_PART_SIZE_BYTES=5 * 1024 * 1024,
+        S3_MULTIPART_CHECKPOINT_PARTS=1,
+        S3_MULTIPART_HASH_CHUNK_BYTES=64 * 1024,
+    )
+    def test_multipart_streams_file_slices_and_persists_only_bounded_progress(self):
+        first = b"a" * (5 * 1024 * 1024)
+        second = b"b" * (1024 * 1024)
+        self._write(first + second)
+        key = "backups/bounded-parts.zip"
+        persisted = []
+        self.point.save.side_effect = lambda **_kwargs: persisted.append(
+            deepcopy(self.point.metadata)
+        )
+        client = mock.MagicMock()
+        client.head_object.side_effect = [_not_found(), self._head()]
+        client.list_multipart_uploads.return_value = {
+            "Uploads": [],
+            "IsTruncated": False,
+        }
+        client.create_multipart_upload.return_value = {"UploadId": "upload-1"}
+        client.list_parts.side_effect = [
+            {"Parts": [], "IsTruncated": False},
+            {
+                "Parts": [
+                    {
+                        "PartNumber": 1,
+                        "ETag": '"part-1"',
+                        "Size": len(first),
+                    },
+                    {
+                        "PartNumber": 2,
+                        "ETag": '"part-2"',
+                        "Size": len(second),
+                    },
+                ],
+                "IsTruncated": False,
+            },
+        ]
+        bodies = []
+        self.point.ensure_upload_fence = mock.Mock()
+
+        def upload_part(**kwargs):
+            body = kwargs["Body"]
+            self.assertNotIsInstance(body, (bytes, bytearray))
+            digest = hashlib.sha256()
+            total = 0
+            maximum_read = 0
+            while True:
+                payload = body.read(64 * 1024)
+                if not payload:
+                    break
+                digest.update(payload)
+                total += len(payload)
+                maximum_read = max(maximum_read, len(payload))
+            body.seek(0)
+            self.assertEqual(body.tell(), 0)
+            bodies.append((len(body), total, maximum_read))
+            self.assertEqual(
+                kwargs["ChecksumSHA256"],
+                base64.b64encode(digest.digest()).decode("ascii"),
+            )
+            return {"ETag": f'"part-{kwargs["PartNumber"]}"'}
+
+        client.upload_part.side_effect = upload_part
+
+        state = upload_verified_s3(
+            self.point,
+            client=client,
+            bucket="test-bucket",
+            key=key,
+            local_path=self.local_path,
+            supports_checksum=True,
+        )
+
+        self.assertEqual(state["phase"], "committed")
+        self.assertEqual(self.point.ensure_upload_fence.call_count, 3)
+        self.assertEqual(
+            bodies,
+            [
+                (len(first), len(first), 64 * 1024),
+                (len(second), len(second), 64 * 1024),
+            ],
+        )
+        multipart_snapshots = [
+            snapshot["s3_object"]["multipart"]
+            for snapshot in persisted
+            if snapshot["s3_object"].get("multipart")
+        ]
+        self.assertTrue(multipart_snapshots)
+        self.assertTrue(
+            all("parts" not in multipart for multipart in multipart_snapshots)
+        )
+        completion = next(
+            multipart["complete_intent"]
+            for multipart in multipart_snapshots
+            if multipart.get("complete_intent")
+        )
+        self.assertEqual(completion["part_count"], 2)
+        self.assertEqual(completion["uploaded_bytes"], len(self.payload))
+        self.assertEqual(len(completion["part_inventory_sha256"]), 64)
+        self.assertNotIn("parts", completion)
+        self.assertEqual(
+            client.complete_multipart_upload.call_args.kwargs["MultipartUpload"][
+                "Parts"
+            ],
+            [
+                {"PartNumber": 1, "ETag": '"part-1"'},
+                {"PartNumber": 2, "ETag": '"part-2"'},
+            ],
+        )
+
+    @override_settings(
+        S3_MULTIPART_THRESHOLD_BYTES=1,
+        S3_MULTIPART_PART_SIZE_BYTES=5 * 1024 * 1024,
+    )
+    def test_incomplete_final_part_inventory_stops_before_completion(self):
+        self._write(b"a" * (5 * 1024 * 1024))
+        client = mock.MagicMock()
+        client.head_object.side_effect = _not_found()
+        client.list_multipart_uploads.return_value = {
+            "Uploads": [],
+            "IsTruncated": False,
+        }
+        client.create_multipart_upload.return_value = {"UploadId": "upload-1"}
+        client.list_parts.side_effect = [
+            {"Parts": [], "IsTruncated": False},
+            {"Parts": [], "IsTruncated": False},
+        ]
+        client.upload_part.return_value = {"ETag": '"part-1"'}
+
+        with self.assertRaises(S3UploadReconciliationRequired):
+            self._upload(client, key="backups/incomplete-inventory.zip")
+
+        client.complete_multipart_upload.assert_not_called()
+        multipart = self.point.metadata["s3_object"]["multipart"]
+        self.assertNotIn("parts", multipart)
+        self.assertEqual(multipart["progress"]["completed_parts"], 1)
+        self.assertEqual(
+            multipart["progress"]["uploaded_bytes"], len(self.payload)
+        )
+
+    @override_settings(
+        S3_MULTIPART_THRESHOLD_BYTES=1,
+        S3_MULTIPART_PART_SIZE_BYTES=5 * 1024 * 1024,
+        S3_MULTIPART_NO_PROGRESS_SECONDS=60,
+        S3_MULTIPART_NO_PROGRESS_RETRY_AFTER_SECONDS=17,
+    )
+    def test_stalled_multipart_becomes_visible_retry_then_can_resume(self):
+        first_size = 5 * 1024 * 1024
+        second_size = 1024
+        self._write((b"a" * first_size) + (b"b" * second_size))
+        key = "backups/stalled-multipart.zip"
+        old = (timezone.now() - timedelta(minutes=10)).isoformat()
+        self.point.storage_file_id = key
+        self.point.metadata = {
+            "s3_object": {
+                "object_key": key,
+                "bucket": "test-bucket",
+                "sha256": self.sha256,
+                "size_bytes": len(self.payload),
+                "checksum_algorithm": "sha256",
+                "ownership_marker": "42",
+                "phase": "uploading",
+                "multipart": {
+                    "upload_id": "upload-1",
+                    "part_size_bytes": first_size,
+                    "progress": {
+                        "completed_parts": 1,
+                        "total_parts": 2,
+                        "uploaded_bytes": first_size,
+                        "total_bytes": len(self.payload),
+                        "last_progress_at": old,
+                        "window_started_at": old,
+                    },
+                },
+            }
+        }
+        part_one = {
+            "Parts": [
+                {"PartNumber": 1, "ETag": '"part-1"', "Size": first_size}
+            ],
+            "IsTruncated": False,
+        }
+        client = mock.MagicMock()
+        client.head_object.side_effect = _not_found()
+        client.list_parts.return_value = part_one
+
+        with self.assertRaises(S3UploadOutcomePending) as raised:
+            self._upload(client, key=key)
+
+        self.assertEqual(raised.exception.retry_after, 17)
+        stalled = self.point.metadata["s3_object"]
+        self.assertEqual(stalled["phase"], "multipart_no_progress")
+        self.assertEqual(
+            stalled["multipart"]["progress"]["no_progress_count"], 1
+        )
+        client.upload_part.assert_not_called()
+        client.complete_multipart_upload.assert_not_called()
+
+        client.head_object.side_effect = [_not_found(), self._head()]
+        client.list_parts.side_effect = [
+            part_one,
+            {
+                "Parts": [
+                    {
+                        "PartNumber": 1,
+                        "ETag": '"part-1"',
+                        "Size": first_size,
+                    },
+                    {
+                        "PartNumber": 2,
+                        "ETag": '"part-2"',
+                        "Size": second_size,
+                    },
+                ],
+                "IsTruncated": False,
+            },
+        ]
+        client.upload_part.return_value = {"ETag": '"part-2"'}
+
+        state = self._upload(client, key=key)
+
+        self.assertEqual(state["phase"], "committed")
+        client.create_multipart_upload.assert_not_called()
+        client.upload_part.assert_called_once()
+        client.complete_multipart_upload.assert_called_once()
 
     @override_settings(
         S3_MULTIPART_THRESHOLD_BYTES=1,
@@ -831,7 +1073,7 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             {"Uploads": [stale], "IsTruncated": False},
             {"Uploads": [stale, accepted], "IsTruncated": False},
         ]
-        client.list_parts.return_value = {"Parts": [], "IsTruncated": False}
+        client.list_parts.side_effect = _one_part_inventory_pages(len(self.payload))
         client.upload_part.return_value = {"ETag": '"part-etag"'}
 
         with self.assertRaises(S3UploadOutcomePending) as raised:
@@ -886,7 +1128,7 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
             inventory_failure,
             {"Uploads": [accepted], "IsTruncated": False},
         ]
-        client.list_parts.return_value = {"Parts": [], "IsTruncated": False}
+        client.list_parts.side_effect = _one_part_inventory_pages(len(self.payload))
         client.upload_part.return_value = {"ETag": '"part-etag"'}
 
         with self.assertRaises(S3UploadOutcomePending) as raised:

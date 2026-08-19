@@ -4694,6 +4694,23 @@ class BaseBackupStoragePoints(TimeStampedModel):
         self._required_upload_lease_token = str(token or "")
         return self
 
+    def ensure_upload_fence(self):
+        """Fail before a new provider mutation when this worker lost its lease."""
+        required_owner = getattr(self, "_required_upload_lease_owner", "")
+        required_token = getattr(self, "_required_upload_lease_token", "")
+        if not self.pk or not required_owner or not required_token:
+            return
+        now = timezone.now()
+        if not self.__class__.objects.filter(
+            pk=self.pk,
+            upload_lease_owner=required_owner,
+            upload_lease_token=required_token,
+            upload_lease_expires_at__gt=now,
+        ).exists():
+            raise StoragePointLeaseLostError(
+                "Storage upload lease ownership was lost."
+            )
+
     def save(self, *args, **kwargs):
         required_owner = getattr(self, "_required_upload_lease_owner", "")
         required_token = getattr(self, "_required_upload_lease_token", "")

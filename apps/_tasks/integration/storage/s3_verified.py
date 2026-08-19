@@ -125,6 +125,28 @@ def _outcome_reconciliation_retry_after():
     )
 
 
+def _multipart_checkpoint_parts():
+    return _bounded_setting("S3_MULTIPART_CHECKPOINT_PARTS", 16, maximum=1000)
+
+
+def _multipart_hash_chunk_bytes():
+    return _bounded_setting(
+        "S3_MULTIPART_HASH_CHUNK_BYTES", 1024 * 1024, maximum=8 * 1024 * 1024
+    )
+
+
+def _multipart_no_progress_seconds():
+    return _bounded_setting(
+        "S3_MULTIPART_NO_PROGRESS_SECONDS", 3600, maximum=7 * 24 * 3600
+    )
+
+
+def _multipart_no_progress_retry_after():
+    return _bounded_setting(
+        "S3_MULTIPART_NO_PROGRESS_RETRY_AFTER_SECONDS", 300, maximum=3600
+    )
+
+
 class S3ObjectIntegrityError(RuntimeError):
     pass
 
@@ -160,6 +182,78 @@ class S3UploadInventoryFailure(RuntimeError):
         super().__init__(message)
         self.error_code = str(error_code)
         self.code = self.error_code
+
+
+class _BoundedPartBody:
+    """Seekable view of one file range without materialising the part in memory."""
+
+    def __init__(self, source, offset, size):
+        self._source = source
+        self._offset = int(offset)
+        self._size = int(size)
+        self._position = 0
+        self._source.seek(self._offset)
+
+    def __len__(self):
+        return self._size
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def close(self):
+        # Botocore may close request bodies after a call. The shared source file
+        # belongs to the outer upload loop and must remain available for later parts.
+        return None
+
+    def tell(self):
+        return self._position
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        offset = int(offset)
+        if whence == os.SEEK_SET:
+            position = offset
+        elif whence == os.SEEK_CUR:
+            position = self._position + offset
+        elif whence == os.SEEK_END:
+            position = self._size + offset
+        else:
+            raise ValueError("Unsupported seek mode for multipart body.")
+        if position < 0 or position > self._size:
+            raise ValueError("Multipart body seek is outside the bounded part.")
+        self._source.seek(self._offset + position)
+        self._position = position
+        return self._position
+
+    def read(self, size=-1):
+        remaining = self._size - self._position
+        if remaining <= 0:
+            return b""
+        if size is None or int(size) < 0:
+            amount = remaining
+        else:
+            amount = min(int(size), remaining)
+        payload = self._source.read(amount)
+        self._position += len(payload)
+        return payload
+
+
+def _hash_file_range(source, offset, size):
+    digest = hashlib.sha256()
+    remaining = int(size)
+    source.seek(int(offset))
+    chunk_size = _multipart_hash_chunk_bytes()
+    while remaining:
+        payload = source.read(min(chunk_size, remaining))
+        if not payload:
+            raise S3ObjectIntegrityError(
+                "The local backup ended while a multipart part was hashed."
+            )
+        digest.update(payload)
+        remaining -= len(payload)
+    return base64.b64encode(digest.digest()).decode("ascii")
 
 
 def _validated_multipart_geometry(size_bytes, part_size_bytes, *, state=False):
@@ -737,6 +831,190 @@ def _list_parts(client, bucket, key, upload_id, expected_owner=None):
         marker = next_marker
 
 
+def _completion_parts(remote_parts, *, size_bytes, part_size):
+    """Validate one exact provider inventory and return its completion payload."""
+    total_parts = (int(size_bytes) + int(part_size) - 1) // int(part_size)
+    if len(remote_parts) != total_parts:
+        raise S3UploadReconciliationRequired(
+            "Object storage did not return the complete multipart inventory."
+        )
+    completed = []
+    witness = hashlib.sha256()
+    for expected_number, remote in enumerate(remote_parts, start=1):
+        try:
+            number = int(remote.get("PartNumber"))
+            observed_size = int(remote["Size"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise S3UploadReconciliationRequired(
+                "Object storage returned incomplete multipart completion metadata."
+            ) from error
+        expected_size = min(
+            int(part_size),
+            int(size_bytes) - ((expected_number - 1) * int(part_size)),
+        )
+        if number != expected_number or observed_size != expected_size:
+            raise S3UploadReconciliationRequired(
+                "Object storage multipart inventory does not match the exact object geometry."
+            )
+        etag = str(remote.get("ETag") or "")
+        checksum = str(remote.get("ChecksumSHA256") or "")
+        witness.update(
+            f"{number}\0{observed_size}\0{etag}\0{checksum}\n".encode("utf-8")
+        )
+        part = {"PartNumber": number, "ETag": etag}
+        if checksum:
+            part["ChecksumSHA256"] = checksum
+        completed.append(part)
+    return completed, witness.hexdigest()
+
+
+def _checkpoint_multipart_progress(
+    stored_backup,
+    metadata_key,
+    state,
+    multipart,
+    *,
+    completed_parts,
+    total_parts,
+    uploaded_bytes,
+    total_bytes,
+):
+    previous = dict(multipart.get("progress") or {})
+    try:
+        previous_parts = int(previous.get("completed_parts") or 0)
+        previous_bytes = int(previous.get("uploaded_bytes") or 0)
+    except (TypeError, ValueError):
+        previous_parts = previous_bytes = 0
+    progress = {
+        "completed_parts": int(completed_parts),
+        "total_parts": int(total_parts),
+        "uploaded_bytes": int(uploaded_bytes),
+        "total_bytes": int(total_bytes),
+        "updated_at": timezone.now().isoformat(),
+    }
+    if int(completed_parts) > previous_parts or int(uploaded_bytes) > previous_bytes:
+        progress["last_progress_at"] = progress["updated_at"]
+        progress["window_started_at"] = progress["updated_at"]
+    elif previous.get("last_progress_at"):
+        progress["last_progress_at"] = previous["last_progress_at"]
+        if previous.get("window_started_at"):
+            progress["window_started_at"] = previous["window_started_at"]
+    if previous.get("no_progress_count"):
+        progress["no_progress_count"] = previous["no_progress_count"]
+    multipart.pop("parts", None)
+    multipart["progress"] = progress
+    state["multipart"] = multipart
+    _save_state(stored_backup, metadata_key, state)
+
+
+def _contiguous_remote_progress(remote_parts, *, size_bytes, part_size):
+    completed = 0
+    uploaded_bytes = 0
+    for expected_number, remote in enumerate(remote_parts, start=1):
+        try:
+            number = int(remote.get("PartNumber"))
+            observed_size = int(remote["Size"])
+        except (KeyError, TypeError, ValueError):
+            break
+        expected_size = min(
+            int(part_size),
+            int(size_bytes) - ((expected_number - 1) * int(part_size)),
+        )
+        if number != expected_number or observed_size != expected_size:
+            break
+        completed = expected_number
+        uploaded_bytes += observed_size
+    return completed, uploaded_bytes
+
+
+def _maybe_pause_stalled_multipart(
+    stored_backup,
+    metadata_key,
+    state,
+    multipart,
+    *,
+    provider_parts,
+    provider_bytes,
+    total_parts,
+    total_bytes,
+):
+    progress = dict(multipart.get("progress") or {})
+    try:
+        durable_parts = int(progress.get("completed_parts") or 0)
+        durable_bytes = int(progress.get("uploaded_bytes") or 0)
+    except (TypeError, ValueError) as error:
+        raise S3UploadReconciliationRequired(
+            "Multipart upload progress is malformed."
+        ) from error
+    if (
+        durable_parts < 0
+        or durable_parts > int(total_parts)
+        or durable_bytes < 0
+        or durable_bytes > int(total_bytes)
+    ):
+        raise S3UploadReconciliationRequired(
+            "Multipart upload progress is outside the exact object bounds."
+        )
+    if provider_parts > durable_parts or provider_bytes > durable_bytes:
+        _checkpoint_multipart_progress(
+            stored_backup,
+            metadata_key,
+            state,
+            multipart,
+            completed_parts=provider_parts,
+            total_parts=total_parts,
+            uploaded_bytes=provider_bytes,
+            total_bytes=total_bytes,
+        )
+        return
+    if provider_parts >= total_parts:
+        return
+    started_at = progress.get("window_started_at") or progress.get(
+        "last_progress_at"
+    )
+    if not started_at:
+        return
+    parsed = parse_datetime(str(started_at))
+    if parsed is None or timezone.is_naive(parsed):
+        raise S3UploadReconciliationRequired(
+            "Multipart upload progress has an invalid no-progress timestamp."
+        )
+    now = timezone.now()
+    if (now - parsed).total_seconds() < _multipart_no_progress_seconds():
+        return
+    try:
+        notices = int(progress.get("no_progress_count") or 0) + 1
+    except (TypeError, ValueError) as error:
+        raise S3UploadReconciliationRequired(
+            "Multipart upload no-progress state is malformed."
+        ) from error
+    progress.update(
+        {
+            "completed_parts": durable_parts,
+            "total_parts": int(total_parts),
+            "uploaded_bytes": durable_bytes,
+            "total_bytes": int(total_bytes),
+            "updated_at": now.isoformat(),
+            "window_started_at": now.isoformat(),
+            "no_progress_count": notices,
+            "last_no_progress_at": now.isoformat(),
+        }
+    )
+    multipart["progress"] = progress
+    state.update({"phase": "multipart_no_progress", "multipart": multipart})
+    _save_state(stored_backup, metadata_key, state)
+    raise S3UploadOutcomePending(
+        "Multipart upload made no provider-visible progress within the bounded window.",
+        retry_after=_multipart_no_progress_retry_after(),
+    )
+
+
+def _ensure_upload_fence(stored_backup):
+    ensure = getattr(stored_backup, "ensure_upload_fence", None)
+    if callable(ensure):
+        ensure()
+
+
 def _upload_identity(upload, field):
     value = upload.get(field)
     if value is None:
@@ -1248,12 +1526,18 @@ def _multipart_upload(
             # mid-upload ambiguity into bounded HEAD-only reconciliation.
             missing_intent = dict(multipart.get("complete_intent") or {})
             if not missing_intent.get("complete"):
+                legacy_parts = list(multipart.get("parts") or [])
                 missing_intent = _new_outcome_intent(
                     key,
                     identity,
                     state["ownership_marker"],
                     upload_id=str(upload_id),
-                    parts=[dict(part) for part in multipart.get("parts") or []],
+                    part_count=int(
+                        dict(multipart.get("progress") or {}).get(
+                            "completed_parts", len(legacy_parts)
+                        )
+                        or 0
+                    ),
                     inferred_from_missing_upload=True,
                 )
             _require_exact_outcome_intent(
@@ -1337,8 +1621,8 @@ def _multipart_upload(
         multipart = {
             **multipart,
             "upload_id": upload_id,
-            "parts": [],
         }
+        multipart.pop("parts", None)
         if adoption:
             state["multipart_reconciliation"] = adoption
         state.update({"phase": "uploading", "multipart": multipart})
@@ -1352,54 +1636,113 @@ def _multipart_upload(
         multipart["part_size_bytes"] = part_size
         state["multipart"] = multipart
         _save_state(stored_backup, metadata_key, state)
+    elif multipart.get("parts"):
+        # Migrate pre-bounded progress state after exact provider inventory is
+        # available. Provider state, not the legacy JSON ETag list, is authoritative.
+        multipart.pop("parts", None)
+        state["multipart"] = multipart
+        _save_state(stored_backup, metadata_key, state)
     remote_by_number = {int(part["PartNumber"]): part for part in remote_parts}
     total_parts = (identity["size_bytes"] + part_size - 1) // part_size
-    completed = []
+    provider_parts, provider_bytes = _contiguous_remote_progress(
+        remote_parts,
+        size_bytes=identity["size_bytes"],
+        part_size=part_size,
+    )
+    _maybe_pause_stalled_multipart(
+        stored_backup,
+        metadata_key,
+        state,
+        multipart,
+        provider_parts=provider_parts,
+        provider_bytes=provider_bytes,
+        total_parts=total_parts,
+        total_bytes=identity["size_bytes"],
+    )
+    if state.get("phase") != "uploading":
+        state["phase"] = "uploading"
+        state["multipart"] = multipart
+        _save_state(stored_backup, metadata_key, state)
+    checkpoint_parts = _multipart_checkpoint_parts()
+    checkpoint_due = False
+    processed_bytes = 0
     with open(local_path, "rb") as source:
         for number in range(1, total_parts + 1):
+            offset = (number - 1) * part_size
             expected_size = min(
-                part_size, identity["size_bytes"] - ((number - 1) * part_size)
+                part_size, identity["size_bytes"] - offset
             )
             remote = remote_by_number.get(number)
-            if remote and int(remote.get("Size", expected_size)) == expected_size:
-                completed_part = {
+            try:
+                remote_size = int(remote["Size"]) if remote else None
+            except (KeyError, TypeError, ValueError):
+                remote_size = None
+            if remote_size != expected_size:
+                part_checksum = (
+                    _hash_file_range(source, offset, expected_size)
+                    if supports_checksum
+                    else None
+                )
+                upload_args = {
+                    "Bucket": bucket,
+                    "Key": key,
+                    "UploadId": upload_id,
                     "PartNumber": number,
-                    "ETag": remote["ETag"],
+                    "Body": _BoundedPartBody(source, offset, expected_size),
                 }
-                if remote.get("ChecksumSHA256"):
-                    completed_part["ChecksumSHA256"] = remote["ChecksumSHA256"]
-                completed.append(completed_part)
-                continue
-            source.seek((number - 1) * part_size)
-            body = source.read(expected_size)
-            part_checksum = base64.b64encode(
-                hashlib.sha256(body).digest()
-            ).decode("ascii")
-            upload_args = {
-                "Bucket": bucket,
-                "Key": key,
-                "UploadId": upload_id,
-                "PartNumber": number,
-                "Body": body,
-            }
-            if supports_checksum:
-                upload_args["ChecksumSHA256"] = part_checksum
-            if expected_owner:
-                upload_args["ExpectedBucketOwner"] = expected_owner
-            response = client.upload_part(**upload_args)
-            completed_part = {
-                "PartNumber": number,
-                "ETag": response["ETag"],
-            }
-            if response.get("ChecksumSHA256"):
-                completed_part["ChecksumSHA256"] = response["ChecksumSHA256"]
-            completed.append(completed_part)
-            multipart["parts"] = completed
-            multipart["uploaded_bytes"] = min(
-                number * part_size, identity["size_bytes"]
-            )
-            state["multipart"] = multipart
-            _save_state(stored_backup, metadata_key, state)
+                if supports_checksum:
+                    upload_args["ChecksumSHA256"] = part_checksum
+                if expected_owner:
+                    upload_args["ExpectedBucketOwner"] = expected_owner
+                _ensure_upload_fence(stored_backup)
+                response = client.upload_part(**upload_args)
+                if not isinstance(response, dict) or not str(
+                    response.get("ETag") or ""
+                ).strip():
+                    raise S3UploadReconciliationRequired(
+                        "Object storage did not return a valid uploaded-part identity."
+                    )
+            processed_bytes += expected_size
+            checkpoint_due = checkpoint_due or number % checkpoint_parts == 0
+            if checkpoint_due:
+                _checkpoint_multipart_progress(
+                    stored_backup,
+                    metadata_key,
+                    state,
+                    multipart,
+                    completed_parts=number,
+                    total_parts=total_parts,
+                    uploaded_bytes=processed_bytes,
+                    total_bytes=identity["size_bytes"],
+                )
+                checkpoint_due = False
+
+    progress = dict(multipart.get("progress") or {})
+    if (
+        int(progress.get("completed_parts") or 0) != total_parts
+        or int(progress.get("uploaded_bytes") or 0) != identity["size_bytes"]
+    ):
+        _checkpoint_multipart_progress(
+            stored_backup,
+            metadata_key,
+            state,
+            multipart,
+            completed_parts=total_parts,
+            total_parts=total_parts,
+            uploaded_bytes=identity["size_bytes"],
+            total_bytes=identity["size_bytes"],
+        )
+
+    # Completion is based only on one fresh, ordered provider inventory. The
+    # durable row stores a bounded witness, never the growing ETag collection.
+    final_remote_parts = _list_parts(
+        client, bucket, key, upload_id, expected_owner
+    )
+    completed, part_inventory_sha256 = _completion_parts(
+        final_remote_parts,
+        size_bytes=identity["size_bytes"],
+        part_size=part_size,
+    )
 
     complete_args = {
         "Bucket": bucket,
@@ -1415,7 +1758,9 @@ def _multipart_upload(
         identity,
         state["ownership_marker"],
         upload_id=str(upload_id),
-        parts=[dict(part) for part in completed],
+        part_count=len(completed),
+        uploaded_bytes=identity["size_bytes"],
+        part_inventory_sha256=part_inventory_sha256,
     )
     multipart["complete_intent"] = complete_intent
     state.update(
@@ -1426,6 +1771,7 @@ def _multipart_upload(
     )
     _save_state(stored_backup, metadata_key, state)
     try:
+        _ensure_upload_fence(stored_backup)
         client.complete_multipart_upload(**complete_args)
     except Exception as error:
         if _create_error_kind(error) != "ambiguous":

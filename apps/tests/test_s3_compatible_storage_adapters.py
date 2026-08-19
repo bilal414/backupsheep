@@ -567,6 +567,21 @@ class DigitalOceanSpacesVerifiedUploadTests(SimpleTestCase):
                 ],
                 "IsTruncated": False,
             },
+            {
+                "Parts": [
+                    {
+                        "PartNumber": 1,
+                        "ETag": '"part-1"',
+                        "Size": 5 * 1024 * 1024,
+                    },
+                    {
+                        "PartNumber": 2,
+                        "ETag": '"part-2"',
+                        "Size": 1024,
+                    },
+                ],
+                "IsTruncated": False,
+            },
         ]
         client.upload_part.side_effect = [
             {"ETag": '"part-1"'},

@@ -76,6 +76,10 @@ class StorageExecutionLeaseTests(BaseTestCase):
         replacement_point = replacement.claim()
         self.addCleanup(replacement.release)
 
+        with self.assertRaises(StoragePointLeaseLostError):
+            stale_instance.ensure_upload_fence()
+        replacement_point.ensure_upload_fence()
+
         stale_instance.status = stale_instance.Status.UPLOAD_COMPLETE
         with self.assertRaises(StoragePointLeaseLostError):
             stale_instance.save(update_fields=["status", "modified"])
