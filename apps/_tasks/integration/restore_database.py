@@ -213,6 +213,29 @@ def _database_restore_definer_permission_error(database_type):
     return error
 
 
+def _database_restore_binlog_permission_error(*, verification_failed=False):
+    """Return safe MySQL trigger/function binary-log guidance."""
+    if verification_failed:
+        message = (
+            "BackupSheep could not verify the MySQL binary-log requirements for "
+            "restoring stored functions or triggers. Verify the server's log_bin "
+            "and log_bin_trust_function_creators settings, then resume verification. "
+            "No target was changed."
+        )
+    else:
+        message = (
+            "The stored MySQL dump creates a trigger or stored function while "
+            "binary logging is enabled and log_bin_trust_function_creators is off. "
+            "Grant SUPER to a dedicated restore account, or have a database "
+            "administrator explicitly review that server setting, then resume "
+            "verification. No target was changed."
+        )
+    error = RestoreError(message)
+    error.code = DATABASE_RESTORE_PERMISSION_ERROR_CODE
+    error.retryable = False
+    return error
+
+
 def _write_log(backup, text):
     """Append only safe, already-redacted operational text to the run log."""
     with open(f"_storage/restore_{backup.uuid_str}.log", "a+") as log_file:
@@ -758,6 +781,9 @@ _MYSQL_DUMP_AUTOCOMMIT_RESTORE_RE = re.compile(
     rb"(?i)^\s*set\s+autocommit\s*=\s*@old_autocommit\s*;\s*$"
 )
 _MYSQL_EXPLICIT_DEFINER_RE = re.compile(rb"(?i)\bDEFINER\s*=")
+_MYSQL_BINLOG_RESTRICTED_OBJECT_RE = re.compile(
+    rb"(?i)\bCREATE\b[^\r\n]*\b(?:FUNCTION|TRIGGER)\b"
+)
 
 
 def _mysql_line_has_explicit_definer(line):
@@ -768,6 +794,16 @@ def _mysql_line_has_explicit_definer(line):
     if re.match(rb"(?i)^(?:INSERT|REPLACE)\s+", stripped):
         return False
     return _MYSQL_EXPLICIT_DEFINER_RE.search(stripped) is not None
+
+
+def _mysql_line_has_binlog_restricted_object(line):
+    """Detect MySQL stored functions/triggers affected by binary-log policy."""
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith((b"--", b"#")):
+        return False
+    if re.match(rb"(?i)^(?:INSERT|REPLACE)\s+", stripped):
+        return False
+    return _MYSQL_BINLOG_RESTRICTED_OBJECT_RE.search(stripped) is not None
 
 
 def _validate_extracted_archive(
@@ -806,7 +842,10 @@ def _validate_extracted_archive(
         raise RestoreError("the backup archive does not contain any .sql dumps.")
 
     source_digests = {}
-    requirements = {"mysql_explicit_definer": False}
+    requirements = {
+        "mysql_explicit_definer": False,
+        "mysql_binlog_restricted_object": False,
+    }
     targets = OrderedDict()
     tables_mode = bool(backup.tables) and not bool(backup.all_tables)
     for filename, path in sorted(sql_files):
@@ -881,6 +920,11 @@ def _validate_extracted_archive(
                     and _mysql_line_has_explicit_definer(line)
                 ):
                     requirements["mysql_explicit_definer"] = True
+                if (
+                    auth.type == CoreAuthDatabase.DatabaseType.MYSQL
+                    and _mysql_line_has_binlog_restricted_object(line)
+                ):
+                    requirements["mysql_binlog_restricted_object"] = True
                 if (
                     MYSQL_MARKER_TABLE.encode("ascii") in lowered
                     or POSTGRES_MARKER_SCHEMA.encode("ascii") in lowered
@@ -1515,6 +1559,12 @@ def _mysql_grant_capabilities(grants, target_names):
             database_pattern = raw_scope[:-2].strip().strip("`")
         else:
             continue
+        # SHOW GRANTS doubles the backslash used to escape literal ``_`` and
+        # ``%`` characters in database-level wildcard scopes. Collapse that
+        # display escaping once before applying the grant-pattern matcher.
+        # Restore target names cannot contain a backslash, so this cannot turn
+        # an unrelated literal database name into a matching target.
+        database_pattern = database_pattern.replace("\\\\", "\\")
         privileges = match.group("privileges").upper().strip()
         privilege_tokens = {
             token.strip().replace("`", "")
@@ -1538,8 +1588,8 @@ def _mysql_grant_capabilities(grants, target_names):
     return capabilities
 
 
-def _mysql_has_definer_privilege(grants, database_type, database_version=None):
-    """Return whether global grants can preserve explicit object definers."""
+def _mysql_global_privilege_tokens(grants):
+    """Return only global privilege tokens from an opaque SHOW GRANTS result."""
     privilege_tokens = set()
     for line in str(grants or "").splitlines():
         match = re.search(
@@ -1553,6 +1603,20 @@ def _mysql_has_definer_privilege(grants, database_type, database_version=None):
             token.strip().upper().replace("`", "")
             for token in match.group("privileges").split(",")
         )
+    return privilege_tokens
+
+
+def _mysql_has_global_static_privilege(grants, privilege):
+    privilege_tokens = _mysql_global_privilege_tokens(grants)
+    return bool(
+        str(privilege).upper() in privilege_tokens
+        or privilege_tokens.intersection({"ALL", "ALL PRIVILEGES"})
+    )
+
+
+def _mysql_has_definer_privilege(grants, database_type, database_version=None):
+    """Return whether global grants can preserve explicit object definers."""
+    privilege_tokens = _mysql_global_privilege_tokens(grants)
 
     if database_type == CoreAuthDatabase.DatabaseType.MARIADB:
         return bool(
@@ -1581,6 +1645,30 @@ def _mysql_has_definer_privilege(grants, database_type, database_version=None):
     )
 
 
+def _mysql_setting_boolean(value):
+    value = str(value or "").strip().casefold()
+    if value in {"1", "on", "true"}:
+        return True
+    if value in {"0", "off", "false"}:
+        return False
+    return None
+
+
+def _mysql_binlog_super_required(result):
+    """Parse the two non-secret global settings used by MySQL error 1419."""
+    rows = [
+        line.split("\t")
+        for line in str(result or "").splitlines()
+        if line.strip()
+    ]
+    if len(rows) != 1 or len(rows[0]) != 2:
+        raise _database_restore_binlog_permission_error(verification_failed=True)
+    log_bin, trust_creators = map(_mysql_setting_boolean, rows[0])
+    if log_bin is None or trust_creators is None:
+        raise _database_restore_binlog_permission_error(verification_failed=True)
+    return log_bin and not trust_creators
+
+
 def _preflight_mysql_fork_permissions(
     node,
     backup,
@@ -1592,6 +1680,7 @@ def _preflight_mysql_fork_permissions(
     defaults_arg,
     target_names,
     requires_definer_privilege=False,
+    requires_binlog_super_check=False,
     ssh=None,
 ):
     """Check fork CREATE/DROP capability without creating or dropping anything."""
@@ -1617,6 +1706,25 @@ def _preflight_mysql_fork_permissions(
         grants, auth.type, getattr(auth, "version", None)
     ):
         raise _database_restore_definer_permission_error(auth.type)
+    if (
+        requires_binlog_super_check
+        and auth.type == CoreAuthDatabase.DatabaseType.MYSQL
+        and not _mysql_has_global_static_privilege(grants, "SUPER")
+    ):
+        settings_result = _mysql_query(
+            node,
+            backup,
+            auth,
+            defaults_arg,
+            "SELECT @@GLOBAL.log_bin, @@GLOBAL.log_bin_trust_function_creators;",
+            username,
+            password,
+            "check MySQL binary-log restore privileges",
+            ssh=ssh,
+            restore=restore,
+        )
+        if _mysql_binlog_super_required(settings_result):
+            raise _database_restore_binlog_permission_error()
     return {"create": True, "drop": True}
 
 
@@ -2647,6 +2755,9 @@ def _preflight_database_restore_permissions(
     requires_definer_privilege = bool(
         (archive_requirements or {}).get("mysql_explicit_definer")
     )
+    requires_binlog_super_check = bool(
+        (archive_requirements or {}).get("mysql_binlog_restricted_object")
+    )
     ssh = None
     ssh_key_path = None
     remote_name = None
@@ -2681,6 +2792,7 @@ def _preflight_database_restore_permissions(
                     defaults_arg=remote_name,
                     target_names=target_names,
                     requires_definer_privilege=requires_definer_privilege,
+                    requires_binlog_super_check=requires_binlog_super_check,
                     ssh=ssh,
                 )
             local_path = f"_storage/db_restore_preflight_{worker_suffix}.cnf"
@@ -2698,6 +2810,7 @@ def _preflight_database_restore_permissions(
                 defaults_arg=f"--defaults-extra-file={local_path}",
                 target_names=target_names,
                 requires_definer_privilege=requires_definer_privilege,
+                requires_binlog_super_check=requires_binlog_super_check,
             )
 
         if auth.type == CoreAuthDatabase.DatabaseType.POSTGRESQL:

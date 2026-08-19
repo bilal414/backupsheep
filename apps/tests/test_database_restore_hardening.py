@@ -436,6 +436,111 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
             )
         )
 
+    def test_mysql_binlog_preflight_requires_super_before_target_mutation(self):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL)
+        auth.version = CoreAuthDatabase.DatabaseVersion.MYSQL_8_4
+        grants = (
+            "GRANT CREATE, DROP ON `bs_restore_%`.* TO 'backup'@'%';\n"
+            "GRANT SET_ANY_DEFINER, ALLOW_NONEXISTENT_DEFINER "
+            "ON *.* TO 'backup'@'%';\n"
+        )
+        with mock.patch.object(
+            RD, "_mysql_query", side_effect=[grants, "1\t0\n"]
+        ) as query, mock.patch.object(RD, "_run_direct") as run:
+            with self.assertRaises(RestoreError) as raised:
+                RD._preflight_database_restore_permissions(
+                    SimpleNamespace(),
+                    _fake_backup(),
+                    self._fenced_restore(),
+                    auth,
+                    "dbuser",
+                    "password-do-not-persist",
+                    mode="fork",
+                    mapping={"source_db": "bs_restore_target"},
+                    archive_requirements={
+                        "mysql_explicit_definer": True,
+                        "mysql_binlog_restricted_object": True,
+                    },
+                )
+
+        self.assertEqual(
+            raised.exception.code,
+            RD.DATABASE_RESTORE_PERMISSION_ERROR_CODE,
+        )
+        self.assertFalse(raised.exception.retryable)
+        self.assertIn("SUPER", str(raised.exception))
+        self.assertNotIn("password-do-not-persist", str(raised.exception))
+        self.assertEqual(query.call_count, 2)
+        self.assertEqual(query.call_args_list[0].args[4], "SHOW GRANTS;")
+        self.assertIn("log_bin", query.call_args_list[1].args[4])
+        run.assert_not_called()
+
+    def test_mysql_binlog_preflight_accepts_super_or_safe_server_settings(self):
+        base_grants = (
+            "GRANT CREATE, DROP ON `bs_restore_%`.* TO 'backup'@'%';\n"
+            "GRANT SET_ANY_DEFINER, ALLOW_NONEXISTENT_DEFINER "
+            "ON *.* TO 'backup'@'%';\n"
+        )
+        cases = (
+            (base_grants + "GRANT SUPER ON *.* TO 'backup'@'%';\n", [], 1),
+            (base_grants, ["1\t1\n"], 2),
+            (base_grants, ["0\t0\n"], 2),
+        )
+        for grants, settings_results, expected_calls in cases:
+            with self.subTest(
+                has_super="GRANT SUPER" in grants,
+                settings_results=settings_results,
+            ):
+                auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL)
+                auth.version = CoreAuthDatabase.DatabaseVersion.MYSQL_8_4
+                with mock.patch.object(
+                    RD,
+                    "_mysql_query",
+                    side_effect=[grants, *settings_results],
+                ) as query:
+                    result = RD._preflight_database_restore_permissions(
+                        SimpleNamespace(),
+                        _fake_backup(),
+                        self._fenced_restore(),
+                        auth,
+                        "dbuser",
+                        "db-password",
+                        mode="fork",
+                        mapping={"source_db": "bs_restore_target"},
+                        archive_requirements={
+                            "mysql_explicit_definer": True,
+                            "mysql_binlog_restricted_object": True,
+                        },
+                    )
+                self.assertEqual(result, {"create": True, "drop": True})
+                self.assertEqual(query.call_count, expected_calls)
+
+    def test_mysql_binlog_setting_result_fails_closed_when_malformed(self):
+        auth = self._auth(CoreAuthDatabase.DatabaseType.MYSQL)
+        grants = "GRANT CREATE, DROP ON *.* TO 'backup'@'%';\n"
+        with mock.patch.object(
+            RD, "_mysql_query", side_effect=[grants, "unexpected\n"]
+        ), self.assertRaises(RestoreError) as raised:
+            RD._preflight_database_restore_permissions(
+                SimpleNamespace(),
+                _fake_backup(),
+                self._fenced_restore(),
+                auth,
+                "dbuser",
+                "db-password",
+                mode="fork",
+                mapping={"source_db": "bs_restore_target"},
+                archive_requirements={
+                    "mysql_binlog_restricted_object": True,
+                },
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            RD.DATABASE_RESTORE_PERMISSION_ERROR_CODE,
+        )
+        self.assertIn("could not verify", str(raised.exception))
+
     def test_mysql_scoped_grants_cover_exact_and_matching_wildcard_targets(self):
         exact_result, exact_logs, exact_error = self._mysql_preflight_result(
             "GRANT CREATE, DROP ON `bs_restore_target`.* TO 'fixture'@'%' "
@@ -449,6 +554,22 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
         )
         self.assertEqual(wildcard_result, {"create": True, "drop": True})
         self.assertIsNone(wildcard_error)
+
+        escaped_grants = (
+            "GRANT CREATE, DROP ON `bs\\\\_restore\\\\_%`.* "
+            "TO 'fixture'@'%';\n"
+        )
+        escaped_result, escaped_logs, escaped_error = self._mysql_preflight_result(
+            escaped_grants
+        )
+        self.assertEqual(escaped_result, {"create": True, "drop": True})
+        self.assertIsNone(escaped_error)
+        escaped_capabilities = RD._mysql_grant_capabilities(
+            escaped_grants,
+            ["bs_restore_target", "bsXrestoreYtarget"],
+        )
+        self.assertTrue(escaped_capabilities["bs_restore_target"]["create"])
+        self.assertFalse(escaped_capabilities["bsXrestoreYtarget"]["create"])
 
         unrelated_result, unrelated_logs, unrelated_error = self._mysql_preflight_result(
             "GRANT CREATE, DROP ON `other_%`.* TO 'fixture'@'%' "
@@ -471,7 +592,13 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
         for error in (unrelated_error, missing_error):
             self.assertNotIn("fixture", str(error))
             self.assertNotIn("grant-secret", str(error))
-        for logs in (exact_logs, wildcard_logs, unrelated_logs, missing_logs):
+        for logs in (
+            exact_logs,
+            wildcard_logs,
+            escaped_logs,
+            unrelated_logs,
+            missing_logs,
+        ):
             joined_logs = " ".join(str(item) for item in logs)
             self.assertNotIn("GRANT ", joined_logs)
             self.assertNotIn("grant-secret", joined_logs)
@@ -2013,6 +2140,29 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
             digests["source_db"][0]["sha256"], hashlib.sha256(payload).hexdigest()
         )
         self.assertTrue(requirements["mysql_explicit_definer"])
+        self.assertFalse(requirements["mysql_binlog_restricted_object"])
+
+    def test_mysql_archive_reports_binlog_restricted_trigger_requirement(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        payload = (
+            b"CREATE TABLE restored(id integer);\n"
+            b"/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ "
+            b"/*!50003 TRIGGER restored_bi BEFORE INSERT ON restored "
+            b"FOR EACH ROW SET NEW.id = NEW.id */;;\n"
+        )
+        with open(sql_path, "wb") as output:
+            output.write(payload)
+
+        _targets, _digests, requirements = RD._validate_extracted_archive(
+            _fake_backup(),
+            _fake_auth(CoreAuthDatabase.DatabaseType.MYSQL),
+            self.tmp,
+            mode="fork",
+            include_requirements=True,
+        )
+
+        self.assertTrue(requirements["mysql_explicit_definer"])
+        self.assertTrue(requirements["mysql_binlog_restricted_object"])
 
     def test_mysql_row_data_does_not_require_definer_privilege(self):
         sql_path = os.path.join(self.tmp, "source_db.sql")
@@ -2032,6 +2182,7 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         )
 
         self.assertFalse(requirements["mysql_explicit_definer"])
+        self.assertFalse(requirements["mysql_binlog_restricted_object"])
 
     def test_mariadb_transaction_scaffolding_is_rejected_for_in_place_restore(self):
         sql_path = os.path.join(self.tmp, "source_db.sql")
