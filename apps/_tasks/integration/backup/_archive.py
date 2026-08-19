@@ -12,7 +12,15 @@ _ZIP_CENTRAL_HEADER_SIZE = 46
 _ZIP_LOCAL_HEADER_SIZE = 30
 _ZIP_CENTRAL_SIGNATURE = b"PK\x01\x02"
 _ZIP_LOCAL_SIGNATURE = b"PK\x03\x04"
+_ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
+_ZIP64_EOCD_SIGNATURE = b"PK\x06\x06"
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_ZIP_CENTRAL_DIGITAL_SIGNATURE = b"PK\x05\x05"
 _ZIP_UTF8_FLAG = 0x0800
+_ZIP_UINT16_MAX = 0xFFFF
+_ZIP_UINT32_MAX = 0xFFFFFFFF
+_ZIP_EOCD_SIZE = 22
+_ZIP_MAX_COMMENT_SIZE = 0xFFFF
 
 
 class ArchiveSourcePolicyError(Exception):
@@ -93,6 +101,158 @@ def _fsync_parent(path):
         os.close(descriptor)
 
 
+def _find_zip_eocd(archive_file):
+    """Return the validated EOCD offset and unpacked fixed fields."""
+    archive_file.seek(0, os.SEEK_END)
+    file_size = archive_file.tell()
+    tail_size = min(file_size, _ZIP_EOCD_SIZE + _ZIP_MAX_COMMENT_SIZE)
+    archive_file.seek(file_size - tail_size)
+    tail = archive_file.read(tail_size)
+    search_end = len(tail)
+    while True:
+        position = tail.rfind(_ZIP_EOCD_SIGNATURE, 0, search_end)
+        if position < 0:
+            raise ValueError("Backup archive end record is missing.")
+        if position + _ZIP_EOCD_SIZE <= len(tail):
+            fields = struct.unpack_from("<4s4H2LH", tail, position)
+            comment_length = fields[-1]
+            absolute = file_size - tail_size + position
+            if absolute + _ZIP_EOCD_SIZE + comment_length == file_size:
+                return absolute, fields
+        search_end = position
+
+
+def _zip_central_directory(archive_file):
+    """Locate one non-spanned standard/Zip64 central directory in O(1) memory."""
+    eocd_offset, fields = _find_zip_eocd(archive_file)
+    (
+        _signature,
+        disk_number,
+        central_disk,
+        entries_on_disk,
+        entry_count,
+        central_size,
+        central_offset,
+        _comment_length,
+    ) = fields
+    has_maximum_standard_field = (
+        entries_on_disk == _ZIP_UINT16_MAX
+        or entry_count == _ZIP_UINT16_MAX
+        or central_size == _ZIP_UINT32_MAX
+        or central_offset == _ZIP_UINT32_MAX
+    )
+    directory_boundary = eocd_offset
+    locator_offset = eocd_offset - 20
+    locator = b""
+    if locator_offset >= 0:
+        archive_file.seek(locator_offset)
+        locator = archive_file.read(20)
+    has_zip64_locator = (
+        len(locator) == 20 and locator[:4] == _ZIP64_LOCATOR_SIGNATURE
+    )
+    if has_zip64_locator:
+        (
+            _locator_signature,
+            zip64_disk,
+            zip64_eocd_offset,
+            total_disks,
+        ) = struct.unpack("<4sLQL", locator)
+        if zip64_disk != 0 or total_disks != 1:
+            raise ValueError("Spanned ZIP archives are not supported.")
+        archive_file.seek(zip64_eocd_offset)
+        fixed = archive_file.read(56)
+        if len(fixed) != 56 or fixed[:4] != _ZIP64_EOCD_SIGNATURE:
+            raise ValueError("Backup archive Zip64 end record is malformed.")
+        (
+            _zip64_signature,
+            record_size,
+            _version_made,
+            _version_needed,
+            disk_number,
+            central_disk,
+            entries_on_disk,
+            entry_count,
+            central_size,
+            central_offset,
+        ) = struct.unpack("<4sQ2H2L4Q", fixed)
+        if record_size < 44 or zip64_eocd_offset + 12 + record_size != locator_offset:
+            raise ValueError("Backup archive Zip64 end record has an invalid size.")
+        directory_boundary = zip64_eocd_offset
+
+    # The largest values represent either ordinary standard-ZIP maxima or Zip64
+    # sentinels. A real Zip64 archive is identified by its mandatory locator;
+    # accepting the standard maxima without one keeps exactly-65,535-member
+    # archives valid while later bounds/count checks still reject corruption.
+    if has_maximum_standard_field and not has_zip64_locator:
+        directory_boundary = eocd_offset
+
+    if disk_number != 0 or central_disk != 0 or entries_on_disk != entry_count:
+        raise ValueError("Spanned ZIP archives are not supported.")
+    if central_offset + central_size > directory_boundary:
+        raise ValueError("Backup archive central directory is out of bounds.")
+    return int(central_offset), int(central_size), int(entry_count)
+
+
+def _zip64_local_header_offset(
+    extra,
+    *,
+    compressed_size,
+    uncompressed_size,
+    local_offset,
+    disk_start,
+):
+    """Read the local-header offset from a central Zip64 extra field."""
+    if local_offset != _ZIP_UINT32_MAX and disk_start != _ZIP_UINT16_MAX:
+        return local_offset
+    position = 0
+    while position + 4 <= len(extra):
+        field_id, field_size = struct.unpack_from("<HH", extra, position)
+        position += 4
+        field_end = position + field_size
+        if field_end > len(extra):
+            raise ValueError("Backup archive extra field is truncated.")
+        if field_id == 0x0001:
+            cursor = position
+
+            def consume(size):
+                nonlocal cursor
+                if cursor + size > field_end:
+                    raise ValueError("Backup archive Zip64 extra field is truncated.")
+                value = int.from_bytes(extra[cursor:cursor + size], "little")
+                cursor += size
+                return value
+
+            if uncompressed_size == _ZIP_UINT32_MAX:
+                consume(8)
+            if compressed_size == _ZIP_UINT32_MAX:
+                consume(8)
+            resolved_offset = local_offset
+            if local_offset == _ZIP_UINT32_MAX:
+                resolved_offset = consume(8)
+            if disk_start == _ZIP_UINT16_MAX:
+                if consume(4) != 0:
+                    raise ValueError("Spanned ZIP archives are not supported.")
+            return resolved_offset
+        position = field_end
+    raise ValueError("Backup archive Zip64 local-header offset is missing.")
+
+
+def _validate_central_directory_tail(archive_file, position, directory_end):
+    """Allow only the optional central-directory digital-signature record."""
+    remaining = directory_end - position
+    if remaining == 0:
+        return
+    if remaining < 6:
+        raise ValueError("Backup archive central directory is malformed.")
+    archive_file.seek(position)
+    header = archive_file.read(6)
+    if header[:4] != _ZIP_CENTRAL_DIGITAL_SIGNATURE:
+        raise ValueError("Backup archive central directory is malformed.")
+    signature_size = struct.unpack_from("<H", header, 4)[0]
+    if 6 + signature_size != remaining:
+        raise ValueError("Backup archive central signature is malformed.")
+
+
 def mark_utf8_zip_names(archive_path):
     """Mark Info-ZIP entries whose raw names are valid non-ASCII UTF-8.
 
@@ -110,14 +270,16 @@ def mark_utf8_zip_names(archive_path):
     historical BackupSheep archives; a committed storage object is never changed.
     """
 
-    with zipfile.ZipFile(archive_path) as archive:
-        infos = archive.infolist()
-        central_offset = archive.start_dir
-
     patched = 0
     with open(archive_path, "r+b") as archive_file:
-        for info in infos:
-            archive_file.seek(central_offset)
+        central_offset, central_size, entry_count = _zip_central_directory(
+            archive_file
+        )
+        directory_start = central_offset
+        directory_end = central_offset + central_size
+        for _entry_index in range(entry_count):
+            entry_offset = central_offset
+            archive_file.seek(entry_offset)
             central = archive_file.read(_ZIP_CENTRAL_HEADER_SIZE)
             if (
                 len(central) != _ZIP_CENTRAL_HEADER_SIZE
@@ -132,6 +294,31 @@ def mark_utf8_zip_names(archive_path):
             raw_filename = archive_file.read(filename_length)
             if len(raw_filename) != filename_length:
                 raise ValueError("Backup archive filename is truncated.")
+            extra = archive_file.read(extra_length)
+            if len(extra) != extra_length:
+                raise ValueError("Backup archive extra field is truncated.")
+            compressed_size, uncompressed_size = struct.unpack_from(
+                "<LL", central, 20
+            )
+            disk_start = struct.unpack_from("<H", central, 34)[0]
+            if disk_start not in (0, _ZIP_UINT16_MAX):
+                raise ValueError("Spanned ZIP archives are not supported.")
+            local_offset = _zip64_local_header_offset(
+                extra,
+                compressed_size=compressed_size,
+                uncompressed_size=uncompressed_size,
+                local_offset=struct.unpack_from("<L", central, 42)[0],
+                disk_start=disk_start,
+            )
+            central_offset = (
+                entry_offset
+                + _ZIP_CENTRAL_HEADER_SIZE
+                + filename_length
+                + extra_length
+                + comment_length
+            )
+            if central_offset > directory_end:
+                raise ValueError("Backup archive central directory is truncated.")
 
             should_mark = False
             if not central_flags & _ZIP_UTF8_FLAG and any(
@@ -145,7 +332,10 @@ def mark_utf8_zip_names(archive_path):
                     should_mark = True
 
             if should_mark:
-                local_offset = info.header_offset
+                if local_offset >= directory_start:
+                    raise ValueError(
+                        "Backup archive local header is out of bounds."
+                    )
                 archive_file.seek(local_offset)
                 local = archive_file.read(_ZIP_LOCAL_HEADER_SIZE)
                 if (
@@ -154,11 +344,18 @@ def mark_utf8_zip_names(archive_path):
                 ):
                     raise ValueError("Backup archive local header is malformed.")
                 local_flags = struct.unpack_from("<H", local, 6)[0]
-                local_filename_length = struct.unpack_from("<H", local, 26)[0]
+                local_filename_length, local_extra_length = struct.unpack_from(
+                    "<HH", local, 26
+                )
                 local_filename = archive_file.read(local_filename_length)
                 if (
                     local_flags != central_flags
                     or local_filename != raw_filename
+                    or local_offset
+                    + _ZIP_LOCAL_HEADER_SIZE
+                    + local_filename_length
+                    + local_extra_length
+                    > directory_start
                 ):
                     raise ValueError(
                         "Backup archive local and central filenames do not match."
@@ -168,18 +365,14 @@ def mark_utf8_zip_names(archive_path):
                 archive_file.write(
                     struct.pack("<H", local_flags | _ZIP_UTF8_FLAG)
                 )
-                archive_file.seek(central_offset + 8)
+                archive_file.seek(entry_offset + 8)
                 archive_file.write(
                     struct.pack("<H", central_flags | _ZIP_UTF8_FLAG)
                 )
                 patched += 1
-
-            central_offset += (
-                _ZIP_CENTRAL_HEADER_SIZE
-                + filename_length
-                + extra_length
-                + comment_length
-            )
+        _validate_central_directory_tail(
+            archive_file, central_offset, directory_end
+        )
     return patched
 
 
