@@ -132,12 +132,16 @@ def backup_website(
             node.notify_backup_fail(error, backup_type)
             if not getattr(error, "retryable", True):
                 node.backup_max_retries_reached(self.request.id)
+                if backup:
+                    delete_from_disk.apply_async(args=[backup.uuid_str, "both"])
                 return
             try:
                 node.backup_retrying_reset(self.request.id)
                 raise self.retry()
             except MaxRetriesExceededError:
                 node.backup_max_retries_reached(self.request.id)
+                if backup:
+                    delete_from_disk.apply_async(args=[backup.uuid_str, "both"])
         except Exception as error:
             capture_exception(error)
             try:
@@ -152,3 +156,5 @@ def backup_website(
                 Reset node for max retries
                 """
                 node.backup_max_retries_reached(self.request.id)
+                if backup:
+                    delete_from_disk.apply_async(args=[backup.uuid_str, "both"])

@@ -35,7 +35,17 @@ _PUBLIC_PHASES = {
     "manual_review",
     "cancelled",
     "in_progress",
+    "website_mirroring",
+    "website_enumerating",
+    "website_archiving",
+    "website_archive_publishing",
     "unknown",
+}
+_PUBLIC_BACKUP_STAGES = {
+    "website_mirroring",
+    "website_enumerating",
+    "website_archiving",
+    "website_archive_publishing",
 }
 
 # Legacy backup/restore rows pre-date the durable execution ledger. Their parent
@@ -629,13 +639,19 @@ def _backup_execution_status(obj, state=None, artifact=None):
         attempts = max(0, int(attempts))
     except (TypeError, ValueError):
         attempts = 0
+    phase_value = getattr(state, "phase", None) if state else None
+    execution_metadata = getattr(state, "metadata", None) if state else None
+    if isinstance(execution_metadata, dict):
+        public_stage = _safe_token(execution_metadata.get("public_stage"))
+        if public_stage in _PUBLIC_BACKUP_STAGES:
+            phase_value = public_stage
     return {
         "durable": bool(state),
         "correlation_id": str(state.correlation_id) if state else None,
         "status": legacy_status,
         "phase": _execution_phase(
             legacy_status,
-            getattr(state, "phase", None) if state else None,
+            phase_value,
         ),
         "last_error_code": error_code,
         "last_error_message": _safe_error_message(error_code),

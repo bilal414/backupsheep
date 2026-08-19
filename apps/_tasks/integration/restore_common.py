@@ -3077,6 +3077,7 @@ def _preflight_zip_members(zip_path, parent):
             raise RestoreError(
                 "there is not enough free disk space to extract this backup safely."
             )
+        return member_count
     except sqlite3.Error as error:
         raise RestoreError(
             "unable to build the archive safety index."
@@ -3111,27 +3112,28 @@ def extract_backup_zip(zip_path, dest_dir):
                 "stored backup has inconsistent ZIP filename headers."
             ) from error
         try:
-            _preflight_zip_members(zip_path, parent)
+            member_count = _preflight_zip_members(zip_path, parent)
         except ValueError as error:
             raise RestoreError("stored backup is not a valid zip file.") from error
 
-        unzip_environment = os.environ.copy()
-        unzip_environment.pop("UNZIPOPT", None)
-        unzip_environment.pop("ZIPINFOOPT", None)
-        try:
-            process = subprocess.Popen(
-                ["unzip", "-UU", "-qq", "-o", zip_path, "-d", staging_root],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=unzip_environment,
-            )
-            process.wait()
-        except OSError as error:
-            raise RestoreError(
-                "unable to run the safe ZIP extractor."
-            ) from error
-        if process.returncode != 0:
-            raise RestoreError("stored backup failed ZIP CRC validation.")
+        if member_count:
+            unzip_environment = os.environ.copy()
+            unzip_environment.pop("UNZIPOPT", None)
+            unzip_environment.pop("ZIPINFOOPT", None)
+            try:
+                process = subprocess.Popen(
+                    ["unzip", "-UU", "-qq", "-o", zip_path, "-d", staging_root],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=unzip_environment,
+                )
+                process.wait()
+            except OSError as error:
+                raise RestoreError(
+                    "unable to run the safe ZIP extractor."
+                ) from error
+            if process.returncode != 0:
+                raise RestoreError("stored backup failed ZIP CRC validation.")
         if os.path.exists(dest_root):
             shutil.rmtree(dest_root)
         os.replace(staging_root, dest_root)

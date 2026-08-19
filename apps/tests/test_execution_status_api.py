@@ -143,6 +143,27 @@ class ExecutionStatusApiTests(BaseTestCase):
         values.update(overrides)
         return CoreBackupExecution.objects.create(**values)
 
+    def test_website_backup_stage_is_visible_without_exposing_checkpoint_metadata(self):
+        backup = self._backup(status=UtilBackup.Status.DOWNLOAD_IN_PROGRESS)
+        self._execution(
+            backup,
+            phase="source_dispatch",
+            metadata={
+                "public_stage": "website_enumerating",
+                "private_checkpoint": "must-not-be-returned",
+            },
+            progress_completed=20000,
+            progress_total=2000000,
+            progress_unit="files",
+        )
+
+        payload = CoreWebsiteBackupSerializer(backup).data
+        status = payload["execution_status"]
+        self.assertEqual(status["phase"], "website_enumerating")
+        self.assertEqual(status["progress"]["completed"], 20000)
+        self.assertEqual(status["progress"]["total"], 2000000)
+        self.assertNotIn("private_checkpoint", str(payload))
+
     def test_in_progress_state_survives_fresh_serializer_instance(self):
         backup = self._backup()
         backup.metadata = {"provider_response": "legacy-provider-secret-canary"}

@@ -53,6 +53,7 @@ import tempfile
 import paramiko
 from cryptography.hazmat.primitives import serialization
 from django.conf import settings
+from django.utils import timezone
 from sentry_sdk import capture_exception
 from apps._tasks.integration.backup.errors import safe_backup_failure
 
@@ -158,16 +159,32 @@ def _check_ssh_command(stdout, stderr, description):
 
 # Minimum free-space floor for the preflight check (1 GiB).
 _PREFLIGHT_FLOOR = 1 << 30
+_PREFLIGHT_INODE_FLOOR = 1024
+_WEBSITE_CHECKPOINT_KEY = "_website_mirror_checkpoint"
+_WEBSITE_CHECKPOINT_VERSION = 1
+_WEBSITE_PROGRESS_BATCH = 10000
+_CHECKPOINT_PHASES = {
+    "mirror_complete",
+    "archive_building",
+    "archive_published",
+}
+
+
+def _last_complete_backup(backup, **node_filter):
+    return (
+        backup.__class__.objects.filter(
+            status__in=UtilBackup.SUCCESS_STATUSES,
+            **node_filter,
+        )
+        .order_by("-created")
+        .first()
+    )
 
 
 def _last_complete_zip_size(backup, **node_filter):
     """Size in bytes of the node's most recent COMPLETE backup of the same class
     (0 when there is none) -- the basis for the disk-space preflight estimate."""
-    last = (
-        backup.__class__.objects.filter(status__in=UtilBackup.SUCCESS_STATUSES, **node_filter)
-        .order_by("-created")
-        .first()
-    )
+    last = _last_complete_backup(backup, **node_filter)
     return last.size if last and last.size else 0
 
 
@@ -394,6 +411,11 @@ def _cache_fingerprint(website, auth, username):
         "port": auth.port,
         "protocol": get_display() if callable(get_display) else getattr(auth, "protocol", None),
         "username": username,
+        # A credential edit can change the remote account's visible root even when
+        # the username stays the same. Bind checkpoints to the auth-row revision,
+        # without persisting or hashing the credential material itself.
+        "auth_id": getattr(auth, "pk", None),
+        "auth_modified": str(getattr(auth, "modified", "") or ""),
         "all_paths": website.all_paths,
         "paths": website.paths,
         "includes_regex": website.includes_regex,
@@ -406,55 +428,200 @@ def _cache_fingerprint(website, auth, username):
     ).hexdigest()
 
 
-def _finalize_zip(backup, local_dir, *, keep_dir):
-    """Build the standalone snapshot zip from a downloaded tree.
+def _existing_parent(path):
+    candidate = os.path.abspath(path)
+    while not os.path.exists(candidate):
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            return os.path.abspath(".")
+        candidate = parent
+    return candidate
 
-    Writes the file manifest to TOP-LEVEL ``_storage/{backup.uuid}.files`` (NOT
-    inside the tree): on a million-file site a ~50-100MB manifest would
-    otherwise bloat every backup zip. The zip therefore contains pure site
-    content; the manifest sits next to the run log, where `delete_old_logs`
-    prunes it after the retention window. Records backup.total_files, zips the
-    tree to ``_storage/{backup.uuid}.zip`` and marks the backup
-    DOWNLOAD_COMPLETE. With keep_dir (incremental cache) the tree is left in
-    place for the next run; otherwise the working directory is discarded once
-    the zip exists."""
-    local_zip = f"_storage/{backup.uuid}.zip"
-    backup_file_list_path = f"_storage/{backup.uuid}.files"
 
-    # File list + count (Python walk; no `sudo find` / md5sum). The manifest is
-    # outside local_dir, so the walk never sees it. Scan with lstat before invoking
-    # Info-ZIP: the restore contract rejects symlinks and special files, so publishing
-    # them would create an artifact BackupSheep itself cannot restore. Sorting is
-    # per-directory (bounded by one directory rather than total entries) and makes
-    # the manifest deterministic without retaining the whole tree in memory.
+def _ensure_inode_capacity(path, needed_inodes, *, what):
+    """Fail before work when the destination cannot hold the required entries."""
+    needed_inodes = max(1, int(needed_inodes))
+    statvfs = os.statvfs(_existing_parent(path))
+    # A zero inode total/free pair means the filesystem does not report inode
+    # capacity. Byte preflight still applies; do not manufacture a false failure.
+    if statvfs.f_files and statvfs.f_favail < needed_inodes:
+        raise RuntimeError(
+            f"Not enough free inodes for {what}: need ~{needed_inodes}, "
+            f"have ~{statvfs.f_favail} free"
+        )
+
+
+def _preflight_website_capacity(backup, local_dir, *, incremental):
+    """Estimate mirror bytes/inodes from the latest successful same-node run."""
+    last = _last_complete_backup(backup, website__node=backup.website.node)
+    multiplier = 1.2 if incremental else 2
+    last_size = int(last.size or 0) if last else 0
+    needed_bytes = int(max(multiplier * last_size, _PREFLIGHT_FLOOR))
+    last_entries = 0
+    if last:
+        last_entries = int(last.total_files or 0) + int(last.total_folders or 0)
+    needed_inodes = max(last_entries + 16, _PREFLIGHT_INODE_FLOOR)
+    capacity_path = _existing_parent(local_dir)
+    ensure_disk_space(needed_bytes, path=capacity_path, what="website backup")
+    _ensure_inode_capacity(
+        capacity_path,
+        needed_inodes,
+        what="website backup",
+    )
+
+
+def _archive_capacity_bytes(identity):
+    # The mirror already occupies disk. Reserve a conservative uncompressed ZIP
+    # body plus local/central headers and the path bytes used by those records.
+    entries = int(identity["file_count"]) + int(identity["directory_count"])
+    overhead = entries * 256 + int(identity["path_bytes"]) * 3
+    return max(_PREFLIGHT_FLOOR, int(identity["logical_bytes"]) + overhead)
+
+
+def _report_website_progress(backup, stage, completed=0, total=None):
+    callback = getattr(backup, "_execution_progress_callback", None)
+    if not callable(callback):
+        return
+    floor = max(
+        int(getattr(backup, "_execution_progress_floor", 0) or 0),
+        int(completed or 0),
+    )
+    safe_total = None if total is None else int(total)
+    if safe_total is not None and safe_total < floor:
+        safe_total = None
+    callback(
+        floor,
+        safe_total,
+        unit="files",
+        metadata_updates={"public_stage": stage},
+    )
+    backup._execution_progress_floor = floor
+
+
+def _workspace_identity(backup, local_dir):
+    value = f"{backup.pk}\0{backup.uuid_str}\0{os.path.realpath(local_dir)}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _checkpoint_identity(identity):
+    return {
+        key: identity[key]
+        for key in (
+            "file_count",
+            "directory_count",
+            "logical_bytes",
+            "path_bytes",
+            "tree_sha256",
+            "manifest_sha256",
+            "members_sha256",
+        )
+    }
+
+
+def _valid_checkpoint_identity(identity):
+    if not isinstance(identity, dict):
+        return False
+    for key in ("file_count", "directory_count", "logical_bytes", "path_bytes"):
+        try:
+            if int(identity.get(key)) < 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    for key in ("tree_sha256", "manifest_sha256", "members_sha256"):
+        value = str(identity.get(key) or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            return False
+    return True
+
+
+def _website_checkpoint(backup):
+    metadata = backup.metadata if isinstance(backup.metadata, dict) else {}
+    checkpoint = metadata.get(_WEBSITE_CHECKPOINT_KEY)
+    return dict(checkpoint) if isinstance(checkpoint, dict) else {}
+
+
+def _website_local_dir(backup):
+    if backup.website.incremental:
+        return _cache_paths(backup.website.node)[0]
+    return f"_storage/{backup.uuid_str}/"
+
+
+def website_mirror_checkpoint_candidate(backup):
+    """Whether a retry must preserve the workspace for fenced revalidation."""
+    checkpoint = _website_checkpoint(backup)
+    local_dir = _website_local_dir(backup)
+    return bool(
+        checkpoint.get("version") == _WEBSITE_CHECKPOINT_VERSION
+        and checkpoint.get("backup_uuid") == backup.uuid_str
+        and checkpoint.get("phase") in _CHECKPOINT_PHASES
+        and checkpoint.get("workspace_sha256")
+        == _workspace_identity(backup, local_dir)
+        and _valid_checkpoint_identity(checkpoint.get("identity"))
+        and os.path.isdir(local_dir)
+    )
+
+
+def _persist_mirror_checkpoint(
+    backup,
+    local_dir,
+    configuration_sha256,
+    identity,
+    *,
+    phase,
+):
+    execution = backup.ensure_execution_fence()
+    if execution is None:
+        execution = backup.get_execution_state(create=False)
+    metadata = dict(backup.metadata or {})
+    metadata[_WEBSITE_CHECKPOINT_KEY] = {
+        "version": _WEBSITE_CHECKPOINT_VERSION,
+        "phase": phase,
+        "backup_uuid": backup.uuid_str,
+        "workspace_sha256": _workspace_identity(backup, local_dir),
+        "configuration_sha256": configuration_sha256,
+        "execution_correlation_id": (
+            str(execution.correlation_id) if execution is not None else ""
+        ),
+        "identity": _checkpoint_identity(identity),
+        "updated_at": timezone.now().isoformat(),
+    }
+    backup.metadata = metadata
+    backup.save(update_fields=["metadata", "modified"])
+
+
+def _enumerate_website_mirror(backup, local_dir):
+    """Write bounded manifests and return a stable identity for the mirror."""
     source_root = os.path.abspath(local_dir)
     root_mode = os.lstat(source_root).st_mode
     if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
         raise ArchiveSourcePolicyError("source_root")
 
-    manifest_parent = os.path.dirname(backup_file_list_path) or "."
-    os.makedirs(manifest_parent, exist_ok=True)
-    descriptor, staged_manifest = tempfile.mkstemp(
+    manifest_path = f"_storage/{backup.uuid}.files"
+    members_path = f"_storage/{backup.uuid}.members"
+    parent = os.path.dirname(manifest_path) or "."
+    os.makedirs(parent, exist_ok=True)
+    manifest_fd, staged_manifest = tempfile.mkstemp(
         prefix=f".{backup.uuid}.files.",
         suffix=".partial",
-        dir=manifest_parent,
+        dir=parent,
         text=True,
     )
     try:
-        archive_descriptor, staged_archive_members = tempfile.mkstemp(
+        members_fd, staged_members = tempfile.mkstemp(
             prefix=f".{backup.uuid}.members.",
             suffix=".partial",
-            dir=manifest_parent,
+            dir=parent,
             text=True,
         )
     except Exception:
-        os.close(descriptor)
-        try:
-            os.remove(staged_manifest)
-        except FileNotFoundError:
-            pass
+        os.close(manifest_fd)
+        os.remove(staged_manifest)
         raise
-    total_files = 0
+
+    tree_digest = hashlib.sha256()
+    manifest_digest = hashlib.sha256()
+    members_digest = hashlib.sha256()
+    file_count = directory_count = logical_bytes = path_bytes = 0
 
     def raise_walk_error(error):
         raise error
@@ -462,32 +629,26 @@ def _finalize_zip(backup, local_dir, *, keep_dir):
     def inspect_member(root, name, *, expected_directory):
         path = os.path.join(root, name)
         relative = os.path.relpath(path, source_root).replace(os.sep, "/")
-        if any(
-            character in relative
-            for character in ("\x00", "\r", "\n", "\\")
-        ):
-            raise ArchiveSourcePolicyError(
-                "invalid_path", relative_path=relative
-            )
-        mode = os.lstat(path).st_mode
-        if stat.S_ISLNK(mode):
+        if any(character in relative for character in ("\x00", "\r", "\n", "\\")):
+            raise ArchiveSourcePolicyError("invalid_path", relative_path=relative)
+        observed = os.lstat(path)
+        if stat.S_ISLNK(observed.st_mode):
             raise ArchiveSourcePolicyError("symlink", relative_path=relative)
         if expected_directory:
-            if not stat.S_ISDIR(mode):
-                raise ArchiveSourcePolicyError(
-                    "special", relative_path=relative
-                )
-        elif not stat.S_ISREG(mode):
+            if not stat.S_ISDIR(observed.st_mode):
+                raise ArchiveSourcePolicyError("special", relative_path=relative)
+        elif not stat.S_ISREG(observed.st_mode):
             raise ArchiveSourcePolicyError("special", relative_path=relative)
-        return relative
+        return relative, observed
 
-    scan_succeeded = False
+    published = False
+    _report_website_progress(backup, "website_enumerating", 0, None)
     try:
         with os.fdopen(
-            descriptor, "w", encoding="utf-8", newline="\n"
-        ) as flist, os.fdopen(
-            archive_descriptor, "w", encoding="utf-8", newline="\n"
-        ) as archive_members:
+            manifest_fd, "w", encoding="utf-8", newline="\n"
+        ) as manifest, os.fdopen(
+            members_fd, "w", encoding="utf-8", newline="\n"
+        ) as members:
             for root, dirs, files in os.walk(
                 source_root,
                 topdown=True,
@@ -497,55 +658,212 @@ def _finalize_zip(backup, local_dir, *, keep_dir):
                 dirs.sort()
                 files.sort()
                 for name in dirs:
-                    relative = inspect_member(
+                    relative, observed = inspect_member(
                         root, name, expected_directory=True
                     )
-                    archive_members.write(relative + "/\n")
+                    line = (relative + "/\n").encode("utf-8")
+                    members.write(line.decode("utf-8"))
+                    members_digest.update(line)
+                    tree_digest.update(
+                        f"D\0{relative}\0{observed.st_mode}\0{observed.st_mtime_ns}\n".encode(
+                            "utf-8"
+                        )
+                    )
+                    directory_count += 1
+                    path_bytes += len(relative.encode("utf-8")) + 1
                 for name in files:
-                    relative = inspect_member(
+                    relative, observed = inspect_member(
                         root, name, expected_directory=False
                     )
-                    flist.write(relative + "\n")
-                    archive_members.write(relative + "\n")
-                    total_files += 1
-            flist.flush()
-            os.fsync(flist.fileno())
-            archive_members.flush()
-            os.fsync(archive_members.fileno())
-        os.replace(staged_manifest, backup_file_list_path)
-        scan_succeeded = True
+                    line = (relative + "\n").encode("utf-8")
+                    text_line = line.decode("utf-8")
+                    manifest.write(text_line)
+                    members.write(text_line)
+                    manifest_digest.update(line)
+                    members_digest.update(line)
+                    tree_digest.update(
+                        f"F\0{relative}\0{observed.st_mode}\0{observed.st_size}\0{observed.st_mtime_ns}\n".encode(
+                            "utf-8"
+                        )
+                    )
+                    file_count += 1
+                    logical_bytes += observed.st_size
+                    path_bytes += len(relative.encode("utf-8"))
+                    if file_count % _WEBSITE_PROGRESS_BATCH == 0:
+                        _report_website_progress(
+                            backup,
+                            "website_enumerating",
+                            file_count,
+                            None,
+                        )
+            manifest.flush()
+            os.fsync(manifest.fileno())
+            members.flush()
+            os.fsync(members.fileno())
+
+        identity = {
+            "file_count": file_count,
+            "directory_count": directory_count,
+            "logical_bytes": logical_bytes,
+            "path_bytes": path_bytes,
+            "tree_sha256": tree_digest.hexdigest(),
+            "manifest_sha256": manifest_digest.hexdigest(),
+            "members_sha256": members_digest.hexdigest(),
+        }
+        ensure_disk_space(
+            _archive_capacity_bytes(identity),
+            path=_existing_parent(parent),
+            what="website archive",
+        )
+        _ensure_inode_capacity(parent, 8, what="website archive")
+        backup.ensure_execution_fence()
+        os.replace(staged_manifest, manifest_path)
+        os.replace(staged_members, members_path)
+        published = True
+        _report_website_progress(
+            backup,
+            "website_enumerating",
+            file_count,
+            file_count,
+        )
+        return {
+            "identity": identity,
+            "manifest_path": manifest_path,
+            "members_path": members_path,
+        }
     finally:
-        try:
-            os.remove(staged_manifest)
-        except FileNotFoundError:
-            pass
-        if not scan_succeeded:
+        for path in (staged_manifest, staged_members):
             try:
-                os.remove(staged_archive_members)
+                os.remove(path)
             except FileNotFoundError:
                 pass
-
-    try:
-        backup.total_files = total_files
-        backup.save()
-
-        # Feed the exact verified enumeration to Info-ZIP. This avoids a second
-        # directory walk while retaining explicit empty-directory entries.
-        create_zip(
-            local_dir,
-            local_zip,
-            timeout=COMMAND_TIMEOUT,
-            before_publish=backup.ensure_execution_fence,
-            member_list_path=staged_archive_members,
-        )
-    finally:
-        try:
-            os.remove(staged_archive_members)
-        except FileNotFoundError:
+        if not published:
+            # Previously published checkpoint manifests, if any, remain untouched.
             pass
+
+
+def _checkpoint_matches_current_execution(
+    backup,
+    local_dir,
+    configuration_sha256,
+    enumeration,
+):
+    checkpoint = _website_checkpoint(backup)
+    execution = backup.ensure_execution_fence()
+    if execution is None:
+        execution = backup.get_execution_state(create=False)
+    expected_correlation = str(execution.correlation_id) if execution else ""
+    return bool(
+        checkpoint.get("version") == _WEBSITE_CHECKPOINT_VERSION
+        and checkpoint.get("backup_uuid") == backup.uuid_str
+        and checkpoint.get("phase") in _CHECKPOINT_PHASES
+        and checkpoint.get("workspace_sha256")
+        == _workspace_identity(backup, local_dir)
+        and checkpoint.get("configuration_sha256") == configuration_sha256
+        and checkpoint.get("execution_correlation_id", "") == expected_correlation
+        and checkpoint.get("identity")
+        == _checkpoint_identity(enumeration["identity"])
+    )
+
+
+def _remove_exact_staged_archives(backup):
+    parent = os.path.abspath("_storage")
+    prefix = f".{backup.uuid}.zip."
+    suffix = ".partial.zip"
+    try:
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                if (
+                    entry.name.startswith(prefix)
+                    and entry.name.endswith(suffix)
+                    and entry.is_file(follow_symlinks=False)
+                ):
+                    os.remove(entry.path)
+    except FileNotFoundError:
+        pass
+
+
+def _finalize_zip(
+    backup,
+    local_dir,
+    *,
+    keep_dir,
+    configuration_sha256=None,
+    enumeration=None,
+):
+    """Checkpoint one verified mirror, then atomically build its standalone ZIP."""
+    local_zip = f"_storage/{backup.uuid}.zip"
+    if configuration_sha256 is None:
+        configuration_sha256 = _cache_fingerprint(
+            backup.website,
+            backup.website.node.connection.auth_website,
+            "",
+        )
+    enumeration = enumeration or _enumerate_website_mirror(backup, local_dir)
+    identity = enumeration["identity"]
+
+    _persist_mirror_checkpoint(
+        backup,
+        local_dir,
+        configuration_sha256,
+        identity,
+        phase="mirror_complete",
+    )
+    backup.total_files = identity["file_count"]
+    backup.total_folders = identity["directory_count"]
+    backup.raw_size = identity["logical_bytes"]
+    backup.save(
+        update_fields=["total_files", "total_folders", "raw_size", "modified"]
+    )
+
+    _report_website_progress(
+        backup,
+        "website_archiving",
+        identity["file_count"],
+        identity["file_count"],
+    )
+    backup.ensure_execution_fence()
+    _remove_exact_staged_archives(backup)
+    _persist_mirror_checkpoint(
+        backup,
+        local_dir,
+        configuration_sha256,
+        identity,
+        phase="archive_building",
+    )
+    create_zip(
+        local_dir,
+        local_zip,
+        timeout=COMMAND_TIMEOUT,
+        before_publish=backup.ensure_execution_fence,
+        member_list_path=enumeration["members_path"],
+        expected_member_count=(
+            int(identity["file_count"]) + int(identity["directory_count"])
+        ),
+        expected_member_list_sha256=identity["members_sha256"],
+        expected_source_bytes=identity["logical_bytes"],
+        during_write=backup.ensure_execution_fence,
+    )
+    _report_website_progress(
+        backup,
+        "website_archive_publishing",
+        identity["file_count"],
+        identity["file_count"],
+    )
+    _persist_mirror_checkpoint(
+        backup,
+        local_dir,
+        configuration_sha256,
+        identity,
+        phase="archive_published",
+    )
     backup.size = os.stat(local_zip).st_size
     backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
-    backup.save()
+    backup.save(update_fields=["size", "status", "modified"])
+    try:
+        os.remove(enumeration["members_path"])
+    except FileNotFoundError:
+        pass
     _write_log(backup, f"Size (compressed): {backup.size_display()}\n")
 
     if not keep_dir:
@@ -598,32 +916,6 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
     lock_file = None
 
     try:
-        # Disk-space preflight before a single byte is downloaded: a full mirror
-        # needs the tree plus the zip (~2x the last snapshot); the incremental
-        # cache already exists, so only the new zip needs headroom (~1.2x).
-        multiplier = 1.2 if incremental else 2
-        ensure_disk_space(
-            int(max(multiplier * _last_complete_zip_size(backup, website__node=node),
-                    _PREFLIGHT_FLOOR)),
-            what="website backup",
-        )
-
-        auth.check_connection()
-
-        if auth.use_public_key:
-            ssh_key_path = managed_private_key_path()
-        elif auth.use_private_key:
-            # lftp starts the system ssh from its own process context. Use an
-            # absolute path so a relative `_storage/...` key cannot resolve
-            # against an unexpected working directory and fail authentication.
-            ssh_key_path = os.path.abspath(f"_storage/ssh_{backup.uuid}")
-            _materialize_ssh_private_key(
-                ssh_key_path,
-                bs_decrypt(auth.private_key, encryption_key),
-            )
-            _normalize_ssh_key(ssh_key_path, password)
-            temporary_ssh_key = True
-
         protocol = auth.get_protocol_display().lower()  # ftp / sftp / ftps
         if auth.protocol == CoreAuthWebsite.Protocol.FTPS and auth.ftps_use_explicit_ssl:
             protocol = "ftp"  # explicit FTPS connects as ftp:// then upgrades
@@ -660,6 +952,7 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
             sources = [{"path": ".", "type": "directory"}]
         else:
             sources = [{"path": p["path"], "type": p["type"]} for p in (website.paths or [])]
+        fingerprint = _cache_fingerprint(website, auth, username)
 
         _write_log(backup, f"Parallel: {parallel}\nIncludes: {' '.join(include_rules)}\n"
                            f"Excludes: {' '.join(exclude_rules)}\n")
@@ -672,8 +965,66 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
             fcntl.flock(lock_file, fcntl.LOCK_EX)
 
         try:
+            checkpoint_candidate = website_mirror_checkpoint_candidate(backup)
+            if checkpoint_candidate:
+                enumeration = _enumerate_website_mirror(backup, local_dir)
+                if _checkpoint_matches_current_execution(
+                    backup,
+                    local_dir,
+                    fingerprint,
+                    enumeration,
+                ):
+                    _write_log(
+                        backup,
+                        "Verified mirror checkpoint; retrying archive without "
+                        "another source transfer.\n",
+                    )
+                    _finalize_zip(
+                        backup,
+                        local_dir,
+                        keep_dir=incremental,
+                        configuration_sha256=fingerprint,
+                        enumeration=enumeration,
+                    )
+                    if incremental:
+                        with open(meta_path, "w") as fh:
+                            json.dump({"fingerprint": fingerprint}, fh)
+                    return
+                _write_log(
+                    backup,
+                    "Mirror checkpoint no longer matches the workspace; "
+                    "rebuilding the exact source mirror.\n",
+                )
+                if not incremental:
+                    shutil.rmtree(local_dir, ignore_errors=True)
+
+            # These checks and key materialization can touch the source. Keep them
+            # after exact checkpoint revalidation so an archive-only retry remains
+            # independent of source availability. Byte and inode preflight still
+            # runs before any fresh transfer; _finalize_zip performs the separate
+            # exact archive-capacity check for a reused mirror.
+            _preflight_website_capacity(
+                backup,
+                local_dir,
+                incremental=incremental,
+            )
+            auth.check_connection()
+
+            if auth.use_public_key:
+                ssh_key_path = managed_private_key_path()
+            elif auth.use_private_key:
+                # lftp starts the system ssh from its own process context. Use an
+                # absolute path so a relative `_storage/...` key cannot resolve
+                # against an unexpected working directory and fail authentication.
+                ssh_key_path = os.path.abspath(f"_storage/ssh_{backup.uuid}")
+                _materialize_ssh_private_key(
+                    ssh_key_path,
+                    bs_decrypt(auth.private_key, encryption_key),
+                )
+                _normalize_ssh_key(ssh_key_path, password)
+                temporary_ssh_key = True
+
             if incremental:
-                fingerprint = _cache_fingerprint(website, auth, username)
                 stored_fingerprint = None
                 if os.path.exists(meta_path):
                     try:
@@ -691,8 +1042,12 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
                                            "downloaded; later backups only fetch changes.\n")
                 os.makedirs(local_dir, exist_ok=True)
             else:
-                mkdir_p(local_dir)
+                # A verified website snapshot must contain only source members.
+                # The historical placeholder would make a 2,000,000-file source
+                # publish 2,000,001 members and breaks exact restore semantics.
+                mkdir_p(local_dir, add_bs_file=False)
 
+            _report_website_progress(backup, "website_mirroring", 0, None)
             for source in sources:
                 target = local_dir if source["path"] == "." else (local_dir + source["path"]).replace("//", "/")
                 create_directory_v2(target)
@@ -775,7 +1130,12 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
                 # for the verified mechanism).
                 _check_lftp_result(node, backup, proc, username, password)
 
-            _finalize_zip(backup, local_dir, keep_dir=incremental)
+            _finalize_zip(
+                backup,
+                local_dir,
+                keep_dir=incremental,
+                configuration_sha256=fingerprint,
+            )
 
             if incremental:
                 # Only stamp the cache after a successful mirror+zip, so a failed run
@@ -788,7 +1148,10 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
                 lock_file.close()
 
     except NodeBackupFailedError:
-        delete_from_disk.apply_async(args=[backup.uuid_str, "both"])
+        cleanup_kind = (
+            "zip" if website_mirror_checkpoint_candidate(backup) else "both"
+        )
+        delete_from_disk.apply_async(args=[backup.uuid_str, cleanup_kind])
         raise
     except BackupExecutionLeaseLostError:
         # A replacement worker owns the canonical workspace/archive now. A stale
@@ -799,7 +1162,10 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
         capture_exception(e)
         failure = safe_backup_failure(e, stage="website_backup")
         _write_log(backup, f"Error [{failure.code}]: {failure.detail}\n")
-        delete_from_disk.apply_async(args=[backup.uuid_str, "both"])
+        cleanup_kind = (
+            "zip" if website_mirror_checkpoint_candidate(backup) else "both"
+        )
+        delete_from_disk.apply_async(args=[backup.uuid_str, cleanup_kind])
         if failure.code == "BACKUP_TIMEOUT":
             raise NodeBackupTimeoutError(node, backup.uuid_str, backup.attempt_no, backup.type)
         raise NodeBackupFailedError(

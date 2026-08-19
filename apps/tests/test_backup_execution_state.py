@@ -271,6 +271,35 @@ class BackupExecutionStateTests(BaseTestCase):
         self.assertFalse(state.lease_is_active())
         self.assertIsNone(state.lease_token)
 
+    def test_fenced_progress_can_publish_and_clear_a_safe_ui_stage(self):
+        _node, backup = self._backup()
+
+        with durable_execution_lease(
+            backup, phase="source_dispatch", task_id="website-stage"
+        ) as execution:
+            execution.progress(
+                10000,
+                None,
+                unit="files",
+                metadata_updates={"public_stage": "website_enumerating"},
+            )
+            state = backup.get_execution_state()
+            self.assertEqual(state.progress_completed, 10000)
+            self.assertEqual(state.progress_unit, "files")
+            self.assertEqual(
+                state.metadata["public_stage"],
+                "website_enumerating",
+            )
+
+            execution.progress(
+                12000,
+                12000,
+                unit="files",
+                metadata_updates={"public_stage": None},
+            )
+            state = backup.get_execution_state()
+            self.assertNotIn("public_stage", state.metadata)
+
     def test_stale_worker_direct_save_is_fenced_after_takeover(self):
         _node, backup = self._backup()
         expired_at = timezone.now() - timedelta(minutes=2)

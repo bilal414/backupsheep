@@ -49,7 +49,13 @@ from apps.console.connection.models import (
     CoreAuthWebsite,
     CoreConnection,
 )
-from apps.console.node.models import CoreDatabase, CoreNode, CoreWebsite
+from apps.console.node.models import (
+    CoreDatabase,
+    CoreNode,
+    CoreWebsite,
+    _clear_local_backup_artifacts,
+    _resume_local_backup_owned,
+)
 from apps.console.storage.models import CoreStorage, CoreStorageLocal
 from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 from apps.tests import factories
@@ -602,11 +608,23 @@ class DiskCleanupTests(TestCase):
         uid = "u1"
         os.makedirs(os.path.join(st, uid))
         open(os.path.join(st, f"{uid}.zip"), "w").close()
+        open(os.path.join(st, f"{uid}.files"), "w").close()
+        open(os.path.join(st, f"{uid}.members"), "w").close()
+        staged = (
+            f".{uid}.zip.0123456789abcdef0123456789abcdef.partial.zip"
+        )
+        open(os.path.join(st, staged), "w").close()
+        foreign = ".other.zip.0123456789abcdef0123456789abcdef.partial.zip"
+        open(os.path.join(st, foreign), "w").close()
         open(os.path.join(st, f"{uid}.log"), "w").close()
         with override_settings(BASE_DIR=base):
             helper_tasks.delete_from_disk.apply(args=[uid, "both"])
         self.assertFalse(os.path.exists(os.path.join(st, uid)))
         self.assertFalse(os.path.exists(os.path.join(st, f"{uid}.zip")))
+        self.assertFalse(os.path.exists(os.path.join(st, f"{uid}.files")))
+        self.assertFalse(os.path.exists(os.path.join(st, f"{uid}.members")))
+        self.assertFalse(os.path.exists(os.path.join(st, staged)))
+        self.assertTrue(os.path.exists(os.path.join(st, foreign)))
         self.assertTrue(os.path.exists(os.path.join(st, f"{uid}.log")))  # log retained
 
     def test_delete_from_disk_path_traversal_guard(self):
@@ -617,6 +635,35 @@ class DiskCleanupTests(TestCase):
         with override_settings(BASE_DIR=base):
             helper_tasks.delete_from_disk.apply(args=["../secret", "dir"])
         self.assertTrue(os.path.exists(os.path.join(base, "secret")))  # not escaped
+
+    def test_retry_cleanup_removes_only_exact_incomplete_generation(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        st = self._storage(base)
+        uid = "retry-owned"
+        backup = SimpleNamespace(uuid_str=uid)
+        os.makedirs(os.path.join(st, uid))
+        exact_files = (
+            f"{uid}.zip",
+            f"{uid}.manifest.json",
+            f"{uid}.files",
+            f"{uid}.members",
+            f".{uid}.zip.0123456789abcdef0123456789abcdef.partial.zip",
+            f".{uid}.files.0123456789abcdef0123456789abcdef.partial",
+            f".{uid}.members.0123456789abcdef0123456789abcdef.partial",
+        )
+        for name in exact_files:
+            open(os.path.join(st, name), "w").close()
+        foreign = ".foreign.members.0123456789abcdef0123456789abcdef.partial"
+        open(os.path.join(st, foreign), "w").close()
+
+        with override_settings(BASE_DIR=base):
+            _clear_local_backup_artifacts(backup)
+
+        self.assertFalse(os.path.exists(os.path.join(st, uid)))
+        for name in exact_files:
+            self.assertFalse(os.path.exists(os.path.join(st, name)))
+        self.assertTrue(os.path.exists(os.path.join(st, foreign)))
 
     def test_delete_from_disk_removes_one_fenced_restore_generation(self):
         import tempfile
@@ -719,6 +766,8 @@ class WebsiteEngineBase(BaseTestCase):
         self.addCleanup(_cleanup_storage_artifacts(
             f"_storage/{backup.uuid}.log",
             f"_storage/{backup.uuid}.zip",
+            f"_storage/{backup.uuid}.files",
+            f"_storage/{backup.uuid}.members",
             f"_storage/{backup.uuid}/",
             f"_storage/ssh_{backup.uuid}",
             f"_storage/website_cache/{node.uuid_str}/",
@@ -2798,6 +2847,194 @@ class FinalizeZipManifestTests(WebsiteEngineBase):
         self.assertEqual(context.exception.relative_path, "site-link")
         create.assert_not_called()
         self.assertFalse(os.path.exists(manifest))
+
+
+class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
+    def _tree(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        os.makedirs(os.path.join(directory, "sub"))
+        with open(os.path.join(directory, "index.html"), "w") as source:
+            source.write("first")
+        with open(os.path.join(directory, "sub", "world.txt"), "w") as source:
+            source.write("second")
+        return directory
+
+    def _checkpoint_tree(self, backup):
+        directory = os.path.abspath(f"_storage/{backup.uuid}")
+        os.makedirs(os.path.join(directory, "sub"), exist_ok=True)
+        with open(os.path.join(directory, "index.html"), "w") as source:
+            source.write("first")
+        with open(os.path.join(directory, "sub", "world.txt"), "w") as source:
+            source.write("second")
+        return directory
+
+    def test_archive_failure_persists_exact_mirror_checkpoint(self):
+        _node, backup = self._make_backup()
+        directory = self._checkpoint_tree(backup)
+        fingerprint = W._cache_fingerprint(
+            backup.website,
+            backup.website.node.connection.auth_website,
+            "u",
+        )
+
+        with mock.patch.object(W, "create_zip", side_effect=RuntimeError("zip stopped")):
+            with self.assertRaisesRegex(RuntimeError, "zip stopped"):
+                W._finalize_zip(
+                    backup,
+                    directory,
+                    keep_dir=True,
+                    configuration_sha256=fingerprint,
+                )
+
+        backup.refresh_from_db()
+        checkpoint = backup.metadata[W._WEBSITE_CHECKPOINT_KEY]
+        self.assertEqual(checkpoint["phase"], "archive_building")
+        self.assertEqual(checkpoint["identity"]["file_count"], 2)
+        self.assertEqual(checkpoint["identity"]["directory_count"], 1)
+        self.assertEqual(backup.total_files, 2)
+        self.assertTrue(os.path.isfile(f"_storage/{backup.uuid}.members"))
+        self.assertTrue(W.website_mirror_checkpoint_candidate(backup))
+
+    def test_retry_revalidates_checkpoint_and_skips_second_lftp_transfer(self):
+        node, backup = self._make_backup()
+        directory = self._checkpoint_tree(backup)
+        fingerprint = W._cache_fingerprint(
+            backup.website,
+            node.connection.auth_website,
+            "u",
+        )
+        with mock.patch.object(W, "create_zip", side_effect=RuntimeError("zip stopped")):
+            with self.assertRaises(RuntimeError):
+                W._finalize_zip(
+                    backup,
+                    directory,
+                    keep_dir=True,
+                    configuration_sha256=fingerprint,
+                )
+
+        with mock.patch.object(
+                 CoreAuthWebsite,
+                 "check_connection",
+                 side_effect=AssertionError("archive retry touched the source"),
+             ) as check_connection, \
+             mock.patch.object(
+                 W,
+                 "_preflight_website_capacity",
+                 side_effect=AssertionError("archive retry requested mirror capacity"),
+             ) as mirror_preflight, \
+             mock.patch.object(W.subprocess, "run") as lftp, \
+             mock.patch.object(W, "delete_from_disk"):
+            W._snapshot_lftp(
+                backup,
+                base_dir=directory + os.sep,
+                incremental=False,
+            )
+
+        lftp.assert_not_called()
+        check_connection.assert_not_called()
+        mirror_preflight.assert_not_called()
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.DOWNLOAD_COMPLETE)
+        with open(f"_storage/{backup.uuid}.log") as run_log:
+            self.assertIn("without another source transfer", run_log.read())
+
+    def test_changed_checkpoint_workspace_forces_fresh_mirror(self):
+        node, backup = self._make_backup()
+        directory = self._checkpoint_tree(backup)
+        fingerprint = W._cache_fingerprint(
+            backup.website,
+            node.connection.auth_website,
+            "u",
+        )
+        with mock.patch.object(W, "create_zip", side_effect=RuntimeError("zip stopped")):
+            with self.assertRaises(RuntimeError):
+                W._finalize_zip(
+                    backup,
+                    directory,
+                    keep_dir=True,
+                    configuration_sha256=fingerprint,
+                )
+        with open(os.path.join(directory, "index.html"), "w") as source:
+            source.write("changed after checkpoint")
+
+        with mock.patch.object(
+                 CoreAuthWebsite,
+                 "check_connection",
+             ) as check_connection, \
+             mock.patch.object(
+                 W.subprocess,
+                 "run",
+                 return_value=SimpleNamespace(stdout="", returncode=0),
+             ) as lftp, \
+             mock.patch.object(W, "_finalize_zip"), \
+             mock.patch.object(W, "delete_from_disk"):
+            W._snapshot_lftp(
+                backup,
+                base_dir=directory + os.sep,
+                incremental=False,
+            )
+
+        lftp.assert_called_once()
+        check_connection.assert_called_once_with()
+
+    def test_inode_preflight_fails_before_work_when_capacity_is_short(self):
+        with mock.patch.object(
+            W.os,
+            "statvfs",
+            return_value=SimpleNamespace(f_files=100, f_favail=3),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Not enough free inodes for website backup",
+            ):
+                W._ensure_inode_capacity("_storage", 4, what="website backup")
+
+    def test_resume_preserves_checkpoint_and_unbinds_progress_callback(self):
+        node, backup = self._make_backup()
+        checkpoint = mock.Mock(return_value=True)
+        execution = SimpleNamespace(
+            state=SimpleNamespace(progress_completed=12000),
+            progress=mock.Mock(),
+            ensure_owned=mock.Mock(),
+        )
+
+        def snapshot(current):
+            self.assertIs(current, backup)
+            self.assertIs(current._execution_progress_callback, execution.progress)
+            self.assertEqual(current._execution_progress_floor, 12000)
+
+        with mock.patch(
+                 "apps.console.node.models._clear_local_backup_artifacts",
+             ) as clear_artifacts, \
+             mock.patch(
+                 "apps._tasks.execution.verify_and_commit_source_artifact",
+                 return_value=SimpleNamespace(byte_count=321),
+             ), \
+             mock.patch(
+                 "apps._tasks.integration.storage.tasks.finalize_backup.apply_async",
+             ) as finalize:
+            _resume_local_backup_owned(
+                backup,
+                node,
+                snapshot,
+                "stored_website_backups",
+                CoreWebsiteBackupStoragePoints.Status,
+                execution,
+                resume_source_checkpoint=checkpoint,
+            )
+
+        checkpoint.assert_called_once_with(backup)
+        clear_artifacts.assert_not_called()
+        execution.progress.assert_called_once_with(
+            321,
+            321,
+            unit="bytes",
+            metadata_updates={"public_stage": None},
+        )
+        finalize.assert_called_once_with(args=[node.id, backup.id])
+        self.assertNotIn("_execution_progress_callback", backup.__dict__)
+        self.assertNotIn("_execution_progress_floor", backup.__dict__)
 
     def test_directory_symlink_is_rejected_before_archive_publication(self):
         _node, backup = self._make_backup()

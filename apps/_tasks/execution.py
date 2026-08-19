@@ -113,7 +113,14 @@ class DurableExecutionLease:
         self.state = state
         return state
 
-    def progress(self, completed, total=None, unit="bytes"):
+    def progress(
+        self,
+        completed,
+        total=None,
+        unit="bytes",
+        *,
+        metadata_updates=None,
+    ):
         self.ensure_owned()
         state = self.backup.heartbeat_execution(
             lease_owner=self.owner,
@@ -122,6 +129,7 @@ class DurableExecutionLease:
             progress_completed=completed,
             progress_total=total,
             progress_unit=unit,
+            metadata_updates=metadata_updates,
         )
         if state is None:
             self._lost.set()

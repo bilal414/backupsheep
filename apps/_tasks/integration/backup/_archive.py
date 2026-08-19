@@ -1,12 +1,17 @@
 """Small, dependency-free helpers for producing and validating backup archives."""
 
 import errno
+import hashlib
 import os
+import shutil
+import stat
 import struct
 import subprocess
 import tempfile
+import time
 import uuid
 import zipfile
+import zlib
 from typing import NamedTuple
 
 
@@ -23,6 +28,9 @@ _ZIP_UINT16_MAX = 0xFFFF
 _ZIP_UINT32_MAX = 0xFFFFFFFF
 _ZIP_EOCD_SIZE = 22
 _ZIP_MAX_COMMENT_SIZE = 0xFFFF
+_ZIP_STREAM_CHUNK_SIZE = 1024 * 1024
+_ZIP_STREAM_STORE_LIMIT = 64 * 1024
+_ZIP_STREAM_FENCE_BATCH = 10000
 
 
 class ArchiveSourcePolicyError(Exception):
@@ -73,8 +81,10 @@ def validate_zip_archive(archive_path, *, required_suffix=None):
 
     try:
         suffix_found = not required_suffix
+        member_count = 0
         suffix = str(required_suffix or "").lower()
         for member in iter_zip_members(archive_path):
+            member_count += 1
             if suffix and member.filename.lower().endswith(suffix):
                 suffix_found = True
         if not suffix_found:
@@ -82,10 +92,13 @@ def validate_zip_archive(archive_path, *, required_suffix=None):
                 f"Backup archive contains no {required_suffix} dump: {archive_path}"
             )
 
-        # Info-ZIP's tester streams member payloads and CRC state without creating
-        # one Python object per member. New website artifacts are already produced
-        # by the matching Info-ZIP tool; database artifacts use only standard
-        # stored/deflated ZIP methods that this tester supports as well.
+        # Info-ZIP reports its structurally valid zero-member archive as a warning
+        # exit, so there is no payload CRC subprocess to run for an empty website.
+        # The bounded central-directory reader above has still validated the whole
+        # archive. For non-empty archives, stream payloads and CRC state without
+        # creating one Python object per member.
+        if member_count == 0:
+            return archive_path
         process = subprocess.Popen(
             ["unzip", "-tqq", archive_path],
             stdout=subprocess.DEVNULL,
@@ -595,6 +608,356 @@ def _run_zip_writer(command, *, source_dir, timeout, stderr_dir, stdin=None):
     return process.returncode, stderr_tail
 
 
+def _zip_dos_timestamp(timestamp):
+    """Return bounded DOS and extended-Unix timestamps for one source member."""
+    try:
+        seconds = int(timestamp)
+    except (TypeError, ValueError, OverflowError):
+        seconds = 0
+    extended = max(0, min(seconds, _ZIP_UINT32_MAX))
+    try:
+        value = time.localtime(seconds)
+    except (OSError, OverflowError, ValueError):
+        value = time.localtime(0)
+    if value.tm_year < 1980:
+        year, month, day, hour, minute, second = 1980, 1, 1, 0, 0, 0
+    elif value.tm_year > 2107:
+        year, month, day, hour, minute, second = 2107, 12, 31, 23, 59, 58
+    else:
+        year, month, day = value.tm_year, value.tm_mon, value.tm_mday
+        hour, minute, second = value.tm_hour, value.tm_min, value.tm_sec
+    dos_time = (hour << 11) | (minute << 5) | (second // 2)
+    dos_date = ((year - 1980) << 9) | (month << 5) | day
+    return dos_time, dos_date, extended
+
+
+def _zip_extended_timestamp(timestamp):
+    return struct.pack("<HHBI", 0x5455, 5, 1, timestamp)
+
+
+def _deflate_bound(size):
+    """The zlib deflateBound formula, used before reserving a local header."""
+    size = max(0, int(size))
+    return size + (size >> 12) + (size >> 14) + (size >> 25) + 13
+
+
+def _streaming_member(source_root, raw_name):
+    """Resolve and revalidate one strict UTF-8 member-list entry."""
+    try:
+        name = raw_name.decode("utf-8", "strict")
+    except UnicodeDecodeError as error:
+        raise ArchiveSourcePolicyError("invalid_path") from error
+    is_directory = name.endswith("/")
+    relative = name[:-1] if is_directory else name
+    components = relative.split("/")
+    if (
+        not relative
+        or name.startswith("/")
+        or "\\" in name
+        or any(character in name for character in ("\x00", "\r", "\n"))
+        or any(component in ("", ".", "..") for component in components)
+        or len(raw_name) > _ZIP_UINT16_MAX
+    ):
+        raise ArchiveSourcePolicyError("invalid_path", relative_path=name)
+    source_path = os.path.join(source_root, *components)
+    observed = os.lstat(source_path)
+    if stat.S_ISLNK(observed.st_mode):
+        raise ArchiveSourcePolicyError("symlink", relative_path=name)
+    if is_directory:
+        if not stat.S_ISDIR(observed.st_mode):
+            raise ArchiveSourcePolicyError("special", relative_path=name)
+    elif not stat.S_ISREG(observed.st_mode):
+        raise ArchiveSourcePolicyError("special", relative_path=name)
+    return name, source_path, observed, is_directory
+
+
+def _write_streaming_zip_member(
+    archive,
+    central,
+    source_root,
+    raw_name,
+    *,
+    deadline,
+    timeout,
+):
+    """Write one local entry and disk-spool its central-directory record."""
+    name, source_path, observed, is_directory = _streaming_member(
+        source_root, raw_name
+    )
+    local_offset = archive.tell()
+    dos_time, dos_date, unix_time = _zip_dos_timestamp(observed.st_mtime)
+    timestamp_extra = _zip_extended_timestamp(unix_time)
+    expected_size = 0 if is_directory else int(observed.st_size)
+    method = 0 if is_directory or expected_size <= _ZIP_STREAM_STORE_LIMIT else 8
+    size_bound = expected_size if method == 0 else _deflate_bound(expected_size)
+    local_zip64 = size_bound > _ZIP_UINT32_MAX
+    local_zip64_extra = (
+        struct.pack("<HHQQ", 0x0001, 16, expected_size, 0)
+        if local_zip64
+        else b""
+    )
+    local_extra = local_zip64_extra + timestamp_extra
+    version_needed = 45 if local_zip64 else 20
+    flags = _ZIP_UTF8_FLAG
+    archive.write(
+        struct.pack(
+            "<4s5H3L2H",
+            _ZIP_LOCAL_SIGNATURE,
+            version_needed,
+            flags,
+            method,
+            dos_time,
+            dos_date,
+            0,
+            _ZIP_UINT32_MAX if local_zip64 else 0,
+            _ZIP_UINT32_MAX if local_zip64 else expected_size,
+            len(raw_name),
+            len(local_extra),
+        )
+    )
+    archive.write(raw_name)
+    archive.write(local_extra)
+
+    crc = 0
+    uncompressed_size = 0
+    compressed_size = 0
+    if not is_directory:
+        flags_open = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(source_path, flags_open)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_dev != observed.st_dev
+                or opened.st_ino != observed.st_ino
+                or opened.st_size != observed.st_size
+            ):
+                raise RuntimeError(
+                    "Website mirror changed during archive creation."
+                )
+            compressor = zlib.compressobj(level=6, wbits=-15) if method == 8 else None
+            with os.fdopen(descriptor, "rb", closefd=False) as source:
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(
+                            "bounded-zip-writer",
+                            timeout,
+                        )
+                    chunk = source.read(_ZIP_STREAM_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    crc = zlib.crc32(chunk, crc)
+                    uncompressed_size += len(chunk)
+                    output = compressor.compress(chunk) if compressor else chunk
+                    if output:
+                        archive.write(output)
+                        compressed_size += len(output)
+                if compressor:
+                    output = compressor.flush()
+                    archive.write(output)
+                    compressed_size += len(output)
+            finished = os.fstat(descriptor)
+            if (
+                uncompressed_size != expected_size
+                or finished.st_size != observed.st_size
+                or finished.st_mtime_ns != observed.st_mtime_ns
+            ):
+                raise RuntimeError(
+                    "Website mirror changed during archive creation."
+                )
+        finally:
+            os.close(descriptor)
+
+    end_offset = archive.tell()
+    archive.seek(local_offset + 14)
+    if local_zip64:
+        archive.write(struct.pack("<L", crc & _ZIP_UINT32_MAX))
+        archive.seek(local_offset + _ZIP_LOCAL_HEADER_SIZE + len(raw_name) + 4)
+        archive.write(struct.pack("<QQ", uncompressed_size, compressed_size))
+    else:
+        if compressed_size > _ZIP_UINT32_MAX:
+            raise RuntimeError("Website archive member unexpectedly exceeded ZIP32.")
+        archive.write(
+            struct.pack(
+                "<LLL",
+                crc & _ZIP_UINT32_MAX,
+                compressed_size,
+                uncompressed_size,
+            )
+        )
+    archive.seek(end_offset)
+
+    central_zip64 = bytearray()
+    central_compressed = compressed_size
+    central_uncompressed = uncompressed_size
+    central_offset = local_offset
+    if uncompressed_size > _ZIP_UINT32_MAX:
+        central_uncompressed = _ZIP_UINT32_MAX
+        central_zip64.extend(struct.pack("<Q", uncompressed_size))
+    if compressed_size > _ZIP_UINT32_MAX:
+        central_compressed = _ZIP_UINT32_MAX
+        central_zip64.extend(struct.pack("<Q", compressed_size))
+    if local_offset > _ZIP_UINT32_MAX:
+        central_offset = _ZIP_UINT32_MAX
+        central_zip64.extend(struct.pack("<Q", local_offset))
+    zip64_extra = (
+        struct.pack("<HH", 0x0001, len(central_zip64)) + bytes(central_zip64)
+        if central_zip64
+        else b""
+    )
+    central_extra = zip64_extra + timestamp_extra
+    if central_zip64 or local_zip64:
+        version_needed = 45
+    external_attr = (int(observed.st_mode) & 0xFFFF) << 16
+    if is_directory:
+        external_attr |= 0x10
+    central.write(
+        struct.pack(
+            "<4s6H3L5H2L",
+            _ZIP_CENTRAL_SIGNATURE,
+            (3 << 8) | version_needed,
+            version_needed,
+            flags,
+            method,
+            dos_time,
+            dos_date,
+            crc & _ZIP_UINT32_MAX,
+            central_compressed,
+            central_uncompressed,
+            len(raw_name),
+            len(central_extra),
+            0,
+            0,
+            0,
+            external_attr,
+            central_offset,
+        )
+    )
+    central.write(raw_name)
+    central.write(central_extra)
+    return expected_size
+
+
+def _write_zip_end_records(archive, *, entry_count, central_size, central_offset):
+    needs_zip64 = (
+        entry_count >= _ZIP_UINT16_MAX
+        or central_size > _ZIP_UINT32_MAX
+        or central_offset > _ZIP_UINT32_MAX
+    )
+    if needs_zip64:
+        zip64_offset = archive.tell()
+        archive.write(
+            struct.pack(
+                "<4sQ2H2L4Q",
+                _ZIP64_EOCD_SIGNATURE,
+                44,
+                45,
+                45,
+                0,
+                0,
+                entry_count,
+                entry_count,
+                central_size,
+                central_offset,
+            )
+        )
+        archive.write(
+            struct.pack(
+                "<4sLQL",
+                _ZIP64_LOCATOR_SIGNATURE,
+                0,
+                zip64_offset,
+                1,
+            )
+        )
+    archive.write(
+        struct.pack(
+            "<4s4H2LH",
+            _ZIP_EOCD_SIGNATURE,
+            0,
+            0,
+            min(entry_count, _ZIP_UINT16_MAX),
+            min(entry_count, _ZIP_UINT16_MAX),
+            min(central_size, _ZIP_UINT32_MAX),
+            min(central_offset, _ZIP_UINT32_MAX),
+            0,
+        )
+    )
+
+
+def _create_streaming_zip(
+    source_dir,
+    staged_path,
+    member_list_path,
+    *,
+    timeout,
+    expected_member_count=None,
+    expected_member_list_sha256=None,
+    expected_source_bytes=None,
+    during_write=None,
+):
+    """Write a ZIP with O(1) resident member state and disk-spooled central data."""
+    source_root = os.path.abspath(source_dir)
+    parent = os.path.dirname(staged_path) or "."
+    deadline = time.monotonic() + max(1, int(timeout))
+    member_digest = hashlib.sha256()
+    entry_count = 0
+    source_bytes = 0
+    with open(staged_path, "w+b") as archive, tempfile.TemporaryFile(
+        dir=parent
+    ) as central, open(member_list_path, "rb") as members:
+        for line in members:
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("bounded-zip-writer", timeout)
+            if not line.endswith(b"\n"):
+                raise ArchiveSourcePolicyError("invalid_path")
+            member_digest.update(line)
+            raw_name = line[:-1]
+            source_bytes += _write_streaming_zip_member(
+                archive,
+                central,
+                source_root,
+                raw_name,
+                deadline=deadline,
+                timeout=timeout,
+            )
+            entry_count += 1
+            if (
+                during_write is not None
+                and entry_count % _ZIP_STREAM_FENCE_BATCH == 0
+            ):
+                during_write()
+        if expected_member_count is not None and entry_count != int(
+            expected_member_count
+        ):
+            raise RuntimeError("Website archive member count changed before writing.")
+        if (
+            expected_member_list_sha256 is not None
+            and member_digest.hexdigest() != str(expected_member_list_sha256)
+        ):
+            raise RuntimeError("Website archive member list changed before writing.")
+        if expected_source_bytes is not None and source_bytes != int(
+            expected_source_bytes
+        ):
+            raise RuntimeError("Website archive source size changed before writing.")
+        if during_write is not None:
+            during_write()
+        central_offset = archive.tell()
+        central.flush()
+        central_size = central.tell()
+        central.seek(0)
+        shutil.copyfileobj(central, archive, _ZIP_STREAM_CHUNK_SIZE)
+        _write_zip_end_records(
+            archive,
+            entry_count=entry_count,
+            central_size=central_size,
+            central_offset=central_offset,
+        )
+        archive.flush()
+        os.fsync(archive.fileno())
+    return entry_count
+
+
 def create_zip(
     source_dir,
     archive_path,
@@ -603,38 +966,40 @@ def create_zip(
     required_suffix=None,
     before_publish=None,
     member_list_path=None,
+    expected_member_count=None,
+    expected_member_list_sha256=None,
+    expected_source_bytes=None,
+    during_write=None,
 ):
     """Build, fsync, and atomically publish a validated ZIP archive."""
     archive_path = os.path.abspath(archive_path)
     staged_path = _staged_archive_path(archive_path)
     try:
         if member_list_path:
-            command = ["zip", "-q", "-y", staged_path, "-@"]
+            _create_streaming_zip(
+                source_dir,
+                staged_path,
+                member_list_path,
+                timeout=timeout,
+                expected_member_count=expected_member_count,
+                expected_member_list_sha256=expected_member_list_sha256,
+                expected_source_bytes=expected_source_bytes,
+                during_write=during_write,
+            )
         else:
             command = ["zip", "-q", "-y", "-r", staged_path, ".", "-i", "*"]
-
-        if member_list_path:
-            with open(member_list_path, "rb") as member_list:
-                returncode, stderr = _run_zip_writer(
-                    command,
-                    source_dir=source_dir,
-                    timeout=timeout,
-                    stderr_dir=os.path.dirname(staged_path) or ".",
-                    stdin=member_list,
-                )
-        else:
             returncode, stderr = _run_zip_writer(
                 command,
                 source_dir=source_dir,
                 timeout=timeout,
                 stderr_dir=os.path.dirname(staged_path) or ".",
             )
-        if returncode != 0:
-            raise RuntimeError(
-                f"zip failed with exit code {returncode}"
-                + (f": {stderr}" if stderr else "")
-            )
-        mark_utf8_zip_names(staged_path)
+            if returncode != 0:
+                raise RuntimeError(
+                    f"zip failed with exit code {returncode}"
+                    + (f": {stderr}" if stderr else "")
+                )
+            mark_utf8_zip_names(staged_path)
         return _publish_archive(
             staged_path,
             archive_path,

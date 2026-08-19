@@ -1531,6 +1531,18 @@ class ExtractBackupZipTests(RestoreBackendBase):
         with open(os.path.join(dest, "public_html", "index.html")) as fh:
             self.assertEqual(fh.read(), "hi")
 
+    def test_extracts_valid_empty_website_archive(self):
+        zip_path = os.path.join(self.tmp, "empty.zip")
+        with zipfile.ZipFile(zip_path, "w"):
+            pass
+
+        destination = restore_common.extract_backup_zip(
+            zip_path, os.path.join(self.tmp, "empty-out")
+        )
+
+        self.assertTrue(os.path.isdir(destination))
+        self.assertEqual(os.listdir(destination), [])
+
     def test_extract_does_not_materialize_zipfile_members(self):
         zip_path = self._make_zip(
             {"public_html/index.html": "bounded"}, name="bounded.zip"

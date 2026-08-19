@@ -1,3 +1,4 @@
+import hashlib
 import struct
 import tempfile
 import unittest
@@ -139,6 +140,29 @@ class ArchiveValidationTests(unittest.TestCase):
             archive_file.truncate()
             archive_file.write(new_content)
 
+    def test_streaming_writer_publishes_valid_empty_website_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            members = root / "members.txt"
+            members.write_bytes(b"")
+            archive_path = root / "empty.zip"
+
+            create_zip(
+                source,
+                archive_path,
+                timeout=30,
+                member_list_path=members,
+                expected_member_count=0,
+                expected_member_list_sha256=hashlib.sha256(b"").hexdigest(),
+                expected_source_bytes=0,
+            )
+
+            self.assertGreater(archive_path.stat().st_size, 0)
+            self.assertEqual(list(iter_zip_members(archive_path)), [])
+            validate_zip_archive(archive_path)
+
     def test_validate_zip_checks_member_crc(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             archive_path = Path(temp_dir) / "backup.zip"
@@ -262,6 +286,92 @@ class ArchiveValidationTests(unittest.TestCase):
                 self.assertTrue(infos[composed].flag_bits & 0x0800)
                 self.assertTrue(infos[decomposed].flag_bits & 0x0800)
                 self.assertIsNone(archive.testzip())
+
+    def test_member_list_writer_spools_metadata_and_preserves_website_semantics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_dir = Path(temp_dir) / "source"
+            source_dir.mkdir()
+            (source_dir / "empty-目录").mkdir()
+            (source_dir / "café.txt").write_text("composed", encoding="utf-8")
+            (source_dir / "large.bin").write_bytes(b"bounded-writer" * 6000)
+            member_list = Path(temp_dir) / "members"
+            members = (
+                "empty-目录/\n"
+                "café.txt\n"
+                "large.bin\n"
+            ).encode("utf-8")
+            member_list.write_bytes(members)
+            archive_path = Path(temp_dir) / "backup.zip"
+            fence = mock.Mock()
+
+            with mock.patch.object(
+                ARCHIVE,
+                "_run_zip_writer",
+                side_effect=AssertionError("Info-ZIP must not write member lists"),
+            ), mock.patch.object(
+                ARCHIVE.zipfile,
+                "ZipFile",
+                side_effect=AssertionError("writer must not retain ZipInfo members"),
+            ):
+                create_zip(
+                    source_dir,
+                    archive_path,
+                    timeout=60,
+                    member_list_path=member_list,
+                    expected_member_count=3,
+                    expected_member_list_sha256=hashlib.sha256(members).hexdigest(),
+                    expected_source_bytes=(
+                        len("composed".encode("utf-8")) + len(b"bounded-writer" * 6000)
+                    ),
+                    during_write=fence,
+                )
+
+            fence.assert_called_once_with()
+            with zipfile.ZipFile(archive_path) as archive:
+                infos = {info.filename: info for info in archive.infolist()}
+                self.assertEqual(
+                    set(infos),
+                    {"empty-目录/", "café.txt", "large.bin"},
+                )
+                self.assertTrue(infos["empty-目录/"].is_dir())
+                self.assertEqual(infos["café.txt"].compress_type, zipfile.ZIP_STORED)
+                self.assertEqual(infos["large.bin"].compress_type, zipfile.ZIP_DEFLATED)
+                self.assertEqual(archive.read("café.txt"), b"composed")
+                self.assertEqual(archive.read("large.bin"), b"bounded-writer" * 6000)
+                self.assertIsNone(archive.testzip())
+                for info in infos.values():
+                    self.assertTrue(info.flag_bits & 0x0800)
+
+    def test_member_list_identity_failure_keeps_previous_archive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_dir = Path(temp_dir) / "source"
+            source_dir.mkdir()
+            (source_dir / "site.txt").write_text("new", encoding="utf-8")
+            member_list = Path(temp_dir) / "members"
+            member_list.write_bytes(b"site.txt\n")
+            archive_path = Path(temp_dir) / "backup.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("previous.txt", "committed")
+
+            with self.assertRaisesRegex(RuntimeError, "member list changed"):
+                create_zip(
+                    source_dir,
+                    archive_path,
+                    timeout=60,
+                    member_list_path=member_list,
+                    expected_member_count=1,
+                    expected_member_list_sha256="0" * 64,
+                    expected_source_bytes=3,
+                )
+
+            with zipfile.ZipFile(archive_path) as archive:
+                self.assertEqual(archive.namelist(), ["previous.txt"])
+            self.assertFalse(
+                any(
+                    path.name.endswith(".partial.zip")
+                    for path in Path(temp_dir).iterdir()
+                )
+            )
 
     def test_utf8_header_repair_does_not_materialize_zipfile_members(self):
         with tempfile.TemporaryDirectory() as temp_dir:

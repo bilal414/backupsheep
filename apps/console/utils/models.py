@@ -550,6 +550,7 @@ class UtilBackup(TimeStampedModel):
         progress_total=None,
         progress_unit=None,
         worker_name=None,
+        metadata_updates=None,
         now=None,
     ):
         """Renew a live lease and optionally persist monotonic progress.
@@ -590,19 +591,35 @@ class UtilBackup(TimeStampedModel):
                 state.progress_unit = str(progress_unit)[:32]
             if worker_name is not None:
                 state.worker_name = str(worker_name)[:255]
+            metadata_changed = False
+            if metadata_updates is not None:
+                if not isinstance(metadata_updates, dict):
+                    raise TypeError("metadata_updates must be a dictionary.")
+                metadata = dict(state.metadata or {})
+                for key, value in metadata_updates.items():
+                    key = str(key)[:64]
+                    if not key:
+                        continue
+                    if value is None:
+                        metadata.pop(key, None)
+                    else:
+                        metadata[key] = value
+                state.metadata = metadata
+                metadata_changed = True
             state.heartbeat_at = now
             state.lease_expires_at = now + timedelta(seconds=lease_seconds)
-            state.save(
-                update_fields=[
-                    "progress_completed",
-                    "progress_total",
-                    "progress_unit",
-                    "worker_name",
-                    "heartbeat_at",
-                    "lease_expires_at",
-                    "modified",
-                ]
-            )
+            update_fields = [
+                "progress_completed",
+                "progress_total",
+                "progress_unit",
+                "worker_name",
+                "heartbeat_at",
+                "lease_expires_at",
+                "modified",
+            ]
+            if metadata_changed:
+                update_fields.append("metadata")
+            state.save(update_fields=update_fields)
             return state
 
     def release_execution(

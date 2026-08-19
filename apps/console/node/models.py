@@ -11978,7 +11978,14 @@ def _local_backup_phase_lock(backup):
 def _clear_local_backup_artifacts(backup):
     """Remove only incomplete dump artifacts before restarting a dump phase."""
     storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
-    for name, is_dir in ((backup.uuid_str, True), (f"{backup.uuid_str}.zip", False)):
+    exact_targets = (
+        (backup.uuid_str, True),
+        (f"{backup.uuid_str}.zip", False),
+        (f"{backup.uuid_str}.manifest.json", False),
+        (f"{backup.uuid_str}.files", False),
+        (f"{backup.uuid_str}.members", False),
+    )
+    for name, is_dir in exact_targets:
         target = os.path.realpath(os.path.join(storage_dir, name))
         if target == storage_dir or os.path.commonpath([storage_dir, target]) != storage_dir:
             continue
@@ -11990,8 +11997,35 @@ def _clear_local_backup_artifacts(backup):
             except FileNotFoundError:
                 pass
 
+    staged_patterns = (
+        (f".{backup.uuid_str}.zip.", ".partial.zip"),
+        (f".{backup.uuid_str}.files.", ".partial"),
+        (f".{backup.uuid_str}.members.", ".partial"),
+    )
+    try:
+        with os.scandir(storage_dir) as entries:
+            for entry in entries:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if any(
+                    entry.name.startswith(prefix)
+                    and entry.name.endswith(suffix)
+                    for prefix, suffix in staged_patterns
+                ):
+                    os.remove(entry.path)
+    except FileNotFoundError:
+        pass
 
-def _resume_local_backup(backup, node, snapshot_callback, storage_relation, point_status):
+
+def _resume_local_backup(
+    backup,
+    node,
+    snapshot_callback,
+    storage_relation,
+    point_status,
+    *,
+    resume_source_checkpoint=None,
+):
     """Acquire a cross-worker lease before entering the local backup pipeline."""
     from apps._tasks.execution import durable_execution_lease
 
@@ -12011,6 +12045,7 @@ def _resume_local_backup(backup, node, snapshot_callback, storage_relation, poin
             storage_relation,
             point_status,
             execution,
+            resume_source_checkpoint=resume_source_checkpoint,
         )
 
 
@@ -12021,6 +12056,8 @@ def _resume_local_backup_owned(
     storage_relation,
     point_status,
     execution,
+    *,
+    resume_source_checkpoint=None,
 ):
     """Resume a local dump/upload pipeline from its persisted phase.
 
@@ -12057,18 +12094,35 @@ def _resume_local_backup_owned(
 
         if backup.status not in upload_phase:
             # IN_PROGRESS/RETRYING/DOWNLOAD_IN_PROGRESS means the archive is not a
-            # durable upload input yet. Remove partial files before rebuilding it;
-            # otherwise an SSH-streamed dump could be appended to a truncated file.
-            _clear_local_backup_artifacts(backup)
+            # durable upload input yet. Database dumps and website runs without a
+            # fenced mirror checkpoint must discard partial files before rebuilding.
+            # A website archive retry may retain its exact per-backup mirror, but the
+            # snapshot engine must revalidate that checkpoint before skipping the
+            # remote transfer.
+            keep_source = bool(
+                callable(resume_source_checkpoint)
+                and resume_source_checkpoint(backup)
+            )
+            if not keep_source:
+                _clear_local_backup_artifacts(backup)
             backup.status = UtilBackup.Status.DOWNLOAD_IN_PROGRESS
             backup.save(update_fields=["status", "modified"])
-            snapshot_callback(backup)
+            backup._execution_progress_callback = execution.progress
+            backup._execution_progress_floor = int(
+                getattr(execution.state, "progress_completed", 0) or 0
+            )
+            try:
+                snapshot_callback(backup)
+            finally:
+                backup.__dict__.pop("_execution_progress_callback", None)
+                backup.__dict__.pop("_execution_progress_floor", None)
             execution.ensure_owned()
             artifact = verify_and_commit_source_artifact(backup)
             execution.progress(
                 artifact.byte_count,
                 artifact.byte_count,
                 unit="bytes",
+                metadata_updates={"public_stage": None},
             )
             backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
             backup.save(update_fields=["status", "modified"])
@@ -12139,7 +12193,10 @@ class CoreWebsite(TimeStampedModel):
         db_table = "core_website"
 
     def create_snapshot(self, backup):
-        from apps._tasks.integration.backup.website import snapshot_website
+        from apps._tasks.integration.backup.website import (
+            snapshot_website,
+            website_mirror_checkpoint_candidate,
+        )
         from ..backup.models import CoreWebsiteBackupStoragePoints
         return _resume_local_backup(
             backup,
@@ -12147,6 +12204,7 @@ class CoreWebsite(TimeStampedModel):
             snapshot_website,
             "stored_website_backups",
             CoreWebsiteBackupStoragePoints.Status,
+            resume_source_checkpoint=website_mirror_checkpoint_candidate,
         )
 
 

@@ -1322,6 +1322,26 @@ def delete_from_disk(self, backup_uuid, path_type):
             except FileNotFoundError:
                 pass
 
+    def _remove_staged_files():
+        exact_patterns = (
+            (f".{backup_uuid}.zip.", ".partial.zip"),
+            (f".{backup_uuid}.files.", ".partial"),
+            (f".{backup_uuid}.members.", ".partial"),
+        )
+        try:
+            with os.scandir(storage_dir) as entries:
+                for entry in entries:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    if any(
+                        entry.name.startswith(prefix)
+                        and entry.name.endswith(suffix)
+                        for prefix, suffix in exact_patterns
+                    ):
+                        os.remove(entry.path)
+        except FileNotFoundError:
+            pass
+
     try:
         if path_type in ("dir", "both", "restore"):
             _remove(backup_uuid, is_dir=True)
@@ -1329,6 +1349,9 @@ def delete_from_disk(self, backup_uuid, path_type):
         if path_type in ("zip", "both", "restore"):
             _remove(f"{backup_uuid}.zip", is_dir=False)
             _remove(f"{backup_uuid}.manifest.json", is_dir=False)
+            _remove(f"{backup_uuid}.files", is_dir=False)
+            _remove(f"{backup_uuid}.members", is_dir=False)
+            _remove_staged_files()
 
         if path_type == "restore":
             _remove(f"my_{backup_uuid}.cnf", is_dir=False)
