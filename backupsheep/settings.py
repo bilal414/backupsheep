@@ -890,6 +890,11 @@ RESTORE_MAX_COMPRESSION_RATIO = int(
 RESTORE_DISK_RESERVE_BYTES = int(
     config.get("RESTORE_DISK_RESERVE_BYTES", 512 * 1024 ** 2)
 )
+# Detailed per-file restore checkpoints remain useful for small sites. Larger
+# trees persist a fixed-size, disk-spooled manifest aggregate instead.
+WEBSITE_RESTORE_INLINE_FILE_LIMIT = config.get(
+    "WEBSITE_RESTORE_INLINE_FILE_LIMIT", 1_000
+)
 
 # Managed-key authentication is optional and must be configured as an explicit key
 # pair by a self-hosted operator. Never advertise a built-in key whose private half

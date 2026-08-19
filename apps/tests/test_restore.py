@@ -1,5 +1,6 @@
 import io
 import hashlib
+import json
 import os
 import stat
 import tempfile
@@ -1133,7 +1134,7 @@ import tarfile
 import uuid
 import zipfile
 
-from django.test import override_settings
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from apps._tasks.exceptions import NodeBackupFailedError
@@ -1772,6 +1773,133 @@ class MaybeExtractTarTests(RestoreBackendBase):
         with self.assertRaises(RestoreError):
             restore_common.maybe_extract_tar(dest, backup_uuid)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "evil.txt")))
+
+
+class WebsiteRestoreSourceManifestTests(SimpleTestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _tree(self):
+        tree_root = os.path.join(self.tmp, "tree")
+        site_root = os.path.join(tree_root, "public_html")
+        os.makedirs(site_root)
+        return tree_root, site_root
+
+    @staticmethod
+    def _source():
+        return {"path": "public_html", "type": "directory"}
+
+    @staticmethod
+    def _backup():
+        return SimpleNamespace(uuid="bounded-website-restore")
+
+    def _index_residue(self, tree_root):
+        return [
+            name
+            for name in os.listdir(tree_root)
+            if name.startswith(".backupsheep-source-manifest-")
+        ]
+
+    @override_settings(WEBSITE_RESTORE_INLINE_FILE_LIMIT=2)
+    def test_large_source_persists_only_bounded_aggregate(self):
+        tree_root, site_root = self._tree()
+        os.makedirs(os.path.join(site_root, "empty"))
+        os.makedirs(os.path.join(site_root, "nested"))
+        for index in range(3):
+            with open(os.path.join(site_root, f"file-{index}.txt"), "wb") as output:
+                output.write(f"payload-{index}".encode())
+
+        records, manifest = RW._prepare_sources(
+            tree_root, [self._source()], self._backup()
+        )
+        record = records[0]
+        summary = record["file_manifest"]
+
+        self.assertEqual(summary["file_count"], 3)
+        self.assertEqual(summary["directory_count"], 2)
+        self.assertEqual(summary["member_count"], 5)
+        self.assertEqual(summary["byte_count"], 27)
+        self.assertEqual(record["files"], [])
+        self.assertNotIn("files", manifest[record["source_key"]])
+        state = RW._state_for(record, "pending", files_status="pending")
+        self.assertNotIn("files", state)
+        self.assertEqual(state["file_manifest"], summary)
+        self.assertLess(len(json.dumps(manifest)), 1_000)
+        self.assertEqual(self._index_residue(tree_root), [])
+
+    @override_settings(WEBSITE_RESTORE_INLINE_FILE_LIMIT=10)
+    def test_small_source_retains_detailed_file_checkpoints(self):
+        tree_root, site_root = self._tree()
+        for name, payload in (("z.txt", b"z"), ("a.txt", b"alpha")):
+            with open(os.path.join(site_root, name), "wb") as output:
+                output.write(payload)
+
+        records, manifest = RW._prepare_sources(
+            tree_root, [self._source()], self._backup()
+        )
+        record = records[0]
+
+        self.assertEqual(
+            [item["path"] for item in record["files"]], ["a.txt", "z.txt"]
+        )
+        self.assertEqual(
+            list(RW._state_for(record, "pending")["files"]),
+            ["a.txt", "z.txt"],
+        )
+        self.assertEqual(
+            manifest[record["source_key"]]["files"], record["files"]
+        )
+        legacy_identity = {
+            "backup_uuid": str(self._backup().uuid),
+            "path": "public_html",
+            "type": "directory",
+            "files": record["files"],
+        }
+        self.assertEqual(
+            record["source_digest"],
+            hashlib.sha256(
+                RW._canonical(legacy_identity).encode("utf-8")
+            ).hexdigest(),
+        )
+        self.assertEqual(
+            set(manifest[record["source_key"]]),
+            {"path", "type", "source_digest", "files"},
+        )
+        RW._verify_source_manifest(record)
+        self.assertEqual(self._index_residue(tree_root), [])
+
+    @override_settings(WEBSITE_RESTORE_INLINE_FILE_LIMIT=0)
+    def test_content_or_empty_directory_change_fails_reverification(self):
+        tree_root, site_root = self._tree()
+        payload = os.path.join(site_root, "index.html")
+        with open(payload, "wb") as output:
+            output.write(b"before")
+        records, _manifest = RW._prepare_sources(
+            tree_root, [self._source()], self._backup()
+        )
+        record = records[0]
+
+        with open(payload, "wb") as output:
+            output.write(b"after")
+        with self.assertRaisesRegex(RestoreError, "changed after validation"):
+            RW._verify_source_manifest(record)
+
+        with open(payload, "wb") as output:
+            output.write(b"before")
+        os.makedirs(os.path.join(site_root, "new-empty-directory"))
+        with self.assertRaisesRegex(RestoreError, "changed after validation"):
+            RW._verify_source_manifest(record)
+        self.assertEqual(self._index_residue(tree_root), [])
+
+    def test_manifest_index_is_removed_after_unsupported_member(self):
+        tree_root, site_root = self._tree()
+        os.symlink("missing-target", os.path.join(site_root, "link"))
+
+        with self.assertRaisesRegex(RestoreError, "symbolic link"):
+            RW._prepare_sources(tree_root, [self._source()], self._backup())
+
+        self.assertEqual(self._index_residue(tree_root), [])
 
 
 class WebsiteRestoreEngineTests(RestoreBackendBase):

@@ -22,9 +22,12 @@ import json
 import os
 import posixpath
 import re
+import sqlite3
+import stat
 import subprocess
 import tempfile
 
+from django.conf import settings
 from django.utils import timezone
 from sentry_sdk import capture_exception
 
@@ -57,6 +60,9 @@ from apps.console.connection.ssh import managed_private_key_path
 
 WEBSITE_MARKER_VERSION = "1"
 WEBSITE_MARKER_NAME = ".backupsheep-restore-marker"
+SOURCE_MANIFEST_VERSION = 2
+SOURCE_MANIFEST_COMMIT_INTERVAL = 10_000
+SOURCE_MANIFEST_DOMAIN = b"backupsheep-website-source-manifest-v2\x00"
 
 
 def _write_log(backup, text):
@@ -506,22 +512,227 @@ def _file_identity(path):
     return {"bytes": byte_count, "sha256": digest.hexdigest()}
 
 
-def _source_files(source, local_path):
-    if source["type"] == "file":
-        return [{"path": posixpath.basename(source["path"]), **_file_identity(local_path)}]
+def _source_manifest_inline_limit():
+    try:
+        value = int(
+            getattr(settings, "WEBSITE_RESTORE_INLINE_FILE_LIMIT", 1_000)
+        )
+    except (TypeError, ValueError):
+        value = 1_000
+    return max(0, min(value, 10_000))
 
-    entries = []
-    for root, directories, files in os.walk(local_path, followlinks=False):
-        for directory in directories:
-            if os.path.islink(os.path.join(root, directory)):
-                raise RestoreError("website restore archive contains a symbolic link.")
-        for filename in files:
-            path = os.path.join(root, filename)
-            if os.path.islink(path) or not os.path.isfile(path):
-                raise RestoreError("website restore archive contains an unsupported file.")
-            relative = os.path.relpath(path, local_path).replace(os.sep, "/")
-            entries.append({"path": relative, **_file_identity(path)})
-    return sorted(entries, key=lambda item: item["path"])
+
+def _update_source_manifest_digest(
+    digest, *, path_bytes, kind, byte_count=0, checksum=b""
+):
+    """Bind one ordered member without ambiguous string concatenation."""
+    digest.update(b"D" if kind == 1 else b"F")
+    digest.update(len(path_bytes).to_bytes(8, "big"))
+    digest.update(path_bytes)
+    digest.update(int(byte_count).to_bytes(8, "big"))
+    digest.update(checksum if kind == 0 else b"\x00" * 32)
+
+
+def _source_manifest(source, local_path, *, inline_limit=None):
+    """Return a bounded, deterministic identity for one extracted source.
+
+    Path ordering, traversal state, and per-file identities are disk-spooled. The
+    returned ``files`` list is retained only for small restores so existing detailed
+    checkpoints remain useful without making durable JSON scale with member count.
+    """
+    if inline_limit is None:
+        inline_limit = _source_manifest_inline_limit()
+    inline_limit = max(0, min(int(inline_limit), 10_000))
+    digest = hashlib.sha256(SOURCE_MANIFEST_DOMAIN)
+
+    if source["type"] == "file":
+        identity = _file_identity(local_path)
+        path = posixpath.basename(source["path"])
+        path_bytes = os.fsencode(path)
+        checksum = bytes.fromhex(identity["sha256"])
+        _update_source_manifest_digest(
+            digest,
+            path_bytes=path_bytes,
+            kind=0,
+            byte_count=identity["bytes"],
+            checksum=checksum,
+        )
+        summary = {
+            "version": SOURCE_MANIFEST_VERSION,
+            "algorithm": "sha256",
+            "sha256": digest.hexdigest(),
+            "file_count": 1,
+            "directory_count": 0,
+            "member_count": 1,
+            "byte_count": int(identity["bytes"]),
+        }
+        files = [{"path": path, **identity}] if inline_limit else []
+        return {
+            "summary": summary,
+            "files": files,
+            "inlined": bool(inline_limit),
+        }
+
+    root = os.path.realpath(local_path)
+    root_bytes = os.fsencode(root)
+    parent = os.path.dirname(root)
+    descriptor, index_path = tempfile.mkstemp(
+        prefix=".backupsheep-source-manifest-",
+        suffix=".sqlite3",
+        dir=parent,
+    )
+    os.close(descriptor)
+    index = None
+    try:
+        index = sqlite3.connect(index_path)
+        index.execute("PRAGMA journal_mode=OFF")
+        index.execute("PRAGMA synchronous=OFF")
+        index.execute("PRAGMA temp_store=FILE")
+        index.execute("PRAGMA cache_size=-2048")
+        index.execute(
+            "CREATE TABLE members ("
+            "path BLOB PRIMARY KEY, kind INTEGER NOT NULL, "
+            "byte_count INTEGER NOT NULL, checksum BLOB"
+            ") WITHOUT ROWID"
+        )
+        index.execute(
+            "CREATE TABLE directories (path BLOB PRIMARY KEY) WITHOUT ROWID"
+        )
+        index.execute("INSERT INTO directories(path) VALUES (?)", (b"",))
+        index.commit()
+
+        member_count = 0
+        scanned_directories = 0
+        while True:
+            queued = index.execute(
+                "SELECT path FROM directories ORDER BY path LIMIT 1"
+            ).fetchone()
+            if queued is None:
+                break
+            relative_root = bytes(queued[0])
+            absolute_root = (
+                root_bytes
+                if not relative_root
+                else os.path.join(root_bytes, relative_root)
+            )
+            try:
+                entries = os.scandir(absolute_root)
+            except OSError as error:
+                raise RestoreError(
+                    "the staged website files changed after validation; manual review is required."
+                ) from error
+            with entries:
+                for entry in entries:
+                    relative = (
+                        entry.name
+                        if not relative_root
+                        else relative_root + b"/" + entry.name
+                    )
+                    try:
+                        mode = entry.stat(follow_symlinks=False).st_mode
+                    except OSError as error:
+                        raise RestoreError(
+                            "the staged website files changed after validation; manual review is required."
+                        ) from error
+                    if stat.S_ISLNK(mode):
+                        raise RestoreError(
+                            "website restore archive contains a symbolic link."
+                        )
+                    if stat.S_ISDIR(mode):
+                        index.execute(
+                            "INSERT INTO members(path, kind, byte_count, checksum) "
+                            "VALUES (?, 1, 0, NULL)",
+                            (relative,),
+                        )
+                        index.execute(
+                            "INSERT INTO directories(path) VALUES (?)", (relative,)
+                        )
+                    elif stat.S_ISREG(mode):
+                        identity = _file_identity(entry.path)
+                        index.execute(
+                            "INSERT INTO members(path, kind, byte_count, checksum) "
+                            "VALUES (?, 0, ?, ?)",
+                            (
+                                relative,
+                                int(identity["bytes"]),
+                                bytes.fromhex(identity["sha256"]),
+                            ),
+                        )
+                    else:
+                        raise RestoreError(
+                            "website restore archive contains an unsupported file."
+                        )
+                    member_count += 1
+                    if member_count % SOURCE_MANIFEST_COMMIT_INTERVAL == 0:
+                        index.commit()
+            index.execute("DELETE FROM directories WHERE path = ?", (relative_root,))
+            scanned_directories += 1
+            if scanned_directories % 1_000 == 0:
+                index.commit()
+
+        index.commit()
+
+        file_count = 0
+        directory_count = 0
+        byte_count = 0
+        for path_value, kind, member_bytes, checksum in index.execute(
+            "SELECT path, kind, byte_count, checksum FROM members ORDER BY path"
+        ):
+            path_bytes = bytes(path_value)
+            kind = int(kind)
+            member_bytes = int(member_bytes)
+            checksum_bytes = bytes(checksum or b"")
+            _update_source_manifest_digest(
+                digest,
+                path_bytes=path_bytes,
+                kind=kind,
+                byte_count=member_bytes,
+                checksum=checksum_bytes,
+            )
+            if kind == 1:
+                directory_count += 1
+            else:
+                file_count += 1
+                byte_count += member_bytes
+
+        summary = {
+            "version": SOURCE_MANIFEST_VERSION,
+            "algorithm": "sha256",
+            "sha256": digest.hexdigest(),
+            "file_count": file_count,
+            "directory_count": directory_count,
+            "member_count": file_count + directory_count,
+            "byte_count": byte_count,
+        }
+        files = []
+        if file_count <= inline_limit:
+            files = [
+                {
+                    "path": os.fsdecode(bytes(path_value)),
+                    "bytes": int(member_bytes),
+                    "sha256": bytes(checksum).hex(),
+                }
+                for path_value, member_bytes, checksum in index.execute(
+                    "SELECT path, byte_count, checksum FROM members "
+                    "WHERE kind = 0 ORDER BY path"
+                )
+            ]
+        return {
+            "summary": summary,
+            "files": files,
+            "inlined": file_count <= inline_limit,
+        }
+    except sqlite3.Error as error:
+        raise RestoreError(
+            "unable to build the website source safety index."
+        ) from error
+    finally:
+        if index is not None:
+            index.close()
+        try:
+            os.remove(index_path)
+        except FileNotFoundError:
+            pass
 
 
 def _prepare_sources(tree_root, sources, backup):
@@ -529,13 +740,27 @@ def _prepare_sources(tree_root, sources, backup):
     manifest = {}
     for source in sources:
         local_path = _local_source_path(tree_root, source)
-        files = _source_files(source, local_path)
-        identity = {
-            "backup_uuid": str(backup.uuid),
-            "path": source["path"],
-            "type": source["type"],
-            "files": files,
-        }
+        source_manifest = _source_manifest(source, local_path)
+        file_manifest = source_manifest["summary"]
+        files = source_manifest["files"]
+        if source_manifest["inlined"]:
+            # Keep the historical identity for bounded small restores so an
+            # in-progress restore survives deployment without changing its
+            # durable fingerprint or remote stage names.
+            identity = {
+                "backup_uuid": str(backup.uuid),
+                "path": source["path"],
+                "type": source["type"],
+                "files": files,
+            }
+        else:
+            identity = {
+                "version": SOURCE_MANIFEST_VERSION,
+                "backup_uuid": str(backup.uuid),
+                "path": source["path"],
+                "type": source["type"],
+                "file_manifest": file_manifest,
+            }
         source_digest = hashlib.sha256(_canonical(identity).encode("utf-8")).hexdigest()
         fingerprint = hashlib.sha256(
             f"{backup.uuid}|{source_digest}".encode("utf-8")
@@ -545,6 +770,7 @@ def _prepare_sources(tree_root, sources, backup):
             **source,
             "local_path": local_path,
             "files": files,
+            "file_manifest": file_manifest,
             "source_digest": source_digest,
             "fingerprint": fingerprint,
             "source_key": source_key,
@@ -554,14 +780,35 @@ def _prepare_sources(tree_root, sources, backup):
             "path": source["path"],
             "type": source["type"],
             "source_digest": source_digest,
-            "files": files,
         }
+        if source_manifest["inlined"]:
+            manifest[source_key]["files"] = files
+        else:
+            manifest[source_key]["file_manifest"] = file_manifest
     return records, manifest
 
 
 def _verify_source_manifest(record):
-    current = _source_files(record, record["local_path"])
-    if current != record["files"]:
+    expected = record.get("file_manifest")
+    if expected:
+        current = _source_manifest(
+            record, record["local_path"], inline_limit=0
+        )["summary"]
+        matches = current == expected
+    else:
+        # Compatibility for an already-checkpointed legacy restore. New large
+        # restores always carry the bounded v2 summary above.
+        expected_files = list(record.get("files") or [])
+        current = _source_manifest(
+            record,
+            record["local_path"],
+            inline_limit=min(len(expected_files), 10_000),
+        )
+        matches = (
+            current["summary"]["file_count"] == len(expected_files)
+            and current["files"] == expected_files
+        )
+    if not matches:
         raise RestoreError(
             "the staged website files changed after validation; manual review is required."
         )
@@ -574,7 +821,7 @@ def _file_states(record, status):
             "sha256": item["sha256"],
             "status": status,
         }
-        for item in record["files"]
+        for item in record.get("files") or []
     }
 
 
@@ -906,7 +1153,13 @@ def _checkpoint(restore, *, phase, manifest, records=None, progress_total=None):
         fingerprint = record["fingerprint"]
         requested = dict(record["state"])
         existing = dict(states.get(fingerprint) or {})
-        for identity_field in ("path", "type", "source_digest", "target_path"):
+        for identity_field in (
+            "path",
+            "type",
+            "source_digest",
+            "target_path",
+            "file_manifest",
+        ):
             if existing.get(identity_field) not in (None, requested.get(identity_field)):
                 raise RestoreError(
                     "the website target mapping changed; manual review is required."
@@ -979,8 +1232,12 @@ def _state_for(record, status, *, files_status=None, stage=None):
         "type": record["type"],
         "source_digest": record["source_digest"],
         "status": status,
-        "files": _file_states(record, files_status or "pending"),
     }
+    if record.get("file_manifest"):
+        state["file_manifest"] = record["file_manifest"]
+    file_states = _file_states(record, files_status or "pending")
+    if file_states:
+        state["files"] = file_states
     if stage:
         state.update(stage)
     return state
