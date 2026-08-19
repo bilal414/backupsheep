@@ -102,6 +102,10 @@ def _run_direct_dump(
     log_file.write(f"MYSQL: {_redact(' '.join(argv), username, password)}\n")
     with open(db_file, "wb") as out:
         out.write(preamble)
+        # subprocess writes through the underlying descriptor, bypassing the
+        # Python buffer. Flush first so the digest-bound schema preamble cannot
+        # be reordered after the dump bytes.
+        out.flush()
         proc = subprocess.run(
             argv,
             stdout=out,

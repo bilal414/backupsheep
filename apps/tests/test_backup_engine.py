@@ -1192,7 +1192,9 @@ def _recorded_run(calls, *, dump=b"", stderr=b"", returncode=0):
             )
         out = kwargs.get("stdout")
         if out is not None and dump:
-            out.write(dump)
+            # Match subprocess semantics: the child writes to the descriptor,
+            # not through the parent's Python buffer.
+            os.write(out.fileno(), dump)
         return SimpleNamespace(returncode=returncode, stderr=stderr)
 
     return fake_run
@@ -1229,7 +1231,9 @@ def _recorded_multi_database_run(calls, *, inventory=None):
                 returncode=0, stdout=MYSQL_SCHEMA_DEFAULTS, stderr=b""
             )
         database = argv[-1]
-        kwargs["stdout"].write(f"-- dump of {database}\n".encode())
+        os.write(
+            kwargs["stdout"].fileno(), f"-- dump of {database}\n".encode()
+        )
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     return fake_run
