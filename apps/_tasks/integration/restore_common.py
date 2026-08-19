@@ -2992,7 +2992,7 @@ def _preflight_zip_members(zip_path, parent):
         )
 
         maximum_members = int(
-            getattr(settings, "RESTORE_MAX_ARCHIVE_MEMBERS", 1_000_000)
+            getattr(settings, "RESTORE_MAX_ARCHIVE_MEMBERS", 2_100_000)
         )
         maximum_bytes = int(
             getattr(settings, "RESTORE_MAX_UNCOMPRESSED_BYTES", 2 * 1024 ** 4)
