@@ -3,6 +3,7 @@ import hashlib
 import os
 import stat
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -1530,6 +1531,27 @@ class ExtractBackupZipTests(RestoreBackendBase):
         with open(os.path.join(dest, "public_html", "index.html")) as fh:
             self.assertEqual(fh.read(), "hi")
 
+    def test_extract_does_not_materialize_zipfile_members(self):
+        zip_path = self._make_zip(
+            {"public_html/index.html": "bounded"}, name="bounded.zip"
+        )
+        from apps._tasks.integration.backup import _archive as archive_module
+
+        with mock.patch.object(
+            archive_module.zipfile,
+            "ZipFile",
+            side_effect=AssertionError("ZipFile must not be used for extraction"),
+        ):
+            dest = restore_common.extract_backup_zip(
+                zip_path, os.path.join(self.tmp, "bounded-out")
+            )
+
+        with open(os.path.join(dest, "public_html", "index.html")) as restored:
+            self.assertEqual(restored.read(), "bounded")
+        self.assertEqual(
+            list(Path(self.tmp).glob(".backupsheep-zip-index-*")), []
+        )
+
     def test_repairs_historical_unflagged_utf8_names_before_extract(self):
         original_name = "public_html/caf\u00e9-\u0645\u0631\u062d\u0628\u0627-\U0001f642.txt"
         zip_path = self._make_zip({original_name: "unicode payload"}, name="legacy.zip")
@@ -1558,6 +1580,132 @@ class ExtractBackupZipTests(RestoreBackendBase):
         zip_path = self._make_zip({"/abs/evil.txt": "x"}, name="abs.zip")
         with self.assertRaises(RestoreError):
             restore_common.extract_backup_zip(zip_path, os.path.join(self.tmp, "out"))
+
+    def test_rejects_ambiguous_lexical_member_paths(self):
+        for index, member_name in enumerate(
+            ("./site.txt", "public_html\\site.txt", "a//site.txt")
+        ):
+            with self.subTest(member_name=member_name):
+                zip_path = self._make_zip(
+                    {member_name: "x"}, name=f"ambiguous-{index}.zip"
+                )
+                with self.assertRaises(RestoreError) as context:
+                    restore_common.extract_backup_zip(
+                        zip_path, os.path.join(self.tmp, f"ambiguous-{index}")
+                    )
+                self.assertIn("unsafe archive path", str(context.exception))
+
+    def test_rejects_duplicate_member_paths_with_disk_spooled_index(self):
+        zip_path = os.path.join(self.tmp, "duplicate.zip")
+        with self.assertWarns(UserWarning):
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr("public_html/index.html", "first")
+                archive.writestr("public_html/index.html", "second")
+
+        with self.assertRaises(RestoreError) as context:
+            restore_common.extract_backup_zip(
+                zip_path, os.path.join(self.tmp, "duplicate-out")
+            )
+
+        self.assertIn("duplicate archive paths", str(context.exception))
+        self.assertEqual(
+            list(Path(self.tmp).glob(".backupsheep-zip-index-*")), []
+        )
+
+    def test_rejects_file_directory_ancestor_conflicts_in_either_order(self):
+        cases = (
+            (("parent/child.txt", "child"), ("parent", "file")),
+            (("parent", "file"), ("parent/child.txt", "child")),
+        )
+        for index, members in enumerate(cases):
+            with self.subTest(order=index):
+                zip_path = os.path.join(self.tmp, f"conflict-{index}.zip")
+                with zipfile.ZipFile(zip_path, "w") as archive:
+                    for name, payload in members:
+                        archive.writestr(name, payload)
+
+                with self.assertRaises(RestoreError) as context:
+                    restore_common.extract_backup_zip(
+                        zip_path, os.path.join(self.tmp, f"conflict-{index}-out")
+                    )
+
+                self.assertIn("conflicting archive paths", str(context.exception))
+
+    def test_preserves_hidden_empty_case_and_unicode_distinct_members(self):
+        zip_path = os.path.join(self.tmp, "distinct.zip")
+        composed = "caf\u00e9.txt"
+        decomposed = "cafe\u0301.txt"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("empty-dir/", b"")
+            archive.writestr(".hidden", b"")
+            archive.writestr("Case.txt", "upper")
+            archive.writestr("case.txt", "lower")
+            archive.writestr(composed, "composed")
+            archive.writestr(decomposed, "decomposed")
+
+        destination = restore_common.extract_backup_zip(
+            zip_path, os.path.join(self.tmp, "distinct-out")
+        )
+
+        self.assertTrue(os.path.isdir(os.path.join(destination, "empty-dir")))
+        self.assertEqual(os.path.getsize(os.path.join(destination, ".hidden")), 0)
+        expected = {
+            "Case.txt": "upper",
+            "case.txt": "lower",
+            composed: "composed",
+            decomposed: "decomposed",
+        }
+        for name, payload in expected.items():
+            with open(os.path.join(destination, name), encoding="utf-8") as restored:
+                self.assertEqual(restored.read(), payload)
+
+    @override_settings(RESTORE_MAX_ARCHIVE_MEMBERS=1)
+    def test_rejects_member_count_over_configured_limit(self):
+        zip_path = self._make_zip(
+            {"one.txt": "1", "two.txt": "2"}, name="too-many.zip"
+        )
+
+        with self.assertRaises(RestoreError) as context:
+            restore_common.extract_backup_zip(
+                zip_path, os.path.join(self.tmp, "too-many-out")
+            )
+
+        self.assertIn("too many archive members", str(context.exception))
+
+    def test_rejects_crc_failure_without_publishing_destination(self):
+        zip_path = self._make_zip({"site.txt": "crc payload"}, name="crc.zip")
+        with zipfile.ZipFile(zip_path) as archive:
+            info = archive.getinfo("site.txt")
+        with open(zip_path, "r+b") as archive_file:
+            archive_file.seek(info.header_offset)
+            local = archive_file.read(30)
+            filename_length, extra_length = struct.unpack_from("<HH", local, 26)
+            payload_offset = info.header_offset + 30 + filename_length + extra_length
+            archive_file.seek(payload_offset)
+            first_byte = archive_file.read(1)
+            archive_file.seek(payload_offset)
+            archive_file.write(bytes([first_byte[0] ^ 0xFF]))
+
+        destination = os.path.join(self.tmp, "crc-out")
+        with self.assertRaises(RestoreError) as context:
+            restore_common.extract_backup_zip(zip_path, destination)
+
+        self.assertIn("CRC validation", str(context.exception))
+        self.assertFalse(os.path.exists(destination))
+
+    def test_rejects_unsupported_compression_method(self):
+        zip_path = os.path.join(self.tmp, "bzip2.zip")
+        with zipfile.ZipFile(
+            zip_path, "w", compression=zipfile.ZIP_BZIP2
+        ) as archive:
+            archive.writestr("site.txt", "bzip2 payload")
+
+        with self.assertRaises(RestoreError) as context:
+            restore_common.extract_backup_zip(
+                zip_path, os.path.join(self.tmp, "bzip2-out")
+            )
+
+        self.assertIn("compression method", str(context.exception))
 
     def test_rejects_zip_symlink_member(self):
         zip_path = os.path.join(self.tmp, "symlink.zip")

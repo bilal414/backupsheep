@@ -29,10 +29,12 @@ import inspect
 import os
 import shutil
 import socket
+import sqlite3
 import stat
+import subprocess
 import tarfile
+import tempfile
 import uuid
-import zipfile
 from urllib.parse import quote
 
 from apps.api.v1.utils.http import requests
@@ -41,7 +43,10 @@ from apps.api.v1.utils.api_helpers import bs_decrypt
 from django.conf import settings
 from sentry_sdk import capture_exception
 
-from apps._tasks.integration.backup._archive import mark_utf8_zip_names
+from apps._tasks.integration.backup._archive import (
+    iter_zip_members,
+    mark_utf8_zip_names,
+)
 
 # (connect, read) timeout for the download URL fetch; 1 MiB stream chunks.
 DOWNLOAD_TIMEOUT = (30, 300)
@@ -2907,6 +2912,166 @@ def _check_members(names, dest_root, kind):
             raise RestoreError(f"unsafe path in backup {kind}: {name}")
 
 
+def _normalise_zip_member_path(name):
+    """Return the contract path and directory bit for one central entry."""
+    if (
+        not name
+        or name.startswith("/")
+        or "\\" in name
+        or "\x00" in name
+        or "\r" in name
+        or "\n" in name
+        or (len(name) >= 2 and name[0].isalpha() and name[1] == ":")
+    ):
+        raise RestoreError("stored backup contains an unsafe archive path.")
+    is_directory = name.endswith("/")
+    lexical_name = name[:-1] if is_directory else name
+    components = lexical_name.split("/")
+    if not lexical_name or any(
+        component in ("", ".", "..") for component in components
+    ):
+        raise RestoreError("stored backup contains an unsafe archive path.")
+    return "/".join(components), is_directory
+
+
+def _zip_member_kind(member, is_directory):
+    unix_mode = (member.external_attr >> 16) & 0xFFFF
+    file_type = stat.S_IFMT(unix_mode)
+    if file_type and not (
+        stat.S_ISREG(unix_mode) or stat.S_ISDIR(unix_mode)
+    ):
+        raise RestoreError(
+            "stored backup contains an unsupported special file."
+        )
+    if file_type and stat.S_ISDIR(unix_mode) != is_directory:
+        raise RestoreError("stored backup contains an inconsistent member type.")
+    if member.flag_bits & (0x1 | 0x40):
+        raise RestoreError(
+            "encrypted ZIP members are not supported for restore."
+        )
+    if member.compress_type not in (0, 8):
+        raise RestoreError(
+            "stored backup uses an unsupported ZIP compression method."
+        )
+    return 1 if is_directory else 0
+
+
+def _check_file_ancestors(index, path):
+    components = path.split("/")
+    ancestors = [
+        "/".join(components[:position])
+        for position in range(1, len(components))
+    ]
+    for start in range(0, len(ancestors), 500):
+        chunk = ancestors[start:start + 500]
+        placeholders = ",".join("?" for _value in chunk)
+        if chunk and index.execute(
+            f"SELECT 1 FROM members WHERE kind = 0 AND path IN ({placeholders}) LIMIT 1",
+            chunk,
+        ).fetchone():
+            raise RestoreError("stored backup contains conflicting archive paths.")
+
+
+def _preflight_zip_members(zip_path, parent):
+    """Spool collision state to SQLite while enforcing restore safety limits."""
+    descriptor, index_path = tempfile.mkstemp(
+        prefix=".backupsheep-zip-index-", suffix=".sqlite3", dir=parent
+    )
+    os.close(descriptor)
+    index = None
+    try:
+        index = sqlite3.connect(index_path)
+        index.execute("PRAGMA journal_mode=OFF")
+        index.execute("PRAGMA synchronous=OFF")
+        index.execute("PRAGMA temp_store=FILE")
+        index.execute("PRAGMA cache_size=-2048")
+        index.execute(
+            "CREATE TABLE members ("
+            "path TEXT PRIMARY KEY, kind INTEGER NOT NULL"
+            ") WITHOUT ROWID"
+        )
+
+        maximum_members = int(
+            getattr(settings, "RESTORE_MAX_ARCHIVE_MEMBERS", 1_000_000)
+        )
+        maximum_bytes = int(
+            getattr(settings, "RESTORE_MAX_UNCOMPRESSED_BYTES", 2 * 1024 ** 4)
+        )
+        member_count = 0
+        total_uncompressed = 0
+        total_compressed = 0
+        index.execute("BEGIN")
+        for member in iter_zip_members(zip_path):
+            member_count += 1
+            if member_count > maximum_members:
+                raise RestoreError(
+                    "stored backup contains too many archive members."
+                )
+            path, is_directory = _normalise_zip_member_path(member.filename)
+            kind = _zip_member_kind(member, is_directory)
+            _check_file_ancestors(index, path)
+            if kind == 0:
+                prefix = path + "/"
+                if index.execute(
+                    "SELECT 1 FROM members "
+                    "WHERE path >= ? AND path < ? LIMIT 1",
+                    (prefix, path + "0"),
+                ).fetchone():
+                    raise RestoreError(
+                        "stored backup contains conflicting archive paths."
+                    )
+            try:
+                index.execute(
+                    "INSERT INTO members(path, kind) VALUES (?, ?)",
+                    (path, kind),
+                )
+            except sqlite3.IntegrityError as error:
+                raise RestoreError(
+                    "stored backup contains duplicate archive paths."
+                ) from error
+
+            total_uncompressed += int(member.file_size)
+            total_compressed += int(member.compress_size)
+            if total_uncompressed > maximum_bytes:
+                raise RestoreError(
+                    "stored backup expands beyond the configured restore safety limit."
+                )
+            if member_count % 10_000 == 0:
+                index.commit()
+                index.execute("BEGIN")
+        index.commit()
+
+        maximum_ratio = int(
+            getattr(settings, "RESTORE_MAX_COMPRESSION_RATIO", 1000)
+        )
+        if total_uncompressed and (
+            not total_compressed
+            or total_uncompressed > total_compressed * maximum_ratio
+        ):
+            raise RestoreError(
+                "stored backup has an unsafe compression expansion ratio."
+            )
+        free_bytes = shutil.disk_usage(parent).free
+        reserve_bytes = int(
+            getattr(settings, "RESTORE_DISK_RESERVE_BYTES", 512 * 1024 ** 2)
+        )
+        if total_uncompressed + reserve_bytes > free_bytes:
+            raise RestoreError(
+                "there is not enough free disk space to extract this backup safely."
+            )
+    except sqlite3.Error as error:
+        raise RestoreError(
+            "unable to build the archive safety index."
+        ) from error
+    finally:
+        if index is not None:
+            index.close()
+        try:
+            os.remove(index_path)
+        except FileNotFoundError:
+            pass
+
+
 def extract_backup_zip(zip_path, dest_dir):
     """CRC-check and atomically extract a ZIP while rejecting unsafe members."""
     dest_root = os.path.realpath(dest_dir)
@@ -2927,74 +3092,31 @@ def extract_backup_zip(zip_path, dest_dir):
             raise RestoreError(
                 "stored backup has inconsistent ZIP filename headers."
             ) from error
-        with zipfile.ZipFile(zip_path) as zf:
-            infos = zf.infolist()
-            maximum_members = int(
-                getattr(settings, "RESTORE_MAX_ARCHIVE_MEMBERS", 1_000_000)
-            )
-            if len(infos) > maximum_members:
-                raise RestoreError("stored backup contains too many archive members.")
+        try:
+            _preflight_zip_members(zip_path, parent)
+        except ValueError as error:
+            raise RestoreError("stored backup is not a valid zip file.") from error
 
-            _check_members((info.filename for info in infos), staging_root, "zip")
-            normalised_names = set()
-            total_uncompressed = 0
-            total_compressed = 0
-            for info in infos:
-                normalised = os.path.normcase(os.path.normpath(info.filename))
-                if normalised in normalised_names:
-                    raise RestoreError(
-                        "stored backup contains duplicate archive paths."
-                    )
-                normalised_names.add(normalised)
-                unix_mode = (info.external_attr >> 16) & 0xFFFF
-                file_type = stat.S_IFMT(unix_mode)
-                if file_type and not (
-                    stat.S_ISREG(unix_mode) or stat.S_ISDIR(unix_mode)
-                ):
-                    raise RestoreError(
-                        "stored backup contains an unsupported special file."
-                    )
-                if info.flag_bits & 0x1:
-                    raise RestoreError(
-                        "encrypted ZIP members are not supported for restore."
-                    )
-                total_uncompressed += int(info.file_size)
-                total_compressed += int(info.compress_size)
-
-            maximum_bytes = int(
-                getattr(settings, "RESTORE_MAX_UNCOMPRESSED_BYTES", 2 * 1024 ** 4)
+        unzip_environment = os.environ.copy()
+        unzip_environment.pop("UNZIPOPT", None)
+        unzip_environment.pop("ZIPINFOOPT", None)
+        try:
+            process = subprocess.Popen(
+                ["unzip", "-UU", "-qq", "-o", zip_path, "-d", staging_root],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=unzip_environment,
             )
-            if total_uncompressed > maximum_bytes:
-                raise RestoreError(
-                    "stored backup expands beyond the configured restore safety limit."
-                )
-            maximum_ratio = int(
-                getattr(settings, "RESTORE_MAX_COMPRESSION_RATIO", 1000)
-            )
-            if total_compressed > 0 and total_uncompressed > total_compressed * maximum_ratio:
-                raise RestoreError(
-                    "stored backup has an unsafe compression expansion ratio."
-                )
-            free_bytes = shutil.disk_usage(parent).free
-            reserve_bytes = int(
-                getattr(settings, "RESTORE_DISK_RESERVE_BYTES", 512 * 1024 ** 2)
-            )
-            if total_uncompressed + reserve_bytes > free_bytes:
-                raise RestoreError(
-                    "there is not enough free disk space to extract this backup safely."
-                )
-
-            bad_member = zf.testzip()
-            if bad_member:
-                raise RestoreError(
-                    "stored backup failed ZIP CRC validation."
-                )
-            zf.extractall(staging_root)
+            process.wait()
+        except OSError as error:
+            raise RestoreError(
+                "unable to run the safe ZIP extractor."
+            ) from error
+        if process.returncode != 0:
+            raise RestoreError("stored backup failed ZIP CRC validation.")
         if os.path.exists(dest_root):
             shutil.rmtree(dest_root)
         os.replace(staging_root, dest_root)
-    except zipfile.BadZipFile as e:
-        raise RestoreError("stored backup is not a valid zip file.") from e
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
     return dest_root
