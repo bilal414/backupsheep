@@ -28,6 +28,7 @@ from apps._tasks.exceptions import (
 from apps._tasks.helper import tasks as helper_tasks
 from apps._tasks.integration.backup import mariadb as MDB_ENGINE
 from apps._tasks.integration.backup import mysql as MYSQL_ENGINE
+from apps._tasks.integration.backup import _mysql_schema as MYSQL_SCHEMA
 from apps._tasks.integration.backup import postgresql as PG_ENGINE
 from apps._tasks.integration.backup import website as W
 from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
@@ -1098,6 +1099,36 @@ class GetSftpClientKeyTests(BaseTestCase):
 
 DB_USER = "dbuser"
 DB_PASS = "p@ssw0rdSecret"
+MYSQL_SCHEMA_DEFAULTS = b"utf8mb4\tutf8mb4_unicode_ci\n"
+MYSQL_SCHEMA_PREAMBLE = (
+    b"ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n"
+)
+
+
+class MysqlSchemaMetadataTests(TestCase):
+    def test_database_defaults_are_validated_and_rendered_as_digest_bound_sql(self):
+        defaults = MYSQL_SCHEMA.parse_database_defaults(
+            MYSQL_SCHEMA_DEFAULTS.decode("ascii")
+        )
+
+        self.assertEqual(
+            defaults,
+            {"character_set": "utf8mb4", "collation": "utf8mb4_unicode_ci"},
+        )
+        self.assertEqual(
+            MYSQL_SCHEMA.database_defaults_preamble(defaults),
+            MYSQL_SCHEMA_PREAMBLE,
+        )
+
+    def test_database_defaults_reject_sql_metacharacters_and_missing_rows(self):
+        for output in (
+            "",
+            "utf8mb4\tutf8mb4_unicode_ci\nextra\trow\n",
+            "utf8mb4\tutf8mb4_unicode_ci;DROP_DATABASE\n",
+        ):
+            with self.subTest(output=output):
+                with self.assertRaises(ValueError):
+                    MYSQL_SCHEMA.parse_database_defaults(output)
 
 
 def make_database_node(account, member, *, db_type, version, database_name="appdb",
@@ -1152,6 +1183,13 @@ def _recorded_run(calls, *, dump=b"", stderr=b"", returncode=0):
                          if a.startswith("--defaults-extra-file=")), None)
         if defaults:
             call["defaults_mode"] = stat.S_IMODE(os.stat(defaults).st_mode)
+        if any(
+            item.startswith("--execute=") and "DEFAULT_CHARACTER_SET_NAME" in item
+            for item in argv
+        ):
+            return SimpleNamespace(
+                returncode=0, stdout=MYSQL_SCHEMA_DEFAULTS, stderr=b""
+            )
         out = kwargs.get("stdout")
         if out is not None and dump:
             out.write(dump)
@@ -1182,6 +1220,13 @@ def _recorded_multi_database_run(calls, *, inventory=None):
                 returncode=0,
                 stdout=("\n".join(inventory) + "\n").encode(),
                 stderr=b"",
+            )
+        if any(
+            item.startswith("--execute=") and "DEFAULT_CHARACTER_SET_NAME" in item
+            for item in argv
+        ):
+            return SimpleNamespace(
+                returncode=0, stdout=MYSQL_SCHEMA_DEFAULTS, stderr=b""
             )
         database = argv[-1]
         kwargs["stdout"].write(f"-- dump of {database}\n".encode())
@@ -1404,11 +1449,21 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         self.assertTrue(os.path.exists(zip_path))
         with zipfile.ZipFile(zip_path) as zf:
             self.assertIn("appdb.sql", zf.namelist())
-            self.assertEqual(zf.read("appdb.sql"), self.DUMP)
+            self.assertEqual(
+                zf.read("appdb.sql"), MYSQL_SCHEMA_PREAMBLE + self.DUMP
+            )
 
-        # Exactly one subprocess, argv list with the defaults file first, mode 0600.
-        self.assertEqual(len(calls), 1)
-        argv, kwargs = calls[0]["argv"], calls[0]["kwargs"]
+        # One metadata query plus one dump. Both use the same 0600 defaults file.
+        self.assertEqual(len(calls), 2)
+        defaults_call = next(
+            call for call in calls if "--database=appdb" in call["argv"]
+        )
+        self.assertIn("DEFAULT_CHARACTER_SET_NAME", " ".join(defaults_call["argv"]))
+        argv, kwargs = next(
+            (call["argv"], call["kwargs"])
+            for call in calls
+            if call["argv"][0].endswith("mysqldump")
+        )
         self.assertTrue(argv[0].endswith("mysqldump"))
         self.assertEqual(argv[1], f"--defaults-extra-file=_storage/my_{backup.uuid}.cnf")
         self.assertIn("--column-statistics=0", argv)  # mysql_8
@@ -1427,13 +1482,19 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         self.assertEqual(
             backup.metadata["logical_dump"],
             {
-                "contract_version": 1,
+                "contract_version": 2,
                 "engine": "mysql",
                 "version": "mysql_8_0",
                 "client": "mysqldump",
                 "flags": argv[2:-1],
                 "extended_insert": True,
                 "max_allowed_packet_bytes": 512 * 1024 * 1024,
+                "database_defaults": {
+                    "appdb": {
+                        "character_set": "utf8mb4",
+                        "collation": "utf8mb4_unicode_ci",
+                    }
+                },
             },
         )
 
@@ -1457,7 +1518,11 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         )
 
         self.assertEqual(
-            [call["argv"][-1] for call in calls],
+            [
+                call["argv"][-1]
+                for call in calls
+                if call["argv"][0].endswith("mysqldump")
+            ],
             ["analytics", "appdb"],
         )
         self.assertTrue(all(call["defaults_mode"] == 0o600 for call in calls))
@@ -1494,11 +1559,15 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
             ),
         )
 
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 5)
         self.assertTrue(calls[0]["argv"][0].endswith("mysql"))
         self.assertIn("--execute=SHOW DATABASES;", calls[0]["argv"])
         self.assertEqual(
-            [call["argv"][-1] for call in calls[1:]],
+            [
+                call["argv"][-1]
+                for call in calls
+                if call["argv"][0].endswith("mysqldump")
+            ],
             ["analytics", "appdb"],
         )
         with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
@@ -1514,7 +1583,7 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         with self.assertRaises(NodeBackupFailedError):
             self._run_engine(backup, _recorded_run(
                 calls, dump=b"partial", stderr=b"mysqldump: boom", returncode=1))
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         self.assertFalse(os.path.exists(f"_storage/{backup.uuid}.zip"))
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
 
@@ -1529,7 +1598,11 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         self._run_engine(backup, _recorded_run(calls, dump=self.DUMP))
 
         backup.refresh_from_db()
-        argv = calls[0]["argv"]
+        argv = next(
+            call["argv"]
+            for call in calls
+            if call["argv"][0].endswith("mysqldump")
+        )
         self.assertIn("--skip-opt", argv)
         self.assertNotIn("--extended-insert", argv)
         self.assertNotIn("--skip-extended-insert", argv)
@@ -1659,8 +1732,12 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
             MDB_ENGINE.snapshot_mariadb(backup)
         backup.refresh_from_db()
         self.assertEqual(backup.status, UtilBackup.Status.DOWNLOAD_COMPLETE)
-        self.assertEqual(len(calls), 1)
-        argv = calls[0]["argv"]
+        self.assertEqual(len(calls), 2)
+        argv = next(
+            call["argv"]
+            for call in calls
+            if call["argv"][0].endswith("mariadb-dump")
+        )
         self.assertTrue(argv[0].endswith("mariadb-dump"))
         self.assertEqual(argv[1], f"--defaults-extra-file=_storage/my_{backup.uuid}.cnf")
         self.assertIn("--compress", argv)
@@ -1676,13 +1753,19 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
         self.assertEqual(
             backup.metadata["logical_dump"],
             {
-                "contract_version": 1,
+                "contract_version": 2,
                 "engine": "mariadb",
                 "version": "mariadb_10_11",
                 "client": "mariadb-dump",
                 "flags": argv[2:-1],
                 "extended_insert": True,
                 "max_allowed_packet_bytes": 512 * 1024 * 1024,
+                "database_defaults": {
+                    "appdb": {
+                        "character_set": "utf8mb4",
+                        "collation": "utf8mb4_unicode_ci",
+                    }
+                },
             },
         )
 
@@ -1704,7 +1787,11 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
             MDB_ENGINE.snapshot_mariadb(backup)
 
         self.assertEqual(
-            [call["argv"][-1] for call in calls],
+            [
+                call["argv"][-1]
+                for call in calls
+                if call["argv"][0].endswith("mariadb-dump")
+            ],
             ["analytics", "appdb"],
         )
         self.assertTrue(all(call["defaults_mode"] == 0o600 for call in calls))
@@ -1742,11 +1829,15 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
         ), mock.patch.object(MDB_ENGINE, "delete_from_disk"):
             MDB_ENGINE.snapshot_mariadb(backup)
 
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 5)
         self.assertTrue(calls[0]["argv"][0].endswith("mariadb"))
         self.assertIn("--execute=SHOW DATABASES;", calls[0]["argv"])
         self.assertEqual(
-            [call["argv"][-1] for call in calls[1:]],
+            [
+                call["argv"][-1]
+                for call in calls
+                if call["argv"][0].endswith("mariadb-dump")
+            ],
             ["analytics", "appdb"],
         )
         with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
@@ -1773,7 +1864,11 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
             MDB_ENGINE.snapshot_mariadb(backup)
 
         backup.refresh_from_db()
-        argv = calls[0]["argv"]
+        argv = next(
+            call["argv"]
+            for call in calls
+            if call["argv"][0].endswith("mariadb-dump")
+        )
         self.assertIn("--skip-opt", argv)
         self.assertNotIn("--extended-insert", argv)
         self.assertNotIn("--skip-extended-insert", argv)
@@ -1792,7 +1887,13 @@ class MariadbSshEngineTests(DatabaseEngineBase):
         node.connection.auth_database.include_stored_procedure = True
         node.connection.auth_database.save(update_fields=["include_stored_procedure"])
         dump = b"/*M!999999\\- enable the sandbox mode */\nCREATE TABLE t (id int);\n"
-        ssh = _FakeSSH(lambda command: (dump, b"", 0))
+        ssh = _FakeSSH(
+            lambda command: (
+                (MYSQL_SCHEMA_DEFAULTS if "DEFAULT_CHARACTER_SET_NAME" in command else dump),
+                b"",
+                0,
+            )
+        )
         key_path = self._key_file()
         with self._patch_check_connection(), \
              mock.patch.object(
@@ -1815,7 +1916,9 @@ class MariadbSshEngineTests(DatabaseEngineBase):
         self.assertNotIn("--skip-extended-insert", dump_commands[0])
         self.assertNotIn(DB_PASS, dump_commands[0])
         with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
-            self.assertEqual(archive.read("appdb.sql"), dump)
+            self.assertEqual(
+                archive.read("appdb.sql"), MYSQL_SCHEMA_PREAMBLE + dump
+            )
 
 
 class PostgresDirectEngineTests(DatabaseEngineBase):
@@ -1880,7 +1983,17 @@ class MysqlSshEngineTests(DatabaseEngineBase):
         node, backup = self._ssh_backup()
         node.connection.auth_database.include_stored_procedure = True
         node.connection.auth_database.save(update_fields=["include_stored_procedure"])
-        ssh = _FakeSSH(lambda command: (self.DUMP, b"", 0))
+        ssh = _FakeSSH(
+            lambda command: (
+                (
+                    MYSQL_SCHEMA_DEFAULTS
+                    if "DEFAULT_CHARACTER_SET_NAME" in command
+                    else self.DUMP
+                ),
+                b"",
+                0,
+            )
+        )
         key_path = self._key_file()
         with self._patch_check_connection(), \
              mock.patch.object(CoreAuthDatabase, "get_ssh_client",
@@ -1914,11 +2027,19 @@ class MysqlSshEngineTests(DatabaseEngineBase):
         self.assertFalse(os.path.exists(key_path))
 
         with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as zf:
-            self.assertEqual(zf.read("appdb.sql"), self.DUMP)
+            self.assertEqual(
+                zf.read("appdb.sql"), MYSQL_SCHEMA_PREAMBLE + self.DUMP
+            )
 
     def test_ssh_nonzero_exit_raises_and_cleans_up(self):
         node, backup = self._ssh_backup()
-        ssh = _FakeSSH(lambda command: (b"", b"mysqldump: access denied", 2))
+        ssh = _FakeSSH(
+            lambda command: (
+                (MYSQL_SCHEMA_DEFAULTS, b"", 0)
+                if "DEFAULT_CHARACTER_SET_NAME" in command
+                else (b"", b"mysqldump: access denied", 2)
+            )
+        )
         key_path = self._key_file()
         with self._patch_check_connection(), \
              mock.patch.object(CoreAuthDatabase, "get_ssh_client",

@@ -32,6 +32,12 @@ from sentry_sdk import capture_exception
 from apps._tasks.integration.backup.errors import safe_backup_failure
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.backup._archive import create_python_zip
+from apps._tasks.integration.backup._mysql_schema import (
+    DATABASE_DEFAULTS_QUERY,
+    SYSTEM_DATABASES,
+    database_defaults_preamble,
+    parse_database_defaults,
+)
 from apps._tasks.helper.tasks import delete_from_disk
 from apps.api.v1.utils.api_helpers import bs_decrypt, ensure_disk_space
 from apps.api.v1.utils.api_helpers import mkdir_p
@@ -90,10 +96,13 @@ def _decode(data):
     return data.decode("utf-8", "replace") if isinstance(data, bytes) else (data or "")
 
 
-def _run_direct_dump(node, backup, argv, db_file, log_file, username, password):
+def _run_direct_dump(
+    node, backup, argv, db_file, log_file, username, password, *, preamble=b""
+):
     """Run a local mysqldump, streaming stdout to db_file; raise on any failure."""
     log_file.write(f"MariaDB: {_redact(' '.join(argv), username, password)}\n")
     with open(db_file, "wb") as out:
+        out.write(preamble)
         proc = subprocess.run(
             argv,
             stdout=out,
@@ -113,7 +122,7 @@ def _run_direct_dump(node, backup, argv, db_file, log_file, username, password):
     for line in err_text.splitlines():
         if line.strip():
             log_file.write(f"WARNING: {_redact(line, username, password)}\n")
-    if os.path.getsize(db_file) == 0:
+    if os.path.getsize(db_file) <= len(preamble):
         raise NodeBackupFailedError(
             node,
             backup.uuid_str,
@@ -180,7 +189,9 @@ def _ssh_run_capture(node, backup, ssh, command, log_file, username, password, w
     return out_text
 
 
-def _ssh_dump_to_file(node, backup, ssh, command, db_file, log_file, username, password):
+def _ssh_dump_to_file(
+    node, backup, ssh, command, db_file, log_file, username, password, *, preamble=b""
+):
     """Run remote mariadb-dump, streaming stdout to a local binary file."""
     log_file.write(f"MariaDB: {_redact(command, username, password)}\n")
     stdin, stdout, stderr = ssh.exec_command(
@@ -188,14 +199,16 @@ def _ssh_dump_to_file(node, backup, ssh, command, db_file, log_file, username, p
         timeout=int(getattr(settings, "DATABASE_COMMAND_TIMEOUT", 23 * 3600)),
     )
     stdout._set_mode("rb")
+    starting_size = os.path.getsize(db_file) if os.path.exists(db_file) else 0
     with open(db_file, "ab") as tmp:
+        tmp.write(preamble)
         while True:
             chunk = stdout.read(65536)
             if not chunk:
                 break
             tmp.write(chunk)
     _ssh_check_result(node, backup, stdout, stderr, log_file, username, password, "mariadb-dump")
-    if os.path.getsize(db_file) == 0:
+    if os.path.getsize(db_file) <= starting_size + len(preamble):
         raise NodeBackupFailedError(
             node,
             backup.uuid_str,
@@ -300,14 +313,16 @@ def snapshot_mariadb(backup):
             # vendor defaults file. Historical row-by-row dumps remain restorable.
             dump_flags.append("--extended-insert")
         metadata = dict(backup.metadata or {})
+        database_defaults = {}
         metadata["logical_dump"] = {
-            "contract_version": 1,
+            "contract_version": 2,
             "engine": "mariadb",
             "version": str(node.connection.auth_database.version or ""),
             "client": str(dump_binary),
             "flags": list(dump_flags),
             "extended_insert": extended_insert,
             "max_allowed_packet_bytes": 512 * 1024 * 1024,
+            "database_defaults": database_defaults,
         }
         backup.option_mariadb = " ".join(dump_flags)
         backup.metadata = metadata
@@ -340,6 +355,22 @@ def snapshot_mariadb(backup):
                         + targets
                     )
 
+                def record_remote_database_defaults(database):
+                    out_text = _ssh_run_capture(
+                        node,
+                        backup,
+                        ssh,
+                        f"{client_binary} --defaults-extra-file={remote_defaults_name} "
+                        f"--batch --skip-column-names --database={database} "
+                        f'--execute="{DATABASE_DEFAULTS_QUERY}"',
+                        log_file,
+                        username,
+                        password,
+                        f"read schema defaults for {database}",
+                    )
+                    database_defaults[database] = parse_database_defaults(out_text)
+                    return database_defaults[database]
+
                 # All database on server
                 if node.database.all_databases:
                     # Find all databases first.
@@ -359,11 +390,15 @@ def snapshot_mariadb(backup):
 
                     for line in out_text.splitlines():
                         database_name = line.strip()
-                        if database_name:
+                        if (
+                            database_name
+                            and database_name.casefold() not in SYSTEM_DATABASES
+                        ):
                             databases.append(database_name)
 
                     for database in databases:
                         safe_token(database, "database")
+                        defaults = record_remote_database_defaults(database)
                         _ssh_dump_to_file(
                             node,
                             backup,
@@ -373,10 +408,12 @@ def snapshot_mariadb(backup):
                             log_file,
                             username,
                             password,
+                            preamble=database_defaults_preamble(defaults),
                         )
                 # Selected databases on node
                 elif node.database.databases:
                     for database in node.database.databases:
+                        defaults = record_remote_database_defaults(database)
                         _ssh_dump_to_file(
                             node,
                             backup,
@@ -386,9 +423,13 @@ def snapshot_mariadb(backup):
                             log_file,
                             username,
                             password,
+                            preamble=database_defaults_preamble(defaults),
                         )
                 # Means database name is selected at account level.
                 elif node.database.all_tables:
+                    defaults = record_remote_database_defaults(
+                        node.connection.auth_database.database_name
+                    )
                     _ssh_dump_to_file(
                         node,
                         backup,
@@ -398,9 +439,13 @@ def snapshot_mariadb(backup):
                         log_file,
                         username,
                         password,
+                        preamble=database_defaults_preamble(defaults),
                     )
                 # Again! means database name is selected at account level.
                 elif node.database.tables:
+                    defaults = record_remote_database_defaults(
+                        node.connection.auth_database.database_name
+                    )
                     for table in node.database.tables:
                         _ssh_dump_to_file(
                             node,
@@ -411,6 +456,7 @@ def snapshot_mariadb(backup):
                             log_file,
                             username,
                             password,
+                            preamble=database_defaults_preamble(defaults),
                         )
             finally:
                 try:
@@ -438,6 +484,26 @@ def snapshot_mariadb(backup):
                     + targets
                 )
 
+            def record_local_database_defaults(database):
+                out_text = _run_direct_capture(
+                    node,
+                    backup,
+                    [
+                        f"{database_version_path}{client_binary}",
+                        f"--defaults-extra-file={local_defaults_path}",
+                        "--batch",
+                        "--skip-column-names",
+                        f"--database={database}",
+                        f"--execute={DATABASE_DEFAULTS_QUERY}",
+                    ],
+                    log_file,
+                    username,
+                    password,
+                    f"read schema defaults for {database}",
+                )
+                database_defaults[database] = parse_database_defaults(out_text)
+                return database_defaults[database]
+
             selected_databases = list(node.database.databases or [])
             if node.database.all_databases:
                 out_text = _run_direct_capture(
@@ -455,21 +521,16 @@ def snapshot_mariadb(backup):
                     password,
                     "mariadb show databases",
                 )
-                system_databases = {
-                    "information_schema",
-                    "mysql",
-                    "performance_schema",
-                    "sys",
-                }
                 selected_databases = [
                     name
                     for name in (line.strip() for line in out_text.splitlines())
-                    if name and name.casefold() not in system_databases
+                    if name and name.casefold() not in SYSTEM_DATABASES
                 ]
 
             if selected_databases:
                 for database in selected_databases:
                     safe_token(database, "database")
+                    defaults = record_local_database_defaults(database)
                     _run_direct_dump(
                         node,
                         backup,
@@ -478,8 +539,12 @@ def snapshot_mariadb(backup):
                         log_file,
                         username,
                         password,
+                        preamble=database_defaults_preamble(defaults),
                     )
             elif node.database.all_tables:
+                defaults = record_local_database_defaults(
+                    node.connection.auth_database.database_name
+                )
                 _run_direct_dump(
                     node,
                     backup,
@@ -488,8 +553,12 @@ def snapshot_mariadb(backup):
                     log_file,
                     username,
                     password,
+                    preamble=database_defaults_preamble(defaults),
                 )
             elif node.database.tables:
+                defaults = record_local_database_defaults(
+                    node.connection.auth_database.database_name
+                )
                 for table in node.database.tables:
                     _run_direct_dump(
                         node,
@@ -499,7 +568,15 @@ def snapshot_mariadb(backup):
                         log_file,
                         username,
                         password,
+                        preamble=database_defaults_preamble(defaults),
                     )
+
+        metadata = dict(backup.metadata or {})
+        logical_dump = dict(metadata.get("logical_dump") or {})
+        logical_dump["database_defaults"] = dict(sorted(database_defaults.items()))
+        metadata["logical_dump"] = logical_dump
+        backup.metadata = metadata
+        backup.save(update_fields=["metadata", "modified"])
 
         # Generate Report (no external binaries; sudo does not exist in the container).
         log_file.write(f"---Directory Tree--- \n")
