@@ -47,6 +47,46 @@ class ExecutionStatusApiTests(BaseTestCase):
             with self.subTest(status=status, phase=phase):
                 self.assertEqual(_execution_phase(status, phase), expected)
 
+    def test_active_database_restore_component_phases_never_report_terminal_complete(self):
+        validating_phases = (
+            "archive_validated",
+            "database_permissions_verified",
+            "database_ready",
+        )
+        restoring_phases = (
+            "database_importing",
+            "database_importing_file",
+            "database_replaying",
+            "database_adopted",
+            "database_complete",
+            "database_restore_complete",
+        )
+
+        for phase in validating_phases:
+            with self.subTest(status="in_progress", phase=phase):
+                self.assertEqual(_execution_phase("in_progress", phase), "validating")
+        for phase in restoring_phases:
+            with self.subTest(status="in_progress", phase=phase):
+                self.assertEqual(_execution_phase("in_progress", phase), "restoring")
+
+        # The parent restore status, not a per-database checkpoint, is the
+        # authority for the terminal public phase.
+        self.assertEqual(_execution_phase("complete", "database_complete"), "complete")
+
+    def test_active_website_restore_component_completion_stays_restoring(self):
+        for phase in (
+            "website_transferring",
+            "website_staging",
+            "website_staged",
+            "website_publishing",
+            "website_cleanup_pending",
+            "website_complete",
+        ):
+            with self.subTest(status="in_progress", phase=phase):
+                self.assertEqual(_execution_phase("in_progress", phase), "restoring")
+
+        self.assertEqual(_execution_phase("complete", "website_complete"), "complete")
+
     def test_documented_provider_lifecycle_statuses_remain_visible(self):
         self.assertEqual(
             _safe_provider_status("configuring-enhanced-monitoring"),

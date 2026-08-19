@@ -94,6 +94,28 @@ _AUTHORITATIVE_ACTIVE_STATUS_PHASES = {
     "ready_for_upload": "source_ready",
     "download_complete": "source_ready",
 }
+# Restore engines persist detailed component checkpoints while the parent
+# restore row is still active.  In particular, ``database_complete`` and
+# ``website_complete`` mean that one component finished; they are not terminal
+# restore outcomes.  Keep these aliases explicit so substring matching cannot
+# stop a polling client before the parent status becomes terminal.
+_DURABLE_RESTORE_PHASE_ALIASES = {
+    "archive_validated": "validating",
+    "database_permissions_verified": "validating",
+    "database_ready": "validating",
+    "database_importing": "restoring",
+    "database_importing_file": "restoring",
+    "database_replaying": "restoring",
+    "database_adopted": "restoring",
+    "database_complete": "restoring",
+    "database_restore_complete": "restoring",
+    "website_transferring": "restoring",
+    "website_staging": "restoring",
+    "website_staged": "restoring",
+    "website_publishing": "restoring",
+    "website_cleanup_pending": "restoring",
+    "website_complete": "restoring",
+}
 _PUBLIC_PROVIDER_STATUSES = {
     "active",
     "archive",
@@ -370,6 +392,9 @@ def _public_phase(value, fallback="unknown"):
         return "unknown"
     if raw in _PUBLIC_PHASES:
         return raw
+    durable_restore_phase = _DURABLE_RESTORE_PHASE_ALIASES.get(raw)
+    if durable_restore_phase:
+        return durable_restore_phase
     legacy_phase = _LEGACY_STATUS_PHASES.get(raw)
     if legacy_phase:
         return legacy_phase
