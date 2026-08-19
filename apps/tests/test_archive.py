@@ -9,6 +9,7 @@ from unittest import mock
 from apps._tasks.integration.backup import _archive as ARCHIVE
 from apps._tasks.integration.backup._archive import (
     create_zip,
+    iter_zip_members,
     mark_utf8_zip_names,
     validate_zip_archive,
 )
@@ -141,10 +142,55 @@ class ArchiveValidationTests(unittest.TestCase):
     def test_validate_zip_checks_member_crc(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             archive_path = Path(temp_dir) / "backup.zip"
+            with zipfile.ZipFile(
+                archive_path, "w", compression=zipfile.ZIP_STORED
+            ) as archive:
+                archive.writestr("dump.sql", "select 1;\n")
+
+            with zipfile.ZipFile(archive_path) as archive:
+                info = archive.getinfo("dump.sql")
+            with open(archive_path, "r+b") as archive_file:
+                archive_file.seek(info.header_offset)
+                local = archive_file.read(30)
+                filename_length, extra_length = struct.unpack_from("<HH", local, 26)
+                payload_offset = (
+                    info.header_offset + 30 + filename_length + extra_length
+                )
+                archive_file.seek(payload_offset)
+                first_byte = archive_file.read(1)
+                archive_file.seek(payload_offset)
+                archive_file.write(bytes([first_byte[0] ^ 0xFF]))
+
+            with self.assertRaises(ValueError):
+                validate_zip_archive(archive_path, required_suffix=".sql")
+
+    def test_validate_zip_does_not_materialize_zipfile_members(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "backup.zip"
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("dump.sql", "select 1;\n")
 
-            validate_zip_archive(archive_path, required_suffix=".sql")
+            with mock.patch.object(
+                ARCHIVE.zipfile,
+                "ZipFile",
+                side_effect=AssertionError("ZipFile must not be used for validation"),
+            ):
+                validate_zip_archive(archive_path, required_suffix=".sql")
+
+    def test_iter_zip_members_reads_zip64_local_offsets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "metadata-zip64-entry.zip"
+            original_name = "cjk-\u76ee\u5f55.txt"
+            with zipfile.ZipFile(archive_path, "w", allowZip64=True) as archive:
+                archive.writestr(original_name, "metadata payload")
+            self._promote_central_local_offset_to_zip64(archive_path)
+
+            members = list(iter_zip_members(archive_path))
+
+            self.assertEqual(len(members), 1)
+            self.assertEqual(members[0].filename, original_name)
+            self.assertEqual(members[0].header_offset, 0)
+            self.assertEqual(members[0].file_size, len("metadata payload"))
 
     def test_validate_zip_rejects_archive_without_database_dump(self):
         with tempfile.TemporaryDirectory() as temp_dir:

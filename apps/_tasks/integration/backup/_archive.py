@@ -6,6 +6,7 @@ import struct
 import subprocess
 import uuid
 import zipfile
+from typing import NamedTuple
 
 
 _ZIP_CENTRAL_HEADER_SIZE = 46
@@ -34,6 +35,21 @@ class ArchiveSourcePolicyError(Exception):
         super().__init__("website archive source contains an unsupported member")
 
 
+class ZipMember(NamedTuple):
+    """Bounded central-directory metadata for one ZIP member."""
+
+    filename: str
+    raw_filename: bytes
+    flag_bits: int
+    compress_type: int
+    CRC: int
+    compress_size: int
+    file_size: int
+    external_attr: int
+    header_offset: int
+    central_offset: int
+
+
 def _decode_output(value):
     if isinstance(value, bytes):
         return value.decode("utf-8", "replace")
@@ -55,19 +71,29 @@ def validate_zip_archive(archive_path, *, required_suffix=None):
         raise ValueError(f"Backup archive was not created: {archive_path}")
 
     try:
-        with zipfile.ZipFile(archive_path) as archive:
-            bad_member = archive.testzip()
-            if bad_member:
-                raise ValueError(f"Backup archive failed CRC validation: {bad_member}")
+        suffix_found = not required_suffix
+        suffix = str(required_suffix or "").lower()
+        for member in iter_zip_members(archive_path):
+            if suffix and member.filename.lower().endswith(suffix):
+                suffix_found = True
+        if not suffix_found:
+            raise ValueError(
+                f"Backup archive contains no {required_suffix} dump: {archive_path}"
+            )
 
-            if required_suffix and not any(
-                name.lower().endswith(required_suffix.lower())
-                for name in archive.namelist()
-            ):
-                raise ValueError(
-                    f"Backup archive contains no {required_suffix} dump: {archive_path}"
-                )
-    except (OSError, zipfile.BadZipFile) as exc:
+        # Info-ZIP's tester streams member payloads and CRC state without creating
+        # one Python object per member. New website artifacts are already produced
+        # by the matching Info-ZIP tool; database artifacts use only standard
+        # stored/deflated ZIP methods that this tester supports as well.
+        process = subprocess.Popen(
+            ["unzip", "-tqq", archive_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        process.wait()
+        if process.returncode != 0:
+            raise ValueError("Backup archive failed CRC validation.")
+    except OSError as exc:
         raise ValueError(f"Backup archive is not a valid ZIP: {archive_path}") from exc
 
     return archive_path
@@ -193,7 +219,7 @@ def _zip_central_directory(archive_file):
     return int(central_offset), int(central_size), int(entry_count)
 
 
-def _zip64_local_header_offset(
+def _zip64_member_values(
     extra,
     *,
     compressed_size,
@@ -201,9 +227,15 @@ def _zip64_local_header_offset(
     local_offset,
     disk_start,
 ):
-    """Read the local-header offset from a central Zip64 extra field."""
-    if local_offset != _ZIP_UINT32_MAX and disk_start != _ZIP_UINT16_MAX:
-        return local_offset
+    """Resolve central size/offset/disk sentinels from a Zip64 extra field."""
+    needs_zip64 = (
+        compressed_size == _ZIP_UINT32_MAX
+        or uncompressed_size == _ZIP_UINT32_MAX
+        or local_offset == _ZIP_UINT32_MAX
+        or disk_start == _ZIP_UINT16_MAX
+    )
+    if not needs_zip64:
+        return compressed_size, uncompressed_size, local_offset, disk_start
     position = 0
     while position + 4 <= len(extra):
         field_id, field_size = struct.unpack_from("<HH", extra, position)
@@ -222,19 +254,46 @@ def _zip64_local_header_offset(
                 cursor += size
                 return value
 
+            resolved_uncompressed = uncompressed_size
             if uncompressed_size == _ZIP_UINT32_MAX:
-                consume(8)
+                resolved_uncompressed = consume(8)
+            resolved_compressed = compressed_size
             if compressed_size == _ZIP_UINT32_MAX:
-                consume(8)
+                resolved_compressed = consume(8)
             resolved_offset = local_offset
             if local_offset == _ZIP_UINT32_MAX:
                 resolved_offset = consume(8)
+            resolved_disk = disk_start
             if disk_start == _ZIP_UINT16_MAX:
-                if consume(4) != 0:
-                    raise ValueError("Spanned ZIP archives are not supported.")
-            return resolved_offset
+                resolved_disk = consume(4)
+            if resolved_disk != 0:
+                raise ValueError("Spanned ZIP archives are not supported.")
+            return (
+                resolved_compressed,
+                resolved_uncompressed,
+                resolved_offset,
+                resolved_disk,
+            )
         position = field_end
-    raise ValueError("Backup archive Zip64 local-header offset is missing.")
+    raise ValueError("Backup archive Zip64 metadata is missing.")
+
+
+def _zip64_local_header_offset(
+    extra,
+    *,
+    compressed_size,
+    uncompressed_size,
+    local_offset,
+    disk_start,
+):
+    """Read the local-header offset from a central Zip64 extra field."""
+    return _zip64_member_values(
+        extra,
+        compressed_size=compressed_size,
+        uncompressed_size=uncompressed_size,
+        local_offset=local_offset,
+        disk_start=disk_start,
+    )[2]
 
 
 def _validate_central_directory_tail(archive_file, position, directory_end):
@@ -251,6 +310,125 @@ def _validate_central_directory_tail(archive_file, position, directory_end):
     signature_size = struct.unpack_from("<H", header, 4)[0]
     if 6 + signature_size != remaining:
         raise ValueError("Backup archive central signature is malformed.")
+
+
+def iter_zip_members(archive_path):
+    """Yield validated standard/Zip64 central entries in bounded memory."""
+    with open(archive_path, "rb") as archive_file:
+        central_offset, central_size, entry_count = _zip_central_directory(
+            archive_file
+        )
+        directory_start = central_offset
+        directory_end = central_offset + central_size
+        if entry_count > central_size // _ZIP_CENTRAL_HEADER_SIZE:
+            raise ValueError("Backup archive central entry count is invalid.")
+
+        for _entry_index in range(entry_count):
+            entry_offset = central_offset
+            if entry_offset + _ZIP_CENTRAL_HEADER_SIZE > directory_end:
+                raise ValueError("Backup archive central directory is truncated.")
+            archive_file.seek(entry_offset)
+            central = archive_file.read(_ZIP_CENTRAL_HEADER_SIZE)
+            if (
+                len(central) != _ZIP_CENTRAL_HEADER_SIZE
+                or central[:4] != _ZIP_CENTRAL_SIGNATURE
+            ):
+                raise ValueError("Backup archive central directory is malformed.")
+
+            flag_bits, compress_type = struct.unpack_from("<HH", central, 8)
+            crc = struct.unpack_from("<L", central, 16)[0]
+            compressed_size, uncompressed_size = struct.unpack_from(
+                "<LL", central, 20
+            )
+            filename_length, extra_length, comment_length = struct.unpack_from(
+                "<HHH", central, 28
+            )
+            disk_start = struct.unpack_from("<H", central, 34)[0]
+            external_attr = struct.unpack_from("<L", central, 38)[0]
+            local_offset = struct.unpack_from("<L", central, 42)[0]
+            raw_filename = archive_file.read(filename_length)
+            extra = archive_file.read(extra_length)
+            if len(raw_filename) != filename_length:
+                raise ValueError("Backup archive filename is truncated.")
+            if len(extra) != extra_length:
+                raise ValueError("Backup archive extra field is truncated.")
+            (
+                compressed_size,
+                uncompressed_size,
+                local_offset,
+                resolved_disk,
+            ) = _zip64_member_values(
+                extra,
+                compressed_size=compressed_size,
+                uncompressed_size=uncompressed_size,
+                local_offset=local_offset,
+                disk_start=disk_start,
+            )
+            if resolved_disk != 0:
+                raise ValueError("Spanned ZIP archives are not supported.")
+            try:
+                filename = raw_filename.decode(
+                    "utf-8" if flag_bits & _ZIP_UTF8_FLAG else "cp437",
+                    "strict",
+                )
+            except UnicodeDecodeError as error:
+                raise ValueError("Backup archive filename encoding is invalid.") from error
+
+            central_offset = (
+                entry_offset
+                + _ZIP_CENTRAL_HEADER_SIZE
+                + filename_length
+                + extra_length
+                + comment_length
+            )
+            if central_offset > directory_end:
+                raise ValueError("Backup archive central directory is truncated.")
+
+            if local_offset >= directory_start:
+                raise ValueError("Backup archive local header is out of bounds.")
+            archive_file.seek(local_offset)
+            local = archive_file.read(_ZIP_LOCAL_HEADER_SIZE)
+            if (
+                len(local) != _ZIP_LOCAL_HEADER_SIZE
+                or local[:4] != _ZIP_LOCAL_SIGNATURE
+            ):
+                raise ValueError("Backup archive local header is malformed.")
+            local_flags, local_compress_type = struct.unpack_from("<HH", local, 6)
+            local_filename_length, local_extra_length = struct.unpack_from(
+                "<HH", local, 26
+            )
+            local_filename = archive_file.read(local_filename_length)
+            data_offset = (
+                local_offset
+                + _ZIP_LOCAL_HEADER_SIZE
+                + local_filename_length
+                + local_extra_length
+            )
+            if (
+                local_flags != flag_bits
+                or local_compress_type != compress_type
+                or local_filename != raw_filename
+                or data_offset + compressed_size > directory_start
+            ):
+                raise ValueError(
+                    "Backup archive local and central headers do not match."
+                )
+            yield ZipMember(
+                filename=filename,
+                raw_filename=raw_filename,
+                flag_bits=flag_bits,
+                compress_type=compress_type,
+                CRC=crc,
+                compress_size=int(compressed_size),
+                file_size=int(uncompressed_size),
+                external_attr=external_attr,
+                header_offset=int(local_offset),
+                central_offset=entry_offset,
+            )
+
+        _validate_central_directory_tail(
+            archive_file, central_offset, directory_end
+        )
 
 
 def mark_utf8_zip_names(archive_path):
