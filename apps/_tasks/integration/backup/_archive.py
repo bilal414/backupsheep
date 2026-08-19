@@ -15,6 +15,17 @@ _ZIP_LOCAL_SIGNATURE = b"PK\x03\x04"
 _ZIP_UTF8_FLAG = 0x0800
 
 
+class ArchiveSourcePolicyError(Exception):
+    """A source member cannot be represented by the website ZIP contract."""
+
+    def __init__(self, kind, *, relative_path=""):
+        self.kind = str(kind or "unsupported")
+        # Retain the path only for private diagnostics. The exception text is
+        # deliberately stable and secret-free because workers may persist it.
+        self.relative_path = str(relative_path or "")
+        super().__init__("website archive source contains an unsupported member")
+
+
 def _decode_output(value):
     if isinstance(value, bytes):
         return value.decode("utf-8", "replace")

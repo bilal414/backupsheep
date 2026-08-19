@@ -45,7 +45,9 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
+import tempfile
 
 import paramiko
 from cryptography.hazmat.primitives import serialization
@@ -54,7 +56,10 @@ from sentry_sdk import capture_exception
 from apps._tasks.integration.backup.errors import safe_backup_failure
 
 from apps._tasks.exceptions import NodeBackupFailedError, NodeBackupTimeoutError
-from apps._tasks.integration.backup._archive import create_zip
+from apps._tasks.integration.backup._archive import (
+    ArchiveSourcePolicyError,
+    create_zip,
+)
 from apps.api.v1.utils.api_helpers import bs_decrypt, mkdir_p, create_directory_v2, ensure_disk_space
 from apps.console.connection.models import CoreAuthWebsite
 from apps.console.connection.ssh import managed_private_key_path
@@ -381,14 +386,79 @@ def _finalize_zip(backup, local_dir, *, keep_dir):
     backup_file_list_path = f"_storage/{backup.uuid}.files"
 
     # File list + count (Python walk; no `sudo find` / md5sum). The manifest is
-    # outside local_dir, so the walk never sees it.
-    backup.total_files = 0
-    with open(backup_file_list_path, "w") as flist:
-        for root, _dirs, files in os.walk(local_dir):
-            for name in files:
-                rel = os.path.relpath(os.path.join(root, name), local_dir)
-                flist.write(rel + "\n")
-                backup.total_files += 1
+    # outside local_dir, so the walk never sees it. Scan with lstat before invoking
+    # Info-ZIP: the restore contract rejects symlinks and special files, so publishing
+    # them would create an artifact BackupSheep itself cannot restore. Sorting is
+    # per-directory (bounded by one directory rather than total entries) and makes
+    # the manifest deterministic without retaining the whole tree in memory.
+    source_root = os.path.abspath(local_dir)
+    root_mode = os.lstat(source_root).st_mode
+    if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
+        raise ArchiveSourcePolicyError("source_root")
+
+    manifest_parent = os.path.dirname(backup_file_list_path) or "."
+    os.makedirs(manifest_parent, exist_ok=True)
+    descriptor, staged_manifest = tempfile.mkstemp(
+        prefix=f".{backup.uuid}.files.",
+        suffix=".partial",
+        dir=manifest_parent,
+        text=True,
+    )
+    total_files = 0
+
+    def raise_walk_error(error):
+        raise error
+
+    def inspect_member(root, name, *, expected_directory):
+        path = os.path.join(root, name)
+        relative = os.path.relpath(path, source_root).replace(os.sep, "/")
+        if any(
+            character in relative
+            for character in ("\x00", "\r", "\n", "\\")
+        ):
+            raise ArchiveSourcePolicyError(
+                "invalid_path", relative_path=relative
+            )
+        mode = os.lstat(path).st_mode
+        if stat.S_ISLNK(mode):
+            raise ArchiveSourcePolicyError("symlink", relative_path=relative)
+        if expected_directory:
+            if not stat.S_ISDIR(mode):
+                raise ArchiveSourcePolicyError(
+                    "special", relative_path=relative
+                )
+        elif not stat.S_ISREG(mode):
+            raise ArchiveSourcePolicyError("special", relative_path=relative)
+        return relative
+
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as flist:
+            for root, dirs, files in os.walk(
+                source_root,
+                topdown=True,
+                onerror=raise_walk_error,
+                followlinks=False,
+            ):
+                dirs.sort()
+                files.sort()
+                for name in dirs:
+                    inspect_member(root, name, expected_directory=True)
+                for name in files:
+                    relative = inspect_member(
+                        root, name, expected_directory=False
+                    )
+                    flist.write(relative + "\n")
+                    total_files += 1
+            flist.flush()
+            os.fsync(flist.fileno())
+        os.replace(staged_manifest, backup_file_list_path)
+    finally:
+        try:
+            os.remove(staged_manifest)
+        except FileNotFoundError:
+            pass
+
+    backup.total_files = total_files
     backup.save()
 
     # Zip the downloaded tree (no sudo / no chown). The zip path must be absolute:
@@ -631,7 +701,12 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
         if failure.code == "BACKUP_TIMEOUT":
             raise NodeBackupTimeoutError(node, backup.uuid_str, backup.attempt_no, backup.type)
         raise NodeBackupFailedError(
-            node, backup.uuid_str, backup.attempt_no, backup.type, failure.detail
+            node,
+            backup.uuid_str,
+            backup.attempt_no,
+            backup.type,
+            failure.detail,
+            public_failure=failure,
         )
     finally:
         if temporary_ssh_key and ssh_key_path and os.path.exists(ssh_key_path):
@@ -793,6 +868,7 @@ def _snapshot_tar(backup):
                 backup.attempt_no,
                 backup.type,
                 failure.detail,
+                public_failure=failure,
             )
     finally:
         """

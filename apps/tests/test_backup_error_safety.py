@@ -3,6 +3,7 @@ from unittest import mock
 from django.test import SimpleTestCase
 
 from apps._tasks.integration.backup.errors import safe_backup_failure
+from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps.api.v1.utils.api_helpers import get_error
 from apps.console.vultr import record_provider_result
@@ -81,6 +82,19 @@ class BackupErrorSafetyTests(SimpleTestCase):
         self.assertFalse(failure.retryable)
         self.assertIn("SSL/TLS", failure.detail)
         self.assertNotIn("never-return", failure.detail)
+
+    def test_website_special_member_is_terminal_and_path_safe(self):
+        failure = safe_backup_failure(
+            ArchiveSourcePolicyError(
+                "symlink", relative_path="private/customer/path"
+            ),
+            stage="website_backup",
+        )
+
+        self.assertEqual(failure.code, "SOURCE_SPECIAL_FILE_UNSUPPORTED")
+        self.assertFalse(failure.retryable)
+        self.assertIn("regular files and directories", failure.detail)
+        self.assertNotIn("private/customer/path", failure.detail)
 
     def test_legacy_provider_error_helper_never_returns_exception_text(self):
         canary = (

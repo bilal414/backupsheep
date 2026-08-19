@@ -127,6 +127,17 @@ def backup_website(
                 delete_from_disk.apply_async(
                     args=[backup.uuid_str, "zip"],
                 )
+        except NodeBackupFailedError as error:
+            capture_exception(error)
+            node.notify_backup_fail(error, backup_type)
+            if not getattr(error, "retryable", True):
+                node.backup_max_retries_reached(self.request.id)
+                return
+            try:
+                node.backup_retrying_reset(self.request.id)
+                raise self.retry()
+            except MaxRetriesExceededError:
+                node.backup_max_retries_reached(self.request.id)
         except Exception as error:
             capture_exception(error)
             try:

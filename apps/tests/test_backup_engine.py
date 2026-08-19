@@ -30,6 +30,8 @@ from apps._tasks.integration.backup import mariadb as MDB_ENGINE
 from apps._tasks.integration.backup import mysql as MYSQL_ENGINE
 from apps._tasks.integration.backup import postgresql as PG_ENGINE
 from apps._tasks.integration.backup import website as W
+from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
+from apps._tasks.integration.backup.errors import safe_backup_failure
 from apps._tasks.integration.database import backup_database
 from apps._tasks.integration.website import backup_website
 from apps.api.v1.node.views import CoreNodeView
@@ -1842,6 +1844,48 @@ class BackupTaskValidationOrderTests(BaseTestCase):
         self.assertEqual(backup.status, UtilBackup.Status.MAX_RETRY_FAILED)
         notify.assert_called_once()
 
+    def test_website_terminal_archive_policy_stops_without_retry(self):
+        node = self._website_node()
+        storage = self._storage("website-archive-policy")
+        failure = safe_backup_failure(
+            ArchiveSourcePolicyError(
+                "symlink", relative_path="private/customer/path"
+            ),
+            stage="website_backup",
+        )
+        terminal = NodeBackupFailedError(
+            node,
+            "archive-policy-test",
+            1,
+            UtilBackup.Type.ON_DEMAND,
+            failure.detail,
+            public_failure=failure,
+        )
+
+        with mock.patch.object(CoreStorage, "validate", return_value=True), \
+             mock.patch.object(CoreConnection, "validate", return_value=True), \
+             mock.patch.object(
+                 CoreWebsite, "create_snapshot", side_effect=terminal
+             ), \
+             mock.patch.object(CoreNode, "notify_backup_fail") as notify, \
+             mock.patch.object(backup_website, "retry") as retry:
+            backup_website.apply(
+                kwargs={"node_id": node.id, "storage_ids": [storage.id]},
+                throw=False,
+            )
+
+        backup = CoreWebsiteBackup.objects.get(website=node.website)
+        contract = node._backup_notification_contract(terminal)
+        self.assertEqual(terminal.error_code, "SOURCE_SPECIAL_FILE_UNSUPPORTED")
+        self.assertFalse(terminal.retryable)
+        self.assertEqual(contract["code"], "SOURCE_SPECIAL_FILE_UNSUPPORTED")
+        self.assertFalse(contract["retryable"])
+        self.assertIn("Remove or exclude", contract["remediation"])
+        self.assertEqual(backup.status, UtilBackup.Status.MAX_RETRY_FAILED)
+        self.assertEqual(backup.attempt_no, 1)
+        notify.assert_called_once()
+        retry.assert_not_called()
+
     def test_database_validation_failure_creates_row_and_marks_retrying(self):
         node = self._database_node()
         storage = self._storage("database-retry")
@@ -2180,8 +2224,8 @@ class FinalizeZipManifestTests(WebsiteEngineBase):
         manifest = f"_storage/{backup.uuid}.files"
         self.assertTrue(os.path.exists(manifest))
         with open(manifest) as fh:
-            entries = set(fh.read().splitlines())
-        self.assertEqual(entries, {"index.html", os.path.join("sub", "world.txt")})
+            entries = fh.read().splitlines()
+        self.assertEqual(entries, ["index.html", "sub/world.txt"])
 
         # The tree itself holds no manifest copy...
         self.assertFalse(os.path.exists(os.path.join(tmp, f"{backup.uuid}.files")))
@@ -2223,3 +2267,91 @@ class FinalizeZipManifestTests(WebsiteEngineBase):
         # cache-local was planted: no {uuid}.files inside the cache.
         self.assertEqual(sorted(os.listdir(cache)), ["index.html", "sub"])
         self.assertTrue(os.path.exists(os.path.join(cache, "sub", "world.txt")))
+
+    def test_symlink_is_rejected_before_archive_or_manifest_publication(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        os.symlink("index.html", os.path.join(tmp, "site-link"))
+        manifest = f"_storage/{backup.uuid}.files"
+        self.addCleanup(
+            _cleanup_storage_artifacts(
+                manifest,
+                f"_storage/{backup.uuid}.zip",
+                f"_storage/{backup.uuid}.log",
+            )
+        )
+
+        with mock.patch.object(W, "create_zip") as create:
+            with self.assertRaises(ArchiveSourcePolicyError) as context:
+                W._finalize_zip(backup, tmp, keep_dir=True)
+
+        self.assertEqual(context.exception.kind, "symlink")
+        self.assertEqual(context.exception.relative_path, "site-link")
+        create.assert_not_called()
+        self.assertFalse(os.path.exists(manifest))
+
+    def test_directory_symlink_is_rejected_before_archive_publication(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        os.symlink("sub", os.path.join(tmp, "linked-directory"))
+        manifest = f"_storage/{backup.uuid}.files"
+        self.addCleanup(
+            _cleanup_storage_artifacts(
+                manifest,
+                f"_storage/{backup.uuid}.zip",
+                f"_storage/{backup.uuid}.log",
+            )
+        )
+
+        with mock.patch.object(W, "create_zip") as create:
+            with self.assertRaises(ArchiveSourcePolicyError) as context:
+                W._finalize_zip(backup, tmp, keep_dir=True)
+
+        self.assertEqual(context.exception.kind, "symlink")
+        self.assertEqual(context.exception.relative_path, "linked-directory")
+        create.assert_not_called()
+        self.assertFalse(os.path.exists(manifest))
+
+    def test_fifo_is_rejected_before_archive_or_manifest_publication(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        os.mkfifo(os.path.join(tmp, "updates.pipe"))
+        manifest = f"_storage/{backup.uuid}.files"
+        self.addCleanup(
+            _cleanup_storage_artifacts(
+                manifest,
+                f"_storage/{backup.uuid}.zip",
+                f"_storage/{backup.uuid}.log",
+            )
+        )
+
+        with mock.patch.object(W, "create_zip") as create:
+            with self.assertRaises(ArchiveSourcePolicyError) as context:
+                W._finalize_zip(backup, tmp, keep_dir=True)
+
+        self.assertEqual(context.exception.kind, "special")
+        self.assertEqual(context.exception.relative_path, "updates.pipe")
+        create.assert_not_called()
+        self.assertFalse(os.path.exists(manifest))
+
+    def test_manifest_ambiguous_name_is_rejected_before_archive_publication(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        with open(os.path.join(tmp, "line\nbreak.txt"), "w") as source:
+            source.write("not representable in the line manifest")
+        manifest = f"_storage/{backup.uuid}.files"
+        self.addCleanup(
+            _cleanup_storage_artifacts(
+                manifest,
+                f"_storage/{backup.uuid}.zip",
+                f"_storage/{backup.uuid}.log",
+            )
+        )
+
+        with mock.patch.object(W, "create_zip") as create:
+            with self.assertRaises(ArchiveSourcePolicyError) as context:
+                W._finalize_zip(backup, tmp, keep_dir=True)
+
+        self.assertEqual(context.exception.kind, "invalid_path")
+        create.assert_not_called()
+        self.assertFalse(os.path.exists(manifest))

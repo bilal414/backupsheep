@@ -108,6 +108,10 @@ _BACKUP_NOTIFICATION_MESSAGES = {
     "WORKER_DISK_FULL": "The backup worker does not have enough free disk space.",
     "ARCHIVE_VALIDATION_FAILED": "The generated backup archive failed integrity validation.",
     "SOURCE_EXPORT_FAILED": "The source export failed.",
+    "SOURCE_SPECIAL_FILE_UNSUPPORTED": (
+        "The website source contains a member that cannot be represented safely "
+        "in a restorable backup."
+    ),
     "PROVIDER_NOT_FOUND": "The provider could not find the backup source or target.",
     "PROVIDER_AUTH_FAILED": "The provider rejected the configured credentials or permissions.",
     "QUOTA_EXCEEDED": "The provider resource quota was exceeded.",
@@ -156,6 +160,10 @@ _BACKUP_NOTIFICATION_REMEDIATIONS = {
     "WORKER_DISK_FULL": "Free worker disk space or move the workload to a worker with sufficient capacity.",
     "ARCHIVE_VALIDATION_FAILED": "Retry the export and inspect the durable execution using the correlation ID.",
     "SOURCE_EXPORT_FAILED": "Review secured diagnostics using the correlation ID and retry the source export.",
+    "SOURCE_SPECIAL_FILE_UNSUPPORTED": (
+        "Remove or exclude symbolic links, special files, and invalid paths, then "
+        "run a new backup."
+    ),
     "PROVIDER_NOT_FOUND": "Confirm the source or target still exists and retry after provider recovery.",
     "PROVIDER_AUTH_FAILED": "Reconnect the cloud account with the minimum required permissions.",
     "QUOTA_EXCEEDED": "Delete an owned resource or request a provider quota increase before retrying.",

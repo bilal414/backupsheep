@@ -285,6 +285,7 @@ class NodeBackupFailedError(APIException):
         backup_type=None,
         message="Unable to create backup/snapshot. "
         "This cloud be temporary because of failed API call. We will keep trying.",
+        public_failure=None,
     ):
         # Command stderr and provider exceptions can contain credentials, signed
         # URLs, SQL, endpoints, and customer file paths. Keep the original text on
@@ -293,9 +294,10 @@ class NodeBackupFailedError(APIException):
         try:
             from apps._tasks.integration.backup.errors import safe_backup_failure
 
-            public_failure = safe_backup_failure(
-                RuntimeError(str(message)), stage="backup"
-            )
+            if public_failure is None:
+                public_failure = safe_backup_failure(
+                    RuntimeError(str(message)), stage="backup"
+                )
             self.error_code = public_failure.code
             self.retryable = public_failure.retryable
             self.public_message = public_failure.detail

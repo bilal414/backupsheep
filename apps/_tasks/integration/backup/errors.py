@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from celery.exceptions import SoftTimeLimitExceeded
 
+from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
 from apps.console.connection.reliability import (
     DATABASE_EVENT_PRIVILEGE_DETAIL,
     classify_connection_error,
@@ -24,6 +25,14 @@ class SafeBackupFailure:
 
 def safe_backup_failure(error, *, stage="backup"):
     """Classify an exception without returning its provider or command text."""
+    if isinstance(error, ArchiveSourcePolicyError):
+        return SafeBackupFailure(
+            "SOURCE_SPECIAL_FILE_UNSUPPORTED",
+            "Website backups support regular files and directories only. "
+            "Remove or exclude symbolic links, special files, and invalid paths, "
+            "then run a new backup.",
+            False,
+        )
     if isinstance(error, (SoftTimeLimitExceeded, TimeoutError)) or getattr(
         error, "errno", None
     ) == errno.ETIMEDOUT:
