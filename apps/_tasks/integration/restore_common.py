@@ -41,6 +41,8 @@ from apps.api.v1.utils.api_helpers import bs_decrypt
 from django.conf import settings
 from sentry_sdk import capture_exception
 
+from apps._tasks.integration.backup._archive import mark_utf8_zip_names
+
 # (connect, read) timeout for the download URL fetch; 1 MiB stream chunks.
 DOWNLOAD_TIMEOUT = (30, 300)
 CHUNK_SIZE = 1024 * 1024
@@ -2913,6 +2915,18 @@ def extract_backup_zip(zip_path, dest_dir):
     staging_root = f"{dest_root}.{uuid.uuid4().hex}.partial"
     os.makedirs(staging_root, mode=0o700)
     try:
+        # BackupSheep historically used Info-ZIP on UTF-8 Linux filesystems.
+        # Info-ZIP preserved those raw UTF-8 filename bytes but omitted language
+        # encoding bit 11, so standards-compliant readers decoded them as CP437
+        # mojibake. ``zip_path`` is the worker-owned downloaded copy, not the
+        # committed provider object. Repair only its header flags before the
+        # normal CRC, collision, path, type, expansion, and disk checks.
+        try:
+            mark_utf8_zip_names(zip_path)
+        except ValueError as error:
+            raise RestoreError(
+                "stored backup has inconsistent ZIP filename headers."
+            ) from error
         with zipfile.ZipFile(zip_path) as zf:
             infos = zf.infolist()
             maximum_members = int(

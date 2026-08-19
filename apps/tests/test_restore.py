@@ -1127,6 +1127,7 @@ class AuthDatabaseSSHSSLFlagTests(BaseTestCase):
 # Website + database restore backend (fetch/extract helpers, engines, tasks, API)
 # ---------------------------------------------------------------------------
 import shutil
+import struct
 import tarfile
 import uuid
 import zipfile
@@ -1496,6 +1497,31 @@ class FetchBackupZipTests(RestoreBackendBase):
 
 
 class ExtractBackupZipTests(RestoreBackendBase):
+    @staticmethod
+    def _clear_utf8_name_flags(zip_path):
+        """Recreate the historical Info-ZIP UTF-8-without-bit-11 layout."""
+        with zipfile.ZipFile(zip_path) as archive:
+            infos = archive.infolist()
+            central_offset = archive.start_dir
+
+        with open(zip_path, "r+b") as archive_file:
+            for info in infos:
+                archive_file.seek(central_offset)
+                central = archive_file.read(46)
+                filename_length, extra_length, comment_length = struct.unpack_from(
+                    "<HHH", central, 28
+                )
+                central_flags = struct.unpack_from("<H", central, 8)[0]
+                archive_file.seek(central_offset + 8)
+                archive_file.write(struct.pack("<H", central_flags & ~0x0800))
+
+                archive_file.seek(info.header_offset + 6)
+                local_flags = struct.unpack("<H", archive_file.read(2))[0]
+                archive_file.seek(info.header_offset + 6)
+                archive_file.write(struct.pack("<H", local_flags & ~0x0800))
+
+                central_offset += 46 + filename_length + extra_length + comment_length
+
     def test_extracts_tree(self):
         zip_path = self._make_zip(
             {"public_html/index.html": "hi", "public_html/css/a.css": "x"}
@@ -1503,6 +1529,24 @@ class ExtractBackupZipTests(RestoreBackendBase):
         dest = restore_common.extract_backup_zip(zip_path, os.path.join(self.tmp, "out"))
         with open(os.path.join(dest, "public_html", "index.html")) as fh:
             self.assertEqual(fh.read(), "hi")
+
+    def test_repairs_historical_unflagged_utf8_names_before_extract(self):
+        original_name = "public_html/caf\u00e9-\u0645\u0631\u062d\u0628\u0627-\U0001f642.txt"
+        zip_path = self._make_zip({original_name: "unicode payload"}, name="legacy.zip")
+        self._clear_utf8_name_flags(zip_path)
+
+        with zipfile.ZipFile(zip_path) as archive:
+            self.assertNotIn(original_name, archive.namelist())
+
+        dest = restore_common.extract_backup_zip(
+            zip_path, os.path.join(self.tmp, "legacy-out")
+        )
+
+        restored_path = os.path.join(dest, *original_name.split("/"))
+        with open(restored_path, encoding="utf-8") as restored:
+            self.assertEqual(restored.read(), "unicode payload")
+        with zipfile.ZipFile(zip_path) as archive:
+            self.assertTrue(archive.getinfo(original_name).flag_bits & 0x0800)
 
     def test_rejects_path_traversal(self):
         zip_path = self._make_zip({"../evil.txt": "x"}, name="evil.zip")

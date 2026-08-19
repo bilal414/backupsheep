@@ -82,7 +82,7 @@ def _fsync_parent(path):
         os.close(descriptor)
 
 
-def _mark_utf8_zip_names(archive_path):
+def mark_utf8_zip_names(archive_path):
     """Mark Info-ZIP entries whose raw names are valid non-ASCII UTF-8.
 
     Info-ZIP 3.0 on Debian stores Unix filename bytes unchanged but leaves the
@@ -94,7 +94,9 @@ def _mark_utf8_zip_names(archive_path):
     filename bytes: one in the local header and one in the central directory.
     File data, compression, CRCs, ZIP64 offsets, symlink representation, empty
     directories, and entry order remain untouched. Invalid UTF-8 byte names are
-    deliberately left unmarked rather than guessed.
+    deliberately left unmarked rather than guessed. The same header-only mutation is
+    used for newly produced archives and for a downloaded working copy of
+    historical BackupSheep archives; a committed storage object is never changed.
     """
 
     with zipfile.ZipFile(archive_path) as archive:
@@ -211,7 +213,7 @@ def create_zip(
                 f"zip failed with exit code {result.returncode}"
                 + (f": {stderr[-1000:]}" if stderr else "")
             )
-        _mark_utf8_zip_names(staged_path)
+        mark_utf8_zip_names(staged_path)
         return _publish_archive(
             staged_path,
             archive_path,
