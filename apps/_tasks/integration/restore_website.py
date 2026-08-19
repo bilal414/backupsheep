@@ -38,6 +38,8 @@ from apps._tasks.integration.backup.website import (
     _materialize_ssh_private_key,
     _normalize_ssh_key,
     _redact,
+    _lftp_depth_stack_exhausted,
+    _serial_lftp_script,
 )
 from apps._tasks.integration.restore_common import (
     RestoreError,
@@ -138,32 +140,42 @@ def _run_lftp(
     check_result=True,
 ):
     """Run lftp with credentials on stdin and only safe failure details."""
-    if enforce_fence:
-        _ensure_restore_fence(restore)
-    try:
-        proc = subprocess.run(
-            ["lftp"],
-            input=script,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=COMMAND_TIMEOUT,
-            text=True,
-            errors="ignore",
-        )
-    except subprocess.TimeoutExpired:
-        _capture_safe("LFTP_TIMEOUT")
-        raise _safe_failure(node, backup, "LFTP_TIMEOUT") from None
-    except FileNotFoundError:
-        _capture_safe("LFTP_UNAVAILABLE")
-        raise _safe_failure(node, backup, "LFTP_UNAVAILABLE") from None
-    except OSError:
-        _capture_safe("LFTP_UNAVAILABLE")
-        raise _safe_failure(node, backup, "LFTP_UNAVAILABLE") from None
+    def run_lftp(current_script):
+        if enforce_fence:
+            _ensure_restore_fence(restore)
+        try:
+            current_proc = subprocess.run(
+                ["lftp"],
+                input=current_script,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=COMMAND_TIMEOUT,
+                text=True,
+                errors="ignore",
+            )
+        except subprocess.TimeoutExpired:
+            _capture_safe("LFTP_TIMEOUT")
+            raise _safe_failure(node, backup, "LFTP_TIMEOUT") from None
+        except (FileNotFoundError, OSError):
+            _capture_safe("LFTP_UNAVAILABLE")
+            raise _safe_failure(node, backup, "LFTP_UNAVAILABLE") from None
+        if enforce_fence:
+            _ensure_restore_fence(restore)
+        return current_proc
+
+    proc = run_lftp(script)
+    if check_result and _lftp_depth_stack_exhausted(proc):
+        serial_script = _serial_lftp_script(script)
+        if serial_script != script:
+            _write_log(
+                backup,
+                "Website restore reached the lftp deep-tree limit; retrying the "
+                "same staged transfer with serial directory traversal.\n",
+            )
+            proc = run_lftp(serial_script)
 
     # A process may have completed a remote action just before losing its
     # lease.  Do not commit the result or continue to another action then.
-    if enforce_fence:
-        _ensure_restore_fence(restore)
     output = str(proc.stdout or "")
     # lftp normally preserves a failed transfer's exit status, but some login
     # failures have historically exited zero after a trailing ``bye``. Treat only

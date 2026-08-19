@@ -510,6 +510,49 @@ class LftpScriptBuilderTests(TestCase):
                                  ssh_key_path=None, parallel=1, transfer="get a", mirror=False)
         self.assertIn("set ftp:ssl-allow false", s)
 
+    def test_serial_fallback_changes_only_parallel_mirror_controls(self):
+        script = "\n".join(
+            [
+                "set net:connection-limit 3",
+                'open -p 22 "sftp://host"',
+                'mirror --parallel=3 "/deep-3" "/target-3"',
+                "bye",
+            ]
+        )
+        serial = W._serial_lftp_script(script)
+        self.assertIn("set net:connection-limit 1", serial)
+        self.assertIn('--parallel=1 "/deep-3" "/target-3"', serial)
+        self.assertNotIn("--parallel=3", serial)
+
+    def test_serial_fallback_leaves_file_and_serial_scripts_unchanged(self):
+        file_script = "set net:connection-limit 3\nget -P source -o target\n"
+        serial_script = (
+            "set net:connection-limit 1\n"
+            "mirror --parallel=1 source target\n"
+        )
+        self.assertEqual(W._serial_lftp_script(file_script), file_script)
+        self.assertEqual(W._serial_lftp_script(serial_script), serial_script)
+
+    def test_depth_assertion_requires_nonzero_exact_lftp_signature(self):
+        exact = SimpleNamespace(
+            returncode=-6,
+            stdout=(
+                "lftp: SMTask.cc:152: static void SMTask::Enter(SMTask*): "
+                "Assertion `stack_ptr<SMTASK_MAX_DEPTH' failed."
+            ),
+        )
+        self.assertTrue(W._lftp_depth_stack_exhausted(exact))
+        self.assertFalse(
+            W._lftp_depth_stack_exhausted(
+                SimpleNamespace(returncode=0, stdout=exact.stdout)
+            )
+        )
+        self.assertFalse(
+            W._lftp_depth_stack_exhausted(
+                SimpleNamespace(returncode=1, stdout="mirror: permission denied")
+            )
+        )
+
 
 class CeleryRoutingTests(TestCase):
     def test_tasks_route_to_expected_queues(self):
@@ -2074,6 +2117,33 @@ class LftpFailureDetectionTests(WebsiteEngineBase):
             fake_run=lambda cmd, **kwargs: SimpleNamespace(stdout="", returncode=0),
         )
         finalize.assert_called_once()
+
+    def test_deep_tree_stack_abort_retries_same_mirror_serially(self):
+        node, backup = self._make_backup(incremental=False)
+        scripts = []
+
+        def fake_run(cmd, **kwargs):
+            scripts.append(kwargs.get("input") or "")
+            if len(scripts) == 1:
+                return SimpleNamespace(
+                    stdout=(
+                        "lftp: SMTask.cc:152: static void SMTask::Enter(SMTask*): "
+                        "Assertion `stack_ptr<SMTASK_MAX_DEPTH' failed.\n"
+                    ),
+                    returncode=-6,
+                )
+            return SimpleNamespace(stdout="", returncode=0)
+
+        finalize = self._run(
+            backup, incremental=False, fake_run=fake_run
+        )
+        finalize.assert_called_once()
+        self.assertEqual(len(scripts), 2)
+        self.assertIn("--parallel=3", scripts[0])
+        self.assertIn("--parallel=1", scripts[1])
+        self.assertIn("set net:connection-limit 1", scripts[1])
+        with open(f"_storage/{backup.uuid}.log") as log:
+            self.assertIn("serial directory traversal", log.read())
 
     def test_login_failure_still_raises_from_output_grep(self):
         node, backup = self._make_backup(incremental=False)

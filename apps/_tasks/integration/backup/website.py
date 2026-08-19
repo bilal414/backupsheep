@@ -43,6 +43,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -86,6 +87,41 @@ _LFTP_MIRROR_SETTINGS = (
     "set ftp:prefer-epsv true",
     "set mirror:parallel-directories true",
 )
+
+_LFTP_DEPTH_ASSERTION = re.compile(
+    r"SMTask\.cc:\d+:.*SMTask::Enter.*SMTASK_MAX_DEPTH",
+    re.DOTALL,
+)
+_LFTP_PARALLEL_OPTION = re.compile(
+    r"(?<!\S)--parallel=([1-9][0-9]*)(?=\s|$)"
+)
+
+
+def _lftp_depth_stack_exhausted(proc):
+    """Return true only for lftp's internal deep-tree task-stack abort."""
+    return bool(
+        getattr(proc, "returncode", 0) != 0
+        and _LFTP_DEPTH_ASSERTION.search(str(getattr(proc, "stdout", "") or ""))
+    )
+
+
+def _serial_lftp_script(script):
+    """Reduce one parallel mirror script to a single traversal worker.
+
+    lftp 4.9.x can abort in ``SMTask::Enter`` on a sufficiently deep tree when
+    ``mirror --parallel`` is greater than one. Leave file transfers and already
+    serial mirrors unchanged so callers can fence the fallback to that exact
+    operation with a changed-script check.
+    """
+    match = _LFTP_PARALLEL_OPTION.search(script or "")
+    if match is None or int(match.group(1)) <= 1:
+        return script
+    serial = re.sub(
+        r"(?m)^set net:connection-limit [1-9][0-9]*$",
+        "set net:connection-limit 1",
+        script,
+    )
+    return _LFTP_PARALLEL_OPTION.sub("--parallel=1", serial)
 
 
 def _lftp_quote(value):
@@ -682,29 +718,57 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
                 _write_log(backup, f"\nPath: {source['path']} -> {target}\n")
                 _write_log(backup, _redact(script, username, password) + "\n")
 
-                try:
-                    proc = subprocess.run(
-                        ["lftp"], input=script, stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT, timeout=COMMAND_TIMEOUT, text=True, errors="ignore",
-                    )
-                except FileNotFoundError:
-                    raise NodeBackupFailedError(
-                        node, backup.uuid_str, backup.attempt_no, backup.type,
-                        "lftp is not installed in the worker image.",
-                    )
-
-                for line in (proc.stdout or "").splitlines():
-                    _write_log(backup, "LFTP: " + _redact(line, username, password) + "\n")
-                    low = line.lower()
-                    if "421 too many connections" in low and (website.parallel or 0) > 1:
-                        website.parallel = max(1, (website.parallel or 2) // 2)
-                        website.save()
-                    if ("login failed" in low or "login incorrect" in low
-                            or ("fatal error" in low and "too many" in low)):
+                def run_lftp(current_script):
+                    try:
+                        return subprocess.run(
+                            ["lftp"], input=current_script,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            timeout=COMMAND_TIMEOUT, text=True, errors="ignore",
+                        )
+                    except FileNotFoundError:
                         raise NodeBackupFailedError(
                             node, backup.uuid_str, backup.attempt_no, backup.type,
-                            message=_redact(line, username, password),
+                            "lftp is not installed in the worker image.",
                         )
+
+                def record_lftp_output(current_proc):
+                    for line in (current_proc.stdout or "").splitlines():
+                        _write_log(
+                            backup,
+                            "LFTP: " + _redact(line, username, password) + "\n",
+                        )
+                        low = line.lower()
+                        if (
+                            "421 too many connections" in low
+                            and (website.parallel or 0) > 1
+                        ):
+                            website.parallel = max(1, (website.parallel or 2) // 2)
+                            website.save()
+                        if (
+                            "login failed" in low
+                            or "login incorrect" in low
+                            or ("fatal error" in low and "too many" in low)
+                        ):
+                            raise NodeBackupFailedError(
+                                node,
+                                backup.uuid_str,
+                                backup.attempt_no,
+                                backup.type,
+                                message=_redact(line, username, password),
+                            )
+
+                proc = run_lftp(script)
+                record_lftp_output(proc)
+                if _lftp_depth_stack_exhausted(proc):
+                    serial_script = _serial_lftp_script(script)
+                    if serial_script != script:
+                        _write_log(
+                            backup,
+                            "LFTP deep-tree limit reached; retrying this path with "
+                            "serial directory traversal.\n",
+                        )
+                        proc = run_lftp(serial_script)
+                        record_lftp_output(proc)
 
                 # A mirror with failed transfers must not produce a "successful"
                 # (partial) backup: lftp's exit code reports them (see the helper

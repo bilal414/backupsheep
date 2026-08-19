@@ -2460,6 +2460,33 @@ class WebsiteRestoreFailureDetectionTests(RestoreBackendBase):
         with open(f"_storage/restore_{backup.uuid_str}.log") as fh:
             self.assertIn("Restore complete.", fh.read())
 
+    def test_deep_tree_stack_abort_retries_same_push_serially(self):
+        node, backup = self._website_backup(all_paths=True)
+        self._last_zip = self._make_zip({"index.html": "hi"})
+        restore = self._restore_row(backup)
+        scripts = []
+
+        def fake_run(cmd, **kwargs):
+            scripts.append(kwargs.get("input") or "")
+            if len(scripts) == 1:
+                return SimpleNamespace(
+                    stdout=(
+                        "lftp: SMTask.cc:152: static void SMTask::Enter(SMTask*): "
+                        "Assertion `stack_ptr<SMTASK_MAX_DEPTH' failed.\n"
+                    ),
+                    returncode=-6,
+                )
+            return SimpleNamespace(stdout="", returncode=0)
+
+        cleanup = self._run(backup, restore, fake_run)
+        cleanup.apply_async.assert_called_once()
+        self.assertEqual(len(scripts), 2)
+        self.assertIn("--parallel=3", scripts[0])
+        self.assertIn("--parallel=1", scripts[1])
+        self.assertIn("set net:connection-limit 1", scripts[1])
+        with open(f"_storage/restore_{backup.uuid_str}.log") as log:
+            self.assertIn("serial directory traversal", log.read())
+
     def test_put_failure_raises(self):
         node, backup = self._website_backup(
             all_paths=False, paths=[{"path": "index.html", "type": "file"}]
