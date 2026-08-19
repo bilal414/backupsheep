@@ -38,9 +38,12 @@ from sentry_sdk import capture_exception
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.helper.tasks import delete_from_disk
 from apps._tasks.integration.backup._sanitize import safe_password, safe_token
+from apps._tasks.integration.backup.mariadb import (
+    _defaults_file_content as _mariadb_defaults_file_content,
+)
 from apps._tasks.integration.backup.mysql import (
     _decode,
-    _defaults_file_content,
+    _defaults_file_content as _mysql_defaults_file_content,
     _write_local_defaults_file,
 )
 from apps._tasks.integration.backup.postgresql import _pgpass_escape
@@ -1399,6 +1402,18 @@ def _mysql_family_client(auth):
         raise RestoreError("database restore received an unsupported MySQL-family engine.") from None
 
 
+def _mysql_family_defaults_file_content(auth, username, password):
+    """Build a vendor-correct TLS/credential file for restore clients."""
+    values = (username, password, auth.host, auth.port, auth.use_ssl)
+    if auth.type == CoreAuthDatabase.DatabaseType.MARIADB:
+        return _mariadb_defaults_file_content(*values)
+    if auth.type == CoreAuthDatabase.DatabaseType.MYSQL:
+        return _mysql_defaults_file_content(*values)
+    raise RestoreError(
+        "database restore received an unsupported MySQL-family engine."
+    )
+
+
 def _mysql_query(
     node,
     backup,
@@ -2067,7 +2082,7 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
             _sftp_write(
                 ssh,
                 remote_defaults_name,
-                _defaults_file_content(username, password, auth.host, auth.port, auth.use_ssl),
+                _mysql_family_defaults_file_content(auth, username, password),
                 restore=restore,
                 backup=backup,
             )
@@ -2086,7 +2101,7 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
         local_defaults_path = f"_storage/my_restore_{backup.uuid_str}{credential_suffix}.cnf"
         _write_local_defaults_file(
             local_defaults_path,
-            _defaults_file_content(username, password, auth.host, auth.port, auth.use_ssl),
+            _mysql_family_defaults_file_content(auth, username, password),
         )
         defaults_arg = f"--defaults-extra-file={local_defaults_path}"
     try:
@@ -2650,8 +2665,8 @@ def _preflight_database_restore_permissions(
                 _sftp_write(
                     ssh,
                     remote_name,
-                    _defaults_file_content(
-                        username, password, auth.host, auth.port, auth.use_ssl
+                    _mysql_family_defaults_file_content(
+                        auth, username, password
                     ),
                     restore=restore,
                     backup=backup,
@@ -2671,9 +2686,7 @@ def _preflight_database_restore_permissions(
             local_path = f"_storage/db_restore_preflight_{worker_suffix}.cnf"
             _write_local_defaults_file(
                 local_path,
-                _defaults_file_content(
-                    username, password, auth.host, auth.port, auth.use_ssl
-                ),
+                _mysql_family_defaults_file_content(auth, username, password),
             )
             return _preflight_mysql_fork_permissions(
                 node,

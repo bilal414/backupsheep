@@ -861,7 +861,7 @@
 
                                     <template x-for="(type, index) in databaseTypes">
                                         <li
-                                                @click="selectedAuth.type = type; selectedAuth.version = null; toggleDatabaseTypeDropdown()"
+                                                @click="selectDatabaseType(type)"
                                                 @mouseenter="databaseTypeActiveIndex = index"
                                                 @mouseleave="databaseTypeActiveIndex = null"
                                                 :class="{ 'text-white bg-indigo-600': databaseTypeActiveIndex === index, 'text-slate-700': !(databaseTypeActiveIndex === index) }"
@@ -921,7 +921,7 @@
 
                                     <template x-for="(version, index) in databaseVersions">
                                         <li
-                                                @click="selectedAuth.version = version; toggleDatabaseVersionDropdown()"
+                                                @click="selectDatabaseVersion(version)"
                                                 x-show="version?.name?.includes(selectedAuth.type?.name)"
                                                 @mouseenter="databaseVersionActiveIndex = index"
                                                 @mouseleave="databaseVersionActiveIndex = null"
@@ -1000,8 +1000,8 @@
                              x-show="integrationCode === 'database' && (selectedAuth.type?.code===1 || selectedAuth.type?.code===2)">
                             <div class="flex items-center justify-between gap-4">
                                 <span class="flex grow flex-col">
-                                    <span class="text-sm font-medium text-slate-700" id="availability-label">Use SSL/TLS? (ssl-mode=PREFERRED)</span>
-                                    <span class="text-xs text-slate-500" id="availability-description">Only use this if your database server supports connection using SSL/TLS.</span>
+                                    <span class="text-sm font-medium text-slate-700" id="availability-label">Use database SSL/TLS?</span>
+                                    <span class="text-xs text-slate-500" id="availability-description">New MySQL 8.4 connections start with TLS required. Turn this off only when the database explicitly supports a safe plaintext connection.</span>
                                 </span>
                                 <button type="button"
                                         @click="toggleUseSSL()"
@@ -2338,6 +2338,21 @@
             toggleAWSRegionDropdown() {
                 this.openAWSRegion = !this.openAWSRegion;
                 this.awsRegionActiveIndex = null;
+            },
+            selectDatabaseType(type) {
+                this.selectedAuth.type = type;
+                this.selectedAuth.version = null;
+                this.toggleDatabaseTypeDropdown();
+            },
+            selectDatabaseVersion(version) {
+                this.selectedAuth.version = version;
+                if (!this.connection.id
+                    && this.selectedAuth.type?.code === 1
+                    && version?.code === 'mysql_8_4'
+                    && typeof this.selectedAuth.use_ssl === 'undefined') {
+                    this.selectedAuth.use_ssl = true;
+                }
+                this.toggleDatabaseVersionDropdown();
             },
             toggleDatabaseTypeDropdown() {
                 this.openDatabaseType = !this.openDatabaseType;

@@ -100,6 +100,26 @@ def _marker(restore, backup, source, target, digest, state):
     ) + "\n"
 
 
+class DatabaseRestoreTLSOptionTests(BaseTestCase):
+    def test_restore_uses_vendor_correct_mysql_family_tls_options(self):
+        mysql_auth = _fake_auth(CoreAuthDatabase.DatabaseType.MYSQL)
+        mysql_auth.use_ssl = True
+        mariadb_auth = _fake_auth(CoreAuthDatabase.DatabaseType.MARIADB)
+        mariadb_auth.use_ssl = True
+
+        mysql_content = RD._mysql_family_defaults_file_content(
+            mysql_auth, "backup", "secret"
+        )
+        mariadb_content = RD._mysql_family_defaults_file_content(
+            mariadb_auth, "backup", "secret"
+        )
+
+        self.assertIn("ssl-mode=Required", mysql_content)
+        self.assertNotIn("ssl-mode=Preferred", mysql_content)
+        self.assertIn("ssl=1\n", mariadb_content)
+        self.assertNotIn("ssl-mode", mariadb_content)
+
+
 class DatabaseRestorePolicyTests(BaseTestCase):
     def _backup_and_storage(self, *, all_databases=False):
         node = make_database_node(

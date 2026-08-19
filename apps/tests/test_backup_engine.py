@@ -1267,6 +1267,18 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
 
     DUMP = b"-- dump\nINSERT INTO t VALUES (1);\n"
 
+    def test_mysql_defaults_file_has_exact_tls_mode(self):
+        required = MYSQL_ENGINE._defaults_file_content(
+            DB_USER, DB_PASS, "db.example.test", 3306, True
+        )
+        disabled = MYSQL_ENGINE._defaults_file_content(
+            DB_USER, DB_PASS, "db.example.test", 3306, False
+        )
+
+        self.assertIn("ssl-mode=Required", required)
+        self.assertNotIn("ssl-mode=Preferred", required)
+        self.assertIn("ssl-mode=Disabled", disabled)
+
     def _run_engine(self, backup, fake_run):
         with self._patch_check_connection(), \
              mock.patch.object(MYSQL_ENGINE.subprocess, "run", side_effect=fake_run), \
@@ -1419,6 +1431,18 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
 
 class MariadbDirectEngineTests(DatabaseEngineBase):
     """snapshot_mariadb direct mode: mariadb-appropriate flags."""
+
+    def test_mariadb_defaults_file_never_uses_mysql_ssl_mode(self):
+        enabled = MDB_ENGINE._defaults_file_content(
+            DB_USER, DB_PASS, "db.example.test", 3306, True
+        )
+        disabled = MDB_ENGINE._defaults_file_content(
+            DB_USER, DB_PASS, "db.example.test", 3306, False
+        )
+
+        self.assertIn("ssl=1\n", enabled)
+        self.assertNotIn("ssl-mode", enabled)
+        self.assertNotIn("ssl-mode", disabled)
 
     def test_direct_success_flags(self):
         node, backup = self._make_backup(

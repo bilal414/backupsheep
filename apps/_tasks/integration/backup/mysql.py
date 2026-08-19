@@ -62,8 +62,10 @@ def _defaults_file_content(username, password, host, port, use_ssl):
         f"host={_quote_cnf(host)}",
         f"port={_quote_cnf(port)}",
     ]
-    if use_ssl:
-        lines.append("ssl-mode=Preferred")
+    # MySQL's implicit/PREFERRED mode may fall back to plaintext. Keep the
+    # product switch deterministic for dump and restore clients: enabled means
+    # TLS is required, while false is an explicit opt-out.
+    lines.append("ssl-mode=Required" if use_ssl else "ssl-mode=Disabled")
     return "\n".join(lines) + "\n"
 
 

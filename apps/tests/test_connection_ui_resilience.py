@@ -292,6 +292,17 @@ class ConnectionSetupTemplateResilienceTests(SimpleTestCase):
             self.assertIn(code, self.source)
         self.assertNotIn("response.statusText", self.method_source("requestJSON", "getOauthUrl"))
 
+    def test_new_mysql_84_selection_defaults_tls_without_overriding_opt_out(self):
+        self.assertIn('@click="selectDatabaseVersion(version)"', self.source)
+        self.assertIn("version?.code === 'mysql_8_4'", self.source)
+        self.assertIn(
+            "typeof this.selectedAuth.use_ssl === 'undefined'",
+            self.source,
+        )
+        self.assertIn("this.selectedAuth.use_ssl = true", self.source)
+        self.assertIn("New MySQL 8.4 connections start with TLS required", self.source)
+        self.assertNotIn("ssl-mode=PREFERRED", self.source)
+
     def test_managed_key_divider_remains_when_managed_key_is_unavailable(self):
         marker = "<!-- Website and Database-->"
         section = self.source.split(marker, 1)[1].split(

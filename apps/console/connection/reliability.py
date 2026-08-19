@@ -60,6 +60,31 @@ class DatabaseClientCapabilityError(Exception):
         super().__init__(f"database client capability check failed for {self.engine}")
 
 
+class DatabaseTLSRequiredError(Exception):
+    """Internal, secret-free signal for a rejected plaintext database client."""
+
+    def __init__(self):
+        super().__init__("database server requires an SSL/TLS connection")
+
+
+def database_tls_required_message(value: object) -> bool:
+    """Recognize stable MySQL-family secure-transport failures."""
+    message = str(value or "").lower()
+    return any(
+        marker in message
+        for marker in (
+            "er_secure_transport_required",
+            "require_secure_transport",
+            "insecure transport are prohibited",
+            "insecure transport is prohibited",
+            "authentication requires secure connection",
+            "requires a secure connection",
+            "ssl connection is required",
+            "ssl/tls connection is required",
+        )
+    )
+
+
 DATABASE_EVENT_PRIVILEGE_DETAIL = (
     "The database account cannot export scheduled event definitions. Grant the "
     "EVENT privilege for every selected database, validate the connection, and "
@@ -108,6 +133,15 @@ def classify_connection_error(error: BaseException, stage: str = "connection") -
             "worker_preflight",
             False,
             "Install compatible database client tools on every relevant worker or SSH server, then validate again.",
+        )
+
+    if isinstance(error, DatabaseTLSRequiredError):
+        return _failure(
+            "TLS_REQUIRED",
+            "The destination requires an SSL/TLS database connection.",
+            "tls",
+            False,
+            "Enable SSL/TLS for this connection and validate again.",
         )
 
     if isinstance(error, DatabaseEventPrivilegeError):
@@ -243,7 +277,9 @@ def classify_connection_error(error: BaseException, stage: str = "connection") -
             False,
             "Grant the minimum read/export permissions required for this backup and validate again.",
         )
-    if "ssl" in message and ("required" in message or "tls" in message):
+    if database_tls_required_message(message) or (
+        "ssl" in message and ("required" in message or "tls" in message)
+    ):
         return _failure(
             "TLS_REQUIRED",
             "The destination requires an SSL/TLS database connection.",

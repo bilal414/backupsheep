@@ -67,6 +67,21 @@ class BackupErrorSafetyTests(SimpleTestCase):
         self.assertTrue(disk.retryable)
         self.assertNotIn("/private/path", disk.detail)
 
+    def test_mysql_secure_transport_failure_is_terminal_and_actionable(self):
+        failure = safe_backup_failure(
+            RuntimeError(
+                "mysqldump: ERROR 3159: Connections using insecure transport are "
+                "prohibited while --require_secure_transport=ON; "
+                "password=never-return"
+            ),
+            stage="database_backup",
+        )
+
+        self.assertEqual(failure.code, "TLS_REQUIRED")
+        self.assertFalse(failure.retryable)
+        self.assertIn("SSL/TLS", failure.detail)
+        self.assertNotIn("never-return", failure.detail)
+
     def test_legacy_provider_error_helper_never_returns_exception_text(self):
         canary = (
             "https://api.example.invalid/object?X-Amz-Credential=secret-canary "

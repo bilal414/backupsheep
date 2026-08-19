@@ -9,6 +9,7 @@ from apps.console.connection.reliability import (
     ClassifiedConnectionError,
     DatabaseClientCapabilityError,
     DatabaseEventPrivilegeError,
+    DatabaseTLSRequiredError,
     classify_connection_error,
 )
 from apps.console.connection.models import CoreAuthDatabase
@@ -39,6 +40,26 @@ class ConnectionErrorClassificationTests(SimpleTestCase):
         )
         auth = paramiko.AuthenticationException("username and password")
         self.assertEqual(classify_connection_error(auth).code, "AUTH_FAILED")
+
+    def test_mysql_secure_transport_errors_are_typed_and_not_retryable(self):
+        errors = (
+            DatabaseTLSRequiredError(),
+            RuntimeError(
+                "ERROR 3159 (HY000): Connections using insecure transport are "
+                "prohibited while --require_secure_transport=ON"
+            ),
+            RuntimeError(
+                "Authentication plugin 'caching_sha2_password' reported error: "
+                "Authentication requires secure connection"
+            ),
+        )
+        for error in errors:
+            with self.subTest(error=error.__class__.__name__):
+                failure = classify_connection_error(error, stage="database")
+                self.assertEqual(failure.code, "TLS_REQUIRED")
+                self.assertEqual(failure.stage, "tls")
+                self.assertFalse(failure.retryable)
+                self.assertIn("Enable SSL/TLS", failure.remediation)
 
     def test_changed_host_key_is_permanent(self):
         failure = classify_connection_error(
@@ -96,6 +117,42 @@ class DatabaseClientCapabilityTests(SimpleTestCase):
             ),
             "mariadb-dump",
         )
+
+    def test_mysql_tls_switch_maps_to_required_or_disabled_without_fallback(self):
+        self.assertEqual(
+            CoreAuthDatabase._mysql_family_ssl_option(
+                CoreAuthDatabase.DatabaseType.MYSQL, True
+            ),
+            "--ssl-mode=REQUIRED",
+        )
+        self.assertEqual(
+            CoreAuthDatabase._mysql_family_ssl_option(
+                CoreAuthDatabase.DatabaseType.MYSQL, False
+            ),
+            "--ssl-mode=DISABLED",
+        )
+        self.assertEqual(
+            CoreAuthDatabase._mysql_family_ssl_option(
+                CoreAuthDatabase.DatabaseType.MARIADB, True
+            ),
+            "--ssl",
+        )
+
+    @mock.patch("apps.console.connection.models.subprocess.run")
+    def test_local_client_secure_transport_rejection_keeps_tls_contract(self, run):
+        run.return_value = mock.Mock(
+            returncode=1,
+            stdout=b"",
+            stderr=(
+                b"ERROR 3159 (HY000): Connections using insecure transport are "
+                b"prohibited while --require_secure_transport=ON"
+            ),
+        )
+
+        with self.assertRaises(DatabaseTLSRequiredError):
+            CoreAuthDatabase._run_local_database_client_command(
+                ["mysql", "--execute", "SELECT 1"]
+            )
 
     def test_local_mariadb_probe_uses_exact_sandbox_header_without_secret_argv(self):
         auth = self._auth(

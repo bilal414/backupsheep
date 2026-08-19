@@ -221,6 +221,19 @@ class CoreAuthDatabaseWriteSerializer(serializers.ModelSerializer):
         existing = self._existing_auth()
         errors = {}
 
+        # MySQL 8.4 uses caching_sha2_password by default and many fresh
+        # accounts require secure transport. New connections therefore start
+        # with database TLS enabled. An explicit false remains a supported
+        # opt-out; updates never rewrite an existing connection silently.
+        if (
+            existing is None
+            and data.get("use_ssl") is None
+            and data.get("type") == CoreAuthDatabase.DatabaseType.MYSQL
+            and data.get("version")
+            == CoreAuthDatabase.DatabaseVersion.MYSQL_8_4
+        ):
+            data["use_ssl"] = True
+
         previous_public_key = bool(getattr(existing, "use_public_key", False))
         previous_private_key = bool(getattr(existing, "use_private_key", False))
 

@@ -193,6 +193,63 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
         )
         self.assertNotIn("new-database-password", json.dumps(response.json()))
 
+    @patch.object(CoreAuthDatabase, "check_connection", return_value=True)
+    def test_new_mysql_84_connection_defaults_database_tls_on(self, check):
+        response = self.client.post(
+            "/api/v1/connections/database/",
+            {
+                "name": "mysql 8.4 secure default",
+                "location": factories.make_location().id,
+                "auth_database": {
+                    "host": "mysql84.example.test",
+                    "port": 3306,
+                    "database_name": "appdb",
+                    "all_databases": False,
+                    "username": "backup-user",
+                    "password": "backup-password",
+                    "type": CoreAuthDatabase.DatabaseType.MYSQL,
+                    "version": CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+                    "use_public_key": False,
+                    "use_private_key": False,
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.content)
+        auth = CoreAuthDatabase.objects.get(connection_id=response.json()["id"])
+        self.assertTrue(auth.use_ssl)
+        self.assertTrue(check.call_args.kwargs["data"]["use_ssl"])
+
+    @patch.object(CoreAuthDatabase, "check_connection", return_value=True)
+    def test_new_mysql_84_connection_preserves_explicit_tls_opt_out(self, check):
+        response = self.client.post(
+            "/api/v1/connections/database/",
+            {
+                "name": "mysql 8.4 explicit plaintext",
+                "location": factories.make_location().id,
+                "auth_database": {
+                    "host": "mysql84.example.test",
+                    "port": 3306,
+                    "database_name": "appdb",
+                    "all_databases": False,
+                    "username": "backup-user",
+                    "password": "backup-password",
+                    "type": CoreAuthDatabase.DatabaseType.MYSQL,
+                    "version": CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+                    "use_ssl": False,
+                    "use_public_key": False,
+                    "use_private_key": False,
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.content)
+        auth = CoreAuthDatabase.objects.get(connection_id=response.json()["id"])
+        self.assertFalse(auth.use_ssl)
+        self.assertFalse(check.call_args.kwargs["data"]["use_ssl"])
+
     @patch.object(CoreAuthWebsite, "check_connection", return_value=True)
     def test_website_patch_omitted_private_key_and_passphrase_are_retained(self, check):
         connection, auth = self._website_auth(

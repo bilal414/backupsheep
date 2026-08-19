@@ -50,7 +50,9 @@ from .reliability import (
     ClassifiedConnectionError,
     DatabaseClientCapabilityError,
     DatabaseEventPrivilegeError,
+    DatabaseTLSRequiredError,
     classified_connection_error,
+    database_tls_required_message,
 )
 from .ssh import cleanup_temporary_key, configure_host_keys, open_ssh_client
 
@@ -2284,6 +2286,20 @@ class CoreAuthDatabase(TimeStampedModel):
             return "mariadb"
         raise ValueError("database type is not part of the MySQL family")
 
+    @classmethod
+    def _mysql_family_ssl_option(cls, database_type, use_ssl):
+        """Return the vendor-correct, non-ambiguous database TLS option."""
+        if database_type == cls.DatabaseType.MARIADB:
+            # MariaDB's client rejects MySQL's --ssl-mode option. Its boolean
+            # --ssl flag is added only when the user enables database TLS.
+            return "--ssl" if use_ssl else ""
+        if database_type == cls.DatabaseType.MYSQL:
+            # MySQL's PREFERRED default can silently fall back to plaintext.
+            # The product switch is therefore exact: on requires TLS; off is
+            # an explicit opt-out for deployments that deliberately allow it.
+            return "--ssl-mode=REQUIRED" if use_ssl else "--ssl-mode=DISABLED"
+        raise ValueError("database type is not part of the MySQL family")
+
     @staticmethod
     def _mysql_cli_version(output):
         match = re.search(
@@ -2343,12 +2359,15 @@ class CoreAuthDatabase(TimeStampedModel):
             ),
             check=False,
         )
+        output = (process.stdout or b"") + b"\n" + (process.stderr or b"")
+        output = output.decode("utf-8", "replace").strip()
         if process.returncode != 0:
+            if database_tls_required_message(output):
+                raise DatabaseTLSRequiredError()
             raise RuntimeError(
                 f"database client exited with status {process.returncode}"
             )
-        output = (process.stdout or b"") + b"\n" + (process.stderr or b"")
-        return output.decode("utf-8", "replace").strip()
+        return output
 
     def _install_local_database_credentials(
         self,
@@ -2415,13 +2434,7 @@ class CoreAuthDatabase(TimeStampedModel):
         probe = "SELECT 1;"
         if database_type == self.DatabaseType.MARIADB:
             probe = "/*M!999999\\- enable the sandbox mode */\nSELECT 1;"
-        ssl_option = None
-        if use_ssl:
-            ssl_option = (
-                "--ssl"
-                if database_type == self.DatabaseType.MARIADB
-                else "--ssl-mode=PREFERRED"
-            )
+        ssl_option = self._mysql_family_ssl_option(database_type, use_ssl)
 
         def event_database_names(discovered=""):
             if all_databases:
@@ -2495,6 +2508,8 @@ class CoreAuthDatabase(TimeStampedModel):
                         )
                         try:
                             remote_query(event_sql)
+                        except DatabaseTLSRequiredError:
+                            raise
                         except Exception as error:
                             raise DatabaseEventPrivilegeError(
                                 internal_detail=error.__class__.__name__
@@ -2552,13 +2567,19 @@ class CoreAuthDatabase(TimeStampedModel):
                         )
                         try:
                             local_query(event_sql)
+                        except DatabaseTLSRequiredError:
+                            raise
                         except Exception as error:
                             raise DatabaseEventPrivilegeError(
                                 internal_detail=error.__class__.__name__
                             ) from error
             if str(probe_output or "").strip() != "1":
                 raise RuntimeError("database client capability probe returned no result")
-        except (DatabaseClientCapabilityError, DatabaseEventPrivilegeError):
+        except (
+            DatabaseClientCapabilityError,
+            DatabaseEventPrivilegeError,
+            DatabaseTLSRequiredError,
+        ):
             raise
         except Exception as error:
             raise DatabaseClientCapabilityError(
@@ -2817,6 +2838,8 @@ class CoreAuthDatabase(TimeStampedModel):
         channel = getattr(stdout, "channel", None)
         status = channel.recv_exit_status() if channel is not None else 0
         if status != 0:
+            if database_tls_required_message(f"{output}\n{error}"):
+                raise DatabaseTLSRequiredError()
             # This detail is used only by the classifier and Sentry. Passwords are
             # absent from both the command and client stderr because auth uses files.
             raise RuntimeError(error or f"Database client exited with status {status}.")
@@ -2883,10 +2906,7 @@ class CoreAuthDatabase(TimeStampedModel):
                     username=username,
                     password=password,
                 )
-                option_ssl_mode = ""
-                if use_ssl:
-                    # The MariaDB client rejects the MySQL-style --ssl-mode flag.
-                    option_ssl_mode = "--ssl" if type == self.DatabaseType.MARIADB else "--ssl-mode=PREFERRED"
+                option_ssl_mode = self._mysql_family_ssl_option(type, use_ssl)
 
                 if type in (
                     self.DatabaseType.MYSQL,
@@ -3085,10 +3105,7 @@ class CoreAuthDatabase(TimeStampedModel):
                     username=username,
                     password=password,
                 )
-                option_ssl_mode = ""
-                if use_ssl:
-                    # The MariaDB client rejects the MySQL-style --ssl-mode flag.
-                    option_ssl_mode = "--ssl" if type == self.DatabaseType.MARIADB else "--ssl-mode=PREFERRED"
+                option_ssl_mode = self._mysql_family_ssl_option(type, use_ssl)
 
                 if type in (
                     self.DatabaseType.MYSQL,
@@ -3249,10 +3266,9 @@ class CoreAuthDatabase(TimeStampedModel):
         password = bs_decrypt(self.password, encryption_key)
 
         try:
-            option_ssl_mode = ""
-            if self.use_ssl:
-                # The MariaDB client rejects the MySQL-style --ssl-mode flag.
-                option_ssl_mode = "--ssl" if self.type == self.DatabaseType.MARIADB else "--ssl-mode=PREFERRED"
+            option_ssl_mode = self._mysql_family_ssl_option(
+                self.type, self.use_ssl
+            )
 
             if self.type in (
                 self.DatabaseType.MYSQL,
