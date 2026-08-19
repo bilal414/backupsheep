@@ -3044,7 +3044,10 @@ class CoreAuthDatabase(TimeStampedModel):
                 ssh.close()
                 cleanup_temporary_key(ssh_key_path)
         else:
-            if type == self.DatabaseType.MYSQL:
+            if type in (
+                self.DatabaseType.MYSQL,
+                self.DatabaseType.MARIADB,
+            ):
                 try:
                     self._validate_mysql_family_client_capability(
                         database_type=type,
@@ -3060,29 +3063,9 @@ class CoreAuthDatabase(TimeStampedModel):
                     )
                     db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
                     cursor = db_con.cursor()
-                    cursor.execute("SHOW TABLES")
-                    cursor.fetchall()
-                    cursor.close()
-                    db_con.close()
-                except Exception as e:
-                    raise classified_connection_error(e, stage="database") from e
-            elif type == self.DatabaseType.MARIADB:
-                try:
-                    self._validate_mysql_family_client_capability(
-                        database_type=type,
-                        version=(data or {}).get("version", self.version),
-                        host=host,
-                        port=port,
-                        database_name=database_name,
-                        username=username,
-                        password=password,
-                        use_ssl=use_ssl,
-                        all_databases=all_databases,
-                        include_database_objects=include_database_objects,
+                    cursor.execute(
+                        "SHOW DATABASES" if all_databases else "SHOW TABLES"
                     )
-                    db_con = self._direct_mysql_connect(host, port, username, password, database_name, use_ssl)
-                    cursor = db_con.cursor()
-                    cursor.execute("SHOW TABLES")
                     cursor.fetchall()
                     cursor.close()
                     db_con.close()

@@ -652,6 +652,52 @@ class DatabaseClientCapabilityTests(SimpleTestCase):
 
         self.assertTrue(validate.call_args.kwargs["include_database_objects"])
         self.assertFalse(validate.call_args.kwargs["all_databases"])
+        cursor.execute.assert_called_once_with("SHOW TABLES")
+
+    def test_direct_all_databases_validation_lists_databases_without_selected_database(self):
+        cases = (
+            (
+                CoreAuthDatabase.DatabaseType.MYSQL,
+                CoreAuthDatabase.DatabaseVersion.MYSQL_8_4,
+            ),
+            (
+                CoreAuthDatabase.DatabaseType.MARIADB,
+                CoreAuthDatabase.DatabaseVersion.MARIADB_11_8,
+            ),
+        )
+        for database_type, version in cases:
+            with self.subTest(database_type=database_type):
+                auth = self._auth(database_type, version)
+                connection = mock.Mock()
+                cursor = connection.cursor.return_value
+                cursor.fetchall.return_value = []
+                data = {
+                    "host": "db.internal",
+                    "port": 3306,
+                    "database_name": None,
+                    "username": "backup",
+                    "password": "secret",
+                    "all_databases": True,
+                    "use_ssl": False,
+                    "type": database_type,
+                    "version": version,
+                    "include_stored_procedure": True,
+                    "use_public_key": False,
+                    "use_private_key": False,
+                }
+
+                with mock.patch.object(
+                    auth, "_validate_mysql_family_client_capability"
+                ) as validate, mock.patch.object(
+                    auth, "_direct_mysql_connect", return_value=connection
+                ) as connect:
+                    auth.check_connection(data=data)
+
+                self.assertTrue(validate.call_args.kwargs["all_databases"])
+                connect.assert_called_once_with(
+                    "db.internal", 3306, "backup", "secret", None, False
+                )
+                cursor.execute.assert_called_once_with("SHOW DATABASES")
 
 
 @override_settings(
