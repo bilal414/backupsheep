@@ -51,7 +51,7 @@ class _FakeRestore:
         self.saves.append(tuple(update_fields or ()))
 
 
-def _fake_backup(*, option_postgres=None):
+def _fake_backup(*, option_postgres=None, metadata=None):
     return SimpleNamespace(
         uuid=uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
         uuid_str="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -61,6 +61,7 @@ def _fake_backup(*, option_postgres=None):
         tables=None,
         all_tables=True,
         option_postgres=option_postgres,
+        metadata=metadata,
     )
 
 
@@ -2090,6 +2091,93 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         with self.assertRaises(RestoreError):
             RD._validate_extracted_archive(
                 _fake_backup(), _fake_auth(), self.tmp
+            )
+
+    def test_mysql_contract_v2_accepts_only_authenticated_first_line_preamble(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        preamble = (
+            b"ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n"
+        )
+        payload = preamble + b"CREATE TABLE restored(id integer);\n"
+        with open(sql_path, "wb") as output:
+            output.write(payload)
+        backup = _fake_backup(
+            metadata={
+                "logical_dump": {
+                    "contract_version": 2,
+                    "engine": "mysql",
+                    "database_defaults": {
+                        "source_db": {
+                            "character_set": "utf8mb4",
+                            "collation": "utf8mb4_unicode_ci",
+                        }
+                    },
+                }
+            }
+        )
+
+        for mode in ("fork", "in_place"):
+            with self.subTest(mode=mode):
+                targets, digests = RD._validate_extracted_archive(
+                    backup,
+                    _fake_auth(CoreAuthDatabase.DatabaseType.MYSQL),
+                    self.tmp,
+                    mode=mode,
+                )
+                self.assertEqual(targets, {"source_db": [sql_path]})
+                self.assertEqual(
+                    digests["source_db"][0]["sha256"],
+                    hashlib.sha256(payload).hexdigest(),
+                )
+
+    def test_mysql_contract_v2_rejects_moved_or_mismatched_schema_preamble(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        backup = _fake_backup(
+            metadata={
+                "logical_dump": {
+                    "contract_version": 2,
+                    "engine": "mysql",
+                    "database_defaults": {
+                        "source_db": {
+                            "character_set": "utf8mb4",
+                            "collation": "utf8mb4_unicode_ci",
+                        }
+                    },
+                }
+            }
+        )
+        unsafe_payloads = (
+            b"CREATE TABLE restored(id integer);\n"
+            b"ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n",
+            b"ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;\n"
+            b"CREATE TABLE restored(id integer);\n",
+        )
+
+        for payload in unsafe_payloads:
+            with self.subTest(payload=payload):
+                with open(sql_path, "wb") as output:
+                    output.write(payload)
+                with self.assertRaises(RestoreError):
+                    RD._validate_extracted_archive(
+                        backup,
+                        _fake_auth(CoreAuthDatabase.DatabaseType.MYSQL),
+                        self.tmp,
+                        mode="fork",
+                    )
+
+    def test_historical_mysql_archive_still_rejects_alter_database(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        with open(sql_path, "wb") as output:
+            output.write(
+                b"ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n"
+            )
+
+        with self.assertRaisesRegex(RestoreError, "unsafe client directive"):
+            RD._validate_extracted_archive(
+                _fake_backup(),
+                _fake_auth(CoreAuthDatabase.DatabaseType.MYSQL),
+                self.tmp,
+                mode="fork",
             )
 
     def test_mariadb_fork_accepts_exact_vendor_transaction_scaffolding(self):

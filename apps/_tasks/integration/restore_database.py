@@ -37,6 +37,7 @@ from sentry_sdk import capture_exception
 
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.helper.tasks import delete_from_disk
+from apps._tasks.integration.backup._mysql_schema import database_defaults_preamble
 from apps._tasks.integration.backup._sanitize import safe_password, safe_token
 from apps._tasks.integration.backup.mariadb import (
     _defaults_file_content as _mariadb_defaults_file_content,
@@ -807,6 +808,33 @@ def _mysql_line_has_binlog_restricted_object(line):
     return _MYSQL_BINLOG_RESTRICTED_OBJECT_RE.search(stripped) is not None
 
 
+def _expected_mysql_database_defaults_preamble(backup, auth, source):
+    """Return the exact product-owned schema preamble for contract-v2 dumps."""
+    logical_dump = dict((getattr(backup, "metadata", None) or {}).get("logical_dump") or {})
+    raw_contract = logical_dump.get("contract_version", 1)
+    try:
+        contract_version = int(raw_contract)
+    except (TypeError, ValueError):
+        raise RestoreError("stored backup schema metadata is malformed.") from None
+    if contract_version < 2:
+        return None
+
+    expected_engine = (
+        "mariadb"
+        if auth.type == CoreAuthDatabase.DatabaseType.MARIADB
+        else "mysql"
+    )
+    if logical_dump.get("engine") != expected_engine:
+        raise RestoreError("stored backup schema metadata is malformed.")
+    database_defaults = logical_dump.get("database_defaults")
+    if not isinstance(database_defaults, dict) or source not in database_defaults:
+        raise RestoreError("stored backup schema metadata is incomplete.")
+    try:
+        return database_defaults_preamble(database_defaults[source])
+    except (TypeError, ValueError):
+        raise RestoreError("stored backup schema metadata is malformed.") from None
+
+
 def _validate_extracted_archive(
     backup,
     auth,
@@ -862,6 +890,16 @@ def _validate_extracted_archive(
                 CoreAuthDatabase.DatabaseType.MARIADB,
             )
         )
+        mysql_family_restore = auth.type in (
+            CoreAuthDatabase.DatabaseType.MYSQL,
+            CoreAuthDatabase.DatabaseType.MARIADB,
+        )
+        expected_database_preamble = (
+            _expected_mysql_database_defaults_preamble(backup, auth, source)
+            if mysql_family_restore
+            else None
+        )
+        database_preamble_seen = False
         autocommit_state = "idle"
         # Read the complete file.  ZIP CRC validation happens in
         # extract_backup_zip; this second pass validates the actual restore
@@ -909,7 +947,17 @@ def _validate_extracted_archive(
                         raise RestoreError(
                             "stored SQL contains an unsafe client directive."
                         )
-                if _UNSAFE_SQL_CLIENT_DIRECTIVE_RE.search(line):
+                exact_database_preamble = bool(
+                    expected_database_preamble is not None
+                    and byte_count == 0
+                    and line == expected_database_preamble
+                )
+                if exact_database_preamble:
+                    database_preamble_seen = True
+                if (
+                    _UNSAFE_SQL_CLIENT_DIRECTIVE_RE.search(line)
+                    and not exact_database_preamble
+                ):
                     raise RestoreError("stored SQL contains an unsafe client directive.")
                 lowered = line.lower()
                 if (
@@ -938,6 +986,10 @@ def _validate_extracted_archive(
         if mysql_fork_scaffolding and autocommit_state != "idle":
             raise RestoreError(
                 "stored SQL contains malformed vendor transaction scaffolding."
+            )
+        if expected_database_preamble is not None and not database_preamble_seen:
+            raise RestoreError(
+                "stored SQL is missing its authenticated database schema preamble."
             )
         if byte_count <= 0:
             raise RestoreError("stored database backup contains an empty SQL dump.")
