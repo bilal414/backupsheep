@@ -1293,9 +1293,11 @@ def delete_from_disk(self, backup_uuid, path_type):
     """Remove a backup's local working files from _storage once uploads have settled.
 
     path_type selects what to remove (everything lives under <BASE_DIR>/_storage/):
-        "dir"  -> the working directory  <uuid>/      (uncompressed dump tree)
-        "zip"  -> the archive and commit marker <uuid>.zip/.manifest.json
-        "both" -> the working directory, archive, and commit marker
+        "dir"     -> the working directory  <uuid>/      (uncompressed dump tree)
+        "zip"     -> the archive and commit marker <uuid>.zip/.manifest.json
+        "both"    -> the working directory, archive, and commit marker
+        "restore" -> "both" plus the exact restore generation's local credential
+                     files (my_<uuid>.cnf and ssh_<uuid>)
 
     The run log (<uuid>.log) is intentionally kept on disk and pruned later by
     delete_old_logs; it is never removed here.
@@ -1321,12 +1323,16 @@ def delete_from_disk(self, backup_uuid, path_type):
                 pass
 
     try:
-        if path_type in ("dir", "both"):
+        if path_type in ("dir", "both", "restore"):
             _remove(backup_uuid, is_dir=True)
 
-        if path_type in ("zip", "both"):
+        if path_type in ("zip", "both", "restore"):
             _remove(f"{backup_uuid}.zip", is_dir=False)
             _remove(f"{backup_uuid}.manifest.json", is_dir=False)
+
+        if path_type == "restore":
+            _remove(f"my_{backup_uuid}.cnf", is_dir=False)
+            _remove(f"ssh_{backup_uuid}", is_dir=False)
     except Exception as e:
         capture_exception(e)
         raise self.retry()

@@ -617,6 +617,34 @@ class DiskCleanupTests(TestCase):
             helper_tasks.delete_from_disk.apply(args=["../secret", "dir"])
         self.assertTrue(os.path.exists(os.path.join(base, "secret")))  # not escaped
 
+    def test_delete_from_disk_removes_one_fenced_restore_generation(self):
+        import tempfile
+        base = tempfile.mkdtemp()
+        st = self._storage(base)
+        prefix = "restore_backup-id_0123456789abcdef"
+        os.makedirs(os.path.join(st, prefix))
+        for name in (
+            f"{prefix}.zip",
+            f"{prefix}.manifest.json",
+            f"my_{prefix}.cnf",
+            f"ssh_{prefix}",
+        ):
+            open(os.path.join(st, name), "w").close()
+        log_path = os.path.join(st, "restore_backup-id.log")
+        open(log_path, "w").close()
+
+        with override_settings(BASE_DIR=base):
+            helper_tasks.delete_from_disk.apply(args=[prefix, "restore"])
+
+        self.assertFalse(os.path.exists(os.path.join(st, prefix)))
+        self.assertFalse(os.path.exists(os.path.join(st, f"{prefix}.zip")))
+        self.assertFalse(
+            os.path.exists(os.path.join(st, f"{prefix}.manifest.json"))
+        )
+        self.assertFalse(os.path.exists(os.path.join(st, f"my_{prefix}.cnf")))
+        self.assertFalse(os.path.exists(os.path.join(st, f"ssh_{prefix}")))
+        self.assertTrue(os.path.exists(log_path))
+
     def test_delete_old_logs_prunes_by_age(self):
         import tempfile
         base = tempfile.mkdtemp()

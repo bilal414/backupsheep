@@ -46,6 +46,7 @@ from apps._tasks.integration.restore_common import (
     extract_backup_zip,
     fetch_backup_zip,
     maybe_extract_tar,
+    stale_local_restore_work_prefixes,
 )
 from apps._tasks.integration.restore_lease import RestoreLeaseLost
 from apps.api.v1.utils.api_helpers import bs_decrypt, ensure_disk_space
@@ -1850,7 +1851,13 @@ def restore_website(backup, restore):
     finally:
         # The local path includes the lease token for production deliveries;
         # stale-worker cleanup can therefore never remove a replacement's tree.
-        delete_from_disk.apply_async(args=[work_prefix, "both"])
+        if _has_restore_fence(restore):
+            cleanup_prefixes = stale_local_restore_work_prefixes(restore, backup)
+            cleanup_prefixes.append(work_prefix)
+            for cleanup_prefix in dict.fromkeys(cleanup_prefixes):
+                delete_from_disk.apply_async(args=[cleanup_prefix, "restore"])
+        else:
+            delete_from_disk.apply_async(args=[work_prefix, "both"])
         if temporary_ssh_key and ssh_key_path and os.path.exists(ssh_key_path):
             try:
                 os.remove(ssh_key_path)

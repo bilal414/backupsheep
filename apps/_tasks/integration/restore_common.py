@@ -54,6 +54,24 @@ CHUNK_SIZE = 1024 * 1024
 
 GLACIER_SENTINELS = ("restore_requested", "restore_in_progress")
 
+
+def stale_local_restore_work_prefixes(restore, backup):
+    """Return exact prior fence generations recorded for one restore row."""
+    prefixes = []
+    metadata = dict(getattr(restore, "execution_metadata", None) or {})
+    for takeover in metadata.get("stale_lease_takeovers") or []:
+        if not isinstance(takeover, dict):
+            continue
+        suffix = str(takeover.get("previous_work_suffix") or "").lower()
+        if len(suffix) != 16 or any(
+            character not in "0123456789abcdef" for character in suffix
+        ):
+            continue
+        prefix = f"restore_{backup.uuid_str}_{suffix}"
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+    return prefixes
+
 # These providers historically exposed a browser/view URL from
 # ``generate_download_url``.  A committed upload now contains a durable
 # provider identity, so restore must authenticate to the provider directly and

@@ -408,6 +408,79 @@ class LogicalRestoreCrashSafetyTests(RestoreBackendBase):
         reimport.assert_not_called()
         drop_target.assert_not_called()
 
+    def test_database_takeover_cleans_prior_and_current_local_generations(self):
+        node, backup, restore, _sql_path, _digests, _mapping = self._database_restore()
+        lease, bound = self._claim(
+            restore,
+            "database_restore",
+            f"database-cleanup-crash-{uuid.uuid4().hex}",
+        )
+        stale_prefix = (
+            f"restore_{backup.uuid_str}_{RD._restore_work_suffix(bound, backup)}"
+        )
+        _replacement_lease, replacement = self._take_over(
+            lease,
+            restore,
+            "database_restore_retry",
+            f"database-cleanup-retry-{uuid.uuid4().hex}",
+        )
+        current_prefix = (
+            f"restore_{backup.uuid_str}_{RD._restore_work_suffix(replacement, backup)}"
+        )
+
+        with mock.patch.object(RD, "ensure_disk_space"), mock.patch.object(
+            RD, "delete_from_disk"
+        ) as cleanup:
+            with self.assertRaisesRegex(RestoreError, "storage point"):
+                RD.restore_database(backup, replacement)
+
+        self.assertEqual(
+            cleanup.apply_async.call_args_list,
+            [
+                mock.call(args=[stale_prefix, "restore"]),
+                mock.call(args=[current_prefix, "restore"]),
+            ],
+        )
+
+    def test_website_takeover_cleans_prior_and_current_local_generations(self):
+        node, backup = self._website_backup(all_paths=True)
+        restore = CoreWebsiteRestore.objects.create(
+            backup=backup,
+            name="crash-cleanup-website-restore",
+            params={"delete": False},
+        )
+        lease, bound = self._claim(
+            restore,
+            "website_restore",
+            f"website-cleanup-crash-{uuid.uuid4().hex}",
+        )
+        stale_prefix = (
+            f"restore_{backup.uuid_str}_{RW._restore_work_suffix(bound, backup)}"
+        )
+        _replacement_lease, replacement = self._take_over(
+            lease,
+            restore,
+            "website_restore_retry",
+            f"website-cleanup-retry-{uuid.uuid4().hex}",
+        )
+        current_prefix = (
+            f"restore_{backup.uuid_str}_{RW._restore_work_suffix(replacement, backup)}"
+        )
+
+        with mock.patch.object(RW, "ensure_disk_space"), mock.patch.object(
+            RW, "delete_from_disk"
+        ) as cleanup:
+            with self.assertRaisesRegex(RestoreError, "storage point"):
+                RW.restore_website(backup, replacement)
+
+        self.assertEqual(
+            cleanup.apply_async.call_args_list,
+            [
+                mock.call(args=[stale_prefix, "restore"]),
+                mock.call(args=[current_prefix, "restore"]),
+            ],
+        )
+
     def test_postgresql_stale_lease_replays_rolled_back_atomic_import(self):
         """An importing marker proves a crashed PostgreSQL transaction rolled back."""
         node, backup, restore, sql_path, source_digests, mapping = self._database_restore(

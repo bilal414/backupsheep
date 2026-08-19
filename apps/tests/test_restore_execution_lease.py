@@ -1,5 +1,6 @@
 """Crash/redelivery tests for generic restore execution fencing."""
 
+import hashlib
 import uuid
 from datetime import timedelta
 from unittest import mock
@@ -118,6 +119,29 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         crashed.release()
         current.refresh_from_db()
         self.assertEqual(current.execution_phase, "validated")
+
+    def test_expired_restore_takeover_records_previous_work_suffix(self):
+        _node, _backup, restore = self._restore()
+        crashed = DurableRestoreLease(
+            restore, phase="database_restore", task_id="crashed"
+        )
+        stale = crashed.claim()
+        previous_work_suffix = hashlib.sha256(
+            f"{stale.lease_owner}|{stale.lease_token}".encode("utf-8")
+        ).hexdigest()[:16]
+        self._stop_without_release(crashed)
+        CoreWebsiteRestore.objects.filter(pk=restore.pk).update(
+            lease_expires_at=timezone.now() - timedelta(seconds=1)
+        )
+
+        replacement = DurableRestoreLease(
+            restore, phase="database_restore", task_id="replacement"
+        )
+        current = replacement.claim()
+        self.addCleanup(replacement.release)
+
+        takeover = current.execution_metadata["stale_lease_takeovers"][-1]
+        self.assertEqual(takeover["previous_work_suffix"], previous_work_suffix)
 
     def test_cloud_restore_root_task_id_survives_poll_recovery_takeover(self):
         _node, _backup, restore = self._cloud_restore()

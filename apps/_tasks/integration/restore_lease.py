@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import uuid
@@ -108,18 +109,27 @@ class DurableRestoreLease:
                 metadata["recovery_claimed_task_id"] = self.task_id
             if restore.lease_owner or restore.lease_token:
                 takeovers = list(metadata.get("stale_lease_takeovers") or [])
-                takeovers.append(
-                    {
-                        "detected_at": now.isoformat(),
-                        "previous_owner": restore.lease_owner,
-                        "previous_phase": restore.execution_phase,
-                        "previous_expires_at": (
-                            restore.lease_expires_at.isoformat()
-                            if restore.lease_expires_at
-                            else None
-                        ),
-                    }
-                )
+                previous_owner = str(restore.lease_owner or "")
+                previous_token = str(restore.lease_token or "")
+                takeover = {
+                    "detected_at": now.isoformat(),
+                    "previous_owner": restore.lease_owner,
+                    "previous_phase": restore.execution_phase,
+                    "previous_expires_at": (
+                        restore.lease_expires_at.isoformat()
+                        if restore.lease_expires_at
+                        else None
+                    ),
+                }
+                if previous_owner or previous_token:
+                    # Restore work files are fence-scoped so a stale worker's
+                    # finally block cannot remove a replacement's files. Keep
+                    # the non-secret derived suffix so the replacement can
+                    # later remove only the crashed generation it superseded.
+                    takeover["previous_work_suffix"] = hashlib.sha256(
+                        f"{previous_owner}|{previous_token}".encode("utf-8")
+                    ).hexdigest()[:16]
+                takeovers.append(takeover)
                 metadata["stale_lease_takeovers"] = takeovers[-20:]
 
             self.token = uuid.uuid4()
