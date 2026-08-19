@@ -93,6 +93,44 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         restore.refresh_from_db()
         self.assertEqual(restore.attempt_count, 1)
 
+    def test_long_restore_completion_does_not_rewind_renewed_lease(self):
+        node, backup, restore = self._restore()
+        stale_heartbeat = timezone.now() - timedelta(hours=1)
+        renewed_heartbeat = timezone.now()
+
+        def long_running_engine(_backup, leased_restore):
+            # Model the task-local instance left behind while the heartbeat thread
+            # renews the authoritative row during a long transfer.
+            leased_restore.heartbeat_at = stale_heartbeat
+            leased_restore.lease_expires_at = stale_heartbeat
+            CoreWebsiteRestore.objects.filter(pk=leased_restore.pk).update(
+                heartbeat_at=renewed_heartbeat,
+                lease_expires_at=renewed_heartbeat + timedelta(seconds=90),
+            )
+
+        with mock.patch(
+            "apps._tasks.integration.restore_website.restore_website",
+            side_effect=long_running_engine,
+        ), mock.patch.object(
+            restore_tasks, "notify_restore_started"
+        ), mock.patch.object(
+            restore_tasks, "notify_restore_completed"
+        ) as completed:
+            result = restore_tasks.restore_website_backup.apply(
+                args=[node.id, backup.id, restore.id]
+            )
+
+        self.assertTrue(result.successful(), result.result)
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, restore.Status.COMPLETE)
+        self.assertEqual(restore.execution_phase, "complete")
+        self.assertEqual(restore.heartbeat_at, renewed_heartbeat)
+        self.assertIn(
+            "completed_notification_enqueued_at",
+            restore.execution_metadata,
+        )
+        completed.assert_called_once_with(node, backup, mock.ANY)
+
     def test_expired_restore_takeover_fences_old_worker_save(self):
         _node, _backup, restore = self._restore()
         crashed = DurableRestoreLease(

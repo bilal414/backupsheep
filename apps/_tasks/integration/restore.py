@@ -245,7 +245,21 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
         restore.error = None
         restore.last_error_code = ""
         restore.next_retry_at = None
-        restore.save()
+        # The lease heartbeat is renewed by a separate thread while the engine can
+        # spend hours transferring data.  A full model save here would write the
+        # task's stale in-memory heartbeat/expiry back over that newer lease and can
+        # fence the task at the completion-notification boundary.  Persist only the
+        # terminal outcome fields; lease.release() owns the lease columns.
+        restore.save(
+            update_fields=[
+                "status",
+                "execution_phase",
+                "error",
+                "last_error_code",
+                "next_retry_at",
+                "modified",
+            ]
+        )
         _notify_once(
             restore,
             "completed_notification_enqueued_at",
@@ -266,7 +280,16 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
         )
         if not retryable:
             restore.status = restore.Status.FAILED
-        restore.save()
+        restore.save(
+            update_fields=[
+                "status",
+                "last_error_code",
+                "error",
+                "execution_phase",
+                "next_retry_at",
+                "modified",
+            ]
+        )
         if retryable:
             try:
                 raise task.retry(countdown=retry_delay)
@@ -276,7 +299,16 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
                 restore.last_error_code = "RESTORE_RETRIES_EXHAUSTED"
                 restore.error = "The restore exhausted its automatic retry budget."
                 restore.next_retry_at = None
-                restore.save()
+                restore.save(
+                    update_fields=[
+                        "status",
+                        "execution_phase",
+                        "last_error_code",
+                        "error",
+                        "next_retry_at",
+                        "modified",
+                    ]
+                )
         if restore.status == restore.Status.FAILED:
             _notify_once(
                 restore,
