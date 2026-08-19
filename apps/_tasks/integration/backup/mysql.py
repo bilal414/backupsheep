@@ -268,6 +268,11 @@ def snapshot_mysql(backup):
 
         if node.database.option_skip_opt:
             option_flags.append("--skip-opt")
+            # ``--skip-opt`` disables MySQL's streaming ``--quick`` behavior as
+            # well as extended inserts. Re-enable only streaming after it so an
+            # intentional row-by-row compatibility dump does not buffer the
+            # complete result set in the client process.
+            option_flags.append("--quick")
 
         if "mysql_5" in node.connection.auth_database.version:
             if node.database.option_compress:

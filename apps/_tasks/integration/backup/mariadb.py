@@ -267,6 +267,10 @@ def snapshot_mariadb(backup):
 
         if node.database.option_skip_opt:
             option_flags.append("--skip-opt")
+            # ``--skip-opt`` also disables the client's streaming ``--quick``
+            # behavior. Keep row-by-row output while preventing the dump client
+            # from materializing the complete result set in memory.
+            option_flags.append("--quick")
 
         if node.database.option_compress:
             option_flags.append("--compress")
