@@ -29,6 +29,9 @@ class RestoreLeaseLost(RuntimeError):
     pass
 
 
+SCHEDULED_RETRY_RESERVED_UNTIL = "scheduled_retry_reserved_until"
+
+
 class DurableRestoreLease:
     def __init__(self, restore, *, phase, task_id="", worker_name=""):
         self.model = restore.__class__
@@ -107,6 +110,11 @@ class DurableRestoreLease:
                 metadata.pop("recovery_dispatch_reserved_until", None)
                 metadata["recovery_claimed_at"] = now.isoformat()
                 metadata["recovery_claimed_task_id"] = self.task_id
+            # An orderly task retry writes this reservation before publishing its
+            # countdown delivery.  Any delivery that successfully claims the row
+            # consumes it; a lost publish leaves it for the recovery sweep to
+            # reclaim after the bounded reservation expires.
+            metadata.pop(SCHEDULED_RETRY_RESERVED_UNTIL, None)
             if restore.lease_owner or restore.lease_token:
                 takeovers = list(metadata.get("stale_lease_takeovers") or [])
                 previous_owner = str(restore.lease_owner or "")

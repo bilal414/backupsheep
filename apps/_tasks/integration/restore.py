@@ -6,6 +6,7 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from sentry_sdk import capture_exception
 
 from apps._tasks.exceptions import NodeBackupFailedError
@@ -14,6 +15,7 @@ from apps._tasks.integration.restore_lease import (
     RestoreAlreadyTerminal,
     RestoreLeaseBusy,
     RestoreLeaseLost,
+    SCHEDULED_RETRY_RESERVED_UNTIL,
 )
 from apps._tasks.integration.restore_common import (
     RestoreError,
@@ -211,6 +213,15 @@ def _restore_retry_delay(error, default=120):
     return max(5, min(value, 86400))
 
 
+def _scheduled_retry_reservation_deadline(due_at):
+    """Bound how long recovery waits for an already-published retry delivery."""
+    reservation_seconds = max(
+        30,
+        int(getattr(settings, "RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS", 120)),
+    )
+    return due_at + timedelta(seconds=reservation_seconds)
+
+
 def _notify_once(restore, key, callback):
     metadata = dict(restore.execution_metadata or {})
     if metadata.get(key):
@@ -234,8 +245,12 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
         restore = lease.claim()
     except RestoreAlreadyTerminal:
         return
-    except RestoreLeaseBusy as error:
-        raise task.retry(countdown=error.retry_after, max_retries=2880)
+    except RestoreLeaseBusy:
+        # This delivery is redundant: either a healthy lease owns the row, an
+        # orderly countdown retry is already reserved, or an exact recovery
+        # delivery is already reserved.  Acknowledging it prevents duplicate
+        # chains from growing while durable recovery remains authoritative.
+        return
 
     try:
         _notify_once(
@@ -278,16 +293,28 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
         capture_exception(error)
         code, message, retryable = _restore_error_outcome(error)
         retry_delay = _restore_retry_delay(error) if retryable else None
+        retry_due_at = (
+            timezone.now() + timedelta(seconds=retry_delay)
+            if retryable
+            else None
+        )
+        metadata = dict(restore.execution_metadata or {})
+        if retry_due_at is not None:
+            metadata[SCHEDULED_RETRY_RESERVED_UNTIL] = (
+                _scheduled_retry_reservation_deadline(retry_due_at).isoformat()
+            )
+        else:
+            metadata.pop(SCHEDULED_RETRY_RESERVED_UNTIL, None)
+        restore.execution_metadata = metadata
         restore.last_error_code = code
         restore.error = message
         restore.execution_phase = "retrying" if retryable else "failed"
-        restore.next_retry_at = (
-            timezone.now() + timedelta(seconds=retry_delay) if retryable else None
-        )
+        restore.next_retry_at = retry_due_at
         if not retryable:
             restore.status = restore.Status.FAILED
         restore.save(
             update_fields=[
+                "execution_metadata",
                 "status",
                 "last_error_code",
                 "error",
@@ -298,8 +325,14 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
         )
         if retryable:
             try:
-                raise task.retry(countdown=retry_delay)
+                retry_options = {"countdown": retry_delay}
+                if code == "RESTORE_ARCHIVE_NOT_READY":
+                    retry_options["max_retries"] = 2880
+                raise task.retry(**retry_options)
             except MaxRetriesExceededError:
+                metadata = dict(restore.execution_metadata or {})
+                metadata.pop(SCHEDULED_RETRY_RESERVED_UNTIL, None)
+                restore.execution_metadata = metadata
                 restore.status = restore.Status.FAILED
                 restore.execution_phase = "failed"
                 restore.last_error_code = "RESTORE_RETRIES_EXHAUSTED"
@@ -307,6 +340,7 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
                 restore.next_retry_at = None
                 restore.save(
                     update_fields=[
+                        "execution_metadata",
                         "status",
                         "execution_phase",
                         "last_error_code",
@@ -868,6 +902,20 @@ def _reserve_restore_recovery(model, restore_id, *, now, retry_seconds):
         if restore.next_retry_at and restore.next_retry_at > now:
             return None
         metadata = dict(restore.execution_metadata or {})
+        scheduled_retry_reserved_until = parse_datetime(
+            str(metadata.get(SCHEDULED_RETRY_RESERVED_UNTIL) or "")
+        )
+        if (
+            scheduled_retry_reserved_until is not None
+            and timezone.is_naive(scheduled_retry_reserved_until)
+        ):
+            scheduled_retry_reserved_until = None
+        if (
+            scheduled_retry_reserved_until is not None
+            and scheduled_retry_reserved_until > now
+        ):
+            return None
+        metadata.pop(SCHEDULED_RETRY_RESERVED_UNTIL, None)
         metadata["recovery_enqueued_at"] = now.isoformat()
         metadata["recovery_dispatch_count"] = int(
             metadata.get("recovery_dispatch_count") or 0

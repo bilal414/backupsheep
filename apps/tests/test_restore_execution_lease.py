@@ -2,7 +2,7 @@
 
 import hashlib
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest import mock
 
 from django.test import override_settings
@@ -92,6 +92,31 @@ class RestoreExecutionLeaseTests(BaseTestCase):
 
         restore.refresh_from_db()
         self.assertEqual(restore.attempt_count, 1)
+
+    def test_materialized_duplicate_delivery_is_acknowledged_without_retry_chain(self):
+        node, backup, restore = self._restore()
+        first = DurableRestoreLease(
+            restore, phase="website_restore", task_id="delivery-a"
+        )
+        first.claim()
+        self.addCleanup(first.release)
+        duplicate_task = mock.Mock()
+        duplicate_task.request.id = "delivery-b"
+        duplicate_task.request.hostname = "files@test"
+        engine = mock.Mock()
+
+        result = restore_tasks._run_materialized_restore(
+            duplicate_task,
+            node=node,
+            backup=backup,
+            restore=restore,
+            engine=engine,
+            phase="website_restore",
+        )
+
+        self.assertIsNone(result)
+        duplicate_task.retry.assert_not_called()
+        engine.assert_not_called()
 
     def test_long_restore_completion_does_not_rewind_renewed_lease(self):
         node, backup, restore = self._restore()
@@ -395,6 +420,51 @@ class RestoreExecutionLeaseTests(BaseTestCase):
             backup_serializers._safe_error_message(code),
         )
 
+    @override_settings(RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS=120)
+    def test_archive_rehydration_reserves_one_retry_with_extended_budget(self):
+        class RetrySignal(Exception):
+            pass
+
+        node, backup, restore = self._restore()
+        task = mock.Mock()
+        task.request.id = "archive-delivery"
+        task.request.hostname = "files@test"
+        task.retry.side_effect = RetrySignal()
+        error = RestoreError("provider-body=secret-canary")
+        error.code = "RESTORE_ARCHIVE_NOT_READY"
+        error.retryable = True
+        error.retry_after = 120
+
+        with mock.patch.object(
+            restore_tasks, "notify_restore_started"
+        ), mock.patch.object(restore_tasks, "capture_exception"):
+            with self.assertRaises(RetrySignal):
+                restore_tasks._run_materialized_restore(
+                    task,
+                    node=node,
+                    backup=backup,
+                    restore=restore,
+                    engine=mock.Mock(side_effect=error),
+                    phase="website_restore",
+                )
+
+        task.retry.assert_called_once_with(countdown=120, max_retries=2880)
+        restore.refresh_from_db()
+        self.assertEqual(
+            restore.last_error_code,
+            "RESTORE_ARCHIVE_NOT_READY",
+        )
+        self.assertEqual(restore.execution_phase, "retrying")
+        self.assertGreater(restore.next_retry_at, timezone.now())
+        reservation = restore.execution_metadata[
+            restore_tasks.SCHEDULED_RETRY_RESERVED_UNTIL
+        ]
+        self.assertGreater(
+            datetime.fromisoformat(reservation),
+            restore.next_retry_at,
+        )
+        self.assertFalse(restore.lease_owner)
+
     def test_provider_request_failure_is_terminal_without_explicit_retry_contract(self):
         error = RestoreError("provider rejected request with secret details")
         error.code = "PROVIDER_REQUEST_FAILED"
@@ -529,6 +599,99 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         self.assertEqual(
             restore.execution_metadata["recovery_dispatch_count"], 1
         )
+
+    @override_settings(
+        RESTORE_RECOVERY_STALE_SECONDS=1,
+        RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS=120,
+        RESTORE_RECOVERY_BATCH_SIZE=10,
+    )
+    def test_recovery_sweep_respects_orderly_retry_reservation(self):
+        _node, _backup, restore = self._restore()
+        now = timezone.now()
+        CoreWebsiteRestore.objects.filter(pk=restore.pk).update(
+            status=restore.Status.IN_PROGRESS,
+            next_retry_at=now - timedelta(seconds=1),
+            execution_metadata={
+                restore_tasks.SCHEDULED_RETRY_RESERVED_UNTIL: (
+                    now + timedelta(seconds=120)
+                ).isoformat()
+            },
+        )
+
+        with mock.patch.object(restore_tasks.current_app, "send_task") as send_task:
+            restore_tasks.resume_in_progress_restores.run()
+
+        send_task.assert_not_called()
+        restore.refresh_from_db()
+        self.assertIn(
+            restore_tasks.SCHEDULED_RETRY_RESERVED_UNTIL,
+            restore.execution_metadata,
+        )
+
+    @override_settings(
+        RESTORE_RECOVERY_STALE_SECONDS=1,
+        RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS=120,
+        RESTORE_RECOVERY_BATCH_SIZE=10,
+    )
+    def test_recovery_sweep_reclaims_expired_orderly_retry_reservation(self):
+        node, backup, restore = self._restore()
+        now = timezone.now()
+        CoreWebsiteRestore.objects.filter(pk=restore.pk).update(
+            status=restore.Status.IN_PROGRESS,
+            next_retry_at=now - timedelta(seconds=1),
+            execution_metadata={
+                restore_tasks.SCHEDULED_RETRY_RESERVED_UNTIL: (
+                    now - timedelta(seconds=1)
+                ).isoformat()
+            },
+        )
+
+        with mock.patch.object(restore_tasks.current_app, "send_task") as send_task:
+            restore_tasks.resume_in_progress_restores.run()
+
+        send_task.assert_called_once_with(
+            "restore_website_backup",
+            task_id=(
+                f"recover-restore-{CoreWebsiteRestore.__name__}-{restore.pk}"
+            ),
+            args=[node.id, backup.id, restore.id],
+        )
+        restore.refresh_from_db()
+        self.assertNotIn(
+            restore_tasks.SCHEDULED_RETRY_RESERVED_UNTIL,
+            restore.execution_metadata,
+        )
+        self.assertEqual(
+            restore.execution_metadata["recovery_dispatch_count"],
+            1,
+        )
+
+    def test_due_retry_claim_consumes_orderly_retry_reservation(self):
+        _node, _backup, restore = self._restore()
+        now = timezone.now()
+        CoreWebsiteRestore.objects.filter(pk=restore.pk).update(
+            status=restore.Status.IN_PROGRESS,
+            next_retry_at=now - timedelta(seconds=1),
+            execution_metadata={
+                restore_tasks.SCHEDULED_RETRY_RESERVED_UNTIL: (
+                    now + timedelta(seconds=120)
+                ).isoformat()
+            },
+        )
+        restore.refresh_from_db()
+        retry = DurableRestoreLease(
+            restore,
+            phase="website_restore",
+            task_id="archive-delivery",
+        )
+        claimed = retry.claim()
+        self.addCleanup(retry.release)
+
+        self.assertNotIn(
+            restore_tasks.SCHEDULED_RETRY_RESERVED_UNTIL,
+            claimed.execution_metadata,
+        )
+        self.assertIsNone(claimed.next_retry_at)
 
     @override_settings(
         RESTORE_RECOVERY_STALE_SECONDS=1,
