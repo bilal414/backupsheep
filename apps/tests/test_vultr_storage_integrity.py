@@ -130,7 +130,11 @@ class VultrStorageIntegrityTests(BaseTestCase):
 
     def test_upload_notification_tolerates_legacy_safe_message(self):
         node = self.point.backup.website.node
-        with mock.patch("apps.console.node.models.capture_exception") as capture:
+        with mock.patch(
+            "apps.console.node.models.capture_exception"
+        ) as capture, mock.patch(
+            "apps._tasks.helper.tasks.send_postmark_email"
+        ):
             node.notify_upload_fail(
                 "The storage upload could not be completed.",
                 self.point.backup,
