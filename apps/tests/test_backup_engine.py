@@ -3044,6 +3044,48 @@ class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
         self.assertNotIn("_execution_progress_callback", backup.__dict__)
         self.assertNotIn("_execution_progress_floor", backup.__dict__)
 
+    def test_source_ready_parent_waits_for_a_storage_worker_claim(self):
+        node, backup = self._make_backup()
+        storage = factories.make_storage(
+            self.account,
+            self.member,
+            code="local",
+            bucket=f"source-ready-{uuid.uuid4().hex[:12]}",
+        )
+        CoreStorageLocal.objects.create(storage=storage, path=None)
+        CoreWebsiteBackupStoragePoints.objects.create(
+            backup=backup,
+            storage=storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_READY,
+        )
+        execution = SimpleNamespace(
+            state=SimpleNamespace(progress_completed=0),
+            progress=mock.Mock(),
+            ensure_owned=mock.Mock(),
+        )
+        artifact = SimpleNamespace(byte_count=321)
+
+        with mock.patch(
+            "apps._tasks.execution.verify_and_commit_source_artifact",
+            return_value=artifact,
+        ), mock.patch("apps.console.node.models.chord") as queued_chord:
+            _resume_local_backup_owned(
+                backup,
+                node,
+                mock.Mock(),
+                "stored_website_backups",
+                CoreWebsiteBackupStoragePoints.Status,
+                execution,
+            )
+
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.DOWNLOAD_COMPLETE)
+        self.assertEqual(
+            CoreWebsiteBackupSerializer(backup).data["execution_status"]["phase"],
+            "source_ready",
+        )
+        queued_chord.return_value.apply_async.assert_called_once_with()
+
     def test_directory_symlink_is_rejected_before_archive_publication(self):
         _node, backup = self._make_backup()
         tmp = self._tree()

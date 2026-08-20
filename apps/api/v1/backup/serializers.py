@@ -103,6 +103,9 @@ _TERMINAL_STATUS_PHASES = {
 _AUTHORITATIVE_ACTIVE_STATUS_PHASES = {
     "ready_for_upload": "source_ready",
     "download_complete": "source_ready",
+    "upload_in_progress": "uploading",
+    "upload_complete": "validating",
+    "upload_validation": "validating",
 }
 # Restore engines persist detailed component checkpoints while the parent
 # restore row is still active.  In particular, ``database_complete`` and

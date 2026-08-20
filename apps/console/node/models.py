@@ -12149,8 +12149,12 @@ def _resume_local_backup_owned(
         ]
 
         if storage_upload_task_list:
-            backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
-            backup.save(update_fields=["status", "modified"])
+            # The immutable source archive is ready, but no destination worker has
+            # claimed an upload yet.  Keep DOWNLOAD_COMPLETE authoritative during
+            # that queue wait so the public phase can truthfully render
+            # ``source_ready``.  The first storage worker that acquires a fenced
+            # point lease moves the parent to UPLOAD_IN_PROGRESS immediately before
+            # touching the destination.
             chord(
                 storage_upload_task_list,
                 finalize_backup.si(node.id, backup.id),

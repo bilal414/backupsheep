@@ -15,6 +15,7 @@ from apps._tasks.integration.storage.lease import (
     StorageUploadLeaseBusy,
 )
 from apps._tasks.integration.storage.tasks import (
+    _mark_storage_upload_started,
     storage_cleanup_owned_multipart,
     storage_sweep_owned_multipart_cleanup,
 )
@@ -114,6 +115,20 @@ class StorageExecutionLeaseTests(BaseTestCase):
         point.refresh_from_db()
         self.assertEqual(point.upload_attempt_count, 1)
         self.assertEqual(point.upload_lease_owner, first.owner)
+
+    def test_source_ready_parent_moves_only_after_storage_claim_boundary(self):
+        backup, point = self._point()
+        backup.status = UtilBackup.Status.DOWNLOAD_COMPLETE
+        backup.save(update_fields=["status", "modified"])
+
+        lease = DurableStorageUploadLease(point, task_id="storage-claim")
+        lease.claim()
+        self.addCleanup(lease.release)
+        self.assertTrue(_mark_storage_upload_started(backup))
+
+        backup.refresh_from_db()
+        self.assertEqual(backup.status, UtilBackup.Status.UPLOAD_IN_PROGRESS)
+        self.assertFalse(_mark_storage_upload_started(backup))
 
     def test_expired_takeover_fences_worker_that_resumes_after_crash(self):
         _backup, point = self._point()

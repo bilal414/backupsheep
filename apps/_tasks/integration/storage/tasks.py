@@ -110,6 +110,29 @@ class SourceArtifactInvalid(RuntimeError):
     pass
 
 
+def _mark_storage_upload_started(backup):
+    """Move a source-ready parent into upload only after a point is claimed.
+
+    The conditional update preserves terminal decisions and makes parallel point
+    claims idempotent.  It deliberately does not touch the execution lease: the
+    source worker may still be releasing its fenced ``source_dispatch`` lease while
+    a fast storage worker starts.
+    """
+    updated = backup.__class__.objects.filter(
+        pk=backup.pk,
+        status__in=(
+            UtilBackup.Status.DOWNLOAD_COMPLETE,
+            UtilBackup.Status.UPLOAD_READY,
+        ),
+    ).update(
+        status=UtilBackup.Status.UPLOAD_IN_PROGRESS,
+        modified=timezone.now(),
+    )
+    if updated:
+        backup.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
+    return bool(updated)
+
+
 _STORAGE_AUTH_CODES = {
     "AccessDenied",
     "ExpiredToken",
@@ -490,6 +513,8 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
             countdown=error.retry_after,
             max_retries=2880,
         )
+
+    _mark_storage_upload_started(backup)
 
     log_file_path = f"_storage/{backup.uuid_str}.log"
     try:
