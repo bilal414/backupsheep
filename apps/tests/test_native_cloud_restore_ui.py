@@ -48,10 +48,13 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
             self.source,
         )
         self.assertIn(
-            "openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid }}', '{{ backup.status }}')",
+            "openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid }}', '3')",
             self.source,
         )
-        self.assertIn("{% if backup.status == 3 %}", self.source)
+        self.assertIn(
+            "loaded ? Boolean(view && view.category === 'complete')",
+            self.source,
+        )
         self.assertIn("if (String(backupStatus) !== '3') return;", self.source)
         self.assertIn("this.nativeRestoreStarted ||", self.source)
 
