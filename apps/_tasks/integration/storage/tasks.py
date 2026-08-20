@@ -957,6 +957,23 @@ def finalize_backup(self, node_id, backup_id):
         backup.status = final_status
         backup.metadata = metadata
         backup.save(update_fields=["status", "metadata", "modified"])
+        if (
+            final_status
+            in {UtilBackup.Status.PARTIAL, UtilBackup.Status.UPLOAD_FAILED}
+            and any(
+                point.last_error_code == "STORAGE_RETRIES_EXHAUSTED"
+                for point in storage_points
+            )
+        ):
+            # A retrying destination records a transient parent error while its
+            # ETA delivery is still live. Once that destination exhausts its
+            # budget, the finalizer must replace the stale retry guidance before
+            # exposing a terminal partial/failure row.
+            backup.record_execution_error(
+                code="STORAGE_RETRIES_EXHAUSTED",
+                retryable=False,
+                retry_at=None,
+            )
         if final_status in UtilBackup.SUCCESS_STATUSES:
             terminal_phase = "complete"
         elif final_status == UtilBackup.Status.CANCELLED:

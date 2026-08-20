@@ -223,6 +223,10 @@ class UtilBackup(TimeStampedModel):
         "STORAGE_TRANSIENT_FAILURE": (
             "The storage provider is temporarily unavailable; processing will resume later."
         ),
+        "STORAGE_RETRIES_EXHAUSTED": (
+            "Automatic storage retries were exhausted. Review the failed destination "
+            "before starting another upload."
+        ),
         "STORAGE_INTEGRITY_FAILED": (
             "The uploaded object failed integrity verification."
         ),

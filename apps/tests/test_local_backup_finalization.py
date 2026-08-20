@@ -1,11 +1,14 @@
 """Regression coverage for provider-independent local backup finalization."""
 
+from datetime import timedelta
 import uuid
 from pathlib import Path
 from unittest import mock
 
 from django.test import SimpleTestCase
+from django.utils import timezone
 
+from apps.api.v1.backup.database.serializers import CoreDatabaseBackupSerializer
 from apps.api.v1.backup.website.serializers import CoreWebsiteBackupSerializer
 from apps._tasks.integration.storage.tasks import finalize_backup
 from apps.console.backup.models import (
@@ -197,6 +200,14 @@ class LocalBackupFinalizationTests(BaseTestCase):
                 CoreDatabaseBackupStoragePoints.Status.UPLOAD_FAILED,
             ],
         )
+        failed_point = point_model.objects.filter(backup=backup).last()
+        failed_point.last_error_code = "STORAGE_RETRIES_EXHAUSTED"
+        failed_point.save(update_fields=["last_error_code", "modified"])
+        backup.record_execution_error(
+            code="STORAGE_TRANSIENT_FAILURE",
+            retryable=True,
+            retry_at=timezone.now() + timedelta(minutes=15),
+        )
         account_log = mock.patch.object(CoreAccount, "create_backup_log")
         with account_log as create_backup_log, mock.patch(
             "apps._tasks.helper.tasks.delete_from_disk.apply_async"
@@ -218,11 +229,29 @@ class LocalBackupFinalizationTests(BaseTestCase):
         state = backup.get_execution_state()
         self.assertEqual(backup.status, UtilBackup.Status.PARTIAL)
         self.assertEqual(state.phase, "complete")
+        self.assertEqual(state.last_error_code, "STORAGE_RETRIES_EXHAUSTED")
+        self.assertEqual(
+            state.last_error_message,
+            "Automatic storage retries were exhausted. Review the failed "
+            "destination before starting another upload.",
+        )
+        self.assertIsNone(state.next_retry_at)
         self.assertEqual(state.finished_at, first_finished_at)
         self.assertEqual(create_backup_log.call_count, 1)
         self.assertEqual(
             backup.metadata["storage_upload_summary"]["partial"],
             True,
+        )
+        execution_status = CoreDatabaseBackupSerializer(backup).data[
+            "execution_status"
+        ]
+        self.assertEqual(
+            execution_status["last_error_code"], "STORAGE_RETRIES_EXHAUSTED"
+        )
+        self.assertEqual(
+            execution_status["last_error_message"],
+            "Automatic storage retries were exhausted. Review the failed "
+            "destination before starting another upload.",
         )
 
     def test_upload_failed_finalization_is_terminal_and_not_in_progress(self):
@@ -270,3 +299,8 @@ class LocalBackupFinalizationUiContractTests(SimpleTestCase):
             self.source,
         )
         self.assertIn("Partially complete", self.source)
+        self.assertIn(
+            "Automatic storage retries were exhausted. Review the failed "
+            "destination before starting another upload.",
+            self.source,
+        )
