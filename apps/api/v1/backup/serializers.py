@@ -103,10 +103,22 @@ _TERMINAL_STATUS_PHASES = {
 _AUTHORITATIVE_ACTIVE_STATUS_PHASES = {
     "ready_for_upload": "source_ready",
     "download_complete": "source_ready",
-    "upload_in_progress": "uploading",
     "upload_complete": "validating",
     "upload_validation": "validating",
 }
+_LOCAL_UPLOAD_STATUS_TOKENS = {
+    "ready_for_upload",
+    "download_complete",
+    "upload_in_progress",
+    "upload_complete",
+    "upload_validation",
+}
+_LOCAL_STORAGE_RELATIONS = (
+    "stored_website_backups",
+    "stored_database_backups",
+    "stored_wordpress_backups",
+    "stored_basecamp_backups",
+)
 # Restore engines persist detailed component checkpoints while the parent
 # restore row is still active.  In particular, ``database_complete`` and
 # ``website_complete`` mean that one component finished; they are not terminal
@@ -617,6 +629,61 @@ def _artifact_for(obj):
     return artifact
 
 
+def _local_storage_relation(obj):
+    for relation_name in _LOCAL_STORAGE_RELATIONS:
+        relation = getattr(obj, relation_name, None)
+        if relation is not None:
+            return relation
+    return None
+
+
+def _point_phase(point_model, statuses):
+    """Resolve an active local backup from its durable destination rows."""
+    statuses = list(statuses or ())
+    if not statuses:
+        return None
+    status_type = point_model.Status
+    if any(
+        status == getattr(status_type, "UPLOAD_VALIDATION", None)
+        for status in statuses
+    ):
+        return "validating"
+    if any(
+        status == getattr(status_type, "UPLOAD_IN_PROGRESS", None)
+        for status in statuses
+    ):
+        return "uploading"
+    if any(
+        status == getattr(status_type, "UPLOAD_RETRY", None)
+        for status in statuses
+    ):
+        return "retrying"
+    ready = getattr(status_type, "UPLOAD_READY", None)
+    if ready is not None and any(status == ready for status in statuses):
+        return "source_ready"
+    complete = getattr(status_type, "UPLOAD_COMPLETE", None)
+    if complete is not None and all(status == complete for status in statuses):
+        return "validating"
+    return None
+
+
+def _storage_point_phase(obj, legacy_status):
+    if legacy_status not in _LOCAL_UPLOAD_STATUS_TOKENS:
+        return None
+    if getattr(obj, "_api_storage_point_phase_loaded", False):
+        return getattr(obj, "_api_storage_point_phase", None)
+    relation = _local_storage_relation(obj)
+    phase = None
+    if relation is not None:
+        phase = _point_phase(
+            relation.model,
+            relation.values_list("status", flat=True),
+        )
+    obj._api_storage_point_phase = phase
+    obj._api_storage_point_phase_loaded = True
+    return phase
+
+
 def _backup_execution_status(obj, state=None, artifact=None):
     state = _execution_state_for(obj) if state is None else state
     artifact = _artifact_for(obj) if artifact is None else artifact
@@ -648,6 +715,9 @@ def _backup_execution_status(obj, state=None, artifact=None):
         public_stage = _safe_token(execution_metadata.get("public_stage"))
         if public_stage in _PUBLIC_BACKUP_STAGES:
             phase_value = public_stage
+    storage_phase = _storage_point_phase(obj, legacy_status)
+    if storage_phase:
+        phase_value = storage_phase
     return {
         "durable": bool(state),
         "correlation_id": str(state.correlation_id) if state else None,
@@ -797,6 +867,28 @@ class BackupExecutionStatusListSerializer(serializers.ListSerializer):
                 item._api_execution_state_loaded = True
                 item._api_artifact = artifact_by_id.get(item.pk)
                 item._api_artifact_loaded = True
+            upload_items = [
+                item
+                for item in items
+                if _public_status(item) in _LOCAL_UPLOAD_STATUS_TOKENS
+            ]
+            for item in items:
+                item._api_storage_point_phase = None
+                item._api_storage_point_phase_loaded = True
+            if upload_items:
+                relation = _local_storage_relation(upload_items[0])
+                if relation is not None:
+                    statuses_by_id = {}
+                    rows = relation.model.objects.filter(
+                        backup_id__in=[item.pk for item in upload_items]
+                    ).values_list("backup_id", "status")
+                    for backup_id, status in rows:
+                        statuses_by_id.setdefault(backup_id, []).append(status)
+                    for item in upload_items:
+                        item._api_storage_point_phase = _point_phase(
+                            relation.model,
+                            statuses_by_id.get(item.pk, ()),
+                        )
         return super().to_representation(items)
 
 

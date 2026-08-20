@@ -19,6 +19,7 @@ from apps.console.backup.models import (
     CoreBackupArtifact,
     CoreBackupExecution,
     CoreWebsiteBackup,
+    CoreWebsiteBackupStoragePoints,
     CoreWebsiteRestore,
 )
 from apps.console.utils.models import UtilBackup
@@ -218,6 +219,33 @@ class ExecutionStatusApiTests(BaseTestCase):
         self.assertNotIn("provider-secret-canary", json.dumps(redacted))
         self.assertNotIn("reconciliation-secret-canary", json.dumps(redacted))
 
+    def test_local_storage_point_state_drives_source_upload_and_retry_phases(self):
+        cases = (
+            (CoreWebsiteBackupStoragePoints.Status.UPLOAD_READY, "source_ready"),
+            (CoreWebsiteBackupStoragePoints.Status.UPLOAD_RETRY, "retrying"),
+            (CoreWebsiteBackupStoragePoints.Status.UPLOAD_IN_PROGRESS, "uploading"),
+            (CoreWebsiteBackupStoragePoints.Status.UPLOAD_VALIDATION, "validating"),
+            (CoreWebsiteBackupStoragePoints.Status.UPLOAD_COMPLETE, "validating"),
+        )
+        for point_status, expected in cases:
+            with self.subTest(point_status=point_status):
+                backup = self._backup()
+                storage = factories.make_storage(
+                    self.account,
+                    self.member,
+                    code="local",
+                    bucket=f"phase-{uuid.uuid4().hex[:12]}",
+                )
+                CoreWebsiteBackupStoragePoints.objects.create(
+                    backup=backup,
+                    storage=storage,
+                    status=point_status,
+                )
+                self._execution(backup, phase="source_dispatch")
+
+                status = CoreWebsiteBackupSerializer(backup).data["execution_status"]
+                self.assertEqual(status["phase"], expected)
+
     def test_progress_updates_are_visible_and_monotonic(self):
         backup = self._backup()
         state = self._execution(backup)
@@ -289,6 +317,28 @@ class ExecutionStatusApiTests(BaseTestCase):
         second = self._backup()
         self._execution(first)
         self._execution(second, phase="polling")
+        first_storage = factories.make_storage(
+            self.account,
+            self.member,
+            code="local",
+            bucket=f"bulk-phase-{uuid.uuid4().hex[:12]}",
+        )
+        second_storage = factories.make_storage(
+            self.account,
+            self.member,
+            code="local",
+            bucket=f"bulk-phase-{uuid.uuid4().hex[:12]}",
+        )
+        CoreWebsiteBackupStoragePoints.objects.create(
+            backup=first,
+            storage=first_storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_READY,
+        )
+        CoreWebsiteBackupStoragePoints.objects.create(
+            backup=second,
+            storage=second_storage,
+            status=CoreWebsiteBackupStoragePoints.Status.UPLOAD_RETRY,
+        )
 
         with CaptureQueriesContext(connection) as captured:
             data = CoreWebsiteBackupSerializer(
@@ -304,10 +354,15 @@ class ExecutionStatusApiTests(BaseTestCase):
             query for query in captured.captured_queries
             if "core_backup_artifact" in query["sql"]
         ]
+        point_queries = [
+            query for query in captured.captured_queries
+            if "core_website_backup_mtm_storage_points" in query["sql"]
+        ]
         self.assertEqual(len(execution_queries), 1)
         self.assertEqual(len(artifact_queries), 1)
-        self.assertEqual(data[0]["execution_status"]["phase"], "uploading")
-        self.assertEqual(data[1]["execution_status"]["phase"], "polling")
+        self.assertEqual(len(point_queries), 1)
+        self.assertEqual(data[0]["execution_status"]["phase"], "source_ready")
+        self.assertEqual(data[1]["execution_status"]["phase"], "retrying")
 
     def test_every_provider_backup_serializer_exposes_the_same_status_field(self):
         serializers = {
