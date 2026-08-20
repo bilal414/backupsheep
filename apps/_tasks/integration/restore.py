@@ -59,6 +59,12 @@ def _restore_error_outcome(error):
                 "The storage provider rate limit was reached; the restore will resume automatically.",
                 True,
             )
+        if declared_code == "RESTORE_ARCHIVE_NOT_READY":
+            return (
+                "RESTORE_ARCHIVE_NOT_READY",
+                "The storage provider is restoring this archive; the restore will resume automatically when it is ready.",
+                True,
+            )
         if declared_code in {
             "PROVIDER_TRANSIENT_FAILURE",
             "PROVIDER_TRANSIENT_OUTAGE",

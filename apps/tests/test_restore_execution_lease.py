@@ -376,6 +376,20 @@ class RestoreExecutionLeaseTests(BaseTestCase):
                 self.assertNotIn("secret", message)
                 self.assertIn(code, {"RATE_LIMITED", "RESTORE_TRANSIENT_FAILURE"})
 
+    def test_archive_rehydration_has_a_safe_retryable_outcome(self):
+        error = RestoreError("provider-body=secret-canary")
+        error.code = "RESTORE_ARCHIVE_NOT_READY"
+        error.retryable = True
+        error.retry_after = 120
+
+        code, message, retryable = restore_tasks._restore_error_outcome(error)
+
+        self.assertEqual(code, "RESTORE_ARCHIVE_NOT_READY")
+        self.assertTrue(retryable)
+        self.assertIn("restoring this archive", message)
+        self.assertNotIn("secret-canary", message)
+        self.assertEqual(restore_tasks._restore_retry_delay(error), 120)
+
     def test_provider_request_failure_is_terminal_without_explicit_retry_contract(self):
         error = RestoreError("provider rejected request with secret details")
         error.code = "PROVIDER_REQUEST_FAILED"

@@ -2213,6 +2213,18 @@ def _is_multipart_etag(value):
     )
 
 
+def _vultr_archive_restore_in_progress(head, provider_code):
+    """Return whether Vultr is still rehydrating an authenticated archive."""
+    if provider_code != "vultr" or not isinstance(head, dict):
+        return False
+    storage_class = str(head.get("StorageClass") or "").strip().upper()
+    restore_state = str(head.get("Restore") or "").strip().lower()
+    return (
+        storage_class == "VULTR_ARCHIVE"
+        and 'ongoing-request="true"' in restore_state
+    )
+
+
 def _validate_s3_compatible_head(
     head,
     state,
@@ -2326,7 +2338,7 @@ def _s3_compatible_download(stored_backup, dest_zip_path, expected, state, provi
                 allow_vultr_zero_length=True,
             )
 
-        verified_head()
+        initial = verified_head()
         if legacy_bucket_unbound:
             _persist_s3_bucket_binding(
                 stored_backup,
@@ -2336,6 +2348,13 @@ def _s3_compatible_download(stored_backup, dest_zip_path, expected, state, provi
             )
             state["bucket"] = bucket
             state["_legacy_bucket_unbound"] = False
+        if _vultr_archive_restore_in_progress(initial, provider_code):
+            raise _SafeProviderRestoreError(
+                "RESTORE_ARCHIVE_NOT_READY",
+                f"the committed {provider} archive is still being restored.",
+                retryable=True,
+                retry_after=120,
+            )
         response = client.get_object(**request)
         _validate_s3_compatible_head(
             response,

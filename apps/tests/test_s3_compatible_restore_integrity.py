@@ -199,6 +199,70 @@ class S3CompatibleRestoreIntegrityTests(SimpleTestCase):
         client.get_object.assert_called_once_with(**request)
         self.assertEqual(client.head_object.call_count, 2)
 
+    def test_vultr_archive_rehydration_defers_before_get(self):
+        point, _config, _key, state = self._point("vultr")
+        state["etag"] = '"0123456789abcdef0123456789abcdef-7881"'
+        client = mock.Mock(name="vultr-archive-client")
+        client.head_object.return_value = self._head(
+            point,
+            state,
+            ContentLength=0,
+            StorageClass="VULTR_ARCHIVE",
+            Restore='ongoing-request="true"',
+        )
+
+        with mock.patch(
+            "apps._tasks.integration.storage.vultr._s3_client",
+            return_value=client,
+        ):
+            with self.assertRaises(restore_common.RestoreError) as raised:
+                restore_common.fetch_backup_zip(
+                    point,
+                    os.path.join(self.tmp, "vultr-archive.zip"),
+                )
+
+        self.assertEqual(raised.exception.code, "RESTORE_ARCHIVE_NOT_READY")
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.retry_after, 120)
+        client.get_object.assert_not_called()
+
+    def test_vultr_rehydrated_archive_downloads_exact_object(self):
+        point, _config, _key, state = self._point("vultr")
+        state["etag"] = '"0123456789abcdef0123456789abcdef-7881"'
+        zero_length_head = self._head(
+            point,
+            state,
+            ContentLength=0,
+            StorageClass="VULTR_ARCHIVE",
+            Restore='ongoing-request="false"',
+        )
+        exact_get = self._head(
+            point,
+            state,
+            StorageClass="VULTR_ARCHIVE",
+            Restore='ongoing-request="false"',
+        )
+        client = mock.Mock(name="vultr-rehydrated-archive-client")
+        client.head_object.side_effect = [
+            dict(zero_length_head),
+            dict(zero_length_head),
+        ]
+        client.get_object.return_value = {
+            **exact_get,
+            "Body": io.BytesIO(self.payload),
+        }
+        destination = os.path.join(self.tmp, "vultr-rehydrated-archive.zip")
+
+        with mock.patch(
+            "apps._tasks.integration.storage.vultr._s3_client",
+            return_value=client,
+        ):
+            restore_common.fetch_backup_zip(point, destination)
+
+        with open(destination, "rb") as restored:
+            self.assertEqual(restored.read(), self.payload)
+        client.get_object.assert_called_once()
+
     def test_zero_length_head_exception_is_vultr_multipart_only(self):
         cases = (
             ("do_spaces", '"0123456789abcdef0123456789abcdef-2"'),
