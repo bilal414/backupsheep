@@ -168,6 +168,28 @@ class NativeCloudRestoreUiTemplateTests(SimpleTestCase):
         self.assertNotIn("item.error", error_block)
         self.assertIn("QUOTA_EXCEEDED", self.source)
 
+    def test_hidden_native_restore_details_guard_null_status(self):
+        guarded_expressions = (
+            "nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.provider_status : ''",
+            "nativeRestoreStatus ? nativeRestoreStatus.resource_id : ''",
+            "nativeRestoreStatus ? nativeRestoreStatus.provider_job_id : ''",
+            "nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.next_retry_at : ''",
+            "nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.last_error_code : ''",
+        )
+        for expression in guarded_expressions:
+            with self.subTest(expression=expression):
+                self.assertIn(f'x-text="{expression}"', self.source)
+
+        for unsafe_expression in (
+            'x-text="nativeRestoreStatus.execution_status.provider_status"',
+            'x-text="nativeRestoreStatus.resource_id"',
+            'x-text="nativeRestoreStatus.provider_job_id"',
+            'x-text="nativeRestoreStatus.execution_status.next_retry_at"',
+            'x-text="nativeRestoreStatus.execution_status.last_error_code"',
+        ):
+            with self.subTest(unsafe_expression=unsafe_expression):
+                self.assertNotIn(unsafe_expression, self.source)
+
     def test_in_progress_reconciliation_does_not_stop_browser_polling(self):
         shared_category = self.source.split(
             "function categoryFor({status, phase, providerStatus, reconciliationState, errorCode, retryAt})",

@@ -1513,17 +1513,17 @@
                                     Phase: <span class="font-medium text-slate-700" x-text="nativeRestorePhaseLabel(nativeRestoreStatus)"></span>
                                 </p>
                                 <p x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.provider_status" class="text-xs text-slate-500">
-                                    Provider: <span class="font-medium text-slate-700" x-text="nativeRestoreStatus.execution_status.provider_status"></span>
+                                    Provider: <span class="font-medium text-slate-700" x-text="nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.provider_status : ''"></span>
                                 </p>
                                 <p x-show="nativeRestoreStatus && nativeRestoreStatus.resource_id" class="mt-2 break-all text-xs text-slate-500">
-                                    Provider resource ID: <span class="font-mono text-slate-700" x-text="nativeRestoreStatus.resource_id"></span>
+                                    Provider resource ID: <span class="font-mono text-slate-700" x-text="nativeRestoreStatus ? nativeRestoreStatus.resource_id : ''"></span>
                                 </p>
                                 <p x-show="nativeRestoreStatus && nativeRestoreStatus.provider_job_id" class="break-all text-xs text-slate-500">
-                                    Provider job ID: <span class="font-mono text-slate-700" x-text="nativeRestoreStatus.provider_job_id"></span>
+                                    Provider job ID: <span class="font-mono text-slate-700" x-text="nativeRestoreStatus ? nativeRestoreStatus.provider_job_id : ''"></span>
                                 </p>
                                 <p x-show="nativeRestoreStatus && nativeRestoreStatusError(nativeRestoreStatus)" class="mt-2 text-sm font-medium text-red-700" role="alert" x-text="nativeRestoreStatusError(nativeRestoreStatus)"></p>
                                 <p x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.next_retry_at" class="mt-2 text-xs font-medium text-amber-700">
-                                    Retry scheduled: <span x-text="nativeRestoreStatus.execution_status.next_retry_at"></span>
+                                    Retry scheduled: <span x-text="nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.next_retry_at : ''"></span>
                                 </p>
                                 <div x-show="nativeRestoreCanResume(nativeRestoreStatus)" class="mt-3 rounded-lg border border-orange-200 bg-orange-50 px-3 py-3">
                                     <p x-show="nativeRestoreResumeMode(nativeRestoreStatus) !== 'provider_retry'" class="text-xs leading-5 text-orange-800">
@@ -1552,7 +1552,7 @@
                                                     aria-label="Copy native restore correlation ID">Copy</button>
                                         </div>
                                         <code class="block break-all font-mono text-[11px] text-slate-700" x-text="nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.correlation_id : ''"></code>
-                                        <p x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.last_error_code">Error code: <span class="font-mono text-slate-700" x-text="nativeRestoreStatus.execution_status.last_error_code"></span></p>
+                                        <p x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.last_error_code">Error code: <span class="font-mono text-slate-700" x-text="nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.last_error_code : ''"></span></p>
                                     </div>
                                 </details>
                             </div>
