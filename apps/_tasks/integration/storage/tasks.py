@@ -641,7 +641,12 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
             retry_at=retry_at,
         )
         if attempt_no <= 3:
-            node.notify_upload_fail(message, backup, stored_backup.storage)
+            node.notify_upload_fail(
+                error,
+                backup,
+                stored_backup.storage,
+                error_code=code,
+            )
         node.connection.account.create_storage_log(
             message, node, backup, stored_backup.storage
         )

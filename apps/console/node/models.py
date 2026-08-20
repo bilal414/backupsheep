@@ -13554,15 +13554,19 @@ class CoreNode(TimeStampedModel):
         """Persist and send only the stable public backup-failure contract."""
         return self._notify_backup_fail_safe(error, backup_type)
 
-    def notify_upload_fail(self, error, backup, storage):
+    def notify_upload_fail(self, error, backup, storage, *, error_code=None):
         from apps._tasks.helper.tasks import send_postmark_email
         from datetime import datetime
 
         # Keep full diagnostics in Sentry only. The account log and email are
         # a stable public contract and must never contain provider bodies,
         # command lines, credentials, hostnames, or exception text.
-        capture_exception(error)
-        safe_code = getattr(error, "error_code", None)
+        # Older callers passed an already-sanitized message here. Sentry requires
+        # an exception object, so never let notification diagnostics turn a
+        # retryable upload into a terminal task failure.
+        if isinstance(error, BaseException):
+            capture_exception(error)
+        safe_code = error_code or getattr(error, "error_code", None)
         if not isinstance(safe_code, str) or safe_code not in _BACKUP_NOTIFICATION_SAFE_CODES:
             safe_code = "STORAGE_UPLOAD_FAILED"
         safe_message = _BACKUP_NOTIFICATION_MESSAGES[safe_code]
