@@ -170,3 +170,16 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
             "The storage provider is restoring this archive; the restore will resume automatically when it is ready.",
             self.source,
         )
+
+    def test_restore_created_and_retry_labels_share_browser_timezone_formatter(self):
+        self.assertIn("function dateTimeLabel(value)", self.source)
+        self.assertIn("const retryAtLabel = dateTimeLabel(retryAt);", self.source)
+        self.assertIn(
+            "window.BackupSheepExecutionStatus.dateTimeLabel(item.created)",
+            self.source,
+        )
+
+        created_label = self.source.split("restoreCreatedLabel(item)", 1)[1].split(
+            "safeLegacyRestoreError(item)", 1
+        )[0]
+        self.assertIn("item.created_display", created_label)

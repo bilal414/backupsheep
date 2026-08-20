@@ -2475,7 +2475,7 @@ class WebsiteRestoreAPITests(RestoreBackendBase):
         self.assertEqual([r["id"] for r in resp.data], [newer.id, older.id])
         row = resp.data[0]
         for field in ("id", "name", "status", "status_display", "error", "backup",
-                      "storage_point", "created_display", "modified_display"):
+                      "storage_point", "created", "created_display", "modified_display"):
             self.assertIn(field, row)
         self.assertEqual(row["name"], "newer")
         self.assertEqual(row["status"], CoreWebsiteRestore.Status.PENDING)
@@ -2552,7 +2552,7 @@ class DatabaseRestoreAPITests(RestoreBackendBase):
         self.assertEqual(len(resp.data), 1)
         row = resp.data[0]
         for field in ("id", "name", "status", "status_display", "error", "backup",
-                      "storage_point", "created_display", "modified_display"):
+                      "storage_point", "created", "created_display", "modified_display"):
             self.assertIn(field, row)
         self.assertEqual(row["name"], "only")
         self.assertEqual(row["status_display"], "Pending")

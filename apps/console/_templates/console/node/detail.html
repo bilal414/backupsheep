@@ -2483,6 +2483,19 @@
                 return Number.isNaN(date.getTime()) ? null : date;
             }
 
+            function dateTimeLabel(value) {
+                const date = safeDate(value);
+                if (!date) return null;
+                try {
+                    return new Intl.DateTimeFormat(undefined, {
+                        dateStyle: 'medium',
+                        timeStyle: 'short',
+                    }).format(date);
+                } catch (_) {
+                    return null;
+                }
+            }
+
             function safeProgress(raw) {
                 if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
                 const completedNumber = Number(raw.completed);
@@ -2615,15 +2628,7 @@
                     retryAt,
                 });
                 const tones = toneClasses(category.tone);
-                const retryAtLabel = retryAt
-                    ? (() => {
-                        try {
-                            return new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(retryAt);
-                        } catch (_) {
-                            return null;
-                        }
-                    })()
-                    : null;
+                const retryAtLabel = dateTimeLabel(retryAt);
                 const reconciliationLabel = reconciliationState !== 'none'
                     ? humanize(reconciliationState)
                     : null;
@@ -2651,7 +2656,7 @@
                 };
             }
 
-            return {normalize, safeErrorMessage, humanize};
+            return {normalize, safeErrorMessage, humanize, dateTimeLabel};
         })();
 
         document.addEventListener('alpine:init', () => {
@@ -2878,6 +2883,10 @@
                     return view && view.errorCode ? view.errorCode : '';
                 },
                 restoreCreatedLabel(item) {
+                    const createdLabel = item && typeof item === 'object' && !Array.isArray(item)
+                        ? window.BackupSheepExecutionStatus.dateTimeLabel(item.created)
+                        : null;
+                    if (createdLabel) return createdLabel;
                     return item && typeof item.created_display === 'string'
                         ? item.created_display
                         : 'Restore date unavailable';
