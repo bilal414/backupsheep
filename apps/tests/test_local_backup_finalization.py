@@ -261,9 +261,12 @@ class LocalBackupFinalizationUiContractTests(SimpleTestCase):
         ).read_text(encoding="utf-8")
 
     def test_complete_and_partial_terminal_rows_do_not_use_cancel_action(self):
-        complete_actions = self.source.split("{% if backup.status == 3 %}", 1)[1].split(
-            "{% elif backup.status == 2", 1
-        )[0]
-        self.assertNotIn("cancelBackup", complete_actions)
-        self.assertNotIn("backup.status == 23", complete_actions)
+        self.assertIn(
+            "loaded ? Boolean(view && view.category === 'complete')",
+            self.source,
+        )
+        self.assertIn(
+            "loaded ? Boolean(view && view.shouldPoll)",
+            self.source,
+        )
         self.assertIn("Partially complete", self.source)

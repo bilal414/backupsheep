@@ -469,7 +469,12 @@
                         </thead>
                         <tbody class="divide-y divide-slate-100">
                             {% for backup in page.object_list %}
-                                <tr class="transition hover:bg-slate-50">
+                                <tr class="transition hover:bg-slate-50"
+                                    x-data="executionStatusCard"
+                                    data-execution-status-card
+                                    data-backup-id="{{ backup.id }}"
+                                    data-integration-code="{% if is_vultr_managed_database %}vultr_database{% else %}{{ object.connection.integration.code|lower }}{% endif %}"
+                                    data-fallback-status="{{ backup.get_status_display }}">
                                     <td class="whitespace-nowrap px-4 py-3">
                                         <div class="flex items-center gap-2">
                                             <button type="button" @click="$clipboard('{{ backup.uuid }}')"
@@ -483,10 +488,7 @@
                                         </div>
                                     </td>
                                     <td class="px-4 py-3">
-                                        <div x-data="executionStatusCard" class="min-w-[13rem]" data-execution-status-card
-                                             data-backup-id="{{ backup.id }}"
-                                             data-integration-code="{% if is_vultr_managed_database %}vultr_database{% else %}{{ object.connection.integration.code|lower }}{% endif %}"
-                                             data-fallback-status="{{ backup.get_status_display }}">
+                                        <div class="min-w-[13rem]">
                                             <div x-show="!loaded">
                                                 {% if backup.status == 3 %}
                                                     <span class="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20" role="status" aria-live="polite">
@@ -587,44 +589,45 @@
                                     {% endif %}
                                     <td class="whitespace-nowrap px-4 py-3 text-right">
                                         <div class="inline-flex items-center gap-2">
-                                            {% if backup.status == 3 %}
-                                                {% if object.type == 3 or object.type == 5 or object.type == 4 and not is_vultr_managed_database %}
-                                                    <button @click="openBackupDownloadModal('{{ backup.id }}', '{{ backup.uuid }}')"
-                                                            type="button"
-                                                            class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                        Download
-                                                    </button>
-                                                {% endif %}
-                                                {% if object.type == 3 or object.type == 4 and not is_vultr_managed_database %}
-                                                    <button @click="openBackupRestoreModal('{{ backup.id }}', '{{ backup.uuid }}')"
-                                                            type="button"
-                                                            class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                        Restore
-                                                    </button>
-                                                {% elif object.type == 1 or object.type == 2 or is_vultr_managed_database %}
-                                                    <button @click="openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid }}', '{{ backup.status }}')"
-                                                            type="button"
-                                                            class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                        Restore
-                                                    </button>
-                                                {% endif %}
-                                                <button @click="openBackupDeleteModal('{% if is_vultr_managed_database %}vultr_database{% else %}{{ object.connection.integration.code }}{% endif %}', '{{ backup.id }}', '{{ backup.uuid }}')"
+                                            {% if object.type == 3 or object.type == 5 or object.type == 4 and not is_vultr_managed_database %}
+                                                <button x-show="loaded ? Boolean(view && view.category === 'complete') : {% if backup.status == 3 %}true{% else %}false{% endif %}"
+                                                        x-cloak
+                                                        @click="openBackupDownloadModal('{{ backup.id }}', '{{ backup.uuid }}')"
                                                         type="button"
-                                                        class="inline-flex items-center justify-center rounded-lg border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">
-                                                    Delete
-                                                </button>
-                                            {% elif backup.status == 2 or backup.status == 5 or backup.status == 8 or backup.status == 9 or backup.status == 10  or backup.status == 11 or backup.status == 17 or backup.status == 18 %}
-                                                <button @click="cancelBackup('{{ backup.id }}')" type="button"
                                                         class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                    Cancel
+                                                    Download
                                                 </button>
-                                            {% elif backup.status == 7 %}
-                                                <!-- Retry intentionally unavailable for this status. -->
-                                            {% elif backup.status == 15 %}
-                                                <!-- DELETE_COMPLETED -->
-                                            {% elif backup.status == 14 %}
-                                                <!-- Logs intentionally unavailable for this status. -->
                                             {% endif %}
+                                            {% if object.type == 3 or object.type == 4 and not is_vultr_managed_database %}
+                                                <button x-show="loaded ? Boolean(view && view.category === 'complete') : {% if backup.status == 3 %}true{% else %}false{% endif %}"
+                                                        x-cloak
+                                                        @click="openBackupRestoreModal('{{ backup.id }}', '{{ backup.uuid }}')"
+                                                        type="button"
+                                                        class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                                    Restore
+                                                </button>
+                                            {% elif object.type == 1 or object.type == 2 or is_vultr_managed_database %}
+                                                <button x-show="loaded ? Boolean(view && view.category === 'complete') : {% if backup.status == 3 %}true{% else %}false{% endif %}"
+                                                        x-cloak
+                                                        @click="openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid }}', '3')"
+                                                        type="button"
+                                                        class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                                    Restore
+                                                </button>
+                                            {% endif %}
+                                            <button x-show="loaded ? Boolean(view && view.category === 'complete') : {% if backup.status == 3 %}true{% else %}false{% endif %}"
+                                                    x-cloak
+                                                    @click="openBackupDeleteModal('{% if is_vultr_managed_database %}vultr_database{% else %}{{ object.connection.integration.code }}{% endif %}', '{{ backup.id }}', '{{ backup.uuid }}')"
+                                                    type="button"
+                                                    class="inline-flex items-center justify-center rounded-lg border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 shadow-sm transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600">
+                                                Delete
+                                            </button>
+                                            <button x-show="loaded ? Boolean(view && view.shouldPoll) : {% if backup.status == 2 or backup.status == 5 or backup.status == 8 or backup.status == 9 or backup.status == 10 or backup.status == 11 or backup.status == 17 or backup.status == 18 %}true{% else %}false{% endif %}"
+                                                    x-cloak
+                                                    @click="cancelBackup('{{ backup.id }}')" type="button"
+                                                    class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                                                Cancel
+                                            </button>
 
                                             {% if object.type == 1 and object.type == 2 %}
                                                 <a href="{% url 'console:log:index' %}?backup={{ backup.id }}"

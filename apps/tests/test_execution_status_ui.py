@@ -134,6 +134,24 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
         self.assertNotIn("downloadTransferLog", self.source)
         self.assertNotIn("Log File", self.source)
 
+    def test_polled_terminal_backup_replaces_cancel_with_terminal_actions(self):
+        self.assertIn(
+            "loaded ? Boolean(view && view.category === 'complete')",
+            self.source,
+        )
+        self.assertIn(
+            "loaded ? Boolean(view && view.shouldPoll)",
+            self.source,
+        )
+        self.assertIn(
+            'x-data="executionStatusCard"',
+            self.source,
+        )
+        self.assertIn(
+            "openNativeCloudRestoreModal('{{ backup.id }}', '{{ backup.uuid }}', '3')",
+            self.source,
+        )
+
     def test_recent_restore_history_exposes_phase_and_safe_diagnostics(self):
         for marker in (
             'x-show="restoreExecutionSummary(restoreItem)"',
