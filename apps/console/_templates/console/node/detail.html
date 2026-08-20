@@ -3693,11 +3693,18 @@
                         this.restoreExecutionStatus = this.executionStatusView(this.restoreStatus);
                         if (this.restoreStatus) {
                             /**
-                             * Stop polling once the latest restore reaches a final state.
+                             * Opening a backup with an existing active restore is
+                             * also a live status view. Resume polling after refresh,
+                             * and stop only when the latest restore is terminal.
                              */
-                            if ((this.restoreExecutionStatus && !this.restoreExecutionStatus.shouldPoll) ||
-                                (!this.restoreExecutionStatus && (this.restoreStatus.status === 3 || this.restoreStatus.status === 4))) {
+                            const restoreIsTerminal = (
+                                (this.restoreExecutionStatus && !this.restoreExecutionStatus.shouldPoll) ||
+                                (!this.restoreExecutionStatus && (this.restoreStatus.status === 3 || this.restoreStatus.status === 4))
+                            );
+                            if (restoreIsTerminal) {
                                 this.clearRestorePoll();
+                            } else if (!this.restorePollHandle) {
+                                this.startRestorePolling();
                             }
                         }
                     }).catch((error) => {

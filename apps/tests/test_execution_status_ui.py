@@ -183,3 +183,14 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
             "safeLegacyRestoreError(item)", 1
         )[0]
         self.assertIn("item.created_display", created_label)
+
+    def test_opening_an_existing_active_restore_resumes_polling(self):
+        restore_refresh = self.source.split(
+            "async getBackupRestores(showErrors)", 1
+        )[1].split("async startRestore()", 1)[0]
+        self.assertIn("else if (!this.restorePollHandle)", restore_refresh)
+        self.assertIn("this.startRestorePolling();", restore_refresh)
+        self.assertLess(
+            restore_refresh.index("this.clearRestorePoll();"),
+            restore_refresh.index("else if (!this.restorePollHandle)"),
+        )
