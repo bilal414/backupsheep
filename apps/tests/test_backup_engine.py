@@ -35,6 +35,7 @@ from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
 from apps._tasks.integration.backup.errors import safe_backup_failure
 from apps._tasks.integration.database import backup_database
 from apps._tasks.integration.website import backup_website
+from apps.api.v1.backup.website.serializers import CoreWebsiteBackupSerializer
 from apps.api.v1.node.views import CoreNodeView
 from apps.api.v1.utils.api_helpers import bs_encrypt, ensure_disk_space, zipdir
 from apps.console.backup.models import (

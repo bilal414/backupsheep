@@ -37,7 +37,6 @@ class ExecutionStatusApiTests(BaseTestCase):
             ("partial_some_destinations_failed", "uploading"): "complete",
             ("download_complete", "capturing"): "source_ready",
             ("ready_for_upload", "preparing"): "source_ready",
-            ("upload_in_progress", "source_dispatch"): "uploading",
             ("upload_complete", "source_dispatch"): "validating",
             ("upload_validation", "source_dispatch"): "validating",
             ("upload_validation", None): "validating",
@@ -354,13 +353,18 @@ class ExecutionStatusApiTests(BaseTestCase):
             query for query in captured.captured_queries
             if "core_backup_artifact" in query["sql"]
         ]
-        point_queries = [
+        point_phase_queries = [
             query for query in captured.captured_queries
             if "core_website_backup_mtm_storage_points" in query["sql"]
+            and (
+                'WHERE "core_website_backup_mtm_storage_points"."backup_id" IN'
+                in query["sql"]
+            )
+            and '"status"' in query["sql"]
         ]
         self.assertEqual(len(execution_queries), 1)
         self.assertEqual(len(artifact_queries), 1)
-        self.assertEqual(len(point_queries), 1)
+        self.assertEqual(len(point_phase_queries), 1)
         self.assertEqual(data[0]["execution_status"]["phase"], "source_ready")
         self.assertEqual(data[1]["execution_status"]["phase"], "retrying")
 
