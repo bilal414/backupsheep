@@ -63,6 +63,12 @@ WEBSITE_MARKER_NAME = ".backupsheep-restore-marker"
 SOURCE_MANIFEST_VERSION = 2
 SOURCE_MANIFEST_COMMIT_INTERVAL = 10_000
 SOURCE_MANIFEST_DOMAIN = b"backupsheep-website-source-manifest-v2\x00"
+RESTORE_NAME_FIDELITY_PROBES = (
+    "Case-sensitive-name.bin",
+    "case-sensitive-name.bin",
+    "caf\u00e9-normalization-name.bin",
+    "cafe\u0301-normalization-name.bin",
+)
 
 
 def _write_log(backup, text):
@@ -264,6 +270,24 @@ def _website_restore_preflight_error(backup, code, *, retryable=True):
     error.code = code
     error.retryable = bool(retryable)
     _write_log(backup, f"Website restore stopped: {code}; {message}\n")
+    return error
+
+
+def _website_restore_name_fidelity_error(backup):
+    """Return a terminal safe error before a destination can merge names."""
+    message = (
+        "The restore target cannot preserve distinct case-sensitive and Unicode "
+        "website filenames. No website data was uploaded or published. Choose a "
+        "destination filesystem that preserves exact filenames, then retry."
+    )
+    error = RestoreError(message)
+    error.code = "RESTORE_TARGET_NAME_COLLISION"
+    error.retryable = False
+    _write_log(
+        backup,
+        "Website restore stopped: RESTORE_TARGET_NAME_COLLISION; no target data "
+        "was published.\n",
+    )
     return error
 
 
@@ -860,7 +884,9 @@ def _remote_probe_paths(restore, backup, source):
     """Build restore-scoped probe paths without using the final target path."""
     parent = _remote_restore_parent(source["path"])
     if parent is None:
-        return None
+        # Root/all-path restores cannot use the sibling atomic-publish plan, but
+        # an exact hidden child remains a safe, restore-owned capability probe.
+        parent = "."
     restore_scope = hashlib.sha256(
         f"{getattr(restore, 'correlation_id', '')}|{backup.uuid}".encode("utf-8")
     ).hexdigest()[:16]
@@ -874,6 +900,10 @@ def _remote_probe_paths(restore, backup, source):
         "root": root,
         "payload": posixpath.join(root, "payload"),
         "renamed": posixpath.join(parent, f"{name}_renamed"),
+        "name_fidelity": [
+            posixpath.join(root, probe_name)
+            for probe_name in RESTORE_NAME_FIDELITY_PROBES
+        ],
     }
 
 
@@ -901,6 +931,25 @@ def _write_restore_probe_file():
         except OSError:
             pass
         raise
+
+
+def _probe_preserves_distinct_names(output, probe):
+    """Require all exact probe basenames in the bounded remote listing."""
+    expected = {
+        posixpath.basename(path)
+        for path in probe.get("name_fidelity") or []
+    }
+    if expected != set(RESTORE_NAME_FIDELITY_PROBES):
+        return False
+    observed = set()
+    for line in str(output or "").splitlines():
+        value = line.strip().rstrip("/")
+        if not value:
+            continue
+        basename = posixpath.basename(value)
+        if basename in expected:
+            observed.add(basename)
+    return observed == expected
 
 
 def _cleanup_restore_target_probe(
@@ -995,6 +1044,8 @@ def _preflight_restore_target(
         return
     probes = []
     for source in sources:
+        if _remote_restore_parent(source["path"]) is None:
+            continue
         probe = _remote_probe_paths(restore, backup, source)
         if probe is not None:
             probes.append((source, probe))
@@ -1062,6 +1113,122 @@ def _preflight_restore_target(
                     password,
                     probe["parent"],
                 )
+            except Exception as error:
+                primary_error = error
+            cleaned = _cleanup_restore_target_probe(
+                node,
+                backup,
+                restore,
+                auth,
+                username,
+                password,
+                ssh_key_path,
+                host_url,
+                parallel,
+                probe,
+            )
+            if primary_error is not None:
+                raise primary_error
+            if not cleaned:
+                raise _website_restore_preflight_error(
+                    backup, "PROVIDER_TRANSIENT_FAILURE", retryable=True
+                )
+    finally:
+        try:
+            os.remove(local_probe)
+        except OSError:
+            pass
+
+
+def _preflight_restore_name_fidelity(
+    node,
+    backup,
+    restore,
+    auth,
+    website,
+    sources,
+    host_url,
+    username,
+    password,
+    ssh_key_path,
+):
+    """Prove the target preserves exact case and Unicode names.
+
+    This check intentionally runs only after the backup archive is available
+    and its source tree has been validated. Archive-provider retries therefore
+    do not repeatedly touch the restore target. Every probe remains hidden,
+    restore-owned, and is removed before any website data is uploaded.
+    """
+    if auth.protocol != CoreAuthWebsite.Protocol.SFTP:
+        return
+
+    probes = [_remote_probe_paths(restore, backup, source) for source in sources]
+    probes = [probe for probe in probes if probe is not None]
+    if not probes:
+        return
+
+    local_probe = _write_restore_probe_file()
+    parallel = website.parallel or 3
+    try:
+        for probe in probes:
+            primary_error = None
+            try:
+                _ensure_restore_fence(restore)
+                if not _cleanup_restore_target_probe(
+                    node,
+                    backup,
+                    restore,
+                    auth,
+                    username,
+                    password,
+                    ssh_key_path,
+                    host_url,
+                    parallel,
+                    probe,
+                ):
+                    raise _website_restore_preflight_error(
+                        backup, "PROVIDER_TRANSIENT_FAILURE", retryable=True
+                    )
+                script = _build_lftp_script(
+                    auth=auth,
+                    host_url=host_url,
+                    port=auth.port,
+                    username=username,
+                    password=password,
+                    ssh_key_path=ssh_key_path,
+                    parallel=parallel,
+                    transfer="\n".join(
+                        [
+                            f"mkdir {_lftp_quote(probe['root'])}",
+                            f"mkdir {_lftp_quote(probe['payload'])}",
+                            *[
+                                f"put -P {_lftp_quote(local_probe)} "
+                                f"-o {_lftp_quote(remote_path)}"
+                                for remote_path in probe["name_fidelity"]
+                            ],
+                            f"cls -1 {_lftp_quote(probe['root'])}",
+                            f"mv {_lftp_quote(probe['payload'])} "
+                            f"{_lftp_quote(probe['renamed'])}",
+                            f"cls -1 {_lftp_quote(probe['renamed'])}",
+                        ]
+                    ),
+                    mirror=False,
+                )
+                result = _run_restore_target_probe(
+                    node,
+                    backup,
+                    restore,
+                    auth,
+                    script,
+                    username,
+                    password,
+                    probe["parent"],
+                )
+                if not _probe_preserves_distinct_names(
+                    getattr(result, "stdout", ""), probe
+                ):
+                    _capture_safe("WEBSITE_TARGET_NAME_COLLISION")
+                    raise _website_restore_name_fidelity_error(backup)
             except Exception as error:
                 primary_error = error
             cleaned = _cleanup_restore_target_probe(
@@ -2011,9 +2178,9 @@ def restore_website(backup, restore):
             protocol = "ftp"
         host_url = f"{protocol}://{auth.host}"
 
-        # This runs before the archive download and before any remote upload or
-        # publication. Root/all_paths keeps its historical convergent mirror
-        # semantics and is intentionally excluded from sibling staging.
+        # Permission checks run before archive download and before any remote
+        # website upload or publication. Root/all_paths keeps its historical
+        # convergent mirror semantics and is excluded from sibling staging.
         _preflight_restore_target(
             node,
             backup,
@@ -2034,6 +2201,21 @@ def restore_website(backup, restore):
         _ensure_restore_fence(restore)
 
         records, manifest = _prepare_sources(tree_root, sources, backup)
+        # Filename representability is checked only after the archive is
+        # available and validated, but still before any target data is staged.
+        # This avoids touching the target on every archive-provider retry.
+        _preflight_restore_name_fidelity(
+            node,
+            backup,
+            restore,
+            auth,
+            website,
+            sources,
+            host_url,
+            username,
+            password,
+            ssh_key_path,
+        )
         existing_states = dict(
             _metadata(restore).get("source_states") or {}
         )

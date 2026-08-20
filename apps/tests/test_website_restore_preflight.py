@@ -73,6 +73,20 @@ class WebsiteRestorePreflightTests(SimpleTestCase):
             self.ssh_key_path,
         )
 
+    def _name_preflight(self, sources):
+        return RW._preflight_restore_name_fidelity(
+            self.node,
+            self.backup,
+            self.restore,
+            self.auth,
+            self.website,
+            sources,
+            "sftp://sftp.example.invalid",
+            self.username,
+            self.password,
+            self.ssh_key_path,
+        )
+
     def _record(self, path="public_html"):
         return {
             "path": path,
@@ -145,6 +159,10 @@ class WebsiteRestorePreflightTests(SimpleTestCase):
 
         def run_probe(*args, **kwargs):
             probe_scripts.append(args[4])
+            return SimpleNamespace(
+                returncode=0,
+                stdout="\n".join(RW.RESTORE_NAME_FIDELITY_PROBES),
+            )
 
         with mock.patch.object(
             RW, "_write_restore_probe_file", return_value=local_probe
@@ -168,24 +186,106 @@ class WebsiteRestorePreflightTests(SimpleTestCase):
         directory_script, file_script = probe_scripts
         self.assertIn("mkdir", directory_script)
         self.assertIn("mv", directory_script)
+        for name in RW.RESTORE_NAME_FIDELITY_PROBES:
+            self.assertNotIn(name, directory_script)
+            self.assertNotIn(name, file_script)
         self.assertNotIn('"public_html"', directory_script)
         self.assertIn("put -P", file_script)
         self.assertIn('"nested/', file_script)
         self.assertNotIn('"nested/index.html"', file_script)
         self.assertFalse(os.path.exists(local_probe))
 
-    def test_root_all_paths_and_non_sftp_keep_legacy_semantics(self):
+    def test_name_fidelity_probe_rejects_case_or_unicode_normalization_collision(self):
+        for missing_name in (
+            "Case-sensitive-name.bin",
+            "cafe\u0301-normalization-name.bin",
+        ):
+            with self.subTest(missing_name=missing_name):
+                local_probe = self._track_probe()
+                observed = [
+                    name
+                    for name in RW.RESTORE_NAME_FIDELITY_PROBES
+                    if name != missing_name
+                ]
+                result = SimpleNamespace(
+                    returncode=0,
+                    stdout="\n".join(observed),
+                )
+                with mock.patch.object(
+                    RW, "_write_restore_probe_file", return_value=local_probe
+                ), mock.patch.object(
+                    RW, "_run_restore_target_probe", return_value=result
+                ), mock.patch.object(
+                    RW, "_cleanup_restore_target_probe", return_value=True
+                ) as cleanup, mock.patch.object(
+                    RW, "_capture_safe"
+                ) as capture, mock.patch.object(RW, "_write_log"):
+                    with self.assertRaises(RestoreError) as raised:
+                        self._name_preflight(
+                            [{"path": "public_html", "type": "directory"}]
+                        )
+
+                self.assertEqual(
+                    raised.exception.code, "RESTORE_TARGET_NAME_COLLISION"
+                )
+                self.assertFalse(raised.exception.retryable)
+                self.assertNotIn(self.password, str(raised.exception))
+                self.assertEqual(cleanup.call_count, 2)
+                capture.assert_called_with("WEBSITE_TARGET_NAME_COLLISION")
+                self.assertFalse(os.path.exists(local_probe))
+
+    def test_name_fidelity_listing_accepts_exact_basenames_with_remote_prefix(self):
+        probe = RW._remote_probe_paths(
+            self.restore,
+            self.backup,
+            {"path": "public_html", "type": "directory"},
+        )
+        output = "\n".join(
+            f"{probe['root']}/{name}"
+            for name in RW.RESTORE_NAME_FIDELITY_PROBES
+        )
+
+        self.assertTrue(RW._probe_preserves_distinct_names(output, probe))
+        self.assertFalse(
+            RW._probe_preserves_distinct_names(
+                output.replace("Case-sensitive-name.bin\n", ""), probe
+            )
+        )
+
+    def test_root_all_paths_gets_owned_probe_while_non_sftp_keeps_legacy_semantics(self):
+        local_probe = self._track_probe()
+        result = SimpleNamespace(
+            returncode=0,
+            stdout="\n".join(RW.RESTORE_NAME_FIDELITY_PROBES),
+        )
         with mock.patch.object(
-            RW, "_write_restore_probe_file"
+            RW, "_write_restore_probe_file", return_value=local_probe
         ) as write_probe, mock.patch.object(
-            RW, "_run_restore_target_probe"
-        ) as run_probe:
+            RW, "_run_restore_target_probe", return_value=result
+        ) as run_probe, mock.patch.object(
+            RW, "_cleanup_restore_target_probe", return_value=True
+        ) as cleanup:
             self._preflight([{"path": ".", "type": "directory"}])
+            write_probe.assert_not_called()
+            run_probe.assert_not_called()
+            cleanup.assert_not_called()
+
+            self._name_preflight([{"path": ".", "type": "directory"}])
+            self.assertEqual(run_probe.call_count, 1)
+            root_script = run_probe.call_args.args[4]
+            self.assertIn(".backupsheep_restore_probe_", root_script)
+            for name in RW.RESTORE_NAME_FIDELITY_PROBES:
+                self.assertIn(name, root_script)
+            self.assertEqual(cleanup.call_count, 2)
             self.auth.protocol = CoreAuthWebsite.Protocol.FTP
             self._preflight([{"path": "public_html", "type": "directory"}])
+            self._name_preflight(
+                [{"path": "public_html", "type": "directory"}]
+            )
 
-        write_probe.assert_not_called()
-        run_probe.assert_not_called()
+        write_probe.assert_called_once()
+        self.assertEqual(run_probe.call_count, 1)
+        self.assertFalse(os.path.exists(local_probe))
 
     def test_permission_denied_is_actionable_terminal_target_rejection(self):
         secret = "Bearer restore-secret-value"

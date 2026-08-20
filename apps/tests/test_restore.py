@@ -1909,8 +1909,12 @@ class WebsiteRestoreEngineTests(RestoreBackendBase):
         scripts = []
 
         def fake_run(cmd, **kwargs):
-            scripts.append(kwargs.get("input") or "")
-            return SimpleNamespace(stdout="", returncode=0)
+            script = kwargs.get("input") or ""
+            scripts.append(script)
+            stdout = ""
+            if all(name in script for name in RW.RESTORE_NAME_FIDELITY_PROBES):
+                stdout = "\n".join(RW.RESTORE_NAME_FIDELITY_PROBES)
+            return SimpleNamespace(stdout=stdout, returncode=0)
 
         with mock.patch.object(CoreAuthWebsite, "check_connection", lambda *a, **k: None), \
              mock.patch.object(RW.subprocess, "run", side_effect=fake_run), \
@@ -2033,6 +2037,35 @@ class WebsiteRestoreEngineTests(RestoreBackendBase):
             f"_storage/ssh_restore_{backup.uuid_str}",
             key_without_newline,
         )
+
+    def test_name_fidelity_probe_waits_for_archive_fetch(self):
+        node, backup = self._website_backup(
+            all_paths=False,
+            paths=[{"path": "public_html", "type": "directory"}],
+        )
+        auth = node.connection.auth_website
+        auth.protocol = CoreAuthWebsite.Protocol.SFTP
+        auth.port = 22
+        auth.save(update_fields=["protocol", "port", "modified"])
+        self._last_zip = self._make_zip({"public_html/index.html": "hi"})
+        restore = self._restore_row(backup)
+
+        with mock.patch.object(
+            CoreAuthWebsite, "check_connection", lambda *args, **kwargs: None
+        ), mock.patch.object(
+            RW, "_preflight_restore_target"
+        ) as permission_probe, mock.patch.object(
+            RW,
+            "fetch_backup_zip",
+            side_effect=RestoreError("archive provider is still preparing the object"),
+        ), mock.patch.object(
+            RW, "_preflight_restore_name_fidelity"
+        ) as name_probe, mock.patch.object(RW, "delete_from_disk"):
+            with self.assertRaisesRegex(RestoreError, "still preparing"):
+                RW.restore_website(backup, restore)
+
+        permission_probe.assert_called_once()
+        name_probe.assert_not_called()
 
     def test_missing_path_in_archive_fails_before_lftp(self):
         node, backup = self._website_backup(
