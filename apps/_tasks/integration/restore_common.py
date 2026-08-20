@@ -2201,12 +2201,25 @@ def _s3_compatible_binding(stored_backup, provider_code, *, expected_bucket=None
     return client, bucket, S3_COMPATIBLE_PROVIDER_LABELS[provider_code]
 
 
+def _is_multipart_etag(value):
+    value = str(value or "").strip().strip('"').lower()
+    digest, separator, part_count = value.rpartition("-")
+    return bool(
+        separator
+        and len(digest) == 32
+        and all(character in "0123456789abcdef" for character in digest)
+        and part_count.isdigit()
+        and int(part_count) > 1
+    )
+
+
 def _validate_s3_compatible_head(
     head,
     state,
     expected,
     *,
     provider,
+    allow_vultr_zero_length=False,
 ):
     """Verify provider metadata for the exact committed object version."""
     if not isinstance(head, dict):
@@ -2242,7 +2255,21 @@ def _validate_s3_compatible_head(
             "MALFORMED_PROVIDER_RESPONSE",
             f"{provider} returned malformed backup size metadata.",
         ) from None
-    if remote_bytes != expected["size_bytes"] or content_length != expected["size_bytes"]:
+    # Vultr currently returns ``Content-Length: 0`` for HEAD on some committed
+    # large multipart objects even though its immutable upload metadata, ETag,
+    # and subsequent GET identify the full object.  Permit that response only
+    # for an already-bound Vultr multipart ETag.  The GET response must still
+    # declare the exact size, and the atomic materializer independently requires
+    # the full committed byte count and SHA-256 before publication.
+    safe_vultr_zero_length = bool(
+        allow_vultr_zero_length
+        and provider == S3_COMPATIBLE_PROVIDER_LABELS["vultr"]
+        and content_length == 0
+        and _is_multipart_etag(state.get("etag"))
+    )
+    if remote_bytes != expected["size_bytes"] or (
+        content_length != expected["size_bytes"] and not safe_vultr_zero_length
+    ):
         raise _SafeProviderRestoreError(
             "INTEGRITY_MISMATCH",
             f"the committed {provider} object byte count does not match the backup.",
@@ -2296,6 +2323,7 @@ def _s3_compatible_download(stored_backup, dest_zip_path, expected, state, provi
                 state,
                 expected,
                 provider=provider,
+                allow_vultr_zero_length=True,
             )
 
         verified_head()

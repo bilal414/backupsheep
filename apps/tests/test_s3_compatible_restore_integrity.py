@@ -171,6 +171,86 @@ class S3CompatibleRestoreIntegrityTests(SimpleTestCase):
             with self.subTest(provider=provider):
                 self._run_success(provider)
 
+    def test_vultr_multipart_zero_length_head_still_requires_exact_get_stream(self):
+        point, config, key, state = self._point("vultr")
+        state["etag"] = '"0123456789abcdef0123456789abcdef-7881"'
+        zero_length_head = self._head(point, state, ContentLength=0)
+        exact_get = self._head(point, state)
+        client = mock.Mock(name="vultr-zero-length-head-client")
+        client.head_object.side_effect = [
+            dict(zero_length_head),
+            dict(zero_length_head),
+        ]
+        client.get_object.return_value = {
+            **exact_get,
+            "Body": io.BytesIO(self.payload),
+        }
+        destination = os.path.join(self.tmp, "vultr-zero-length-head.zip")
+
+        with mock.patch(
+            "apps._tasks.integration.storage.vultr._s3_client",
+            return_value=client,
+        ):
+            restore_common.fetch_backup_zip(point, destination)
+
+        with open(destination, "rb") as restored:
+            self.assertEqual(restored.read(), self.payload)
+        request = {"Bucket": config.bucket_name, "Key": key, "VersionId": "version-1"}
+        client.get_object.assert_called_once_with(**request)
+        self.assertEqual(client.head_object.call_count, 2)
+
+    def test_zero_length_head_exception_is_vultr_multipart_only(self):
+        cases = (
+            ("do_spaces", '"0123456789abcdef0123456789abcdef-2"'),
+            ("upcloud", '"0123456789abcdef0123456789abcdef-2"'),
+            ("oracle", '"0123456789abcdef0123456789abcdef-2"'),
+            ("vultr", '"etag-committed"'),
+        )
+        for provider, etag in cases:
+            with self.subTest(provider=provider, etag=etag):
+                point, _config, _key, state = self._point(provider)
+                state["etag"] = etag
+                client = mock.Mock(name=f"{provider}-zero-length-head-client")
+                client.head_object.return_value = self._head(
+                    point,
+                    state,
+                    ContentLength=0,
+                )
+                with mock.patch(
+                    f"apps._tasks.integration.storage.{provider}._s3_client",
+                    return_value=client,
+                ):
+                    with self.assertRaises(restore_common.RestoreError) as raised:
+                        restore_common.fetch_backup_zip(
+                            point,
+                            os.path.join(self.tmp, f"{provider}-zero-length-head.zip"),
+                        )
+
+                self.assertEqual(raised.exception.code, "INTEGRITY_MISMATCH")
+                client.get_object.assert_not_called()
+
+    def test_vultr_zero_length_get_is_rejected_after_accepted_multipart_head(self):
+        point, _config, _key, state = self._point("vultr")
+        state["etag"] = '"0123456789abcdef0123456789abcdef-7881"'
+        zero_length = self._head(point, state, ContentLength=0)
+        client = mock.Mock(name="vultr-zero-length-get-client")
+        client.head_object.return_value = dict(zero_length)
+        client.get_object.return_value = {
+            **zero_length,
+            "Body": io.BytesIO(self.payload),
+        }
+        destination = os.path.join(self.tmp, "vultr-zero-length-get.zip")
+
+        with mock.patch(
+            "apps._tasks.integration.storage.vultr._s3_client",
+            return_value=client,
+        ):
+            with self.assertRaises(restore_common.RestoreError) as raised:
+                restore_common.fetch_backup_zip(point, destination)
+
+        self.assertEqual(raised.exception.code, "INTEGRITY_MISMATCH")
+        self.assertFalse(os.path.exists(destination))
+
     def test_bucket_drift_is_rejected_before_object_access_for_all_providers(self):
         for provider, _state_key, _module, _label in PROVIDERS:
             with self.subTest(provider=provider):
