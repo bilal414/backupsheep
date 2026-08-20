@@ -9,6 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RABBITMQ_CONFIG = PROJECT_ROOT / "deploy" / "rabbitmq" / "90-backupsheep.conf"
 COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yml"
 ENV_SAMPLE = PROJECT_ROOT / ".env_sample"
+SCALING_GUIDE = PROJECT_ROOT / "docs" / "scaling.md"
 
 
 class CeleryBrokerSettingsTests(SimpleTestCase):
@@ -137,3 +138,12 @@ class WorkerCapacityContractTests(SimpleTestCase):
     def test_cpu_and_disk_heavy_workers_default_to_one_active_job(self):
         self.assertEqual(self.DEFAULTS["database"][0], "1")
         self.assertEqual(self.DEFAULTS["files"][0], "1")
+
+    def test_operator_guides_match_starter_capacity_contract(self):
+        text = SCALING_GUIDE.read_text(encoding="utf-8")
+        for queue, (concurrency, _prefetch) in self.DEFAULTS.items():
+            with self.subTest(documented_queue=queue):
+                self.assertIn(f"{queue} `{concurrency}`", text)
+        self.assertIn("2 vCPU", text)
+        self.assertIn("4 GB RAM", text)
+        self.assertIn("8 GB of SSD-backed swap", text)

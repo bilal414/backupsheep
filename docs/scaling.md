@@ -35,9 +35,31 @@ shared network filesystem (NFS/EFS) so replicas see each other's in-progress fil
 
 ## Concurrency
 
-Each worker's `--concurrency` is set in `docker-compose.yml` (cloud 8, the rest 4). Tune
-per host: raise `worker-cloud` (I/O-bound on provider APIs) freely; keep
-`worker-database`/`worker-files` modest (CPU/disk-bound).
+The stock single-host concurrency is cloud `4`, database `1`, files `1`, storage `2`, and
+logs `2`, with a prefetch multiplier of `1` for every queue. The values are configurable
+through `CELERY_<QUEUE>_CONCURRENCY` and
+`CELERY_<QUEUE>_PREFETCH_MULTIPLIER`; `.env_sample` and the Compose fallbacks intentionally
+match.
+
+The minimum supported stock host has 2 vCPU, 4 GB RAM, 8 GB of SSD-backed swap, and
+SSD/NVMe-backed work and Local Storage volumes. Keep the stock limits on that profile.
+They allow one database job, one files job, and two storage jobs to use the shared disk
+at once while excess lane-specific work stays durably queued. Cloud and log processes
+remain independently bounded so they cannot reserve a large hidden backlog.
+
+The minimum-profile acceptance target during that four-lane disk workload is:
+
+- no kernel/container OOM and no worker restart;
+- every web probe returns HTTP 200;
+- signed-in console p95 latency is at most 1 second;
+- `/healthz/` p95 latency is at most 100 milliseconds;
+- accepted excess work remains visible and drains without duplication when capacity is
+  available.
+
+Treat sustained swap I/O, queue growth, or latency above these targets as an undersized
+host. Upgrade the host or reduce concurrency before increasing a queue. On a larger
+profile, change one lane at a time and repeat the same workload, queue, OOM, and latency
+measurements. Scaling a Compose service multiplies that service's configured concurrency.
 
 ## Maintenance tasks
 
