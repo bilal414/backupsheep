@@ -163,3 +163,10 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.source)
+
+    def test_archive_rehydration_has_specific_safe_guidance(self):
+        self.assertIn("RESTORE_ARCHIVE_NOT_READY", self.source)
+        self.assertIn(
+            "The storage provider is restoring this archive; the restore will resume automatically when it is ready.",
+            self.source,
+        )

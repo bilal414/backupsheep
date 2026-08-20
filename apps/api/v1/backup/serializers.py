@@ -375,6 +375,10 @@ _PUBLIC_ERROR_MESSAGES = {
         "The restore state is ambiguous, so automatic destination writes were "
         "stopped. Review the exact ownership and checkpoint evidence before retrying."
     ),
+    "RESTORE_ARCHIVE_NOT_READY": (
+        "The storage provider is restoring this archive; the restore will resume "
+        "automatically when it is ready."
+    ),
 }
 
 

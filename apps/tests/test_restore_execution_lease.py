@@ -389,6 +389,11 @@ class RestoreExecutionLeaseTests(BaseTestCase):
         self.assertIn("restoring this archive", message)
         self.assertNotIn("secret-canary", message)
         self.assertEqual(restore_tasks._restore_retry_delay(error), 120)
+        self.assertEqual(backup_serializers._safe_error_code(code), code)
+        self.assertIn(
+            "restoring this archive",
+            backup_serializers._safe_error_message(code),
+        )
 
     def test_provider_request_failure_is_terminal_without_explicit_retry_contract(self):
         error = RestoreError("provider rejected request with secret details")
