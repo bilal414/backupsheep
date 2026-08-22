@@ -195,6 +195,33 @@ class StorageExecutionLeaseTests(BaseTestCase):
         point.refresh_from_db()
         self.assertGreater(point.upload_lease_expires_at, previous_expiry)
 
+    def test_fenced_save_cannot_regress_a_renewed_lease_deadline(self):
+        _backup, point = self._point()
+        lease = DurableStorageUploadLease(point, task_id="renewed-save-worker")
+        claimed = lease.claim()
+        self.addCleanup(lease.release)
+        self._stop_without_release(lease)
+        original_expiry = claimed.upload_lease_expires_at
+        original_heartbeat = claimed.upload_heartbeat_at
+
+        self.assertTrue(lease._heartbeat_once())
+        point.refresh_from_db()
+        renewed_expiry = point.upload_lease_expires_at
+        renewed_heartbeat = point.upload_heartbeat_at
+        self.assertGreater(renewed_expiry, original_expiry)
+
+        # Simulate an adapter that still holds the model state from claim time and
+        # performs an ordinary full save after the background heartbeat.
+        claimed.upload_lease_expires_at = original_expiry
+        claimed.upload_heartbeat_at = original_heartbeat
+        claimed.metadata = {"phase": "validating"}
+        claimed.save()
+
+        point.refresh_from_db()
+        self.assertEqual(point.upload_lease_expires_at, renewed_expiry)
+        self.assertEqual(point.upload_heartbeat_at, renewed_heartbeat)
+        self.assertEqual(point.metadata, {"phase": "validating"})
+
     def test_recovery_uses_lease_expiry_not_modified_timestamp(self):
         backup, point = self._point()
         lease = DurableStorageUploadLease(point, task_id="active-upload")

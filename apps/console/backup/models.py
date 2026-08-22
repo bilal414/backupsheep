@@ -4720,6 +4720,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     "upload_lease_owner",
                     "upload_lease_token",
                     "upload_lease_expires_at",
+                    "upload_heartbeat_at",
                 ).get(pk=self.pk)
                 if (
                     current.upload_lease_owner != required_owner
@@ -4730,6 +4731,14 @@ class BaseBackupStoragePoints(TimeStampedModel):
                     raise StoragePointLeaseLostError(
                         "Storage upload lease ownership was lost."
                     )
+                # Heartbeats update these fields directly in the database while
+                # provider adapters retain the claimed model instance. Never let a
+                # later full-model save write the instance's older lease deadline
+                # back over a successful renewal.
+                self.upload_lease_owner = current.upload_lease_owner
+                self.upload_lease_token = current.upload_lease_token
+                self.upload_lease_expires_at = current.upload_lease_expires_at
+                self.upload_heartbeat_at = current.upload_heartbeat_at
                 return super().save(*args, **kwargs)
         return super().save(*args, **kwargs)
 
