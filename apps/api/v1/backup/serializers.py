@@ -323,6 +323,7 @@ _PUBLIC_ERROR_CODES = set(UtilBackup.EXECUTION_ERROR_MESSAGES) | {
     "RESTORE_RECONCILIATION_REQUIRED",
     "RESTORE_RETRIES_EXHAUSTED",
     "RESTORE_SOURCE_UNAVAILABLE",
+    "RESTORE_TARGET_NAME_COLLISION",
     "RESTORE_TARGET_REJECTED",
     "RESTORE_TIMEOUT",
     "RESTORE_TRANSIENT_FAILURE",
@@ -378,6 +379,11 @@ _PUBLIC_ERROR_MESSAGES = {
     "RESTORE_ARCHIVE_NOT_READY": (
         "The storage provider is restoring this archive; the restore will resume "
         "automatically when it is ready."
+    ),
+    "RESTORE_TARGET_NAME_COLLISION": (
+        "The restore target cannot preserve distinct case-sensitive and Unicode "
+        "filenames. No website data was uploaded or published. Choose a destination "
+        "filesystem that preserves exact filenames, then retry."
     ),
 }
 

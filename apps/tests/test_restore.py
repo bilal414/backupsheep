@@ -2005,6 +2005,27 @@ class WebsiteRestoreEngineTests(RestoreBackendBase):
         self.assertIn("mirror -R", scripts[0])
         self.assertIn('"."', scripts[0])
 
+    def test_restore_uses_backup_path_snapshot_after_node_configuration_changes(self):
+        node, backup = self._website_backup(all_paths=True)
+        backup.all_paths = True
+        backup.paths = None
+        backup.save(update_fields=["all_paths", "paths", "modified"])
+
+        website = node.website
+        website.all_paths = False
+        website.paths = [
+            {"path": "later-node-path", "type": "directory"},
+        ]
+        website.save(update_fields=["all_paths", "paths", "modified"])
+
+        self._last_zip = self._make_zip({"index.html": "historical-root"})
+        restore = self._restore_row(backup)
+        scripts, _ = self._run_engine(backup, restore)
+
+        self.assertIn("mirror -R", scripts[0])
+        self.assertIn('"."', scripts[0])
+        self.assertNotIn("later-node-path", scripts[0])
+
     def test_private_key_restore_uses_canonical_materializer(self):
         from apps.api.v1.utils.api_helpers import bs_encrypt
 
@@ -2341,6 +2362,27 @@ class WebsiteRestoreTaskTests(RestoreBackendBase):
         self.assertEqual(restore.last_error_code, "RESTORE_SOURCE_UNAVAILABLE")
         self.assertNotIn("boom", restore.error)
         self.assertIn("not currently available", restore.error)
+
+    def test_target_name_collision_keeps_actionable_terminal_code(self):
+        node, backup, restore = self._restore()
+        error = RestoreError("destination listing contained secret-canary")
+        error.code = "RESTORE_TARGET_NAME_COLLISION"
+        error.retryable = False
+        with mock.patch(
+            "apps._tasks.integration.restore_website.restore_website",
+            side_effect=error,
+        ):
+            restore_tasks.restore_website_backup.apply(
+                args=[node.id, backup.id, restore.id]
+            )
+
+        restore.refresh_from_db()
+        self.assertEqual(restore.status, CoreWebsiteRestore.Status.FAILED)
+        self.assertEqual(
+            restore.last_error_code, "RESTORE_TARGET_NAME_COLLISION"
+        )
+        self.assertIn("cannot preserve distinct", restore.error)
+        self.assertNotIn("secret-canary", restore.error)
 
 
 class DatabaseRestoreTaskTests(RestoreBackendBase):

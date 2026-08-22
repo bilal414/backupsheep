@@ -866,6 +866,41 @@ class WebsiteMirrorOptsTests(WebsiteEngineBase):
         self.assertIn("--ignore-size", s)
         self.assertNotIn("--delete", s)
 
+    def test_mirror_uses_backup_path_snapshot_after_node_edit(self):
+        node, backup = self._make_backup(incremental=False)
+        backup.all_paths = False
+        backup.paths = [{"path": "request-path", "type": "directory"}]
+        backup.save(update_fields=["all_paths", "paths", "modified"])
+        website = node.website
+        website.all_paths = False
+        website.paths = [{"path": "later-node-path", "type": "directory"}]
+        website.save(update_fields=["all_paths", "paths", "modified"])
+        scripts = []
+
+        def fake_run(cmd, **kwargs):
+            if cmd == ["lftp"]:
+                scripts.append(kwargs.get("input") or "")
+            return SimpleNamespace(stdout="", returncode=0)
+
+        with mock.patch.object(
+            CoreAuthWebsite, "check_connection", lambda *a, **k: None
+        ), mock.patch.object(
+            W.subprocess, "run", side_effect=fake_run
+        ), mock.patch.object(
+            W, "delete_from_disk"
+        ), mock.patch.object(
+            W, "_finalize_zip"
+        ):
+            W._snapshot_lftp(
+                backup,
+                base_dir=f"_storage/{backup.uuid}/",
+                incremental=False,
+            )
+
+        self.assertEqual(len(scripts), 1)
+        self.assertIn('"request-path"', scripts[0])
+        self.assertNotIn("later-node-path", scripts[0])
+
     def test_sftp_private_key_path_is_absolute_for_lftp(self):
         node, backup = self._make_backup(use_private_key=True)
         auth = node.connection.auth_website
@@ -923,6 +958,22 @@ class CacheFingerprintTests(TestCase):
         fp1 = W._cache_fingerprint(website, auth, username)
         website.paths = [{"path": "other_dir", "type": "directory"}]
         self.assertNotEqual(fp1, W._cache_fingerprint(website, auth, username))
+
+    def test_backup_snapshot_keeps_fingerprint_stable_after_node_path_edit(self):
+        website, auth, username = self._inputs()
+        backup = SimpleNamespace(
+            all_paths=False,
+            paths=[{"path": "request_path", "type": "directory"}],
+        )
+        fp1 = W._cache_fingerprint(
+            website, auth, username, backup=backup
+        )
+        website.all_paths = True
+        website.paths = None
+        self.assertEqual(
+            fp1,
+            W._cache_fingerprint(website, auth, username, backup=backup),
+        )
 
     def test_changes_when_host_changes(self):
         website, auth, username = self._inputs()

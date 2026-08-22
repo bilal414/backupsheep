@@ -67,6 +67,14 @@ def _restore_error_outcome(error):
                 "The storage provider is restoring this archive; the restore will resume automatically when it is ready.",
                 True,
             )
+        if declared_code == "RESTORE_TARGET_NAME_COLLISION":
+            return (
+                "RESTORE_TARGET_NAME_COLLISION",
+                "The restore target cannot preserve distinct case-sensitive and Unicode filenames. "
+                "No website data was uploaded or published. Choose a destination filesystem "
+                "that preserves exact filenames, then retry.",
+                False,
+            )
         if declared_code in {
             "PROVIDER_TRANSIENT_FAILURE",
             "PROVIDER_TRANSIENT_OUTAGE",

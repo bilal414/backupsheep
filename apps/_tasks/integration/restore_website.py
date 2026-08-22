@@ -488,11 +488,15 @@ def _validate_remote_path(path):
 
 
 def _normalise_sources(website):
-    if website.all_paths:
+    return _normalise_source_selection(website.all_paths, website.paths)
+
+
+def _normalise_source_selection(all_paths, paths):
+    if all_paths:
         return [{"path": ".", "type": "directory"}]
     sources = []
     seen = set()
-    for item in website.paths or []:
+    for item in paths or []:
         if not isinstance(item, dict):
             raise RestoreError("website restore path configuration is malformed.")
         path = _validate_remote_path(item.get("path"))
@@ -507,6 +511,18 @@ def _normalise_sources(website):
     if not sources:
         raise RestoreError("website restore has no configured paths.")
     return sources
+
+
+def _restore_sources(backup, website):
+    """Resolve the archive layout without trusting later node-path edits.
+
+    Older rows predate source-selection snapshots and keep their historical fallback
+    to the current website configuration.  A row with either snapshot field present
+    is authoritative, including the explicit ``all_paths=False`` case.
+    """
+    if backup.all_paths is not None or backup.paths is not None:
+        return _normalise_source_selection(backup.all_paths, backup.paths)
+    return _normalise_sources(website)
 
 
 def _local_source_path(tree_root, source):
@@ -2143,7 +2159,7 @@ def restore_website(backup, restore):
             raise RestoreError(
                 "the storage point this restore was created from no longer exists."
             )
-        sources = _normalise_sources(website)
+        sources = _restore_sources(backup, website)
         params = dict(restore.params or {})
         metadata = _metadata(restore)
         old_params = metadata.get("restore_params")

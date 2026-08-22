@@ -420,6 +420,24 @@ class RestoreExecutionLeaseTests(BaseTestCase):
             backup_serializers._safe_error_message(code),
         )
 
+    def test_target_name_collision_is_terminal_and_public_safe(self):
+        error = RestoreError("destination listing contained secret-canary")
+        error.code = "RESTORE_TARGET_NAME_COLLISION"
+        error.retryable = False
+
+        code, message, retryable = restore_tasks._restore_error_outcome(error)
+
+        self.assertEqual(code, "RESTORE_TARGET_NAME_COLLISION")
+        self.assertFalse(retryable)
+        self.assertIn("cannot preserve distinct", message)
+        self.assertIn("No website data was uploaded or published", message)
+        self.assertNotIn("secret-canary", message)
+        self.assertEqual(backup_serializers._safe_error_code(code), code)
+        self.assertIn(
+            "cannot preserve distinct",
+            backup_serializers._safe_error_message(code),
+        )
+
     @override_settings(RESTORE_RECOVERY_DISPATCH_LEASE_SECONDS=120)
     def test_archive_rehydration_reserves_one_retry_with_extended_budget(self):
         class RetrySignal(Exception):

@@ -147,6 +147,46 @@ class BackupInitiateGuardTests(BaseTestCase):
         self.assertEqual(resumed.id, first.id)
         self.assertEqual(resumed.status, UtilBackup.Status.UPLOAD_IN_PROGRESS)
 
+    def test_website_source_selection_is_frozen_once_on_backup_creation(self):
+        node = factories.make_website_node(self.account, self.member)
+        website = node.website
+        original_paths = [
+            {"name": "public_html", "path": "public_html", "type": "directory"},
+        ]
+        original_excludes = [{"path": "public_html/cache", "type": "directory"}]
+        website.all_paths = False
+        website.paths = original_paths
+        website.excludes = original_excludes
+        website.save(update_fields=["all_paths", "paths", "excludes", "modified"])
+
+        with mock.patch.object(
+            CoreNode, "_reconcile_local_backup_destinations", return_value=True
+        ):
+            backup = self._initiate(node, "website-selection-task", storage_ids=[])
+
+        self.assertFalse(backup.all_paths)
+        self.assertEqual(backup.paths, original_paths)
+        self.assertEqual(backup.excludes, original_excludes)
+
+        website.all_paths = True
+        website.paths = None
+        website.excludes = None
+        website.save(update_fields=["all_paths", "paths", "excludes", "modified"])
+        backup.status = UtilBackup.Status.RETRYING
+        backup.save(update_fields=["status", "modified"])
+
+        with mock.patch.object(
+            CoreNode, "_reconcile_local_backup_destinations", return_value=True
+        ):
+            resumed = self._initiate(
+                node, "website-selection-task", storage_ids=[]
+            )
+
+        self.assertEqual(resumed.pk, backup.pk)
+        self.assertFalse(resumed.all_paths)
+        self.assertEqual(resumed.paths, original_paths)
+        self.assertEqual(resumed.excludes, original_excludes)
+
 
 class DestinationSetupRecoveryTests(BaseTestCase):
     def _storage(self, suffix):

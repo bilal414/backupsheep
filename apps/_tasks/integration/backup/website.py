@@ -400,11 +400,21 @@ def _cache_paths(node):
     return base + "/", base + ".meta.json", base + ".lock"
 
 
-def _cache_fingerprint(website, auth, username):
+def _backup_source_selection(backup, website):
+    """Return the source paths frozen on a backup request when available."""
+    if backup is not None and (
+        backup.all_paths is not None or backup.paths is not None
+    ):
+        return backup.all_paths, backup.paths
+    return website.all_paths, website.paths
+
+
+def _cache_fingerprint(website, auth, username, *, backup=None):
     """sha256 fingerprint of everything that defines the mirror cache contents; any
     change (host, port, protocol, credentials, paths, include/exclude filters) means
     the cached mirror no longer matches the configuration and must be rebuilt."""
     get_display = getattr(auth, "get_protocol_display", None)
+    all_paths, paths = _backup_source_selection(backup, website)
     payload = {
         "version": 1,
         "host": auth.host,
@@ -416,8 +426,8 @@ def _cache_fingerprint(website, auth, username):
         # without persisting or hashing the credential material itself.
         "auth_id": getattr(auth, "pk", None),
         "auth_modified": str(getattr(auth, "modified", "") or ""),
-        "all_paths": website.all_paths,
-        "paths": website.paths,
+        "all_paths": all_paths,
+        "paths": paths,
         "includes_regex": website.includes_regex,
         "includes_glob": website.includes_glob,
         "excludes_regex": website.excludes_regex,
@@ -798,6 +808,7 @@ def _finalize_zip(
             backup.website,
             backup.website.node.connection.auth_website,
             "",
+            backup=backup,
         )
     enumeration = enumeration or _enumerate_website_mirror(backup, local_dir)
     identity = enumeration["identity"]
@@ -948,11 +959,17 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
                 f"--ignore-size --use-pget=1 --parallel={parallel} {verbose}"
             )
 
-        if website.all_paths:
+        all_paths, configured_paths = _backup_source_selection(backup, website)
+        if all_paths:
             sources = [{"path": ".", "type": "directory"}]
         else:
-            sources = [{"path": p["path"], "type": p["type"]} for p in (website.paths or [])]
-        fingerprint = _cache_fingerprint(website, auth, username)
+            sources = [
+                {"path": p["path"], "type": p["type"]}
+                for p in (configured_paths or [])
+            ]
+        fingerprint = _cache_fingerprint(
+            website, auth, username, backup=backup
+        )
 
         _write_log(backup, f"Parallel: {parallel}\nIncludes: {' '.join(include_rules)}\n"
                            f"Excludes: {' '.join(exclude_rules)}\n")
@@ -1211,9 +1228,12 @@ def _snapshot_tar(backup):
             what="website backup",
         )
 
-        sources = []
-        for path in (node.website.paths or []):
-            sources.append(path["path"])
+        all_paths, configured_paths = _backup_source_selection(
+            backup, node.website
+        )
+        sources = ["."] if all_paths else [
+            path["path"] for path in (configured_paths or [])
+        ]
 
         # Exclude flags for the remote tar --create command. tar_temp_backup_dir and
         # the backup paths are user-controlled: every value interpolated into a remote

@@ -13049,6 +13049,24 @@ class CoreNode(TimeStampedModel):
             backup.schedule_id = schedule_id
             backup.notes = notes
 
+            # Website restores must be based on the source selection that produced
+            # the archive, not on mutable node settings at restore time.  These
+            # fields already exist on CoreWebsiteBackup; freeze them only when the
+            # durable backup row is first created so a retry cannot silently replace
+            # the snapshot after the website configuration changes.
+            if created and self.type == self.Type.WEBSITE:
+                backup.all_paths = node_type_object.all_paths
+                backup.paths = (
+                    json.loads(json.dumps(node_type_object.paths))
+                    if node_type_object.paths is not None
+                    else None
+                )
+                backup.excludes = (
+                    json.loads(json.dumps(node_type_object.excludes))
+                    if node_type_object.excludes is not None
+                    else None
+                )
+
             # Celery is not the source of truth after a worker crash. Freeze the
             # caller's destination selection once so DB-only recovery can reconstruct
             # the request and a redelivery cannot silently substitute another bucket.
