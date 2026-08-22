@@ -639,7 +639,7 @@ def _enumerate_website_mirror(backup, local_dir):
     def inspect_member(root, name, *, expected_directory):
         path = os.path.join(root, name)
         relative = os.path.relpath(path, source_root).replace(os.sep, "/")
-        if any(character in relative for character in ("\x00", "\r", "\n", "\\")):
+        if "\\" in relative or any(ord(character) < 32 for character in relative):
             raise ArchiveSourcePolicyError("invalid_path", relative_path=relative)
         observed = os.lstat(path)
         if stat.S_ISLNK(observed.st_mode):

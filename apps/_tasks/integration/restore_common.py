@@ -3013,9 +3013,7 @@ def _normalise_zip_member_path(name):
         not name
         or name.startswith("/")
         or "\\" in name
-        or "\x00" in name
-        or "\r" in name
-        or "\n" in name
+        or any(ord(character) < 32 for character in name)
         or (len(name) >= 2 and name[0].isalpha() and name[1] == ":")
     ):
         raise RestoreError("stored backup contains an unsafe archive path.")

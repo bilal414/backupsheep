@@ -1596,7 +1596,13 @@ class ExtractBackupZipTests(RestoreBackendBase):
 
     def test_rejects_ambiguous_lexical_member_paths(self):
         for index, member_name in enumerate(
-            ("./site.txt", "public_html\\site.txt", "a//site.txt")
+            (
+                "./site.txt",
+                "public_html\\site.txt",
+                "a//site.txt",
+                "tab\tname.txt",
+                "control-\x1f.txt",
+            )
         ):
             with self.subTest(member_name=member_name):
                 zip_path = self._make_zip(

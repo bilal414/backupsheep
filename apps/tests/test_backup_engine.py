@@ -3203,3 +3203,25 @@ class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
         self.assertEqual(context.exception.kind, "invalid_path")
         create.assert_not_called()
         self.assertFalse(os.path.exists(manifest))
+
+    def test_manifest_control_character_is_rejected_before_archive_publication(self):
+        _node, backup = self._make_backup()
+        tmp = self._tree()
+        with open(os.path.join(tmp, "tab\tname.txt"), "w") as source:
+            source.write("not portable across supported website protocols")
+        manifest = f"_storage/{backup.uuid}.files"
+        self.addCleanup(
+            _cleanup_storage_artifacts(
+                manifest,
+                f"_storage/{backup.uuid}.zip",
+                f"_storage/{backup.uuid}.log",
+            )
+        )
+
+        with mock.patch.object(W, "create_zip") as create:
+            with self.assertRaises(ArchiveSourcePolicyError) as context:
+                W._finalize_zip(backup, tmp, keep_dir=True)
+
+        self.assertEqual(context.exception.kind, "invalid_path")
+        create.assert_not_called()
+        self.assertFalse(os.path.exists(manifest))
