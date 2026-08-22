@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import uuid
 from datetime import timedelta
 
@@ -64,6 +65,7 @@ class DurableStorageUploadLease:
         self._stop = threading.Event()
         self._lost = threading.Event()
         self._thread = None
+        self._last_heartbeat_monotonic = None
 
     def claim(self):
         now = timezone.now()
@@ -159,6 +161,11 @@ class DurableStorageUploadLease:
                 )
 
         self.point = point.bind_upload_fence(self.owner, self.token)
+        self._last_heartbeat_monotonic = time.monotonic()
+        # Provider adapters normally rely on the background heartbeat. Long local
+        # filesystem reads also pulse from the task thread so a worker runtime that
+        # cannot schedule the helper thread cannot silently expire its own fence.
+        self.point._renew_upload_lease = self.heartbeat_if_due
         self._thread = threading.Thread(
             target=self._heartbeat_loop,
             name=f"storage-lease-{self.point_id}",
@@ -181,7 +188,21 @@ class DurableStorageUploadLease:
         if updated != 1:
             self._lost.set()
             return False
+        self._last_heartbeat_monotonic = time.monotonic()
         return True
+
+    def heartbeat_if_due(self):
+        """Renew from the task thread when a long adapter loop reaches a checkpoint."""
+        if self._lost.is_set() or not self.token:
+            raise StorageUploadLeaseLost("Storage upload lease ownership was lost.")
+        now = time.monotonic()
+        if (
+            self._last_heartbeat_monotonic is not None
+            and now - self._last_heartbeat_monotonic < self.heartbeat_seconds
+        ):
+            return
+        if not self._heartbeat_once():
+            raise StorageUploadLeaseLost("Storage upload lease ownership was lost.")
 
     def _heartbeat_loop(self):
         close_old_connections()

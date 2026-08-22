@@ -13,6 +13,7 @@ from apps._tasks.integration.storage.local import (
     LOCAL_OBJECT_METADATA_KEY,
     storage_local,
 )
+from apps._tasks.integration.storage.lease import StorageUploadLeaseLost
 from apps.console.backup.models import CoreWebsiteBackupStoragePoints
 
 
@@ -125,6 +126,33 @@ class LocalStorageUploadHardeningTests(TestCase):
         self.assertEqual(artifact["object_key"], f"backups/{self.identifier}.zip")
         self.assertEqual(artifact["byte_count"], len(payload))
         self.assertEqual(artifact["checksum_value"], checksum)
+
+    def test_long_hash_and_copy_loops_pulse_the_bound_upload_lease(self):
+        payload = b"lease-heartbeat-checkpoints"
+        self._write_source(payload)
+
+        with tempfile.TemporaryDirectory() as root:
+            point = self._point(root)
+            point._renew_upload_lease = mock.Mock()
+            with mock.patch.object(local_storage_module, "CHUNK_SIZE", 4):
+                storage_local(point)
+
+        # Source identity, atomic copy, and destination identity all checkpoint.
+        self.assertGreaterEqual(point._renew_upload_lease.call_count, 3)
+
+    def test_lease_loss_is_preserved_for_the_task_retry_boundary(self):
+        self._write_source(b"lease-loss")
+
+        with tempfile.TemporaryDirectory() as root:
+            point = self._point(root)
+            point._renew_upload_lease = mock.Mock(
+                side_effect=StorageUploadLeaseLost("lost")
+            )
+
+            with self.assertRaises(StorageUploadLeaseLost):
+                storage_local(point)
+
+        self.assertEqual(point.status, point.Status.UPLOAD_IN_PROGRESS)
 
     def test_retry_adopts_target_when_final_database_response_is_lost(self):
         payload = b"adopt-after-lost-response"

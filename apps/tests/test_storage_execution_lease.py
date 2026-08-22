@@ -180,6 +180,21 @@ class StorageExecutionLeaseTests(BaseTestCase):
         )
         self.assertFalse(lease._heartbeat_once())
 
+    def test_claim_binds_a_same_thread_heartbeat_checkpoint(self):
+        _backup, point = self._point()
+        lease = DurableStorageUploadLease(point, task_id="checkpoint-worker")
+        claimed = lease.claim()
+        self.addCleanup(lease.release)
+        self._stop_without_release(lease)
+        point.refresh_from_db()
+        previous_expiry = point.upload_lease_expires_at
+
+        lease._last_heartbeat_monotonic = 0
+        claimed._renew_upload_lease()
+
+        point.refresh_from_db()
+        self.assertGreater(point.upload_lease_expires_at, previous_expiry)
+
     def test_recovery_uses_lease_expiry_not_modified_timestamp(self):
         backup, point = self._point()
         lease = DurableStorageUploadLease(point, task_id="active-upload")

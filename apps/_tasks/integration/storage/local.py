@@ -15,6 +15,8 @@ import tempfile
 from django.utils import timezone
 
 from apps._tasks.exceptions import StorageLocalUploadFailedError
+from apps._tasks.integration.storage.lease import StorageUploadLeaseLost
+from apps.console.backup.models import StoragePointLeaseLostError
 
 
 LOCAL_OBJECT_METADATA_KEY = "local_object"
@@ -82,7 +84,13 @@ def _regular_file(path, *, source=False):
     return True
 
 
-def _file_identity(path, *, source=False):
+def _pulse_upload_lease(stored_backup):
+    heartbeat = getattr(stored_backup, "_renew_upload_lease", None)
+    if callable(heartbeat):
+        heartbeat()
+
+
+def _file_identity(path, *, source=False, stored_backup=None):
     _regular_file(path, source=source)
     digest = hashlib.sha256()
     byte_count = 0
@@ -94,6 +102,7 @@ def _file_identity(path, *, source=False):
                     break
                 digest.update(chunk)
                 byte_count += len(chunk)
+                _pulse_upload_lease(stored_backup)
     except FileNotFoundError:
         if source:
             raise _LocalSourceMissing from None
@@ -140,7 +149,7 @@ def _fsync_directory(directory):
         os.close(descriptor)
 
 
-def _copy_atomically(source, target, expected):
+def _copy_atomically(source, target, expected, *, stored_backup=None):
     """Copy into a private temp file, fsync it, then atomically publish it."""
     parent = os.path.dirname(target)
     temporary = None
@@ -165,10 +174,13 @@ def _copy_atomically(source, target, expected):
                         destination.write(chunk)
                         digest.update(chunk)
                         byte_count += len(chunk)
+                        _pulse_upload_lease(stored_backup)
             except FileNotFoundError:
                 raise _LocalSourceMissing from None
+            _pulse_upload_lease(stored_backup)
             destination.flush()
             os.fsync(destination.fileno())
+            _pulse_upload_lease(stored_backup)
 
         actual = {"sha256": digest.hexdigest(), "size_bytes": byte_count}
         if not _same_identity(actual, expected):
@@ -177,6 +189,7 @@ def _copy_atomically(source, target, expected):
         os.replace(temporary, target)
         temporary = None
         _fsync_directory(parent)
+        _pulse_upload_lease(stored_backup)
         return actual
     finally:
         if temporary:
@@ -278,7 +291,7 @@ def storage_local(stored_backup):
         target_exists = _regular_file(target)
 
         if target_exists:
-            actual = _file_identity(target)
+            actual = _file_identity(target, stored_backup=stored_backup)
             if expected is not None:
                 if not _same_identity(actual, expected):
                     raise _LocalStorageIntegrityError(
@@ -287,7 +300,11 @@ def storage_local(stored_backup):
                 identity = expected
             else:
                 try:
-                    source_identity = _file_identity(local_zip, source=True)
+                    source_identity = _file_identity(
+                        local_zip,
+                        source=True,
+                        stored_backup=stored_backup,
+                    )
                 except _LocalSourceMissing:
                     _mark_missing_source(stored_backup)
                     return
@@ -298,7 +315,11 @@ def storage_local(stored_backup):
                 identity = source_identity
         else:
             try:
-                source_identity = _file_identity(local_zip, source=True)
+                source_identity = _file_identity(
+                    local_zip,
+                    source=True,
+                    stored_backup=stored_backup,
+                )
             except _LocalSourceMissing:
                 _mark_missing_source(stored_backup)
                 return
@@ -323,8 +344,13 @@ def storage_local(stored_backup):
                 target,
                 status=_status(stored_backup, "UPLOAD_VALIDATION"),
             )
-            _copy_atomically(local_zip, target, identity)
-            actual = _file_identity(target)
+            _copy_atomically(
+                local_zip,
+                target,
+                identity,
+                stored_backup=stored_backup,
+            )
+            actual = _file_identity(target, stored_backup=stored_backup)
             if not _same_identity(actual, identity):
                 raise _LocalStorageIntegrityError(
                     "The local destination failed integrity verification."
@@ -356,6 +382,10 @@ def storage_local(stored_backup):
         )
     except _LocalSourceMissing:
         _mark_missing_source(stored_backup)
+    except (StorageUploadLeaseLost, StoragePointLeaseLostError):
+        # The task wrapper owns retry policy. Preserve fence loss instead of
+        # converting it into a generic provider failure and attempting a stale save.
+        raise
     except StorageLocalUploadFailedError:
         raise
     except Exception as error:
