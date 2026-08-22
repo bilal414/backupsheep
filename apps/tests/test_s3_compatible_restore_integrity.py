@@ -263,6 +263,154 @@ class S3CompatibleRestoreIntegrityTests(SimpleTestCase):
             self.assertEqual(restored.read(), self.payload)
         client.get_object.assert_called_once()
 
+    def test_vultr_rehydrated_archive_accepts_stable_transport_etag_change(self):
+        point, _config, _key, state = self._point("vultr")
+        state["etag"] = '"0123456789abcdef0123456789abcdef-7881"'
+        rehydrated_etag = '"fedcba9876543210fedcba9876543210-1025"'
+        rehydrated_head = self._head(
+            point,
+            state,
+            ETag=rehydrated_etag,
+            StorageClass="VULTR_ARCHIVE",
+            Restore='ongoing-request="false"',
+        )
+        client = mock.Mock(name="vultr-rehydrated-etag-client")
+        client.head_object.side_effect = [
+            dict(rehydrated_head),
+            dict(rehydrated_head),
+        ]
+        client.get_object.return_value = {
+            **rehydrated_head,
+            "Body": io.BytesIO(self.payload),
+        }
+        destination = os.path.join(self.tmp, "vultr-rehydrated-etag.zip")
+
+        with mock.patch(
+            "apps._tasks.integration.storage.vultr._s3_client",
+            return_value=client,
+        ):
+            restore_common.fetch_backup_zip(point, destination)
+
+        with open(destination, "rb") as restored:
+            self.assertEqual(restored.read(), self.payload)
+        client.get_object.assert_called_once()
+
+    def test_vultr_archive_etag_change_still_defers_while_rehydrating(self):
+        point, _config, _key, state = self._point("vultr")
+        state["etag"] = '"0123456789abcdef0123456789abcdef-7881"'
+        client = mock.Mock(name="vultr-rehydrating-etag-client")
+        client.head_object.return_value = self._head(
+            point,
+            state,
+            ContentLength=0,
+            ETag='"fedcba9876543210fedcba9876543210-1025"',
+            StorageClass="VULTR_ARCHIVE",
+            Restore='ongoing-request="true"',
+        )
+
+        with mock.patch(
+            "apps._tasks.integration.storage.vultr._s3_client",
+            return_value=client,
+        ):
+            with self.assertRaises(restore_common.RestoreError) as raised:
+                restore_common.fetch_backup_zip(
+                    point,
+                    os.path.join(self.tmp, "vultr-rehydrating-etag.zip"),
+                )
+
+        self.assertEqual(raised.exception.code, "RESTORE_ARCHIVE_NOT_READY")
+        client.get_object.assert_not_called()
+
+    def test_vultr_archive_etag_change_requires_multipart_commit_identity(self):
+        point, _config, _key, state = self._point("vultr")
+        client = mock.Mock(name="vultr-single-part-etag-client")
+        client.head_object.return_value = self._head(
+            point,
+            state,
+            ETag='"fedcba9876543210fedcba9876543210-1025"',
+            StorageClass="VULTR_ARCHIVE",
+            Restore='ongoing-request="false"',
+        )
+
+        with mock.patch(
+            "apps._tasks.integration.storage.vultr._s3_client",
+            return_value=client,
+        ):
+            with self.assertRaises(restore_common.RestoreError) as raised:
+                restore_common.fetch_backup_zip(
+                    point,
+                    os.path.join(self.tmp, "vultr-single-part-etag.zip"),
+                )
+
+        self.assertEqual(raised.exception.code, "PROVIDER_VERSION_DRIFT")
+        client.get_object.assert_not_called()
+
+    def test_vultr_rehydrated_transport_etag_must_match_get(self):
+        point, _config, _key, state = self._point("vultr")
+        state["etag"] = '"0123456789abcdef0123456789abcdef-7881"'
+        rehydrated_etag = '"fedcba9876543210fedcba9876543210-1025"'
+        rehydrated_head = self._head(
+            point,
+            state,
+            ETag=rehydrated_etag,
+            StorageClass="VULTR_ARCHIVE",
+            Restore='ongoing-request="false"',
+        )
+        client = mock.Mock(name="vultr-rehydrated-get-drift-client")
+        client.head_object.return_value = dict(rehydrated_head)
+        client.get_object.return_value = {
+            **rehydrated_head,
+            "ETag": '"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1025"',
+            "Body": io.BytesIO(self.payload),
+        }
+        destination = os.path.join(self.tmp, "vultr-rehydrated-get-drift.zip")
+
+        with mock.patch(
+            "apps._tasks.integration.storage.vultr._s3_client",
+            return_value=client,
+        ):
+            with self.assertRaises(restore_common.RestoreError) as raised:
+                restore_common.fetch_backup_zip(point, destination)
+
+        self.assertEqual(raised.exception.code, "PROVIDER_VERSION_DRIFT")
+        self.assertFalse(os.path.exists(destination))
+
+    def test_vultr_rehydrated_transport_etag_must_match_final_head(self):
+        point, _config, _key, state = self._point("vultr")
+        state["etag"] = '"0123456789abcdef0123456789abcdef-7881"'
+        rehydrated_etag = '"fedcba9876543210fedcba9876543210-1025"'
+        rehydrated_head = self._head(
+            point,
+            state,
+            ETag=rehydrated_etag,
+            StorageClass="VULTR_ARCHIVE",
+            Restore='ongoing-request="false"',
+        )
+        final_drift = {
+            **rehydrated_head,
+            "ETag": '"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1025"',
+        }
+        client = mock.Mock(name="vultr-rehydrated-final-drift-client")
+        client.head_object.side_effect = [
+            dict(rehydrated_head),
+            final_drift,
+        ]
+        client.get_object.return_value = {
+            **rehydrated_head,
+            "Body": io.BytesIO(self.payload),
+        }
+        destination = os.path.join(self.tmp, "vultr-rehydrated-final-drift.zip")
+
+        with mock.patch(
+            "apps._tasks.integration.storage.vultr._s3_client",
+            return_value=client,
+        ):
+            with self.assertRaises(restore_common.RestoreError) as raised:
+                restore_common.fetch_backup_zip(point, destination)
+
+        self.assertEqual(raised.exception.code, "PROVIDER_VERSION_DRIFT")
+        self.assertFalse(os.path.exists(destination))
+
     def test_zero_length_head_exception_is_vultr_multipart_only(self):
         cases = (
             ("do_spaces", '"0123456789abcdef0123456789abcdef-2"'),

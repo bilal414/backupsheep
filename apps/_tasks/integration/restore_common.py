@@ -2232,6 +2232,8 @@ def _validate_s3_compatible_head(
     *,
     provider,
     allow_vultr_zero_length=False,
+    allow_vultr_archive_etag_change=False,
+    expected_transport_etag=None,
 ):
     """Verify provider metadata for the exact committed object version."""
     if not isinstance(head, dict):
@@ -2293,7 +2295,29 @@ def _validate_s3_compatible_head(
             "MALFORMED_PROVIDER_RESPONSE",
             f"{provider} returned no object ETag.",
         )
-    if remote_etag != state["etag"]:
+    committed_etag = str(state.get("etag") or "").strip()
+    required_etag = (
+        str(expected_transport_etag or "").strip()
+        if expected_transport_etag is not None
+        else committed_etag
+    )
+    restore_state = str(head.get("Restore") or "").strip().lower()
+    # Vultr can rehydrate one archived multipart object into a different internal
+    # multipart layout, changing only its transport ETag. The committed ETag stays
+    # immutable in our ledger; the caller must pin this newly observed ETag across
+    # GET and the final HEAD, while the streamed byte count and SHA remain exact.
+    safe_vultr_archive_etag_change = bool(
+        allow_vultr_archive_etag_change
+        and provider == S3_COMPATIBLE_PROVIDER_LABELS["vultr"]
+        and str(head.get("StorageClass") or "").strip().upper()
+        == "VULTR_ARCHIVE"
+        and (
+            'ongoing-request="true"' in restore_state
+            or 'ongoing-request="false"' in restore_state
+        )
+        and _is_multipart_etag(committed_etag)
+    )
+    if remote_etag != required_etag and not safe_vultr_archive_etag_change:
         raise _SafeProviderRestoreError(
             "PROVIDER_VERSION_DRIFT",
             f"the committed {provider} object ETag changed.",
@@ -2329,16 +2353,21 @@ def _s3_compatible_download(stored_backup, dest_zip_path, expected, state, provi
         if version_id:
             request["VersionId"] = version_id
 
-        def verified_head():
+        def verified_head(expected_transport_etag=None):
             return _validate_s3_compatible_head(
                 client.head_object(**request),
                 state,
                 expected,
                 provider=provider,
                 allow_vultr_zero_length=True,
+                allow_vultr_archive_etag_change=(
+                    provider_code == "vultr" and expected_transport_etag is None
+                ),
+                expected_transport_etag=expected_transport_etag,
             )
 
         initial = verified_head()
+        transport_etag = str(initial.get("ETag") or "").strip()
         if legacy_bucket_unbound:
             _persist_s3_bucket_binding(
                 stored_backup,
@@ -2361,6 +2390,7 @@ def _s3_compatible_download(stored_backup, dest_zip_path, expected, state, provi
             state,
             expected,
             provider=provider,
+            expected_transport_etag=transport_etag,
         )
         body = response.get("Body") if isinstance(response, dict) else None
         if body is None or not callable(getattr(body, "read", None)):
@@ -2372,7 +2402,7 @@ def _s3_compatible_download(stored_backup, dest_zip_path, expected, state, provi
             iter(lambda: body.read(CHUNK_SIZE), b""),
             dest_zip_path,
             expected,
-            verified_head,
+            lambda: verified_head(transport_etag),
         )
     except RestoreError:
         raise
