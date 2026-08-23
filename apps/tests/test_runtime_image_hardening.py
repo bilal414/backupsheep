@@ -108,3 +108,12 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertIn("useradd --uid 10001 --gid 10001", self.runtime)
         self.assertIn("USER 10001:10001", self.runtime)
         self.assertIn('ENTRYPOINT ["/usr/local/bin/init.sh"]', self.runtime)
+
+    def test_restrictive_checkout_modes_cannot_break_non_root_imports(self):
+        self.assertIn("find /code -type d -exec chmod 0755 {} +", self.runtime)
+        self.assertIn("find /code -type f -exec chmod 0644 {} +", self.runtime)
+        self.assertIn("chmod 0755 /code/install.sh", self.runtime)
+        self.assertLess(
+            self.runtime.index("find /code -type f -exec chmod 0644 {} +"),
+            self.runtime.index("USER 10001:10001"),
+        )

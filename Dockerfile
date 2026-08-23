@@ -194,6 +194,14 @@ RUN --mount=from=python-wheels,source=/wheels,target=/wheels,ro \
 WORKDIR /code
 COPY . /code/
 
+# A production checkout may be created by root under a restrictive umask. Git
+# records only the executable bit, so COPY can otherwise preserve mode-0600
+# modules that the non-root runtime cannot import. Normalize the immutable code
+# tree explicitly; writable runtime paths are created for UID 10001 below.
+RUN find /code -type d -exec chmod 0755 {} + \
+    && find /code -type f -exec chmod 0644 {} + \
+    && chmod 0755 /code/install.sh
+
 COPY init.sh /usr/local/bin/init.sh
 RUN groupadd --gid 10001 backupsheep \
     && useradd --uid 10001 --gid 10001 \
