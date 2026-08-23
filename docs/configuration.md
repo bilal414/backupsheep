@@ -26,7 +26,9 @@ the simplest rule remains: **copy `.env_sample` wholesale and don't delete lines
 | `APP_DOMAIN` | ✅ | `localhost:8000` | Public host (`host[:port]`); used for `APP_URL` and CSRF trusted origins. |
 | `APP_PROTOCOL` | ✅ | `http://` | URL scheme (`http://` or `https://`), combined with `APP_DOMAIN`. |
 | `API_TOKEN_TTL_SECONDS` | optional | `2592000` | Lifetime of newly issued personal API tokens in seconds (30 days). Values above the 90-day maximum are rejected. |
-| `SENTRY_DSN` | optional | empty | Sentry DSN for error/performance monitoring. Leave blank to disable. |
+| `SENTRY_DSN` | optional | empty | Sentry DSN for scrubbed error/performance monitoring. Leave blank to disable. |
+| `SENTRY_TRACES_SAMPLE_RATE` | optional | `0` | Transaction trace sampling rate from 0 to 1. Opt in only after a privacy/cost review. |
+| `SENTRY_PROFILES_SAMPLE_RATE` | optional | `0` | Profile sampling rate from 0 to 1. Opt in only after a privacy/cost review. |
 | `BACKUPSHEEP_SECRETS` | optional | unset | Advanced: if set, its JSON value is used as the entire config instead of `.env` (for secret-manager deployments). |
 
 ## Database (PostgreSQL)

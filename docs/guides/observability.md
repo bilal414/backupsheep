@@ -111,9 +111,16 @@ Centralize container logs before their local retention/rotation window expires. 
 ## Sentry
 
 Set `SENTRY_DSN` to enable the initialized Django integration. `DJANGO_SERVER` becomes the
-Sentry environment tag. Current settings request full transaction tracing and profiling
-for sampled transactions; evaluate volume, cost, data handling and retention in the Sentry
-project before enabling it on sensitive production workloads.
+Sentry environment tag. Transaction tracing and profiling both default to `0` (off). An
+operator may explicitly set `SENTRY_TRACES_SAMPLE_RATE` or `SENTRY_PROFILES_SAMPLE_RATE`
+to a value from `0` to `1`, after evaluating volume, cost, data handling and retention in
+the Sentry project. Invalid or out-of-range values stop application startup.
+
+BackupSheep configures Sentry to omit request bodies, Python local variables and default
+PII. A final event scrubber removes credentials, cookies, query strings, raw exception
+messages, breadcrumbs, span data and credential-bearing URLs from both error and
+transaction events. Do not put secrets into custom Sentry tags; telemetry is not an
+approved secret store.
 
 An empty DSN disables event delivery. Sentry does not replace queue, capacity, provider or
 restore monitoring.

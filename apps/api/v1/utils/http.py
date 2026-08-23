@@ -55,7 +55,14 @@ def _retry_policy(*, allow_mutation_retries=True):
 
 
 class TimeoutSession(_requests.Session):
-    """Requests session with mandatory timeout and safe idempotent retries."""
+    """Requests session with bounded I/O and no automatic redirects.
+
+    ``requests`` follows redirects for GET/OPTIONS by default and will replay a
+    POST body after a 307/308 when explicitly enabled.  Provider requests carry
+    credentials, so redirects are an authorization boundary and must be handled
+    manually by a caller that has validated the destination.  No current
+    BackupSheep provider integration requires that exception.
+    """
 
     def __init__(self, *, allow_mutation_retries=False):
         super().__init__()
@@ -69,7 +76,33 @@ class TimeoutSession(_requests.Session):
 
     def request(self, method, url, **kwargs):
         kwargs.setdefault("timeout", request_timeout())
+        if kwargs.get("allow_redirects"):
+            raise ValueError(
+                "Automatic redirects are disabled for provider HTTP requests."
+            )
+        kwargs["allow_redirects"] = False
         return super().request(method, url, **kwargs)
+
+    def get(self, url, **kwargs):
+        # requests.Session.get otherwise inserts allow_redirects=True before it
+        # reaches request().
+        kwargs.setdefault("allow_redirects", False)
+        return super().get(url, **kwargs)
+
+    def options(self, url, **kwargs):
+        # requests.Session.options has the same redirect-following default.
+        kwargs.setdefault("allow_redirects", False)
+        return super().options(url, **kwargs)
+
+    def send(self, request, **kwargs):
+        # Cover callers that send a PreparedRequest directly instead of using
+        # request()/get()/post().
+        if kwargs.get("allow_redirects"):
+            raise ValueError(
+                "Automatic redirects are disabled for provider HTTP requests."
+            )
+        kwargs["allow_redirects"] = False
+        return super().send(request, **kwargs)
 
 
 class RequestsFacade:

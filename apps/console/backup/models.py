@@ -6240,7 +6240,10 @@ class CoreWordPressBackup(UtilBackup):
                             f"&backup_uuid={self.uuid_str}"
                             f"&key={self.wordpress.node.connection.auth_wordpress.key}"
                             f"&t={time.time()}",
-                            allow_redirects=True,
+                            # The WordPress URL is user-controlled and this
+                            # request carries both HTTP auth and a query key.
+                            # Never replay them to a redirect destination.
+                            allow_redirects=False,
                             auth=auth,
                             headers=client,
                             verify=True

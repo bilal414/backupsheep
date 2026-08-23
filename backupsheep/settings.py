@@ -24,6 +24,8 @@ import google.auth
 from dotenv import load_dotenv
 from dotenv import dotenv_values
 
+from backupsheep.sentry_security import scrub_sentry_event
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -345,24 +347,47 @@ APP_DOMAIN = config["APP_DOMAIN"]
 APP_PROTOCOL = config["APP_PROTOCOL"]
 APP_URL = f"{APP_PROTOCOL}{APP_DOMAIN}"
 
+
+def _sentry_sample_rate(name):
+    """Return an explicit, bounded Sentry sampling rate.
+
+    Error events remain available when a DSN is configured, while tracing and
+    profiling are off unless an operator deliberately opts in.  Refusing an
+    invalid value is safer than silently turning on high-volume telemetry.
+    """
+
+    raw_value = config.get(name, 0)
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as error:
+        raise ImproperlyConfigured(f"{name} must be a number between 0 and 1.") from error
+    if not 0 <= value <= 1:
+        raise ImproperlyConfigured(f"{name} must be between 0 and 1.")
+    return value
+
+
+SENTRY_TRACES_SAMPLE_RATE = _sentry_sample_rate("SENTRY_TRACES_SAMPLE_RATE")
+SENTRY_PROFILES_SAMPLE_RATE = _sentry_sample_rate("SENTRY_PROFILES_SAMPLE_RATE")
+
 sentry_sdk.init(
     dsn=config["SENTRY_DSN"],
-    # Set traces_sample_rate to 1.0 to capture 100%
-    # of transactions for performance monitoring.
-    traces_sample_rate=1.0,
-    # Set profiles_sample_rate to 1.0 to profile 100%
-    # of sampled transactions.
-    # We recommend adjusting this value in production.
-    profiles_sample_rate=1.0,
+    traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+    profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
+    include_local_variables=False,
+    # sentry-sdk's Python option equivalent to request_bodies="never".
+    max_request_body_size="never",
+    send_default_pii=False,
+    before_send=scrub_sentry_event,
+    before_send_transaction=scrub_sentry_event,
     integrations=[
         DjangoIntegration(
-            transaction_style='url',
+            transaction_style="url",
             middleware_spans=True,
             signals_spans=False,
             cache_spans=False,
         ),
     ],
-    environment=DJANGO_SERVER
+    environment=DJANGO_SERVER,
 )
 
 HOME_URL = "/console"

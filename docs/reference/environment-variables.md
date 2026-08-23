@@ -35,7 +35,9 @@ values are false. Defaults below are repository defaults for `develop`.
 | `APP_PROTOCOL` | `http://` | Public scheme, including `://`; combines with `APP_DOMAIN` for CSRF/OAuth URLs |
 | `APP_NAME` | `BackupSheep` | Display name |
 | `BACKUPSHEEP_SECRETS` | unset | Complete JSON configuration replacement; see warning above |
-| `SENTRY_DSN` | blank | Enables Sentry event/performance delivery when non-empty |
+| `SENTRY_DSN` | blank | Enables scrubbed Sentry error delivery when non-empty |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0` | Transaction trace sampling rate from 0 to 1; disabled unless explicitly opted in |
+| `SENTRY_PROFILES_SAMPLE_RATE` | `0` | Profile sampling rate from 0 to 1; disabled unless explicitly opted in |
 
 `APP_PROTOCOL`, `APP_DOMAIN`, proxy forwarding and `DJANGO_HTTPS` must describe the same
 public URL. Keep `DJANGO_SECRET_KEY` stable and backed up as a secret.
