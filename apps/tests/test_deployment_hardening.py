@@ -19,6 +19,14 @@ class DeploymentHardeningContractTests(TestCase):
         )
         self.assertNotIn('- "8000:8000"', self.compose)
 
+    def test_bundled_postgres_preserves_the_cluster_collation_runtime(self):
+        self.assertIn(
+            "postgres:18.6-trixie@sha256:"
+            "06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941",
+            self.compose,
+        )
+        self.assertNotIn("postgres:18.6-bookworm", self.compose)
+
     def test_compose_uses_supported_pinned_broker_without_guest_defaults(self):
         self.assertIn(
             "rabbitmq:4.3.5-alpine@sha256:"
