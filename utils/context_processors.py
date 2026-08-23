@@ -43,3 +43,17 @@ def timezone(request):
                 request.session["django_timezone"] = request.user.member.timezone
                 member_timezone = request.user.member.timezone
     return {'timezone': member_timezone}
+
+
+def console_capabilities(request):
+    """Current-account capabilities used by the shared console navigation."""
+    if not request.user.is_authenticated or not hasattr(request.user, "member"):
+        return {"can_manage_sources": False, "can_run_backups": False}
+
+    from apps.api.v1.utils.api_permissions import member_has_perm
+
+    return {
+        "can_manage_sources": member_has_perm(request, "node_changes")
+        and member_has_perm(request, "integration_changes"),
+        "can_run_backups": member_has_perm(request, "backup_create"),
+    }

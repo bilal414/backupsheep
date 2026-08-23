@@ -6,7 +6,7 @@ def active_current_membership(member):
 
     Membership status is an authorization boundary. A stale ``current=True``
     flag on a suspended, pending, or invited row must not preserve tenant
-    access through otherwise account-scoped querysets.  If another ACTIVE
+    access through otherwise account-scoped querysets. If another ACTIVE
     membership exists, the member model atomically selects it; otherwise this
     returns ``None``.
     """
@@ -16,13 +16,37 @@ def active_current_membership(member):
         return None
 
 
-def member_has_perm(request, codename):
-    """Check one of the account-group (CoreAccountGroup) custom permissions.
+def _current_account_permission_groups(request, codename):
+    """Active-account groups granting exactly one BackupSheep permission."""
+    from apps.console.account.models import CoreAccountGroup
 
-    The PRIMARY member of the current account bypasses every check (full
-    access). Any other member receives only permissions attached through a
-    CoreAccountGroup owned by that same current account. This intentionally
-    avoids Django's cross-account union of auth-group permissions.
+    try:
+        member = request.user.member
+    except AttributeError:
+        return CoreAccountGroup.objects.none()
+    membership = active_current_membership(member)
+    if membership is None:
+        return CoreAccountGroup.objects.none()
+    return CoreAccountGroup.objects.filter(
+        account=membership.account,
+        group__user=request.user,
+        group__permissions__content_type__app_label=(
+            CoreAccountGroup._meta.app_label
+        ),
+        group__permissions__content_type__model=(
+            CoreAccountGroup._meta.model_name
+        ),
+        group__permissions__codename=codename,
+    ).distinct()
+
+
+def member_has_perm(request, codename):
+    """Check a tenant-scoped CoreAccountGroup custom permission.
+
+    The primary member of the active current account has full access. Other
+    members receive only permissions attached through account groups owned by
+    that same account; Django's cross-account union of auth groups is never an
+    authorization source here.
     """
     try:
         member = request.user.member
@@ -31,35 +55,51 @@ def member_has_perm(request, codename):
     membership = active_current_membership(member)
     if membership is None:
         return False
-    account = membership.account
-
-    from apps.console.account.models import CoreAccountGroup
     if membership.primary:
         return True
-
-    # Django's user.has_perm() returns the union of every auth Group attached to
-    # a user. A member can belong to several BackupSheep accounts, so that union
-    # must never be used for tenant authorization. Resolve the permission only
-    # through CoreAccountGroup rows owned by the current account.
-    return CoreAccountGroup.objects.filter(
-        account=account,
-        group__user=request.user,
-        group__permissions__codename=codename,
-        group__permissions__content_type__app_label=CoreAccountGroup._meta.app_label,
-        group__permissions__content_type__model=CoreAccountGroup._meta.model_name,
-    ).exists()
+    return _current_account_permission_groups(request, codename).exists()
 
 
 def current_account_is_primary(request):
-    """Return whether the authenticated member owns their current account."""
+    """Return whether the authenticated member owns their active account."""
     try:
         member = request.user.member
     except AttributeError:
         return False
     membership = active_current_membership(member)
+    return bool(membership and membership.primary)
+
+
+def permitted_nodes(request, codename):
+    """Visible nodes covered by an active-account permission group.
+
+    Permissions in Settings apply only to nodes in the granting account group.
+    An empty node list is the existing unrestricted-group contract and covers
+    every node visible in the active current account.
+    """
+    from apps.api.v1.utils.api_helpers import visible_nodes
+    from apps.console.node.models import CoreNode
+
+    try:
+        member = request.user.member
+    except AttributeError:
+        return CoreNode.objects.none()
+    membership = active_current_membership(member)
     if membership is None:
-        return False
-    return membership.primary
+        return CoreNode.objects.none()
+
+    nodes = visible_nodes(member)
+    if membership.primary:
+        return nodes
+
+    permission_groups = _current_account_permission_groups(request, codename)
+    if permission_groups.filter(nodes__isnull=True).exists():
+        return nodes
+    return nodes.filter(enrollments__in=permission_groups).distinct()
+
+
+def member_has_perm_for_node(request, codename, node):
+    return permitted_nodes(request, codename).filter(pk=node.pk).exists()
 
 
 class MemberPermissions(permissions.BasePermission):
@@ -68,25 +108,22 @@ class MemberPermissions(permissions.BasePermission):
             member = request.user.member
         except AttributeError:
             return False
-        if active_current_membership(member) is None:
-            return False
-        if request.method in permissions.SAFE_METHODS:
-            return True
-        return True
+        return active_current_membership(member) is not None
 
 
 class MemberGroupPermissions(permissions.BasePermission):
-    """Write/manage-action gate backed by the account-group custom permissions.
+    """Fail-closed write gate backed by tenant-scoped custom permissions.
 
-    ``action_permissions`` maps a DRF action name to a CoreAccountGroup
-    permission codename (e.g. ``{"destroy": "backup_delete"}``); ``"*"`` is the
-    fallback for any unsafe (non-safe-method) action without an explicit entry.
-    Safe-method actions without an explicit mapping stay open for the view's
-    object/queryset checks. Unmapped unsafe actions fail closed for ordinary
-    members; the current account owner retains administrative access.
+    ``action_permissions`` maps a DRF action to a CoreAccountGroup permission
+    codename; ``"*"`` is the fallback for an unsafe action without an explicit
+    entry. Safe actions without a mapping remain available to scoped querysets.
+    Unmapped unsafe actions are owner-only.
     """
 
     action_permissions = {}
+
+    def _permissions_for_view(self, view):
+        return getattr(view, "action_permissions", self.action_permissions)
 
     def has_permission(self, request, view):
         try:
@@ -96,13 +133,7 @@ class MemberGroupPermissions(permissions.BasePermission):
         if active_current_membership(member) is None:
             return False
 
-        # Most viewsets declare their map on the view, while provider-specific
-        # permission subclasses declare it here. Honour both, preferring the
-        # view's explicit map.
-        action_permissions = getattr(view, "action_permissions", None)
-        if action_permissions is None:
-            action_permissions = self.action_permissions
-
+        action_permissions = self._permissions_for_view(view)
         codename = action_permissions.get(getattr(view, "action", None))
         if codename is None and request.method not in permissions.SAFE_METHODS:
             codename = action_permissions.get("*")
@@ -112,10 +143,30 @@ class MemberGroupPermissions(permissions.BasePermission):
             return current_account_is_primary(request)
         return member_has_perm(request, codename)
 
+    def has_object_permission(self, request, view, obj):
+        try:
+            member = request.user.member
+        except AttributeError:
+            return False
+        if active_current_membership(member) is None:
+            return False
+
+        action_permissions = self._permissions_for_view(view)
+        codename = action_permissions.get(getattr(view, "action", None))
+        if codename is None and request.method not in permissions.SAFE_METHODS:
+            codename = action_permissions.get("*")
+        if codename is None:
+            return True
+
+        # A permission granted by one account group must not authorize a node
+        # assigned through another group.
+        from apps.console.node.models import CoreNode
+
+        if isinstance(obj, CoreNode):
+            return member_has_perm_for_node(request, codename, obj)
+        return True
+
 
 class WebhookPermissions(permissions.BasePermission):
     def has_permission(self, request, view):
-        if request.method in ('POST',):
-            return True
-        else:
-            return False
+        return request.method == "POST"

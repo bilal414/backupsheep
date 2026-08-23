@@ -208,6 +208,7 @@ TEMPLATES = [
                 "django.template.context_processors.i18n",
                 "utils.context_processors.timezone",
                 "utils.context_processors.site",
+                "utils.context_processors.console_capabilities",
             ],
         },
     },

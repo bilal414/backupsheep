@@ -131,10 +131,12 @@
   display: none !important;
 }
 
-body.dashboard-page {
+body.dashboard-page,
+body.sources-page {
   background: var(--color-wool-50);
 }
 
-body.dashboard-page #main-content > div {
+body.dashboard-page #main-content > div,
+body.sources-page #main-content > div {
   max-width: 92rem;
 }

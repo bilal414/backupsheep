@@ -1,9 +1,11 @@
 from cryptography.fernet import Fernet
+from django.contrib.auth.models import Group
 from django.contrib.auth import SESSION_KEY
 from django.test import Client
 from rest_framework.authtoken.models import Token
 
 from apps.console.account.models import CoreAccount
+from apps.console.account.models import CoreAccountGroup
 from apps.console.member.models import CoreMemberAccount
 from apps.console.setting.models import CoreSiteSettings
 from apps.tests import factories
@@ -123,6 +125,17 @@ class MembershipAuthenticationBoundaryTests(BaseTestCase):
         old_node.name = old_secret
         old_node.save(update_fields=["name", "modified"])
         new_account, fallback = self._add_membership("Active fallback")
+        unrestricted_group = Group.objects.create(
+            name=f"active-fallback-{new_account.pk}"
+        )
+        CoreAccountGroup.objects.create(
+            account=new_account,
+            group=unrestricted_group,
+            name="Active fallback access",
+            type=CoreAccountGroup.Type.Client,
+            default=False,
+        )
+        self.user.groups.add(unrestricted_group)
         new_node = factories.make_website_node(new_account, self.member)
         new_node.name = new_secret
         new_node.save(update_fields=["name", "modified"])

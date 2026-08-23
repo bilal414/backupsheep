@@ -18,7 +18,7 @@
         </div>
 
         <div class="flex flex-none items-center gap-2 sm:gap-3">
-            <a
+            {% if can_manage_sources %}<a
                 href="{% url 'console:setup:integration_select' %}"
                 class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 sm:px-4"
             >
@@ -27,7 +27,7 @@
                 </svg>
                 <span class="hidden sm:inline">Add source</span>
                 <span class="sr-only sm:hidden">Add source</span>
-            </a>
+            </a>{% endif %}
 
             <div x-data="{ isOpen: false }" class="relative">
                 <button

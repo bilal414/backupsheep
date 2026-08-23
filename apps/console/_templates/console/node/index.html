@@ -3,603 +3,507 @@
 {% block meta_title %}{{ heading }}{% endblock %}
 {% block meta_description %}{{ heading }}{% endblock %}
 {% block meta_keywords %}{{ heading }}{% endblock %}
-{% block page_class %}page_console console-page{% endblock %}
+{% block page_class %}page_console console-page sources-page{% endblock %}
 {% load humanize %}
 {% load tz %}
 
 {% block content %}
-    <div class="space-y-6">
-        <!-- Page header -->
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-                <h2 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Protected sources</h2>
-                <p class="mt-1 text-sm text-slate-500">Keep every protected server, volume, website, and database visible in one operating view. Search by ownership, provider, endpoint, or state.</p>
+    <div x-data="sourceInventoryPage" class="space-y-6 sm:space-y-8">
+        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-ink-650">
+                <span class="h-1.5 w-1.5 rounded-full bg-evidence-600" aria-hidden="true"></span>
+                Source inventory
+                <span class="font-normal normal-case tracking-normal text-ink-650" aria-hidden="true">/</span>
+                <span class="font-normal normal-case tracking-normal text-ink-650">
+                    {% if member.is_primary_account %}Full workspace{% else %}Assigned access{% endif %}
+                </span>
             </div>
-            <div class="flex flex-none items-center gap-2">
-                <span class="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/20">{{ node_count }} protected source{{ node_count|pluralize }}</span>
-                <a href="{% url 'console:setup:integration_select' %}" class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>
+            <p class="font-mono text-xs tabular-nums text-ink-650">
+                As of
+                {% timezone member.timezone %}{% now "M j, Y · H:i T" %}{% endtimezone %}
+            </p>
+        </div>
+
+        <section class="overflow-hidden rounded-lg border border-rule-200 bg-paper" aria-labelledby="inventory-heading">
+            <div class="flex flex-col gap-5 px-5 py-6 sm:px-7 sm:py-7 lg:flex-row lg:items-start lg:justify-between">
+                <div class="max-w-3xl">
+                    <p class="text-xs font-semibold uppercase tracking-widest text-evidence-700">Scoped operating register</p>
+                    <h2 id="inventory-heading" class="mt-3 text-2xl font-semibold tracking-tight text-ink-950 sm:text-3xl">Know what is in scope and what is configured.</h2>
+                    <p class="mt-3 max-w-2xl text-sm leading-6 text-ink-650">Search the sources visible in your access scope, review schedule coverage, and inspect the latest recorded operation without treating configuration as recovery proof.</p>
+                </div>
+                <a href="?{{ export_query }}" class="inline-flex min-h-10 flex-none items-center justify-center gap-2 rounded-md border border-rule-200 bg-paper px-4 py-2 text-sm font-semibold text-ink-800 transition hover:bg-wool-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
+                    <svg class="h-4 w-4 text-evidence-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M7.5 10.5L12 15m0 0l4.5-4.5M12 15V3"/>
                     </svg>
-                    Connect a source
+                    Export current view
                 </a>
             </div>
-        </div>
 
-        <!-- Stat cards -->
-        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
-            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="flex items-center justify-between gap-3">
-                    <p class="text-sm font-medium text-slate-500">Servers</p>
-                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/>
-                        </svg>
-                    </span>
+            <dl class="grid grid-cols-2 border-t border-rule-200 xl:grid-cols-4 xl:divide-x xl:divide-rule-200">
+                <div class="border-b border-rule-100 px-5 py-4 sm:px-7 xl:border-b-0">
+                    <dt class="text-xs font-semibold uppercase tracking-wider text-ink-650">Sources in scope</dt>
+                    <dd class="mt-2 font-mono text-2xl font-semibold tabular-nums text-ink-950">{{ summary.total }}</dd>
+                    <dd class="mt-1 text-xs text-ink-650">Visible with your current access</dd>
                 </div>
-                <p class="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{{ total_clouds }}</p>
-                <p class="mt-1 text-xs text-slate-500">cloud servers</p>
-            </div>
-
-            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="flex items-center justify-between gap-3">
-                    <p class="text-sm font-medium text-slate-500">Volumes</p>
-                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 13.5h3.86a2.25 2.25 0 012.012 1.244l.256.512a2.25 2.25 0 002.013 1.244h3.218a2.25 2.25 0 002.013-1.244l.256-.512a2.25 2.25 0 012.013-1.244h3.859m-19.5.338V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 00-2.15-1.588H6.911a2.25 2.25 0 00-2.15 1.588L2.35 13.177a2.25 2.25 0 00-.1.661z"/>
-                        </svg>
-                    </span>
+                <div class="border-b border-rule-100 px-5 py-4 sm:px-7 xl:border-b-0">
+                    <dt class="text-xs font-semibold uppercase tracking-wider text-ink-650">Scheduled sources</dt>
+                    <dd class="mt-2 font-mono text-2xl font-semibold tabular-nums text-evidence-700">{{ summary.scheduled }}</dd>
+                    <dd class="mt-1 text-xs text-ink-650">At least one active schedule record</dd>
                 </div>
-                <p class="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{{ total_volumes }}</p>
-                <p class="mt-1 text-xs text-slate-500">block storage volumes</p>
-            </div>
-
-            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="flex items-center justify-between gap-3">
-                    <p class="text-sm font-medium text-slate-500">Websites</p>
-                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418"/>
-                        </svg>
-                    </span>
+                <div class="border-b border-rule-100 px-5 py-4 sm:border-b-0 sm:px-7">
+                    <dt class="text-xs font-semibold uppercase tracking-wider text-ink-650">Without active schedule</dt>
+                    <dd class="mt-2 font-mono text-2xl font-semibold tabular-nums text-ink-950">{{ summary.unscheduled }}</dd>
+                    <dd class="mt-1 text-xs text-ink-650">No active schedule record</dd>
                 </div>
-                <p class="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{{ total_websites }}</p>
-                <p class="mt-1 text-xs text-slate-500">sites with off-site backups</p>
-            </div>
-
-            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="flex items-center justify-between gap-3">
-                    <p class="text-sm font-medium text-slate-500">Databases</p>
-                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
-                        </svg>
-                    </span>
+                <div class="px-5 py-4 sm:px-7">
+                    <dt class="text-xs font-semibold uppercase tracking-wider text-ink-650">States to review</dt>
+                    <dd class="mt-2 font-mono text-2xl font-semibold tabular-nums {% if summary.state_review %}text-incident-700{% else %}text-ink-950{% endif %}">{{ summary.state_review }}</dd>
+                    <dd class="mt-1 text-xs text-ink-650">Source or connection state only</dd>
                 </div>
-                <p class="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{{ total_database }}</p>
-                <p class="mt-1 text-xs text-slate-500">databases with off-site backups</p>
+            </dl>
+            <div class="flex items-start gap-2 border-t border-rule-100 bg-evidence-50 px-5 py-3 text-xs leading-5 text-ink-650 sm:px-7">
+                <svg class="mt-0.5 h-4 w-4 flex-none text-evidence-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/>
+                </svg>
+                <p>Schedule coverage and operation records are observed facts; they do not establish recovery readiness.</p>
             </div>
+        </section>
 
-            <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="flex items-center justify-between gap-3">
-                    <p class="text-sm font-medium text-slate-500">CMS &amp; SaaS</p>
-                    <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"/>
-                        </svg>
-                    </span>
-                </div>
-                <p class="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{{ total_saas }}</p>
-                <p class="mt-1 text-xs text-slate-500">managed apps</p>
+        <nav class="overflow-x-auto rounded-lg border border-rule-200 bg-paper" aria-label="Filter sources by type">
+            <div class="flex min-w-max divide-x divide-rule-100">
+                <a href="{% url 'console:node:index' %}{% if all_types_query %}?{{ all_types_query }}{% endif %}#source-inventory" class="inline-flex min-h-12 items-center gap-2 border-b-2 px-4 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 {% if not filters.type %}border-evidence-600 bg-evidence-50 text-evidence-700{% else %}border-transparent text-ink-650 hover:bg-wool-50 hover:text-ink-950{% endif %}" {% if not filters.type %}aria-current="page"{% endif %}>
+                    All
+                    <span class="font-mono text-xs tabular-nums">{{ summary.total }}</span>
+                </a>
+                {% for item in type_filters %}
+                    <a href="?{{ item.query }}#source-inventory" class="inline-flex min-h-12 items-center gap-2 border-b-2 px-4 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 {% if filters.type == item.slug %}border-evidence-600 bg-evidence-50 text-evidence-700{% else %}border-transparent text-ink-650 hover:bg-wool-50 hover:text-ink-950{% endif %}" {% if filters.type == item.slug %}aria-current="page"{% endif %}>
+                        {{ item.label }}
+                        <span class="font-mono text-xs tabular-nums">{{ item.count }}</span>
+                    </a>
+                {% endfor %}
             </div>
-        </div>
+        </nav>
 
-        {% if node_count > 0 %}
-            <div x-data="nodeListPage" class="space-y-6">
-                <!-- Filter panel -->
-                <section class="rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="filter-heading">
-                    <div class="border-b border-slate-200 px-5 py-4">
-                        <h2 id="filter-heading" class="text-sm font-semibold text-slate-900">
-                            {{ node_type|default:'Total'|title }} Nodes {% if not node_type %}({{ total_clouds|add:total_volumes|add:total_websites|add:total_database }}){% endif %}
-                        </h2>
-                        {% if node_type == "server" or node_type == "volume" %}
-                            <p class="mt-0.5 text-xs text-slate-500">{{ node_type }} backups are stored on-site in your hosting account.</p>
-                        {% elif node_type == "website" or node_type == "database" %}
-                            <p class="mt-0.5 text-xs text-slate-500">{{ node_type }} backups are stored off-site.</p>
+        <section id="source-inventory" class="overflow-hidden rounded-lg border border-rule-200 bg-paper" aria-labelledby="sources-heading">
+            <div class="border-b border-rule-200 px-5 py-5 sm:px-6">
+                <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                        <h2 id="sources-heading" class="text-base font-semibold text-ink-950">Sources</h2>
+                        <p class="mt-1 text-xs leading-5 text-ink-650">
+                            {% if filtered_count %}
+                                Showing {{ page.start_index }}–{{ page.end_index }} of {{ filtered_count }} matching source{{ filtered_count|pluralize }}.
+                            {% else %}
+                                No sources match the current view.
+                            {% endif %}
+                            {% if filtered_count != node_count %} {{ node_count }} total in scope.{% endif %}
+                        </p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-3 text-sm">
+                        {% if filters_active %}
+                            <span class="inline-flex items-center gap-1.5 rounded-full bg-attention-50 px-2.5 py-1 text-xs font-semibold text-attention-700 ring-1 ring-inset ring-attention-200">
+                                <span class="h-1.5 w-1.5 rounded-full bg-attention-600" aria-hidden="true"></span>
+                                Filters active
+                            </span>
+                            <a href="{% url 'console:node:index' %}#source-inventory" class="font-semibold text-evidence-600 transition hover:text-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Clear filters</a>
                         {% endif %}
                     </div>
-                    <div class="p-5">
-                        <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                            <div>
-                                <label for="node-filter-name" class="block text-sm font-medium text-slate-700">Node</label>
-                                <input x-model="search.s_node" type="text" name="node" id="node-filter-name"
-                                       class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                       placeholder="Search nodes">
-                            </div>
-                            <div>
-                                <label for="node-filter-integration" class="block text-sm font-medium text-slate-700">Integration</label>
-                                <input x-model="search.s_integration" type="text" name="integration" id="node-filter-integration"
-                                       class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                       placeholder="Search integrations">
-                            </div>
-                            <div>
-                                <label for="node-filter-endpoint" class="block text-sm font-medium text-slate-700">Endpoint</label>
-                                <input x-model="search.s_endpoint" type="text" name="endpoint" id="node-filter-endpoint"
-                                       class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                       placeholder="Search endpoints">
-                            </div>
+                </div>
+
+                <form method="get" action="{% url 'console:node:index' %}#source-inventory" role="search" class="mt-5">
+                    <div class="flex flex-col gap-3 md:flex-row">
+                        <div class="relative min-w-0 flex-1">
+                            <label for="source-search" class="sr-only">Search sources</label>
+                            <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/>
+                            </svg>
+                            <input id="source-search" name="q" value="{{ filters.q }}" type="search" class="block min-h-11 w-full rounded-md border border-rule-200 bg-paper py-2 pl-10 pr-3 text-sm text-ink-950 placeholder:text-ink-500 focus:border-evidence-600 focus:outline-none focus:ring-2 focus:ring-evidence-600/20" placeholder="Search source, connection, provider, or endpoint">
                         </div>
-                        <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <button type="submit" class="inline-flex min-h-11 items-center justify-center rounded-md bg-evidence-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Search inventory</button>
+                    </div>
+
+                    <details class="mt-4 border-t border-rule-100 pt-4" {% if advanced_filters_active %}open{% endif %}>
+                        <summary class="inline-flex min-h-10 cursor-pointer list-none items-center gap-2 rounded-md text-sm font-semibold text-ink-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">
+                            More filters and sorting
+                            <svg class="h-4 w-4 text-ink-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 9l-7.5 7.5L4.5 9"/>
+                            </svg>
+                        </summary>
+                        <div class="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
                             <div>
-                                <label for="node-type" class="block text-sm font-medium text-slate-700">Type</label>
-                                <select id="node-type" x-model="search.s_type"
-                                        class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                        aria-label="Filter sources by type">
-                                    <option value="">Any type</option>
-                                    <option value="1">Cloud</option>
-                                    <option value="2">Volume</option>
-                                    <option value="3">Website</option>
-                                    <option value="4">Database</option>
-                                    <option value="5">SaaS</option>
+                                <label for="source-type" class="block text-xs font-semibold uppercase tracking-wider text-ink-650">Type</label>
+                                <select id="source-type" name="type" class="mt-1.5 block min-h-11 w-full rounded-md border border-rule-200 bg-paper px-3 py-2 text-sm text-ink-950 focus:border-evidence-600 focus:outline-none focus:ring-2 focus:ring-evidence-600/20">
+                                    <option value="">All types</option>
+                                    {% for item in type_filters %}<option value="{{ item.slug }}" {% if filters.type == item.slug %}selected{% endif %}>{{ item.label }}</option>{% endfor %}
                                 </select>
                             </div>
                             <div>
-                                <label for="node-status" class="block text-sm font-medium text-slate-700">Status</label>
-                                <select id="node-status" x-model="search.s_status"
-                                        class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
-                                        aria-label="Filter sources by status">
-                                    <option value="">Any status</option>
-                                    <option value="1">Active</option>
-                                    <option value="3">Backup in progress</option>
-                                    <option value="4">Retrying backup</option>
-                                    <option value="6">Paused</option>
-                                    <option value="8">Paused (max retries)</option>
-                                    <option value="7">Delete requested</option>
+                                <label for="source-status" class="block text-xs font-semibold uppercase tracking-wider text-ink-650">Source state</label>
+                                <select id="source-status" name="status" class="mt-1.5 block min-h-11 w-full rounded-md border border-rule-200 bg-paper px-3 py-2 text-sm text-ink-950 focus:border-evidence-600 focus:outline-none focus:ring-2 focus:ring-evidence-600/20">
+                                    <option value="">Any state</option>
+                                    <option value="1" {% if filters.status == '1' %}selected{% endif %}>Active</option>
+                                    <option value="2" {% if filters.status == '2' %}selected{% endif %}>Ready for backup</option>
+                                    <option value="3" {% if filters.status == '3' %}selected{% endif %}>Backup in progress</option>
+                                    <option value="4" {% if filters.status == '4' %}selected{% endif %}>Retrying backup</option>
+                                    <option value="5" {% if filters.status == '5' %}selected{% endif %}>Suspended</option>
+                                    <option value="6" {% if filters.status == '6' %}selected{% endif %}>Paused</option>
+                                    <option value="8" {% if filters.status == '8' %}selected{% endif %}>Paused (max retries)</option>
+                                    <option value="7" {% if filters.status == '7' %}selected{% endif %}>Delete requested</option>
+                                    <option value="9" {% if filters.status == '9' %}selected{% endif %}>Delete completed</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="schedule-coverage" class="block text-xs font-semibold uppercase tracking-wider text-ink-650">Schedule</label>
+                                <select id="schedule-coverage" name="schedule" class="mt-1.5 block min-h-11 w-full rounded-md border border-rule-200 bg-paper px-3 py-2 text-sm text-ink-950 focus:border-evidence-600 focus:outline-none focus:ring-2 focus:ring-evidence-600/20">
+                                    <option value="">Any coverage</option>
+                                    <option value="active" {% if filters.schedule == 'active' %}selected{% endif %}>Has active schedule</option>
+                                    <option value="missing" {% if filters.schedule == 'missing' %}selected{% endif %}>No active schedule</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="source-owner" class="block text-xs font-semibold uppercase tracking-wider text-ink-650">Added by</label>
+                                <select id="source-owner" name="owner" class="mt-1.5 block min-h-11 w-full rounded-md border border-rule-200 bg-paper px-3 py-2 text-sm text-ink-950 focus:border-evidence-600 focus:outline-none focus:ring-2 focus:ring-evidence-600/20">
+                                    <option value="">Anyone</option>
+                                    {% for owner in owners %}
+                                        <option value="{{ owner.added_by_id }}" {% if filters.owner == owner.added_by_id|stringformat:'s' %}selected{% endif %}>{% if owner.added_by__user__first_name or owner.added_by__user__last_name %}{{ owner.added_by__user__first_name }} {{ owner.added_by__user__last_name }}{% else %}{{ owner.added_by__user__email }}{% endif %}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div>
+                                <label for="source-sort" class="block text-xs font-semibold uppercase tracking-wider text-ink-650">Sort</label>
+                                <select id="source-sort" name="sort" class="mt-1.5 block min-h-11 w-full rounded-md border border-rule-200 bg-paper px-3 py-2 text-sm text-ink-950 focus:border-evidence-600 focus:outline-none focus:ring-2 focus:ring-evidence-600/20">
+                                    <option value="-created" {% if filters.sort == '-created' %}selected{% endif %}>Recently added</option>
+                                    <option value="name" {% if filters.sort == 'name' %}selected{% endif %}>Name A–Z</option>
+                                    <option value="provider" {% if filters.sort == 'provider' %}selected{% endif %}>Provider</option>
+                                    <option value="state" {% if filters.sort == 'state' %}selected{% endif %}>Source state</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="source-page-size" class="block text-xs font-semibold uppercase tracking-wider text-ink-650">Rows</label>
+                                <select id="source-page-size" name="p_size" class="mt-1.5 block min-h-11 w-full rounded-md border border-rule-200 bg-paper px-3 py-2 text-sm text-ink-950 focus:border-evidence-600 focus:outline-none focus:ring-2 focus:ring-evidence-600/20">
+                                    {% for size in page_sizes %}<option value="{{ size }}" {% if page.paginator.per_page == size %}selected{% endif %}>{{ size }} per page</option>{% endfor %}
                                 </select>
                             </div>
                         </div>
-                        <div class="mt-5 flex flex-col gap-2 sm:flex-row sm:items-center">
-                            <button type="button" @click="executeSearch()"
-                                    class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/>
-                                </svg>
-                                Search Nodes
-                            </button>
-                            <button type="button" @click="resetSearch()"
-                                    class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                Reset Filters
-                            </button>
+                        <div class="mt-4 flex flex-wrap items-center gap-3">
+                            <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-md bg-evidence-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Apply filters</button>
+                            <a href="{% url 'console:node:index' %}#source-inventory" class="inline-flex min-h-10 items-center justify-center rounded-md border border-rule-200 bg-paper px-4 py-2 text-sm font-semibold text-ink-800 transition hover:bg-wool-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Reset</a>
                         </div>
-                    </div>
-                </section>
+                    </details>
+                </form>
+            </div>
 
-                {% if page.object_list.count > 0 %}
-                    <!-- Node table -->
-                    <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-                        <table id="section-nodes" class="min-w-full divide-y divide-slate-200 text-sm">
-                            <thead>
-                                <tr class="bg-slate-50">
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Node Name</th>
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Status</th>
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Last Backup/Snapshot &amp; Storage</th>
-                                    <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Integration</th>
-                                    <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-slate-100">
-                                {% for node in page.object_list %}
-                                    <tr class="transition hover:bg-slate-50">
-                                        <td class="px-4 py-3">
-                                            <div class="flex items-center gap-3">
-                                                <span class="grid h-9 w-9 flex-none place-items-center rounded-lg bg-slate-100 text-slate-500">
-                                                    {% if node.type == 1 %}
-                                                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                                            <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/>
-                                                        </svg>
-                                                    {% elif node.type == 2 %}
-                                                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                                            <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 17.25v-.228a4.5 4.5 0 00-.12-1.03l-2.268-9.64a3.375 3.375 0 00-3.285-2.602H7.923a3.375 3.375 0 00-3.285 2.602l-2.268 9.64a4.5 4.5 0 00-.12 1.03v.228m19.5 0a3 3 0 01-3 3H5.25a3 3 0 01-3-3m19.5 0a3 3 0 00-3-3H5.25a3 3 0 00-3 3m16.5 0h.008v.008h-.008v-.008zm-3 0h.008v.008h-.008v-.008z"/>
-                                                        </svg>
-                                                    {% elif node.type == 3 %}
-                                                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418"/>
-                                                        </svg>
-                                                    {% elif node.type == 4 %}
-                                                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                                            <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/>
-                                                        </svg>
-                                                    {% elif node.type == 5 %}
-                                                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                                            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"/>
-                                                        </svg>
-                                                    {% endif %}
-                                                </span>
-                                                <div class="min-w-0">
-                                                    <a href="{% url 'console:node:detail' node.id %}" class="font-medium text-slate-900 transition hover:text-indigo-600">{{ node.name|truncatechars:45 }}</a>
-                                                    <p class="mt-0.5 text-xs text-slate-500">{{ node.connection.integration.name }}</p>
-                                                </div>
-                                            </div>
-                                        </td>
-                                        <td class="whitespace-nowrap px-4 py-3">
-                                            <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset {% if node.status == 1 or node.status == 2 %}bg-emerald-50 text-emerald-700 ring-emerald-600/20{% elif node.status == 3 %}bg-sky-50 text-sky-700 ring-sky-600/20{% elif node.status == 4 %}bg-amber-50 text-amber-700 ring-amber-600/20{% elif node.status == 6 or node.status == 8 %}bg-slate-100 text-slate-600 ring-slate-500/10{% else %}bg-red-50 text-red-700 ring-red-600/20{% endif %}">
-                                                <span class="h-1.5 w-1.5 rounded-full {% if node.status == 1 or node.status == 2 %}bg-emerald-500{% elif node.status == 3 %}bg-sky-500{% elif node.status == 4 %}bg-amber-500{% elif node.status == 6 or node.status == 8 %}bg-slate-400{% else %}bg-red-500{% endif %}"></span>
-                                                {{ node.get_status_display }}
-                                            </span>
-                                        </td>
-                                        <td class="px-4 py-3">
-                                            <p class="text-slate-700">{{ node.last_backup_date|default:"n/a" }}</p>
-                                            <p class="mt-0.5 text-xs text-slate-500">{{ node.total_storage|default:"n/a" }}</p>
-                                        </td>
-                                        <td class="px-4 py-3">
-                                            <a class="font-medium text-slate-700 transition hover:text-indigo-600"
-                                               href="{% url 'console:setup:integration_open' integration_code=node.connection.integration.code %}?i_name={{ node.connection.name }}">{{ node.connection.name|truncatechars:25 }}</a>
-                                            <p class="mt-0.5 text-xs text-slate-500">{{ node.connection.location.location }}</p>
-                                        </td>
-                                        <td class="whitespace-nowrap px-4 py-3 text-right">
-                                            <div class="flex items-center justify-end gap-2">
-                                                <a target="_blank"
-                                                   href="{% url 'console:log:index' %}?node={{ node.id }}"
-                                                   class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                    Logs
-                                                </a>
-                                                <a href="{% url 'console:node:detail' node.id %}"
-                                                   class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                    Open
-                                                </a>
-                                                <button @click="openModal('{{ node.id }}','{{ node.name }}','{{ node.connection.location.id }}','{{ node.connection.integration.code }}','{{ node.type }}')"
-                                                        type="button"
-                                                        class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                                    {% if node.type == 3 or node.type == 4 or node.type == 5 %}Backup{% else %}Snapshot{% endif %}
-                                                </button>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
+            {% if page.object_list %}
+                <div class="hidden grid-cols-[minmax(0,1.35fr)_minmax(10rem,.8fr)_minmax(10rem,.8fr)_auto] gap-6 border-b border-rule-100 bg-wool-50 px-6 py-2.5 text-xs font-semibold uppercase tracking-wider text-ink-650 xl:grid">
+                    <span>Source and connection</span>
+                    <span>Latest operation</span>
+                    <span>Schedule and state</span>
+                    <span class="text-right">Actions</span>
+                </div>
+                <ol class="divide-y divide-rule-100">
+                    {% for node in page.object_list %}
+                        <li class="px-5 py-5 transition hover:bg-wool-50 sm:px-6">
+                            <div class="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-[minmax(0,1.35fr)_minmax(10rem,.8fr)_minmax(10rem,.8fr)_auto] xl:items-center xl:gap-6">
+                                <div class="min-w-0 md:col-span-2 xl:col-span-1">
+                                    <div class="flex items-start gap-3">
+                                        <span class="grid h-9 w-9 flex-none place-items-center rounded-md bg-wool-50 text-ink-650">
+                                            {% if node.type == 1 %}
+                                                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/></svg>
+                                            {% elif node.type == 2 %}
+                                                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 17.25v-.228a4.5 4.5 0 00-.12-1.03l-2.268-9.64a3.375 3.375 0 00-3.285-2.602H7.923a3.375 3.375 0 00-3.285 2.602l-2.268 9.64a4.5 4.5 0 00-.12 1.03v.228m19.5 0a3 3 0 01-3 3H5.25a3 3 0 01-3-3m19.5 0a3 3 0 00-3-3H5.25a3 3 0 00-3 3"/></svg>
+                                            {% elif node.type == 3 %}
+                                                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9 9 0 100-18 9 9 0 000 18zm0 0c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m-8.716 6.75h17.432M3.284 14.25h17.432"/></svg>
+                                            {% elif node.type == 4 %}
+                                                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 3.75c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"/></svg>
+                                            {% else %}
+                                                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 8.25V6zm9.75 0a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6z"/></svg>
+                                            {% endif %}
+                                        </span>
+                                        <div class="min-w-0">
+                                            <a href="{% url 'console:node:detail' node.id %}" class="line-clamp-2 text-sm font-semibold text-ink-950 transition hover:text-evidence-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">{{ node.name }}</a>
+                                            <p class="mt-1 truncate text-xs text-ink-650">{{ node.get_type_display }} · {{ node.connection.integration.name }}</p>
+                                            <p class="mt-1 line-clamp-2 text-xs text-ink-650"><span class="font-medium text-ink-800">{{ node.connection.name }}</span>{% if node.connection.location.location %} · {{ node.connection.location.location }}{% endif %}</p>
+                                        </div>
+                                    </div>
+                                </div>
 
-                    <!-- Pagination -->
-                    <nav class="flex items-center justify-between border-t border-slate-200 px-4 sm:px-0" aria-label="Pagination">
-                        <div class="-mt-px flex w-0 flex-1">
-                            {% if page.has_previous %}
-                                <a @click="executeSearch({{ page.previous_page_number }},{{ page.paginator.per_page }})"
-                                   class="inline-flex cursor-pointer items-center gap-2 border-t-2 border-transparent pt-4 pr-1 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">
-                                    <svg class="h-4 w-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
-                                    </svg>
-                                    Previous
-                                </a>
-                            {% endif %}
+                                <div>
+                                    <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-650 xl:sr-only">Latest operation</p>
+                                    {% if node.latest_operation %}
+                                        <p class="inline-flex items-center gap-2 text-xs font-semibold {% if node.latest_operation_tone == 'verified' %}text-verified-700{% elif node.latest_operation_tone == 'incident' %}text-incident-700{% elif node.latest_operation_tone == 'attention' %}text-attention-700{% elif node.latest_operation_tone == 'active' %}text-evidence-700{% else %}text-ink-650{% endif %}">
+                                            <span class="h-2 w-2 flex-none rounded-full {% if node.latest_operation_tone == 'verified' %}bg-verified-600{% elif node.latest_operation_tone == 'incident' %}bg-incident-600{% elif node.latest_operation_tone == 'attention' %}bg-attention-600{% elif node.latest_operation_tone == 'active' %}bg-evidence-600{% else %}bg-ink-500{% endif %}" aria-hidden="true"></span>
+                                            {{ node.latest_operation.get_status_display }}
+                                        </p>
+                                        <time class="mt-1 block font-mono text-xs tabular-nums text-ink-650" datetime="{{ node.latest_operation.modified|date:'c' }}">Updated {{ node.latest_operation.modified|naturaltime }}</time>
+                                    {% else %}
+                                        <p class="inline-flex items-center gap-2 text-xs font-semibold text-ink-650"><span class="h-2 w-2 rounded-full bg-ink-500" aria-hidden="true"></span>No run recorded</p>
+                                        <p class="mt-1 text-xs text-ink-650">No operation evidence yet</p>
+                                    {% endif %}
+                                    {% if node.last_complete_started_at %}
+                                        <time class="mt-2 block text-xs text-ink-650" datetime="{{ node.last_complete_started_at|date:'c' }}">Complete record started {{ node.last_complete_started_at|naturaltime }}</time>
+                                    {% else %}
+                                        <p class="mt-2 text-xs text-attention-700">No completed run</p>
+                                    {% endif %}
+                                </div>
+
+                                <div>
+                                    <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-650 xl:sr-only">Schedule and state</p>
+                                    {% if node.active_schedule_count %}
+                                        <p class="inline-flex items-center gap-2 text-xs font-semibold text-evidence-700"><span class="h-2 w-2 rounded-full bg-evidence-600" aria-hidden="true"></span>{{ node.active_schedule_count }} active schedule{{ node.active_schedule_count|pluralize }}</p>
+                                    {% else %}
+                                        <p class="inline-flex items-center gap-2 text-xs font-semibold text-ink-650"><span class="h-2 w-2 rounded-full bg-ink-500" aria-hidden="true"></span>Manual only · no active schedule</p>
+                                    {% endif %}
+                                    <p class="mt-2 text-xs {% if node.source_state_tone == 'incident' %}text-incident-700{% elif node.source_state_tone == 'attention' %}text-attention-700{% elif node.source_state_tone == 'active' or node.source_state_tone == 'available' %}text-evidence-700{% else %}text-ink-650{% endif %}">Source: {{ node.get_status_display }}</p>
+                                    <p class="mt-1 text-xs {% if node.connection_state_tone == 'incident' %}text-incident-700{% elif node.connection_state_tone == 'attention' %}text-attention-700{% elif node.connection_state_tone == 'available' %}text-evidence-700{% else %}text-ink-650{% endif %}">Connection: {{ node.connection.get_status_display }}</p>
+                                </div>
+
+                                <div class="flex flex-wrap items-center gap-2 md:col-span-2 xl:col-span-1 xl:justify-end">
+                                    <a href="{% url 'console:log:index' %}?node={{ node.id }}" class="inline-flex min-h-10 items-center justify-center rounded-md border border-rule-200 bg-paper px-3 py-2 text-xs font-semibold text-ink-800 transition hover:bg-wool-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600" aria-label="Open activity for {{ node.name }}">Activity</a>
+                                    {% if node.can_run_operation %}
+                                        <button type="button" data-node-id="{{ node.id }}" data-node-name="{{ node.name }}" data-location-id="{{ node.connection.location.id }}" data-integration-code="{{ node.connection.integration.code }}" data-node-type="{{ node.type }}" @click="openModal($event.currentTarget.dataset)" class="inline-flex min-h-10 items-center justify-center rounded-md border border-evidence-200 bg-evidence-50 px-3 py-2 text-xs font-semibold text-evidence-700 transition hover:bg-evidence-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600" aria-label="{% if node.type == 3 or node.type == 4 or node.type == 5 %}Run backup{% else %}Create snapshot{% endif %} for {{ node.name }}">{% if node.type == 3 or node.type == 4 or node.type == 5 %}Run backup{% else %}Create snapshot{% endif %}</button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </li>
+                    {% endfor %}
+                </ol>
+
+                {% if page.paginator.num_pages > 1 %}
+                    <nav class="flex items-center justify-between border-t border-rule-200 px-5 py-4 sm:px-6" aria-label="Source inventory pages">
+                        <div class="flex-1">
+                            {% if page.has_previous %}<a href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}p_no={{ page.previous_page_number }}#source-inventory" class="inline-flex min-h-10 items-center gap-2 rounded-md px-2 text-sm font-semibold text-ink-650 transition hover:bg-wool-50 hover:text-ink-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Previous</a>{% endif %}
                         </div>
-                        <div class="hidden md:-mt-px md:flex">
+                        <div class="hidden items-center gap-1 md:flex">
                             {% for page_no in elided_page_range %}
-                                {% if page_no == "…" %}
-                                    <span class="inline-flex items-center border-t-2 border-transparent px-4 pt-4 text-sm font-medium text-slate-500">
-                                        {{ page_no }}
-                                    </span>
+                                {% if page_no == '…' %}
+                                    <span class="px-2 text-sm text-ink-500">{{ page_no }}</span>
                                 {% else %}
-                                    <a @click="executeSearch({{ page_no }},{{ page.paginator.per_page }})"
-                                       class="inline-flex cursor-pointer items-center border-t-2 px-4 pt-4 text-sm font-medium transition {% if page.number == page_no %}border-indigo-600 text-indigo-600{% else %}border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700{% endif %}">
-                                        {{ page_no }}
-                                    </a>
+                                    <a href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}p_no={{ page_no }}#source-inventory" class="inline-flex h-9 min-w-9 items-center justify-center rounded-md px-2 font-mono text-sm tabular-nums transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 {% if page.number == page_no %}bg-evidence-600 text-white{% else %}text-ink-650 hover:bg-wool-50 hover:text-ink-950{% endif %}" {% if page.number == page_no %}aria-current="page"{% endif %}>{{ page_no }}</a>
                                 {% endif %}
                             {% endfor %}
                         </div>
-                        <div class="-mt-px flex w-0 flex-1 justify-end">
-                            {% if page.has_next %}
-                                <a @click="executeSearch({{ page.next_page_number }},{{ page.paginator.per_page }})"
-                                   class="inline-flex cursor-pointer items-center gap-2 border-t-2 border-transparent pt-4 pl-1 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700">
-                                    Next
-                                    <svg class="h-4 w-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
-                                    </svg>
-                                </a>
-                            {% endif %}
+                        <div class="flex flex-1 justify-end">
+                            {% if page.has_next %}<a href="?{% if pagination_query %}{{ pagination_query }}&amp;{% endif %}p_no={{ page.next_page_number }}#source-inventory" class="inline-flex min-h-10 items-center gap-2 rounded-md px-2 text-sm font-semibold text-ink-650 transition hover:bg-wool-50 hover:text-ink-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Next</a>{% endif %}
                         </div>
                     </nav>
+                {% endif %}
+            {% elif node_count %}
+                <div class="px-6 py-14 text-center">
+                    <span class="mx-auto grid h-10 w-10 place-items-center rounded-full bg-wool-50 text-ink-650">
+                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/></svg>
+                    </span>
+                    <p class="mt-3 text-sm font-semibold text-ink-950">No sources match these filters</p>
+                    <p class="mt-1 text-sm text-ink-650">Clear the current filters to return to the full inventory.</p>
+                    <a href="{% url 'console:node:index' %}#source-inventory" class="mt-4 inline-flex min-h-10 items-center justify-center rounded-md bg-evidence-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Clear filters</a>
+                </div>
+            {% else %}
+                <div class="px-6 py-14 text-center">
+                    <span class="mx-auto grid h-10 w-10 place-items-center rounded-full bg-evidence-50 text-evidence-600">
+                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+                    </span>
+                    <p class="mt-3 text-sm font-semibold text-ink-950">No sources connected</p>
+                    <p class="mt-1 text-sm text-ink-650">Add a provider or self-hosted source to begin building this inventory.</p>
+                    {% if can_manage_sources %}<a href="{% url 'console:setup:integration_select' %}" class="mt-4 inline-flex min-h-10 items-center justify-center rounded-md bg-evidence-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-evidence-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Add source</a>{% endif %}
+                </div>
+            {% endif %}
+        </section>
 
-                    <!-- On-demand backup/snapshot modal -->
-                    <div x-cloak x-show="open" @keydown.escape.window="open = false" class="fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-                        <div x-show="open"
-                             x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100"
-                             x-transition:leave="transition ease-in duration-150" x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0"
-                             class="fixed inset-0 bg-slate-900/50" @click="open = false" aria-hidden="true"></div>
-                        <div class="flex min-h-full items-center justify-center p-4">
-                            <div x-show="open"
-                                 x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100"
-                                 x-transition:leave="transition ease-in duration-150" x-transition:leave-start="opacity-100 scale-100" x-transition:leave-end="opacity-0 scale-95"
-                                 class="relative flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
-                                <div class="flex-1 overflow-y-auto">
-                                    <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-indigo-600">
-                                        <svg x-show="loading" class="h-6 w-6 animate-spin text-white"
-                                             xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-                                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                        </svg>
-                                        <svg x-show="!loading" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white"
-                                             fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                                        </svg>
-                                    </div>
-                                    <div x-show="!loading" class="mt-4 text-center">
-                                        <h3 class="text-base font-semibold text-slate-900" id="modal-title">
-                                            Create <span x-show="node_type==='3'||node_type==='4'||node_type==='5'">Backup</span><span x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">Snapshot</span>
-                                        </h3>
-                                        <p class="mt-2 text-sm text-slate-500">
-                                            You are about to create on-demand <span x-show="node_type==='3'||node_type==='4'||node_type==='5'">backup</span><span x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">snapshot</span>
-                                            of <strong class="font-semibold text-slate-900" x-text="node_name"></strong>
-                                        </p>
-                                    </div>
-                                    <div x-show="loading" class="mt-4 text-center">
-                                        <h3 class="text-base font-semibold text-slate-900">
-                                            Requesting <span x-show="node_type==='3'||node_type==='4'||node_type==='5'">Backup</span><span x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">Snapshot</span>...
-                                        </h3>
-                                        <p class="mt-2 text-sm text-slate-500">
-                                            Requesting on-demand <span x-show="node_type==='3'||node_type==='4'||node_type==='5'">backup</span><span x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">snapshot</span>
-                                            for <strong class="font-semibold text-slate-900" x-text="node_name"></strong>
-                                        </p>
-                                    </div>
-                                    <div x-show="integration_code==='website'||integration_code==='database'||integration_code==='wordpress'">
-                                        <div x-show="!loading" class="mt-5">
-                                            <h4 class="text-sm font-semibold text-slate-900">
-                                                Storage Locations (<span x-text="onDemandBackup.storage_point_ids.length"></span>)
-                                            </h4>
-                                            <p class="mt-1 text-xs text-slate-500">
-                                                Select where you want to store backups for this backup run.
-                                            </p>
-                                        </div>
-                                        <div x-show="!loading" class="mt-3">
-                                            <fieldset class="h-32 overflow-auto rounded-lg border border-slate-200">
-                                                <div class="divide-y divide-slate-100">
-                                                    {% for storage in storage_list %}
-                                                        <div class="relative flex items-start px-3 py-3">
-                                                            <div class="flex h-5 items-center">
-                                                                <input id="ondemand-storage-{{ storage.id }}"
-                                                                       aria-describedby="ondemand-storage-{{ storage.id }}"
-                                                                       name="storage-{{ storage.id }}" type="checkbox"
-                                                                       value="{{ storage.id }}"
-                                                                       x-model="onDemandBackup.storage_point_ids"
-                                                                       class="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                                                            </div>
-                                                            <div class="ml-3 text-sm">
-                                                                <label for="ondemand-storage-{{ storage.id }}" class="font-medium text-slate-700">
-                                                                    {{ storage.name }}
-                                                                    {% if storage.type.code == "bs" %}
-                                                                        <span class="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/20">Default</span>
-                                                                    {% endif %}
-                                                                </label>
-                                                                <p class="text-xs text-slate-500">{{ storage.type.name }}</p>
-                                                            </div>
-                                                        </div>
-                                                    {% endfor %}
-                                                </div>
-                                            </fieldset>
-                                            <p x-show="onDemandBackupErrors.storage_point_ids"
-                                               class="mt-1.5 text-xs font-medium text-red-600"
-                                               id="ondemand-storage-error"
-                                               x-text="onDemandBackupErrors.storage_point_ids"></p>
-                                        </div>
-                                    </div>
-                                    <div x-show="!loading" class="mt-5 text-left">
-                                        <label for="about" class="block text-sm font-medium text-slate-700">Notes</label>
-                                        <textarea x-model="onDemandBackup.notes" id="about" name="about" rows="3"
-                                                  class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"></textarea>
-                                        <p class="mt-1.5 text-xs text-slate-500">Optional notes about the <span x-show="node_type==='3'||node_type==='4'||node_type==='5'">backup</span><span x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">snapshot</span>.</p>
-                                    </div>
-                                </div>
-                                <div x-show="!loading" class="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                                    <button @click="closeModal()" type="button"
-                                            class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                        Cancel
-                                    </button>
-                                    <button @click="createBackup()" type="button"
-                                            class="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                                        Create <span x-show="node_type==='3'||node_type==='4'||node_type==='5'">Backup</span><span x-show="node_type!=='3' && node_type!=='4' && node_type!=='5'">Snapshot</span>
-                                    </button>
-                                </div>
-                            </div>
+        {% if can_run_backups %}<div x-cloak x-show="open" @keydown.escape.window="closeModal()" class="fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="source-operation-title" aria-describedby="source-operation-description">
+            <div x-show="open" x-transition.opacity class="fixed inset-0 bg-ink-950/50" @click="closeModal()" aria-hidden="true"></div>
+            <div class="flex min-h-full items-center justify-center p-4">
+                <div x-show="open" x-transition x-ref="dialog" @keydown.tab="trapFocus($event)" class="relative flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-lg border border-rule-200 bg-paper shadow-xl">
+                    <div class="flex items-start justify-between gap-4 border-b border-rule-200 px-5 py-4 sm:px-6">
+                        <div>
+                            <p class="text-xs font-semibold uppercase tracking-widest text-evidence-700">On-demand operation</p>
+                            <h2 id="source-operation-title" class="mt-2 text-lg font-semibold text-ink-950"><span x-text="operationVerb"></span> <span x-text="node_name"></span></h2>
+                            <p id="source-operation-description" class="mt-1 text-sm leading-6 text-ink-650">Review the source, destination selection when required, and optional operator note before requesting this operation.</p>
                         </div>
-                    </div>
-                {% else %}
-                    <div class="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white px-6 py-12 text-center">
-                        <span class="grid h-11 w-11 place-items-center rounded-full bg-slate-100 text-slate-400">
-                            <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/>
-                            </svg>
-                        </span>
-                        <p class="mt-3 text-sm font-medium text-slate-900">No nodes found</p>
-                        <p class="mt-1 max-w-sm text-sm text-slate-500">No nodes match the current search filters.</p>
-                        <button type="button" @click="resetSearch()"
-                                class="mt-4 inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                            Reset Filters
+                        <button x-ref="modalInitialFocus" type="button" @click="closeModal()" :disabled="loading" class="inline-flex h-10 w-10 flex-none items-center justify-center rounded-md text-ink-650 transition hover:bg-wool-50 hover:text-ink-950 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600" aria-label="Close operation dialog">
+                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
                         </button>
                     </div>
-                {% endif %}
+
+                    <div class="flex-1 overflow-y-auto px-5 py-5 sm:px-6">
+                        <div x-show="loading" class="flex items-center gap-3 rounded-md border border-evidence-200 bg-evidence-50 px-4 py-3 text-sm text-evidence-700" role="status">
+                            <svg class="h-5 w-5 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle class="opacity-25" cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3"></circle><path class="opacity-75" fill="currentColor" d="M21 12a9 9 0 00-9-9v3a6 6 0 016 6h3z"></path></svg>
+                            Sending the request and recording its durable identity…
+                        </div>
+
+                        <div x-show="!loading && usesStorageDestinations">
+                            <fieldset>
+                                <legend class="text-sm font-semibold text-ink-950">Storage destinations</legend>
+                                <p class="mt-1 text-xs leading-5 text-ink-650">Choose where this backup run should write its copies.</p>
+                                <div class="mt-3 max-h-48 overflow-y-auto rounded-md border border-rule-200">
+                                    <div class="divide-y divide-rule-100">
+                                        {% for storage in storage_list %}
+                                            <label for="ondemand-storage-{{ storage.id }}" class="flex cursor-pointer items-start gap-3 px-4 py-3 transition hover:bg-wool-50">
+                                                <input id="ondemand-storage-{{ storage.id }}" name="storage-{{ storage.id }}" type="checkbox" value="{{ storage.id }}" x-model="onDemandBackup.storage_point_ids" aria-describedby="ondemand-storage-description-{{ storage.id }}" class="mt-0.5 h-4 w-4 rounded border-rule-200 text-evidence-600 focus:ring-2 focus:ring-evidence-600/20">
+                                                <span class="min-w-0">
+                                                    <span class="text-sm font-semibold text-ink-950">{{ storage.name }}{% if storage.type.code == 'bs' %} <span class="ml-1 rounded-full bg-evidence-50 px-2 py-0.5 text-xs text-evidence-700 ring-1 ring-inset ring-evidence-200">Default</span>{% endif %}</span>
+                                                    <span id="ondemand-storage-description-{{ storage.id }}" class="mt-0.5 block text-xs text-ink-650">{{ storage.type.name }}</span>
+                                                </span>
+                                            </label>
+                                        {% empty %}
+                                            <p class="px-4 py-4 text-sm text-attention-700">No active storage destination is available.</p>
+                                        {% endfor %}
+                                    </div>
+                                </div>
+                                <p x-show="onDemandBackupErrors.storage_point_ids" class="mt-2 text-xs font-semibold text-incident-700" role="alert" x-text="onDemandBackupErrors.storage_point_ids"></p>
+                            </fieldset>
+                        </div>
+
+                        <div x-show="!loading" class="mt-5">
+                            <label for="source-operation-note" class="block text-sm font-semibold text-ink-950">Operator note <span class="font-normal text-ink-650">(optional)</span></label>
+                            <textarea id="source-operation-note" x-model="onDemandBackup.notes" rows="3" class="mt-1.5 block w-full rounded-md border border-rule-200 bg-paper px-3 py-2 text-sm text-ink-950 focus:border-evidence-600 focus:outline-none focus:ring-2 focus:ring-evidence-600/20" placeholder="Reason, ticket, or change reference"></textarea>
+                        </div>
+                        <p x-show="onDemandBackupErrors.detail" class="mt-4 rounded-md border border-incident-200 bg-incident-50 px-4 py-3 text-sm text-incident-700" role="alert" x-text="onDemandBackupErrors.detail"></p>
+                    </div>
+
+                    <div class="flex flex-col-reverse gap-2 border-t border-rule-200 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+                        <button type="button" @click="closeModal()" :disabled="loading" class="inline-flex min-h-10 items-center justify-center rounded-md border border-rule-200 bg-paper px-4 py-2 text-sm font-semibold text-ink-800 transition hover:bg-wool-50 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">Cancel</button>
+                        <button type="button" @click="createBackup()" :disabled="loading || (usesStorageDestinations && onDemandBackup.storage_point_ids.length === 0)" class="inline-flex min-h-10 items-center justify-center rounded-md bg-evidence-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-evidence-700 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600"><span x-text="operationVerb"></span></button>
+                    </div>
+                </div>
             </div>
-            <script>
-                document.addEventListener('alpine:init', () => {
-                    Alpine.data('nodeListPage', () => ({
-                        open: false,
-                        node_id: null,
-                        node_name: null,
-                        integration_code: null,
-                        notes: null,
-                        node_type: null,
-                        loading: null,
-                        backupRequestKey: null,
-                        onDemandBackup: {
-                            storage_point_ids: [],
-                        },
-                        search: {
-                            s_node: null,
-                            s_integration: null,
-                            s_status: null,
-                            s_endpoint: null,
-                            s_type: null,
-                            p_no: null,
-                            p_size: null,
-                        },
-                        onDemandBackupErrors: {},
-                        init() {
-                            const url = new URL(window.location.href);
-                            const searchParams = url.searchParams;
-
-                            if (searchParams.get('s_node')) {
-                                this.search.s_node = searchParams.get('s_node');
-                            }
-                            if (searchParams.get('s_integration')) {
-                                this.search.s_integration = searchParams.get('s_integration');
-                            }
-                            if (searchParams.get('s_status')) {
-                                this.search.s_status = searchParams.get('s_status');
-                            }
-                            if (searchParams.get('s_endpoint')) {
-                                this.search.s_endpoint = searchParams.get('s_endpoint');
-                            }
-                            if (searchParams.get('s_type')) {
-                                this.search.s_type = searchParams.get('s_type');
-                            }
-                        },
-
-                        openModal(node_id, node_name, location_id, integration_code, node_type) {
-                            this.loading = false;
-                            this.open = true;
-                            this.node_id = node_id;
-                            this.location_id = location_id;
-                            this.node_name = node_name;
-                            this.integration_code = integration_code;
-                            this.node_type = node_type;
-                            this.backupRequestKey = null;
-                        },
-                        closeModal() {
-                            this.open = false;
-                        },
-                        async createBackup() {
-                            this.loading = true;
-                            if (!this.backupRequestKey) {
-                                this.backupRequestKey = (window.crypto && crypto.randomUUID)
-                                    ? crypto.randomUUID()
-                                    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-                            }
-
-                            let url = "/api/v1/nodes/" + this.node_id + "/take_snapshot/?" + new URLSearchParams({
-                                location: this.location_id,
-                            });
-
-                            let data = {
-                                location: this.location_id,
-                                notes: this.onDemandBackup.notes,
-                                storage_point_ids: this.onDemandBackup.storage_point_ids,
-                                request_id: this.backupRequestKey,
-                            }
-
-                            let response = await fetch(url, {
-                                headers: {
-                                    'Accept': 'application/json',
-                                    'Content-Type': 'application/json',
-                                    'Idempotency-Key': this.backupRequestKey,
-                                },
-                                method: 'POST',
-                                body: JSON.stringify(data)
-                            }).then(async (response) => {
-                                this.loading = false;
-                                if (response.ok) {
-                                    return response.json();
-                                } else {
-                                    let json;
-                                    try {
-                                        json = await response.json();
-                                    } catch (exception_var) {
-                                        json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                                    }
-
-                                    this.onDemandBackupErrors = json;
-                                    throw new Error(json.detail);
-                                }
-                            }).then((json) => {
-                                Alpine.store('notifications').items.push({
-                                    show: true,
-                                    success: true,
-                                    heading: 'Success!',
-                                    details: json.detail
-                                });
-                                if (json.backup_request && json.backup_request.request_id) {
-                                    this.pollBackupRequest(json.backup_request.request_id, 0, this.node_id);
-                                }
-                                this.backupRequestKey = null;
-                                this.closeModal();
-                            }).catch((error) => {
-                                Alpine.store('notifications').items.push({
-                                    show: true,
-                                    error: true,
-                                    heading: 'Error!',
-                                    details: error.message
-                                });
-                            });
-                        },
-                        async pollBackupRequest(requestId, attempt = 0, nodeId = null) {
-                            if (!requestId || attempt >= 120) return;
-                            nodeId = nodeId || this.node_id;
-                            window.setTimeout(async () => {
-                                try {
-                                    const url = `/api/v1/nodes/${nodeId}/backup_request_status/?request_id=${encodeURIComponent(requestId)}`;
-                                    const response = await fetch(url, {
-                                        headers: {'Accept': 'application/json'}
-                                    });
-                                    if (!response.ok) return;
-                                    const state = await response.json();
-                                    if ((state.status === 'claimed' || state.status === 'duplicate') && state.backup_id) {
-                                        Alpine.store('notifications').items.push({
-                                            show: true,
-                                            success: true,
-                                            heading: 'Backup started',
-                                            details: state.backup_status_display || 'The durable backup job is now in progress.'
-                                        });
-                                        window.location.reload();
-                                        return;
-                                    }
-                                    if (state.status === 'cancelled' || state.status === 'manual_review') {
-                                        Alpine.store('notifications').items.push({
-                                            show: true,
-                                            error: true,
-                                            heading: 'Backup needs attention',
-                                            details: state.message || 'The durable backup request requires operator review.'
-                                        });
-                                        return;
-                                    }
-                                    this.pollBackupRequest(requestId, attempt + 1, nodeId);
-                                } catch (error) {
-                                    this.pollBackupRequest(requestId, attempt + 1, nodeId);
-                                }
-                            }, 5000);
-                        },
-                        executeSearch(p_no, p_size) {
-                            if(p_no){
-                                this.search.p_no = p_no;
-                            }
-                            if(p_size){
-                                this.search.p_size = p_size;
-                            }
-                            const params = new URLSearchParams();
-                            Object.entries(this.search).forEach(([key, value]) => {
-                                if (value !== null && value !== undefined && value !== '') {
-                                    params.set(key, value);
-                                }
-                            });
-                            const query = params.toString();
-                            window.location.href = "/console/nodes/" + (query ? "?" + query : "") + "#section-nodes";
-                        },
-                        resetSearch() {
-                            let url = "/console/nodes/";
-                            window.location.href = url;
-                        }
-                    }));
-                });
-            </script>
-        {% else %}
-            {% include "console/_welcome.html" %}
-        {% endif %}
+        </div>{% endif %}
     </div>
+
+    <script>
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('sourceInventoryPage', () => ({
+                open: false,
+                loading: false,
+                node_id: null,
+                node_name: '',
+                node_type: null,
+                location_id: null,
+                integration_code: '',
+                backupRequestKey: null,
+                triggerElement: null,
+                onDemandBackup: {storage_point_ids: [], notes: ''},
+                onDemandBackupErrors: {},
+
+                get operationVerb() {
+                    return ['3', '4', '5'].includes(String(this.node_type)) ? 'Run backup' : 'Create snapshot';
+                },
+                get operationNoun() {
+                    return ['3', '4', '5'].includes(String(this.node_type)) ? 'backup' : 'snapshot';
+                },
+                get usesStorageDestinations() {
+                    return ['3', '4', '5'].includes(String(this.node_type));
+                },
+                openModal(data) {
+                    this.triggerElement = document.activeElement;
+                    this.loading = false;
+                    this.node_id = data.nodeId;
+                    this.node_name = data.nodeName;
+                    this.location_id = data.locationId;
+                    this.integration_code = data.integrationCode;
+                    this.node_type = data.nodeType;
+                    this.backupRequestKey = null;
+                    this.onDemandBackup = {storage_point_ids: [], notes: ''};
+                    this.onDemandBackupErrors = {};
+                    this.open = true;
+                    this.$nextTick(() => this.$refs.modalInitialFocus.focus());
+                },
+                closeModal() {
+                    if (!this.open || this.loading) return;
+                    this.open = false;
+                    const trigger = this.triggerElement;
+                    window.setTimeout(() => trigger && trigger.focus(), 0);
+                },
+                trapFocus(event) {
+                    const focusable = Array.from(this.$refs.dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href]'))
+                        .filter((element) => element.getClientRects().length > 0);
+                    if (!focusable.length) return;
+                    const first = focusable[0];
+                    const last = focusable[focusable.length - 1];
+                    if (event.shiftKey && document.activeElement === first) {
+                        event.preventDefault();
+                        last.focus();
+                    } else if (!event.shiftKey && document.activeElement === last) {
+                        event.preventDefault();
+                        first.focus();
+                    }
+                },
+                notify(item) {
+                    Alpine.store('notifications').items.push({show: true, ...item});
+                },
+                async createBackup() {
+                    this.loading = true;
+                    this.onDemandBackupErrors = {};
+                    if (!this.backupRequestKey) {
+                        this.backupRequestKey = (window.crypto && crypto.randomUUID)
+                            ? crypto.randomUUID()
+                            : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                    }
+                    const url = `/api/v1/nodes/${this.node_id}/take_snapshot/?` + new URLSearchParams({location: this.location_id});
+                    const data = {
+                        location: this.location_id,
+                        notes: this.onDemandBackup.notes,
+                        storage_point_ids: this.onDemandBackup.storage_point_ids,
+                        request_id: this.backupRequestKey,
+                    };
+                    try {
+                        const response = await fetch(url, {
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json',
+                                'Idempotency-Key': this.backupRequestKey,
+                            },
+                            method: 'POST',
+                            body: JSON.stringify(data),
+                        });
+                        let json;
+                        try {
+                            json = await response.json();
+                        } catch (error) {
+                            json = {detail: `${response.status} - ${response.statusText}. Review Activity for details.`};
+                        }
+                        if (!response.ok) throw json;
+                        this.loading = false;
+                        this.notify({success: true, heading: `${this.operationNoun[0].toUpperCase()}${this.operationNoun.slice(1)} request accepted`, details: `The ${this.operationNoun} request was durably queued.`});
+                        const requestId = json.backup_request && json.backup_request.request_id;
+                        const nodeId = this.node_id;
+                        const operationNoun = this.operationNoun;
+                        this.backupRequestKey = null;
+                        this.closeModal();
+                        if (requestId) this.pollBackupRequest(requestId, 0, nodeId, operationNoun);
+                    } catch (error) {
+                        this.loading = false;
+                        this.onDemandBackupErrors = error || {detail: 'The request could not be accepted.'};
+                        this.notify({error: true, heading: `${this.operationNoun[0].toUpperCase()}${this.operationNoun.slice(1)} request not accepted`, details: error.detail || 'Review the source and destination settings, then try again.'});
+                    }
+                },
+                async pollBackupRequest(requestId, attempt = 0, nodeId = null, operationNoun = 'backup') {
+                    if (!requestId) return;
+                    if (attempt >= 120) {
+                        this.notify({error: true, heading: `${operationNoun[0].toUpperCase()}${operationNoun.slice(1)} status unavailable`, details: 'The request was recorded, but its worker status could not be confirmed. Review Activity before retrying.'});
+                        return;
+                    }
+                    window.setTimeout(async () => {
+                        try {
+                            const response = await fetch(`/api/v1/nodes/${nodeId}/backup_request_status/?request_id=${encodeURIComponent(requestId)}`, {headers: {'Accept': 'application/json'}});
+                            if (!response.ok) throw new Error('status unavailable');
+                            const state = await response.json();
+                            if ((state.status === 'claimed' || state.status === 'duplicate') && state.backup_id) {
+                                this.notify({success: true, heading: `${operationNoun[0].toUpperCase()}${operationNoun.slice(1)} started`, details: state.backup_status_display || `The durable ${operationNoun} job is now in progress.`});
+                                window.location.reload();
+                                return;
+                            }
+                            if (state.status === 'cancelled' || state.status === 'manual_review') {
+                                this.notify({error: true, heading: `${operationNoun[0].toUpperCase()}${operationNoun.slice(1)} needs attention`, details: state.message || `The durable ${operationNoun} request requires operator review.`});
+                                return;
+                            }
+                        } catch (error) {
+                            if (attempt >= 119) {
+                                this.notify({error: true, heading: `${operationNoun[0].toUpperCase()}${operationNoun.slice(1)} status unavailable`, details: 'The request was recorded, but its worker status could not be confirmed. Review Activity before retrying.'});
+                                return;
+                            }
+                        }
+                        this.pollBackupRequest(requestId, attempt + 1, nodeId, operationNoun);
+                    }, 5000);
+                },
+            }));
+        });
+    </script>
 {% endblock %}
