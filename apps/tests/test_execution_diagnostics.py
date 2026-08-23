@@ -1,4 +1,4 @@
-"""Private diagnostics retain raw exceptions only in correlated Sentry events."""
+"""Private diagnostics send correlated exceptions through the Sentry scrubber."""
 
 from unittest import mock
 
