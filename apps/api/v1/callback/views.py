@@ -40,8 +40,6 @@ from cryptography.fernet import Fernet
 from google.oauth2 import id_token
 import google.oauth2.credentials
 from datetime import datetime, timezone
-from slack_sdk import WebClient, WebhookClient
-from slack_sdk.errors import SlackApiError
 import secrets
 from urllib.parse import urlsplit
 
@@ -246,10 +244,6 @@ class APICallbackSlack(APIView):
         n_slack.data = slack_data
         n_slack.save()
 
-        # The URL was constrained to Slack's exact webhook hosts above.
-        WebhookClient(webhook_url).send(
-            text="Hey! You successfully connected BackupSheep with your slack.",
-        )
         messages.add_message(
             request,
             messages.SUCCESS,
