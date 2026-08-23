@@ -19,7 +19,12 @@ from apps.console.connection.models import (
     _BoundedGoogleAuthorizedSession,
 )
 from apps.console.node.models import CoreGoogleCloud, CoreBasecamp
-from apps.console.notification.models import CoreNotificationSlack
+from apps.console.notification.models import (
+    CoreNotificationSlack,
+    SLACK_API_HOSTNAMES,
+    SLACK_WEBHOOK_HOSTNAMES,
+    sanitize_slack_oauth_metadata,
+)
 from apps.console.storage.models import (
     CoreStorage,
     CoreStorageType,
@@ -38,7 +43,7 @@ import dropbox
 from cryptography.fernet import Fernet
 from google.oauth2 import id_token
 import google.oauth2.credentials
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import secrets
 from urllib.parse import urlsplit
 
@@ -118,6 +123,34 @@ def _get_oauth_resource(
     )
 
 
+def _validated_slack_configuration_url(value):
+    """Validate a display-only Slack workspace configuration link.
+
+    Slack uses workspace subdomains for these links.  They are never requested
+    by the server, and are persisted only as encrypted data, but suffix
+    confusion, ports, credentials, query strings, and fragments are still
+    rejected before storage.
+    """
+
+    if not isinstance(value, str):
+        return None
+    try:
+        hostname = (urlsplit(value).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    if not (
+        hostname in {"slack.com", "slack-gov.com"}
+        or hostname.endswith(".slack.com")
+        or hostname.endswith(".slack-gov.com")
+    ):
+        return None
+    return validated_https_endpoint(
+        value,
+        allowed_hostnames={hostname},
+        allowed_path_prefixes={"/"},
+    )
+
+
 def _validated_pcloud_hostname(value=None):
     """Return an exact official pCloud API hostname, or None.
 
@@ -194,7 +227,7 @@ class APICallbackSlack(APIView):
             return redirect("console:settings:notification")
         result = _post_oauth_token(
             settings.SLACK_TOKEN_URL,
-            allowed_hostnames={"slack.com"},
+            allowed_hostnames=SLACK_API_HOSTNAMES,
             allowed_paths={"/api/oauth.v2.access"},
             data={
                 "grant_type": "authorization_code",
@@ -212,14 +245,23 @@ class APICallbackSlack(APIView):
             )
             return redirect("console:settings:notification")
 
-        slack_data = result.json()
+        try:
+            slack_data = result.json()
+        except (TypeError, ValueError):
+            slack_data = {}
+        finally:
+            result.close()
         incoming_webhook = slack_data.get("incoming_webhook")
         webhook_url = None
+        configuration_url = None
         if isinstance(incoming_webhook, dict):
             webhook_url = validated_https_endpoint(
                 incoming_webhook.get("url"),
-                allowed_hostnames={"hooks.slack.com", "hooks.slack-gov.com"},
+                allowed_hostnames=SLACK_WEBHOOK_HOSTNAMES,
                 allowed_path_prefixes={"/services/"},
+            )
+            configuration_url = _validated_slack_configuration_url(
+                incoming_webhook.get("configuration_url")
             )
         if not slack_data.get("ok") or webhook_url is None:
             messages.add_message(
@@ -229,23 +271,32 @@ class APICallbackSlack(APIView):
             )
             return redirect("console:settings:notification")
 
-        n_slack, created = CoreNotificationSlack.objects.get_or_create(
+        n_slack = CoreNotificationSlack.objects.filter(
             account=account,
-            channel=incoming_webhook.get("channel"),
             channel_id=incoming_webhook.get("channel_id"),
-        )
+        ).first()
+        if n_slack is None:
+            n_slack = CoreNotificationSlack(account=account)
         n_slack.added_by = member
         n_slack.app_id = slack_data.get("app_id")
         n_slack.token_type = slack_data.get("token_type")
-        n_slack.access_token = slack_data.get("access_token")
         n_slack.bot_user_id = slack_data.get("bot_user_id")
-        n_slack.refresh_token = slack_data.get("refresh_token")
-        n_slack.expiry = datetime.fromtimestamp(
-            int(time.time()) + int(slack_data["expires_in"])
-        )
+        try:
+            expires_in = int(slack_data.get("expires_in"))
+            n_slack.expiry = datetime.now(timezone.utc) + timedelta(
+                seconds=expires_in
+            ) if expires_in > 0 else None
+        except (TypeError, ValueError):
+            n_slack.expiry = None
         n_slack.channel = incoming_webhook.get("channel")
-        n_slack.url = webhook_url
-        n_slack.data = slack_data
+        n_slack.channel_id = incoming_webhook.get("channel_id")
+        n_slack.set_secrets(
+            access_token=slack_data.get("access_token"),
+            refresh_token=slack_data.get("refresh_token"),
+            configuration_url=configuration_url,
+            webhook_url=webhook_url,
+        )
+        n_slack.data = sanitize_slack_oauth_metadata(slack_data)
         n_slack.save()
 
         messages.add_message(
@@ -253,8 +304,6 @@ class APICallbackSlack(APIView):
             messages.SUCCESS,
             "Your slack is successfully connected.",
         )
-        result.close()
-        n_slack.refresh_auth_token()
         return redirect("console:settings:notification")
 
 
