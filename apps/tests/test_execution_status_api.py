@@ -338,6 +338,76 @@ class ExecutionStatusApiTests(BaseTestCase):
         self.assertIsNone(second["last_error_code"])
         self.assertIsNone(second["next_retry_at"])
 
+    def test_completed_backup_hides_stale_rollup_but_keeps_attempt_history(self):
+        backup = self._backup(status=UtilBackup.Status.COMPLETE)
+        correlation_id = uuid.uuid4()
+        self._execution(
+            backup,
+            correlation_id=correlation_id,
+            last_error_code="STORAGE_STALLED",
+            last_error_message="historical safe message",
+            metadata={
+                "public_attempt_history": [{
+                    "attempt": 1,
+                    "started_at": "2026-08-23T12:00:00+00:00",
+                    "finished_at": "2026-08-23T12:05:00+00:00",
+                    "stage": "storage_uploading",
+                    "code": "STORAGE_STALLED",
+                    "retry_decision": "scheduled_retry",
+                    "correlation_id": str(correlation_id),
+                }],
+            },
+        )
+
+        status = CoreWebsiteBackupSerializer(
+            CoreWebsiteBackup.objects.get(pk=backup.pk)
+        ).data["execution_status"]
+
+        self.assertIsNone(status["last_error_code"])
+        self.assertIsNone(status["last_error_message"])
+        self.assertEqual(status["attempt_history"][0]["code"], "STORAGE_STALLED")
+
+    def test_completed_restore_hides_stale_rollup_but_keeps_attempt_history(self):
+        node = factories.make_website_node(self.account, self.member)
+        backup = CoreWebsiteBackup.objects.create(
+            website=node.website,
+            name="completed-restore-source",
+            uuid=f"source-{uuid.uuid4().hex}",
+            status=UtilBackup.Status.COMPLETE,
+            type=UtilBackup.Type.ON_DEMAND,
+        )
+        correlation_id = uuid.uuid4()
+        restore = CoreWebsiteRestore.objects.create(
+            backup=backup,
+            name="completed-restore",
+            params={"_bs_last_error_code": "RESTORE_TRANSIENT_FAILURE"},
+            correlation_id=correlation_id,
+            attempt_count=1,
+            execution_metadata={
+                "public_attempt_history": [{
+                    "attempt": 1,
+                    "started_at": "2026-08-23T12:00:00+00:00",
+                    "finished_at": "2026-08-23T12:05:00+00:00",
+                    "stage": "website_staging",
+                    "code": "RESTORE_TRANSIENT_FAILURE",
+                    "retry_decision": "complete",
+                    "correlation_id": str(correlation_id),
+                }],
+            },
+            last_error_code="RESTORE_TRANSIENT_FAILURE",
+            error="historical safe message",
+            status=CoreWebsiteRestore.Status.COMPLETE,
+        )
+
+        status = CoreWebsiteRestoreSerializer(restore).data["execution_status"]
+
+        self.assertIsNone(status["last_error_code"])
+        self.assertIsNone(status["last_error_message"])
+        self.assertEqual(
+            status["attempt_history"][0]["code"],
+            "RESTORE_TRANSIENT_FAILURE",
+        )
+
     def test_backup_payload_exposes_only_live_node_summary_labels(self):
         backup = self._backup(status=UtilBackup.Status.COMPLETE)
         backup.size = 1234

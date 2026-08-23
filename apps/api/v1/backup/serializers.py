@@ -831,6 +831,11 @@ def _backup_execution_status(obj, state=None, artifact=None):
     artifact = _artifact_for(obj) if artifact is None else artifact
     legacy_status = _public_status(obj)
     error_code = _safe_error_code(getattr(state, "last_error_code", None))
+    if legacy_status in {"complete", "delete_completed"}:
+        # Legacy/recovered rows can retain a historical rollup even though the
+        # terminal parent status is authoritative. Attempt history remains the
+        # public audit trail; the current status must not render an active error.
+        error_code = None
     provider_status = _safe_provider_status(
         getattr(state, "provider_status", None)
     )
@@ -937,6 +942,8 @@ def _restore_execution_status(obj):
         error_code = _safe_error_code(raw_params.get("_bs_last_error_code"))
     if error_code is None and getattr(obj, "error", None):
         error_code = "RESTORE_FAILED"
+    if legacy_status in {"complete", "delete_completed"}:
+        error_code = None
     reconciliation_state = _safe_reconciliation_state(
         getattr(obj, "reconciliation_state", None)
     )

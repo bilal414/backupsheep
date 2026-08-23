@@ -109,6 +109,8 @@ class ProviderReconciliationStateTests(BaseTestCase):
             CoreBackupExecution.ReconciliationState.RESOLVED,
         )
         self.assertEqual(state.reconciliation_reason, "backup_finalized")
+        self.assertEqual(state.last_error_code, "")
+        self.assertEqual(state.last_error_message, "")
 
     def test_manual_review_and_fencing_are_preserved(self):
         _node, backup = self._cloud_backup()

@@ -788,6 +788,21 @@ class UtilBackup(TimeStampedModel):
                 state.next_retry_at = None
                 update_fields.append("next_retry_at")
 
+            # A successful terminal outcome supersedes the current error rollup.
+            # Keep ``last_error_at`` and the bounded public attempt history as the
+            # audit trail, but do not make a recovered backup look actively failed
+            # after the same logical execution completes.
+            if (
+                terminal_phase == "complete"
+                and backup.status == backup.Status.COMPLETE
+            ):
+                if state.last_error_code:
+                    state.last_error_code = ""
+                    update_fields.append("last_error_code")
+                if state.last_error_message:
+                    state.last_error_message = ""
+                    update_fields.append("last_error_message")
+
             # Required/in-progress reconciliation is no longer actionable once all
             # local storage points have reached a terminal outcome. Preserve an
             # explicit provider reconciliation failure: a terminal backup row can
