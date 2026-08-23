@@ -583,6 +583,7 @@ validate_checkout() {
         || die "Installer-managed releases must not depend on Git submodules."
 
     require_regular_checkout_file Dockerfile
+    require_regular_checkout_file Dockerfile.postgres
     require_regular_checkout_file docker-compose.yml
     require_regular_checkout_file .dockerignore
     require_regular_checkout_file .env_sample
@@ -1224,6 +1225,7 @@ create_or_migrate_configuration() {
         chmod 0600 "$ENV_FILE"
         validate_env_file
         set_env_value BACKUPSHEEP_IMAGE "backupsheep:${INSTALL_REF}"
+        set_env_value BACKUPSHEEP_POSTGRES_IMAGE "backupsheep-postgres:${INSTALL_REF}"
         set_env_value DJANGO_ALLOWED_HOSTS "${PUBLIC_HOST},localhost,127.0.0.1"
         set_env_value APP_DOMAIN "$APP_DOMAIN"
         set_env_value APP_PROTOCOL "http://"
@@ -1256,6 +1258,7 @@ create_or_migrate_configuration() {
 
     validate_secret_dir
     set_env_value BACKUPSHEEP_IMAGE "backupsheep:${INSTALL_REF}"
+    set_env_value BACKUPSHEEP_POSTGRES_IMAGE "backupsheep-postgres:${INSTALL_REF}"
     rewrite_env_for_secret_files
     validate_env_file
 }
@@ -1268,6 +1271,9 @@ validate_runtime_configuration() {
     value="$(read_env_value BACKUPSHEEP_IMAGE)"
     [[ "$value" == "backupsheep:${INSTALL_REF}" ]] \
         || die "BACKUPSHEEP_IMAGE must be backupsheep:${INSTALL_REF} for this verified source build."
+    value="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
+    [[ "$value" == "backupsheep-postgres:${INSTALL_REF}" ]] \
+        || die "BACKUPSHEEP_POSTGRES_IMAGE must be backupsheep-postgres:${INSTALL_REF} for this verified source build."
     value="$(read_env_value BACKUPSHEEP_BIND_ADDRESS)"
     [[ -z "$value" || "$value" == "127.0.0.1" ]] \
         || die "The installer only starts a loopback-bound web service. Set BACKUPSHEEP_BIND_ADDRESS=127.0.0.1."
@@ -1326,7 +1332,8 @@ compose() {
 
         # Compose gives the invoking shell precedence over --env-file during
         # interpolation. Do not let an ambient BACKUPSHEEP_BIND_ADDRESS,
-        # BACKUPSHEEP_IMAGE, secret path, resource limit, or future model value
+        # BACKUPSHEEP_IMAGE, BACKUPSHEEP_POSTGRES_IMAGE, secret path, resource
+        # limit, or future model value
         # bypass the configuration that was just parsed and validated above.
         # Preserve only Docker transport/credential-helper inputs and proxy/CA
         # settings needed to reach an intentionally selected daemon or registry.
@@ -1806,8 +1813,8 @@ stop_operations() {
 start_core() {
     stop_operations
 
-    log "Building the reviewed application image"
-    compose build --pull app
+    log "Building the reviewed PostgreSQL and application images"
+    compose build --pull db app
 
     log "Starting core services only (database, broker, migration, security preflight and web)"
     if ! compose up --detach --no-build "${CORE_SERVICES[@]}"; then

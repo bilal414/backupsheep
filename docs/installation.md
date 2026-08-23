@@ -37,11 +37,14 @@ daemon. The installer refuses root and `sudo`; it does not provision or reconfig
 host.
 
 The installer fetches that exact commit from the canonical HTTPS repository, verifies
-the checkout and its own bytes, creates protected file-backed secrets, builds one
-commit-tagged image, and starts only PostgreSQL, RabbitMQ, migrations, the deployment
+the checkout and its own bytes, creates protected file-backed secrets, builds commit-tagged
+application and PostgreSQL images, and starts only PostgreSQL, RabbitMQ, migrations, the deployment
 preflight and web UI. The web listener stays on `127.0.0.1:8000`.
-Application roles use `pull_policy: never`; the installer explicitly builds the reviewed
-commit and will not substitute a registry image if that local build is missing.
+Application and PostgreSQL roles use `pull_policy: never`; the installer explicitly builds
+both from the reviewed commit and will not substitute registry images if either local build
+is missing. The PostgreSQL build starts from the digest-pinned official image, verifies the
+official entrypoint, applies exact Debian security packages and replaces `gosu` with Debian's
+`setpriv` before deleting `gosu`.
 
 It also creates a stable random 64-hex installation ID and an empty labeled sentinel
 volume, then verifies Compose resource ownership before mutation. It enumerates every

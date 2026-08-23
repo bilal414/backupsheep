@@ -117,7 +117,7 @@ On a new installation the script:
    installer-owned data-generation witness. It refuses orphaned, stopped, unhealthy,
    ambiguous, 3.13 or 4.2 broker state instead of guessing at a volume format;
 7. validates Compose through explicit `--project-name`, `--env-file` and `-f` arguments;
-8. builds one commit-tagged application image and starts only PostgreSQL, RabbitMQ,
+8. builds commit-tagged PostgreSQL and application images and starts only PostgreSQL, RabbitMQ,
    migrations, the fail-closed preflight and web UI on `127.0.0.1:8000`;
 9. waits up to five minutes for the `app` health check;
 10. prints an SSH-tunnel command and an explicit server-side token retrieval command,
@@ -244,6 +244,7 @@ Set at least these values in `.env`:
 DJANGO_SERVER='prod'
 DJANGO_DEBUG=false
 BACKUPSHEEP_IMAGE='backupsheep:<same-40-character-reviewed-commit>'
+BACKUPSHEEP_POSTGRES_IMAGE='backupsheep-postgres:<same-40-character-reviewed-commit>'
 BACKUPSHEEP_INSTALLATION_ID='<stable-64-character-lowercase-hex-value>'
 BACKUPSHEEP_COMPOSE_PROJECT_NAME='backupsheep'
 BACKUPSHEEP_SECRETS_DIR='.secrets'
@@ -306,7 +307,7 @@ BS_COMPOSE=("$PWD/backupsheep-compose")
 # BS_COMPOSE+=(--approved-compose-file "$PWD/docker-compose.override.yml")
 bs_compose() { "${BS_COMPOSE[@]}" "$@"; }
 bs_compose config --quiet
-bs_compose build app
+bs_compose build db app
 bs_compose up --detach
 bs_compose ps --all
 ```
@@ -322,8 +323,11 @@ bs_compose --profile operations up --detach
 computes Django's migration plan and refuses any unapplied migration. The application and
 worker services wait for both one-shot gates before starting. Migrations also seed the
 integration/storage catalogs and create the database-backed cache table. Application
-roles use `pull_policy: never`, so the explicit build above is mandatory and a missing
-local image cannot be replaced silently from a registry.
+and PostgreSQL roles use `pull_policy: never`, so both explicit builds above are mandatory
+and a missing local image cannot be replaced silently from a registry. The database build
+uses `Dockerfile.postgres`: it verifies the digest-pinned official 18.6 entrypoint before
+replacing its single `gosu` privilege drop with Debian's security-updated `setpriv`, then
+deletes `gosu` and verifies the fixed util-linux package versions.
 
 Every application-image command still passes through the image entrypoint. It rejects a
 root or weakened runtime, neutralizes shell/Python/dynamic-loader startup hooks and runs

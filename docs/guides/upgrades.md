@@ -271,17 +271,28 @@ INSTALL_ARGS=(
 # then follow docs/guides/rabbitmq-upgrade.md before any 4.3 start.
 
 TARGET_IMAGE="backupsheep:${TARGET_COMMIT}"
+TARGET_POSTGRES_IMAGE="backupsheep-postgres:${TARGET_COMMIT}"
 ENV_TEMPORARY="$(mktemp "${PWD}/.env.backupsheep.XXXXXX")"
 chmod 0600 "${ENV_TEMPORARY}"
-awk -v replacement="BACKUPSHEEP_IMAGE='${TARGET_IMAGE}'" '
+awk \
+  -v app_replacement="BACKUPSHEEP_IMAGE='${TARGET_IMAGE}'" \
+  -v postgres_replacement="BACKUPSHEEP_POSTGRES_IMAGE='${TARGET_POSTGRES_IMAGE}'" '
   BEGIN { replaced = 0 }
   /^[[:space:]]*BACKUPSHEEP_IMAGE=/ {
-    if (!replaced) print replacement
+    if (!replaced) print app_replacement
     replaced = 1
     next
   }
+  /^[[:space:]]*BACKUPSHEEP_POSTGRES_IMAGE=/ {
+    if (!postgres_replaced) print postgres_replacement
+    postgres_replaced = 1
+    next
+  }
   { print }
-  END { if (!replaced) print replacement }
+  END {
+    if (!replaced) print app_replacement
+    if (!postgres_replaced) print postgres_replacement
+  }
 ' .env > "${ENV_TEMPORARY}"
 mv -f -- "${ENV_TEMPORARY}" .env
 unset ENV_TEMPORARY
@@ -290,13 +301,21 @@ test "$(stat -c %a .env)" = 600
 bs_compose config --quiet
 RENDERED_IMAGES="$(bs_compose --profile operations config --images)"
 test -n "$({ printf '%s\n' "${RENDERED_IMAGES}" | grep -Fx "${TARGET_IMAGE}"; })"
+test -n "$({ printf '%s\n' "${RENDERED_IMAGES}" | grep -Fx "${TARGET_POSTGRES_IMAGE}"; })"
 test -z "$({
   printf '%s\n' "${RENDERED_IMAGES}" |
     awk -v expected="${TARGET_IMAGE}" '/^backupsheep:/ && $0 != expected { print }'
 })"
-bs_compose build app
+test -z "$({
+  printf '%s\n' "${RENDERED_IMAGES}" |
+    awk -v expected="${TARGET_POSTGRES_IMAGE}" \
+      '/^backupsheep-postgres:/ && $0 != expected { print }'
+})"
+bs_compose build db app
 BUILT_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${TARGET_IMAGE}")"
+BUILT_POSTGRES_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${TARGET_POSTGRES_IMAGE}")"
 test -n "${BUILT_IMAGE_ID}"
+test -n "${BUILT_POSTGRES_IMAGE_ID}"
 ```
 
 If this is the first upgrade from a root-running BackupSheep image, stop here and perform
@@ -306,9 +325,9 @@ that ownership probe passes.
 
 The `migrate`, web, worker and Beat roles all resolve the same image reference. Their
 `pull_policy: never` setting requires this explicit local build and prevents a missing
-image from being silently replaced from a registry. Do not use `backupsheep:latest` or
-change the tag between migration and application startup. Record `BUILT_IMAGE_ID` in the
-deployment receipt.
+image from being silently replaced from a registry. The database has the same local-only
+contract. Do not use mutable tags or change either tag between migration and application
+startup. Record `BUILT_IMAGE_ID` and `BUILT_POSTGRES_IMAGE_ID` in the deployment receipt.
 
 Run migration and preflight explicitly, then start only the profile-less core:
 

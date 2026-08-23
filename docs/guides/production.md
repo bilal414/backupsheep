@@ -231,10 +231,10 @@ distributions are authenticated before build; the builder then creates a second 
 the exact platform-specific wheels, and the final stage installs that wheelhouse offline
 with `--require-hashes`. A changed or incomplete lock fails the build.
 
-Every application role sets `pull_policy: never`. Manual deployments must run
-`./backupsheep-compose build app` at the exact reviewed commit before `up`; Compose fails instead
-of pulling a same-named registry image when the local build is absent. The verified
-installer performs this explicit build automatically.
+Every application role and the database set `pull_policy: never`. Manual deployments must
+run `./backupsheep-compose build db app` at the exact reviewed commit before `up`; Compose
+fails instead of pulling a same-named registry image when either local build is absent.
+The verified installer performs both explicit builds automatically.
 
 ### Remaining image and bootstrap gates
 
@@ -258,9 +258,10 @@ complete container isolation:
   access and treat this cross-role command-relay path as High.
 - Python source artifacts and the resulting wheelhouse are hash-locked, but locally built
   wheels and signed APT repository snapshots are not guaranteed to be byte-for-byte
-  reproducible across build dates. The image base, PostgreSQL and RabbitMQ images are
-  digest-pinned; runtime Debian packages are exact-version selected from signed indexes;
-  and the MySQL client archive is verified with Oracle's fingerprint-pinned release key.
+  reproducible across build dates. The application, PostgreSQL and RabbitMQ images are
+  rooted in digest-pinned upstream images; runtime Debian packages are exact-version
+  selected from signed indexes; and the MySQL client archive is verified with Oracle's
+  fingerprint-pinned release key.
   Complete the [dependency reproducibility gate](dependency-security.md) before describing
   the resulting image as reproducible.
 

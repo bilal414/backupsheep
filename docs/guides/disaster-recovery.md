@@ -142,12 +142,12 @@ production provider resources.
 
 ### 2. Start only the database and broker
 
-Build the exact checked-out application image before any application role is started. The
-stock services use `pull_policy: never`; they will not fetch an unreviewed registry
+Build the exact checked-out database and application images before either role is started.
+The stock services use `pull_policy: never`; they will not fetch an unreviewed registry
 substitute:
 
 ```bash
-bs_compose build app
+bs_compose build db app
 bs_compose up --detach db rabbitmq
 bs_compose exec -T db pg_isready -U backupsheep -d backupsheep
 bs_compose exec -T rabbitmq rabbitmq-diagnostics -q ping

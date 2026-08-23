@@ -28,7 +28,7 @@ when the reviewed local image is missing:
 
 ```bash
 cd /opt/backupsheep
-./backupsheep-compose build app
+./backupsheep-compose build db app
 ./backupsheep-compose up --detach
 ./backupsheep-compose ps --all
 ./backupsheep-compose logs --tail=100 app migrate preflight

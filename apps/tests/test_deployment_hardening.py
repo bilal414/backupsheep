@@ -30,10 +30,11 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertNotIn('- "8000:8000"', self.compose)
 
     def test_bundled_postgres_preserves_the_cluster_collation_runtime(self):
+        postgres_dockerfile = (ROOT / "Dockerfile.postgres").read_text(encoding="utf-8")
         self.assertIn(
             "postgres:18.6-trixie@sha256:"
             "06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941",
-            self.compose,
+            postgres_dockerfile,
         )
         self.assertNotIn("postgres:18.6-bookworm", self.compose)
 
@@ -136,6 +137,9 @@ class DeploymentHardeningContractTests(TestCase):
 
         env_sample = (ROOT / ".env_sample").read_text(encoding="utf-8")
         self.assertIn("BACKUPSHEEP_IMAGE=backupsheep:local", env_sample)
+        self.assertIn(
+            "BACKUPSHEEP_POSTGRES_IMAGE=backupsheep-postgres:local", env_sample
+        )
         self.assertIn("BACKUPSHEEP_INSTALLATION_ID=''", env_sample)
 
     def test_every_compose_resource_has_an_installation_identity(self):

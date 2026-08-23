@@ -39,6 +39,7 @@ These values control Compose/installer behavior rather than Django application f
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `BACKUPSHEEP_IMAGE` | `backupsheep:local` | Exact locally built application image tag; the verified installer requires `backupsheep:<full-commit>` and application roles use `pull_policy: never` |
+| `BACKUPSHEEP_POSTGRES_IMAGE` | `backupsheep-postgres:local` | Exact locally built database image tag; the verified installer requires `backupsheep-postgres:<full-commit>` and the database role uses `pull_policy: never` |
 | `BACKUPSHEEP_INSTALLATION_ID` | blank sample; installer generates it | Stable random 64-character lowercase hexadecimal ownership marker. Required by stock Compose; do not rotate or copy it between installations |
 | `BACKUPSHEEP_SECRETS_DIR` | `.secrets` | Host directory containing the stock Compose secret files; the verified installer accepts only this relative path |
 | `BACKUPSHEEP_BIND_ADDRESS` | `127.0.0.1` | Host address that publishes the app; the verified installer accepts loopback only |

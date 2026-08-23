@@ -8,6 +8,7 @@
 
 # Build definition and dependency input.
 !Dockerfile
+!Dockerfile.postgres
 !.dockerignore
 !requirements.txt
 !requirements.lock

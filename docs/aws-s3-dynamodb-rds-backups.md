@@ -74,7 +74,7 @@ Focused local coverage, after creating the manual Compose configuration and prot
 `.secrets` files from the installation guide:
 
 ```bash
-./backupsheep-compose build app
+./backupsheep-compose build db app
 ./backupsheep-compose --allow-reviewed-runtime-overrides run --rm --no-deps \
   -e DJANGO_SERVER=test app \
   python manage.py test apps.tests.test_aws_backup_resources

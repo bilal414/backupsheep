@@ -32,9 +32,9 @@
 # backup_workdir must be a shared network filesystem (NFS/EFS) so replicas see each
 # other's files.
 #
-# Plus PostgreSQL and RabbitMQ (the Celery broker). Build the reviewed app image, then
-# start the core with the model-locking wrapper:
-#     ./backupsheep-compose build app
+# Plus PostgreSQL and RabbitMQ (the Celery broker). Build both reviewed local images,
+# then start the core with the model-locking wrapper:
+#     ./backupsheep-compose build db app
 #     ./backupsheep-compose up -d
 #
 # Configure .env (see .env_sample). For this stack use the service names below:
@@ -188,7 +188,13 @@ services:
     # initialize existing volumes. Moving a cluster created with glibc 2.41 to
     # Bookworm's older glibc 2.36 produces a collation-version mismatch and can
     # invalidate ordering/index assumptions until every affected object is rebuilt.
-    image: postgres:18.6-trixie@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
+    image: "${BACKUPSHEEP_POSTGRES_IMAGE:-backupsheep-postgres:local}"
+    # Build only from the digest-pinned official PostgreSQL base and the reviewed
+    # derived Dockerfile. A missing local tag is a hard failure, never a registry pull.
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
     environment:
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}

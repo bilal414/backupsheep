@@ -165,15 +165,24 @@ RUN set -eux; \
         -o Dir::Cache::archives=/runtime-debs \
         --download-only install \
         "ca-certificates=20250419" \
+        "bsdutils=1:2.41.5-0+deb13u1" \
         "lftp=${lftp_version}" \
         "libaio1t64=0.3.113-8+b1" \
+        "libblkid1=2.41.5-0+deb13u1" \
+        "liblastlog2-2=2.41.5-0+deb13u1" \
+        "libmount1=2.41.5-0+deb13u1" \
         "libncurses6=6.5+20250216-2" \
         "libnuma1=2.0.19-1" \
         "libpq5=18.6-1.pgdg13+2" \
+        "libsmartcols1=2.41.5-0+deb13u1" \
+        "libuuid1=2.41.5-0+deb13u1" \
+        "login=1:4.16.0-2+really2.41.5-0+deb13u1" \
         "mariadb-client-core=1:11.8.6-0+deb13u1" \
+        "mount=2.41.5-0+deb13u1" \
         "openssh-client=1:10.0p1-7+deb13u4" \
         "tree=2.2.1-1" \
         "unzip=6.0-29+deb13u1" \
+        "util-linux=2.41.5-0+deb13u1" \
         "zip=3.0-15+deb13u1" \
     && find /runtime-debs -maxdepth 1 -type f -name '*.deb' -print -quit \
         | grep -q . \
@@ -250,11 +259,21 @@ LABEL org.opencontainers.image.title="BackupSheep" \
       org.opencontainers.image.source="https://github.com/bilal414/backupsheep" \
       org.opencontainers.image.licenses="GPL-3.0-only"
 
-# Install the authenticated package closure offline. Unpack all packages before
-# configuration so dependency ordering cannot trigger a network repair attempt.
+# Install the authenticated package closure offline. mount and util-linux
+# Pre-Depend on the matching security-update library generation, so configure
+# that small authenticated set before unpacking the rest. No repository repair
+# is possible in this final stage.
 RUN --mount=from=runtime-packages,source=/runtime-debs,target=/runtime-debs,ro \
     --mount=from=runtime-packages,source=/runtime-extras,target=/runtime-extras,ro \
     set -eux; \
+    dpkg --unpack \
+        /runtime-debs/libblkid1_*.deb \
+        /runtime-debs/liblastlog2-2_*.deb \
+        /runtime-debs/libmount1_*.deb \
+        /runtime-debs/libsmartcols1_*.deb \
+        /runtime-debs/libuuid1_*.deb; \
+    dpkg --configure \
+        libblkid1 liblastlog2-2 libsmartcols1 libuuid1 libmount1; \
     dpkg --unpack /runtime-debs/*.deb; \
     dpkg --configure --pending; \
     dpkg --audit; \
@@ -278,6 +297,9 @@ COPY --from=mysql-client /mysql /opt/mysql
 RUN /opt/mysql/bin/mysql --version \
     && /opt/mysql/bin/mysqldump --version
 
+# pip is a build/install tool, not an application runtime dependency. Its
+# vendored package set is otherwise a second, hidden dependency tree that can
+# retain fixed vulnerabilities after the application lock is updated.
 RUN --mount=from=python-wheels,source=/wheels,target=/wheels,ro \
     python -m pip --isolated install \
         --no-cache-dir \
@@ -285,7 +307,15 @@ RUN --mount=from=python-wheels,source=/wheels,target=/wheels,ro \
         --find-links=/wheels \
         --require-hashes \
         --requirement=/wheels/requirements.runtime.lock \
-    && python -m pip --isolated check
+    && python -m pip --isolated check \
+    && rm -rf \
+        /usr/local/lib/python3.14/site-packages/pip \
+        /usr/local/lib/python3.14/site-packages/pip-*.dist-info \
+        /usr/local/bin/pip \
+        /usr/local/bin/pip3 \
+        /usr/local/bin/pip3.14 \
+    && test ! -e /usr/local/lib/python3.14/site-packages/pip \
+    && test -z "$(find /usr/local/bin -maxdepth 1 -type f -name 'pip*' -print -quit)"
 
 RUN groupadd --gid 10001 backupsheep \
     && useradd --uid 10001 --gid 10001 \

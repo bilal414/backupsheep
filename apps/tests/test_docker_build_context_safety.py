@@ -19,6 +19,7 @@ class DockerBuildContextSafetyTests(TestCase):
         self.assertEqual(self.rules[0], "**")
         for required in (
             "!Dockerfile",
+            "!Dockerfile.postgres",
             "!.dockerignore",
             "!requirements.txt",
             "!requirements.lock",

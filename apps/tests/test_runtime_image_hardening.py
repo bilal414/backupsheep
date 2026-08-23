@@ -64,6 +64,11 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertIn("--find-links=/wheels", self.runtime)
         self.assertGreaterEqual(self.dockerfile.count("--require-hashes"), 2)
         self.assertIn("python -m pip --isolated check", self.runtime)
+        self.assertIn(
+            "/usr/local/lib/python3.14/site-packages/pip-*.dist-info",
+            self.runtime,
+        )
+        self.assertIn("/usr/local/bin/pip3.14", self.runtime)
 
     def test_database_clients_are_version_pinned_and_authenticated(self):
         expected_packages = (
@@ -76,6 +81,21 @@ class RuntimeImageHardeningTests(TestCase):
         )
         for package in expected_packages:
             with self.subTest(package=package):
+                self.assertIn(package, self.dockerfile)
+
+        security_updates = (
+            '"bsdutils=1:2.41.5-0+deb13u1"',
+            '"libblkid1=2.41.5-0+deb13u1"',
+            '"liblastlog2-2=2.41.5-0+deb13u1"',
+            '"libmount1=2.41.5-0+deb13u1"',
+            '"libsmartcols1=2.41.5-0+deb13u1"',
+            '"libuuid1=2.41.5-0+deb13u1"',
+            '"login=1:4.16.0-2+really2.41.5-0+deb13u1"',
+            '"mount=2.41.5-0+deb13u1"',
+            '"util-linux=2.41.5-0+deb13u1"',
+        )
+        for package in security_updates:
+            with self.subTest(security_update=package):
                 self.assertIn(package, self.dockerfile)
 
         self.assertIn("signed-by=/usr/share/keyrings/pgdg.gpg", self.dockerfile)
@@ -112,6 +132,11 @@ class RuntimeImageHardeningTests(TestCase):
 
         self.assertIn("--mount=from=runtime-packages,source=/runtime-debs", self.runtime)
         self.assertNotIn("COPY --from=runtime-packages", self.runtime)
+        self.assertIn("/runtime-debs/libblkid1_*.deb", self.runtime)
+        self.assertIn(
+            "libblkid1 liblastlog2-2 libsmartcols1 libuuid1 libmount1",
+            self.runtime,
+        )
         self.assertIn("dpkg --unpack /runtime-debs/*.deb", self.runtime)
         self.assertIn("dpkg --configure --pending", self.runtime)
 

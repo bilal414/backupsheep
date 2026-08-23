@@ -72,6 +72,7 @@ semver_at_least 2.34.0-rc.1 2.33.1
         self.assertIn("http.sslVerify=true", self.installer)
         self.assertIn('cmp -s -- "$SCRIPT_PATH" "$INSTALL_DIR/install.sh"', self.installer)
         self.assertIn("require_regular_checkout_file backupsheep-compose", self.installer)
+        self.assertIn("require_regular_checkout_file Dockerfile.postgres", self.installer)
         self.assertIn("Mutable branches and tags are not accepted", self.installer)
         self.assertNotIn("DEFAULT_BRANCH", self.installer)
         self.assertNotIn("git clone --depth", self.installer)
@@ -92,7 +93,7 @@ semver_at_least 2.34.0-rc.1 2.33.1
         self.assertIn('compose --profile operations stop "${OPERATION_SERVICES[@]}"', self.installer)
         self.assertLess(
             self.installer.index("    stop_operations\n", self.installer.index("start_core()")),
-            self.installer.index("    compose build --pull app", self.installer.index("start_core()")),
+            self.installer.index("    compose build --pull db app", self.installer.index("start_core()")),
         )
         self.assertNotIn("up --build --detach --remove-orphans", self.installer)
         self.assertIn("/proc/1/task/1/children", self.installer)
@@ -223,6 +224,10 @@ INSTALL_WAS_PRESENT=true
         self.assertIn("DJANGO_SECRET_KEY=''", migrated_env)
         self.assertIn("SSH_MANAGED_PRIVATE_KEY_PATH=''", migrated_env)
         self.assertIn(f"BACKUPSHEEP_IMAGE='backupsheep:{COMMIT}'", migrated_env)
+        self.assertIn(
+            f"BACKUPSHEEP_POSTGRES_IMAGE='backupsheep-postgres:{COMMIT}'",
+            migrated_env,
+        )
         managed_key = secret_dir / "ssh_managed_private_key"
         self.assertEqual(stat.S_IMODE(managed_key.stat().st_mode), 0o444)
         self.assertEqual(managed_key.read_bytes(), b"")
@@ -233,6 +238,21 @@ INSTALL_WAS_PRESENT=true
         )
         after = {path.name: path.read_bytes() for path in secret_dir.iterdir()}
         self.assertEqual(before, after)
+
+    def test_database_image_tag_is_persisted_and_tampering_fails_closed(self):
+        self.run_installer_functions("create_or_migrate_configuration")
+        result = self.run_installer_functions(
+            'ENV_FILE="$INSTALL_DIR/.env"\n'
+            'SECRETS_DIR="$INSTALL_DIR/.secrets"\n'
+            'set_env_value BACKUPSHEEP_POSTGRES_IMAGE "attacker/postgres:latest"\n'
+            "validate_runtime_configuration",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            f"BACKUPSHEEP_POSTGRES_IMAGE must be backupsheep-postgres:{COMMIT}",
+            result.stderr,
+        )
 
     def test_persisted_compose_project_name_refuses_drift(self):
         result = self.run_installer_functions(

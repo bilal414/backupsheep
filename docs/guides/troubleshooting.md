@@ -60,7 +60,7 @@ Static assets are collected in the offline, non-root image-build step and WhiteN
 serves the immutable result. Rebuild the current image and inspect app startup:
 
 ```bash
-./backupsheep-compose build app
+./backupsheep-compose build db app
 ./backupsheep-compose up --detach app
 ./backupsheep-compose logs --tail=200 app
 ```

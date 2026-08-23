@@ -28,7 +28,7 @@ Static files are collected into the immutable image at build time and served by
 WhiteNoise. Explicitly rebuild the reviewed checkout, then recreate the core:
 
 ```bash
-./backupsheep-compose build app
+./backupsheep-compose build db app
 ./backupsheep-compose up --detach
 ```
 
