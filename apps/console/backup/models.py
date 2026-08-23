@@ -56,9 +56,12 @@ from ..vultr import (
 
 
 def _presigned_url_expiry():
-    """Seconds before a generated backup download URL expires (configurable via
-    S3_DOWNLOAD_URL_EXPIRES; default 24h)."""
-    return int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))
+    """Return the five-minute signed-URL default with a one-hour hard ceiling."""
+    try:
+        configured = int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 5 * 60))
+    except (TypeError, ValueError):
+        configured = 5 * 60
+    return min(max(configured, 1), 60 * 60)
 
 
 class StoragePointLeaseLostError(RuntimeError):
@@ -5220,7 +5223,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 if blob.exists():
                     url = blob.generate_signed_url(
                         version="v4",
-                        expiration=timedelta(hours=24),
+                        expiration=timedelta(seconds=_presigned_url_expiry()),
                         method="GET",
                     )
                     return url
@@ -5230,7 +5233,6 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 return None
 
         elif self.storage.type.code == "azure":
-            import time
             import datetime
             from azure.storage.blob import BlobSasPermissions, generate_blob_sas
             from datetime import timedelta
@@ -5239,8 +5241,9 @@ class BaseBackupStoragePoints(TimeStampedModel):
 
             blob_service_client = self.storage.storage_azure.get_client()
 
-            # Create a SAS token that expires in 1 hour
-            sas_expiry = datetime.datetime.utcnow() + timedelta(hours=48)
+            sas_expiry = datetime.datetime.now(
+                datetime.timezone.utc
+            ) + timedelta(seconds=_presigned_url_expiry())
             sas_permissions = BlobSasPermissions(read=True, write=False, delete=False)
             sas_token = generate_blob_sas(
                 account_name=blob_service_client.account_name,
@@ -5264,7 +5267,11 @@ class BaseBackupStoragePoints(TimeStampedModel):
             region_id = self.storage.storage_alibaba.endpoint.split(".")[0].removeprefix("oss-").removesuffix("-internal")
             bucket = oss2.Bucket(auth, f"https://{self.storage.storage_alibaba.endpoint}", self.storage.storage_alibaba.bucket_name, region=region_id)
             return bucket.sign_url(
-                "GET", self.storage_file_id, 3600 * 24, headers={"content-disposition": "attachment"}, slash_safe=True
+                "GET",
+                self.storage_file_id,
+                _presigned_url_expiry(),
+                headers={"content-disposition": "attachment"},
+                slash_safe=True,
             )
 
         elif self.storage.type.code == "tencent":
@@ -5282,7 +5289,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 Method='GET',
                 Bucket=self.storage.storage_tencent.bucket_name,
                 Key=self.storage_file_id,
-                Expired=24 * 3600
+                Expired=_presigned_url_expiry(),
             )
         elif self.storage.type.code == "leviia":
             s3_client = bounded_boto3_client(

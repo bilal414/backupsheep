@@ -87,9 +87,17 @@ DB_PORT='5432'
 ```
 
 For managed PostgreSQL, set `DATABASE_URL`. A non-empty URL overrides all five discrete
-connection values for Django. It must use `postgres://` or `postgresql://`. Set
-`DB_SSLMODE=require` when the provider requires TLS and the URL does not already contain
-an `sslmode` option.
+connection values for Django. It must use `postgres://` or `postgresql://`. Production
+accepts an external host only with certificate and hostname verification:
+
+```dotenv
+DB_SSLMODE=verify-full
+DB_SSLROOTCERT=/run/secrets/postgres-ca.pem
+```
+
+The same `sslmode=verify-full` and `sslrootcert=...` values can be URL query options.
+Plaintext is a narrow single-host exception for the exact stock `db` service, loopback,
+or a Unix socket. Private/RFC1918 addresses are not automatically trusted.
 
 The Compose `db` service still reads the discrete `DB_*` values. If using only an
 external database, use a deployment override that removes or ignores the bundled service
@@ -99,8 +107,9 @@ and update dependency wiring deliberately; the stock Compose file always starts 
 
 BackupSheep accepts RabbitMQ brokers only. Configuration precedence is:
 
-1. if `RABBITMQ_HOST` is non-empty, build a URL from `RABBITMQ_HOST`,
-   `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD` and `RABBITMQ_VHOST`;
+1. if `RABBITMQ_HOST` is non-empty, build a URL from `RABBITMQ_SCHEME`,
+   `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD` and
+   `RABBITMQ_VHOST`;
 2. otherwise use `CLOUDAMQP_URL` when present;
 3. otherwise use `CELERY_BROKER_URL`;
 4. otherwise production fails closed until a broker URL or dedicated fragment credentials
@@ -109,7 +118,13 @@ BackupSheep accepts RabbitMQ brokers only. Configuration precedence is:
 Use `amqp://` or `amqps://`. Never use RabbitMQ's well-known `guest/guest` account, even
 on an internal network. Stock Compose requires a non-empty `RABBITMQ_PASSWORD`, creates a
 dedicated `backupsheep` user/vhost only on a fresh volume, and persists broker state in
-`rabbitmq_data`.
+`rabbitmq_data`. Plaintext `amqp` is accepted in production only for loopback or the exact
+stock `rabbitmq` service. An external broker, including one reached over a private network,
+must use `amqps`; BackupSheep requires a trusted certificate and verifies its hostname.
+Set `RABBITMQ_CA_CERT` when the broker uses a private CA, otherwise system roots apply.
+Do not put `ssl_*` overrides in the broker URL; they are rejected so certificate checking
+cannot be disabled. Use one certificate-valid broker/load-balancer hostname in production
+rather than a semicolon-separated failover URL.
 
 ## Filesystem configuration
 

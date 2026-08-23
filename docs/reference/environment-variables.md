@@ -38,9 +38,13 @@ values are false. Defaults below are repository defaults for `develop`.
 | `SENTRY_DSN` | blank | Enables scrubbed Sentry error delivery when non-empty |
 | `SENTRY_TRACES_SAMPLE_RATE` | `0` | Transaction trace sampling rate from 0 to 1; disabled unless explicitly opted in |
 | `SENTRY_PROFILES_SAMPLE_RATE` | `0` | Profile sampling rate from 0 to 1; disabled unless explicitly opted in |
+| `SESSION_COOKIE_AGE` | `43200` | Browser-session maximum in seconds; values above 12 hours are rejected |
+| `SESSION_EXPIRE_AT_BROWSER_CLOSE` | `true` | Remove the browser's session cookie when the browser closes |
 
 `APP_PROTOCOL`, `APP_DOMAIN`, proxy forwarding and `DJANGO_HTTPS` must describe the same
 public URL. Keep `DJANGO_SECRET_KEY` stable and backed up as a secret.
+Session cookies are always HttpOnly and SameSite=Lax. They become Secure when
+`DJANGO_HTTPS=true`; do not serve an authenticated production console over plain HTTP.
 
 ## API tokens
 
@@ -61,11 +65,15 @@ API token is issued.
 | `DB_HOST` | `db` | Database hostname in stock Compose |
 | `DB_PORT` | `5432` | Database port |
 | `DATABASE_URL` | blank | `postgres://` or `postgresql://` URL; overrides the five discrete Django values |
-| `DB_SSLMODE` | blank | libpq `sslmode`; overrides/adds the URL query option when set |
+| `DB_SSLMODE` | blank | libpq `sslmode`; external production databases require `verify-full` |
+| `DB_SSLROOTCERT` | blank | CA/root-certificate bundle for external PostgreSQL hostname verification |
 
 The bundled `db` service still consumes the discrete `DB_*` keys even when Django uses
 `DATABASE_URL`. Changing `DB_PASSWORD` after PostgreSQL initialized does not change the
-existing database role.
+existing database role. In production, plaintext PostgreSQL is allowed only for an exact
+stock `db` service name, loopback address, or Unix socket. Every other hostname or IP,
+including RFC1918 addresses, requires `sslmode=verify-full` plus `sslrootcert`; the two
+options may instead be supplied in the `DATABASE_URL` query string.
 
 ## RabbitMQ
 
@@ -75,12 +83,20 @@ existing database role.
 | `CLOUDAMQP_URL` | unset | Managed RabbitMQ URL used ahead of `CELERY_BROKER_URL` |
 | `RABBITMQ_HOST` | `rabbitmq` | When non-empty, fragment mode takes highest precedence |
 | `RABBITMQ_PORT` | `5672` | Fragment-mode port |
+| `RABBITMQ_SCHEME` | `amqp` | Fragment-mode scheme; use `amqps` for every external broker |
 | `RABBITMQ_USER` | `backupsheep` | Dedicated bundled-broker username |
 | `RABBITMQ_PASSWORD` | blank (required by Compose) | Dedicated broker password; `install.sh` generates it |
 | `RABBITMQ_VHOST` | `backupsheep` | Dedicated virtual host; components are URL encoded |
+| `RABBITMQ_CA_CERT` | blank | Optional private CA bundle for `amqps`; system roots are used when blank |
 
 Only `amqp://` and `amqps://` broker URLs are accepted. The stock Compose deployment does
-not use RabbitMQ's well-known `guest` account.
+not use RabbitMQ's well-known `guest` account. Production permits plaintext AMQP only on
+loopback or the exact stock `rabbitmq` Compose service. Every external/internal-network
+hostname or non-loopback IP must use `amqps`; BackupSheep requires the peer certificate
+and verifies it against the broker hostname using system roots or `RABBITMQ_CA_CERT`.
+TLS query-string overrides are rejected. Production accepts one broker URL; put broker
+high availability behind one certificate-valid load-balancer/DNS endpoint instead of a
+semicolon failover list whose members could cross transport trust boundaries.
 
 ## Paths, logs and downloads
 
@@ -89,10 +105,15 @@ not use RabbitMQ's well-known `guest` account.
 | `BACKUPSHEEP_PIDS_LIMIT` | `512` | Maximum processes per app/migrate/worker/Beat container in stock non-Swarm Compose |
 | `BS_LOCAL_STORAGE_PATH` | `/backups` | Root used by the Local Storage destination; mount identically in relevant roles |
 | `LOG_RETENTION_DAYS` | `30` | Days before local run logs and database activity are pruned |
-| `S3_DOWNLOAD_URL_EXPIRES` | `86400` | Seconds that generated archive download URLs remain valid |
+| `S3_DOWNLOAD_URL_EXPIRES` | `300` | Provider-signed archive URL seconds; hard maximum `3600` |
 | `SSH_KNOWN_HOSTS_PATH` | `_storage/ssh_known_hosts` | Reviewed OpenSSH known-hosts file; relative paths resolve under repository root |
 | `SSH_MANAGED_PRIVATE_KEY_PATH` | blank | Optional managed private key file; relative paths resolve under repository root |
 | `SSH_MANAGED_PUBLIC_KEY` | blank | Matching public key advertised by the console only when private key exists |
+
+`S3_DOWNLOAD_URL_EXPIRES` applies to the S3-compatible, Google Cloud, Azure, Alibaba and
+Tencent signatures that BackupSheep creates. Dropbox, OneDrive and similar APIs may issue
+their own temporary links without accepting a caller-selected lifetime; those remain
+bounded by the provider rather than this setting.
 
 ## Durable execution and recovery
 

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from http.cookiejar import DefaultCookiePolicy
 import math
+
 import requests as _requests
 from django.conf import settings
 from requests.adapters import HTTPAdapter
+from requests.cookies import RequestsCookieJar
 from urllib3.util.retry import Retry
 
 
@@ -26,6 +29,15 @@ def request_timeout():
         _bounded_setting("PROVIDER_HTTP_CONNECT_TIMEOUT", 10.0, maximum),
         _bounded_setting("PROVIDER_HTTP_READ_TIMEOUT", 60.0, maximum),
     )
+
+
+def _pool_size():
+    """Keep provider connection reuse useful without accepting absurd config."""
+    try:
+        value = int(getattr(settings, "PROVIDER_HTTP_MAX_POOL_CONNECTIONS", 50))
+    except (TypeError, ValueError):
+        value = 50
+    return min(max(value, 1), 500)
 
 
 def _retry_policy(*, allow_mutation_retries=True):
@@ -54,6 +66,42 @@ def _retry_policy(*, allow_mutation_retries=True):
     )
 
 
+class RejectAllCookiePolicy(DefaultCookiePolicy):
+    """Provider responses must never create ambient credentials for later calls."""
+
+    def set_ok(self, cookie, request):
+        del cookie, request
+        return False
+
+    def return_ok(self, cookie, request):
+        del cookie, request
+        return False
+
+    def domain_return_ok(self, domain, request):
+        del domain, request
+        return False
+
+    def path_return_ok(self, path, request):
+        del path, request
+        return False
+
+
+class RejectAllCookieJar(RequestsCookieJar):
+    """A cookie jar that cannot retain server- or caller-created state.
+
+    Explicit ``cookies=`` on a single request still works because Requests prepares
+    those values in a separate per-request jar.  The shared session itself remains
+    stateless, preventing one account/provider response from influencing a later call.
+    """
+
+    def __init__(self):
+        super().__init__(policy=RejectAllCookiePolicy())
+
+    def set_cookie(self, cookie, *args, **kwargs):
+        del cookie, args, kwargs
+        return None
+
+
 class TimeoutSession(_requests.Session):
     """Requests session with bounded I/O and no automatic redirects.
 
@@ -66,7 +114,11 @@ class TimeoutSession(_requests.Session):
 
     def __init__(self, *, allow_mutation_retries=False):
         super().__init__()
+        self.cookies = RejectAllCookieJar()
+        pool_size = _pool_size()
         adapter = HTTPAdapter(
+            pool_connections=pool_size,
+            pool_maxsize=pool_size,
             max_retries=_retry_policy(
                 allow_mutation_retries=allow_mutation_retries
             )

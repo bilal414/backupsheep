@@ -10,9 +10,11 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 import io
+import ipaddress
 import json
 import os
 import re
+import ssl
 import warnings
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlparse
@@ -92,6 +94,21 @@ API_TOKEN_TTL_SECONDS = _bounded_positive_int(
     90 * 24 * 60 * 60,
 )
 
+# Bound browser authentication independently of API tokens. Browser-close removes
+# the client cookie early; the server-side row still has this absolute upper bound.
+SESSION_COOKIE_AGE = _bounded_positive_int(
+    "SESSION_COOKIE_AGE",
+    12 * 60 * 60,
+    12 * 60 * 60,
+)
+SESSION_EXPIRE_AT_BROWSER_CLOSE = _as_bool(
+    config.get("SESSION_EXPIRE_AT_BROWSER_CLOSE"),
+    default=True,
+)
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_SAVE_EVERY_REQUEST = False
+
 # .env_sample values are merged in as defaults (see config above) so a PaaS deploy
 # that forgets to set DJANGO_SECRET_KEY would otherwise boot with a publicly known
 # signing key. Refuse to start a production instance in that state instead of
@@ -113,12 +130,13 @@ CSRF_TRUSTED_ORIGINS = [f"{config['APP_PROTOCOL']}{config['APP_DOMAIN']}"]
 HTTPS_ENABLED = _as_bool(config.get("DJANGO_HTTPS", "false"))
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_CONTENT_TYPE_NOSNIFF = True
+SESSION_COOKIE_SECURE = HTTPS_ENABLED
+CSRF_COOKIE_SECURE = HTTPS_ENABLED
+CSRF_COOKIE_SAMESITE = "Lax"
 # Platform health probes commonly reach the container over private HTTP even when the
 # public endpoint is HTTPS. This endpoint contains no sensitive data and must remain 200.
 SECURE_REDIRECT_EXEMPT = [r"^healthz/$"]
 if HTTPS_ENABLED:
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
     SECURE_SSL_REDIRECT = True
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
@@ -235,6 +253,66 @@ REST_FRAMEWORK = {
 MIGRATION_MODULES = {"apps": "apps._migrations"}
 
 
+def _is_local_transport_host(host, compose_hostname):
+    """Return true only for a loopback, Unix socket, or exact stock service name.
+
+    RFC1918 addresses and arbitrary internal DNS names are intentionally not trusted:
+    they can cross hosts and therefore need authenticated transport in production.
+    """
+    value = str(host or "").strip().lower().rstrip(".")
+    if not value or value.startswith("/"):
+        return True
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    if value in {"localhost", compose_hostname}:
+        return True
+    try:
+        return ipaddress.ip_address(value.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_database_transport(database, values):
+    if str(values.get("DJANGO_SERVER") or "").strip().lower() != "prod":
+        return database
+
+    options = database.get("OPTIONS") or {}
+    # libpq accepts alternate routing through URL options, service files, and
+    # PG* environment defaults. Include every route that could bypass DB_HOST.
+    primary_host = (
+        database.get("HOST")
+        or options.get("host")
+        or values.get("PGHOST")
+        or ""
+    )
+    hostaddr = options.get("hostaddr") or values.get("PGHOSTADDR") or ""
+    service_routing = any(
+        str(candidate or "").strip()
+        for candidate in (
+            options.get("service"),
+            options.get("servicefile"),
+            values.get("PGSERVICE"),
+            values.get("PGSERVICEFILE"),
+        )
+    )
+    local_route = (
+        not service_routing
+        and _is_local_transport_host(primary_host, "db")
+        and (not hostaddr or _is_local_transport_host(hostaddr, "db"))
+    )
+    if local_route:
+        return database
+
+    sslmode = str(options.get("sslmode") or "").strip().lower()
+    sslrootcert = str(options.get("sslrootcert") or "").strip()
+    if sslmode != "verify-full" or not sslrootcert:
+        raise ImproperlyConfigured(
+            "External PostgreSQL requires sslmode=verify-full and a configured "
+            "sslrootcert (DATABASE_URL query options or DB_SSLMODE/DB_SSLROOTCERT)."
+        )
+    return database
+
+
 def _database_config():
     """Build Django's PostgreSQL configuration from a URL or discrete DB_* values.
 
@@ -253,8 +331,10 @@ def _database_config():
         if config.get("DB_SSLMODE"):
             # An explicit DB_SSLMODE is useful when a platform URL omits its TLS mode.
             options["sslmode"] = config["DB_SSLMODE"]
+        if config.get("DB_SSLROOTCERT"):
+            options["sslrootcert"] = config["DB_SSLROOTCERT"]
 
-        return {
+        database = {
             "ENGINE": "django.db.backends.postgresql",
             "NAME": unquote(parsed.path.lstrip("/")),
             "USER": unquote(parsed.username or ""),
@@ -263,12 +343,15 @@ def _database_config():
             "PORT": str(parsed.port or 5432),
             "OPTIONS": options,
         }
+        return _validate_database_transport(database, config)
 
     options = {}
     if config.get("DB_SSLMODE"):
         options["sslmode"] = config["DB_SSLMODE"]
+    if config.get("DB_SSLROOTCERT"):
+        options["sslrootcert"] = config["DB_SSLROOTCERT"]
 
-    return {
+    database = {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": config["DB_NAME"],
         "USER": config["DB_USER"],
@@ -277,6 +360,7 @@ def _database_config():
         "PORT": config["DB_PORT"],
         "OPTIONS": options,
     }
+    return _validate_database_transport(database, config)
 
 
 DATABASES = {"default": _database_config()}
@@ -568,6 +652,11 @@ def _resolve_celery_broker_url(values):
     """
     host = str(values.get("RABBITMQ_HOST") or "").strip()
     if host:
+        scheme = str(values.get("RABBITMQ_SCHEME") or "amqp").strip().lower()
+        if scheme not in {"amqp", "amqps"}:
+            raise ImproperlyConfigured(
+                "RABBITMQ_SCHEME must be amqp or amqps."
+            )
         if not (values.get("RABBITMQ_USER") and values.get("RABBITMQ_PASSWORD")):
             if str(values.get("DJANGO_SERVER") or "").strip().lower() == "prod":
                 raise ImproperlyConfigured(
@@ -587,8 +676,10 @@ def _resolve_celery_broker_url(values):
         vhost = str(values.get("RABBITMQ_VHOST") or "/").strip().strip("/")
         vhost_path = quote(vhost, safe="")
         if vhost_path:
-            return f"amqp://{user}:{password}@{host}:{port}/{vhost_path}"
-        return f"amqp://{user}:{password}@{host}:{port}//"
+            broker_url = f"{scheme}://{user}:{password}@{host}:{port}/{vhost_path}"
+        else:
+            broker_url = f"{scheme}://{user}:{password}@{host}:{port}//"
+        return _validate_broker_transport(broker_url, values)
 
     # The Heroku template provisions CloudAMQP's RabbitMQ plan, which exposes its
     # canonical AMQP URL as CLOUDAMQP_URL. Prefer it over the Compose fallback from
@@ -608,10 +699,65 @@ def _resolve_celery_broker_url(values):
         )
     if urlparse(broker_url).scheme not in {"amqp", "amqps"}:
         raise ValueError("RabbitMQ broker URLs must use the amqp:// or amqps:// scheme.")
+    return _validate_broker_transport(broker_url, values)
+
+
+def _validate_broker_transport(broker_url, values):
+    query_keys = {
+        key.strip().lower()
+        for key, _value in parse_qsl(urlparse(broker_url).query, keep_blank_values=True)
+    }
+    if any(
+        key.startswith("ssl_")
+        or key in {"cert_reqs", "check_hostname", "server_hostname"}
+        for key in query_keys
+    ):
+        raise ImproperlyConfigured(
+            "RabbitMQ TLS options are not accepted in the broker URL. Use "
+            "RABBITMQ_CA_CERT; certificate and hostname verification cannot be "
+            "overridden."
+        )
+    parsed = urlparse(broker_url)
+    if parsed.scheme == "amqps" and not parsed.hostname:
+        raise ImproperlyConfigured(
+            "amqps:// RabbitMQ URLs require an explicit hostname for certificate "
+            "verification."
+        )
+    if str(values.get("DJANGO_SERVER") or "").strip().lower() != "prod":
+        return broker_url
+    if ";" in broker_url:
+        raise ImproperlyConfigured(
+            "Production RabbitMQ configuration accepts one verified broker URL; "
+            "semicolon failover URLs could cross transport trust boundaries."
+        )
+    if _is_local_transport_host(parsed.hostname, "rabbitmq"):
+        return broker_url
+    if parsed.scheme != "amqps":
+        raise ImproperlyConfigured(
+            "External RabbitMQ requires amqps:// with certificate and hostname "
+            "verification. Plain amqp:// is limited to loopback or the stock "
+            "rabbitmq Compose service."
+        )
     return broker_url
 
 
+def _broker_ssl_options(broker_url, values):
+    parsed = urlparse(broker_url)
+    if parsed.scheme != "amqps":
+        return False
+    options = {
+        "cert_reqs": ssl.CERT_REQUIRED,
+        # py-amqp uses this for both SNI and certificate hostname matching.
+        "server_hostname": parsed.hostname,
+    }
+    ca_cert = str(values.get("RABBITMQ_CA_CERT") or "").strip()
+    if ca_cert:
+        options["ca_certs"] = ca_cert
+    return options
+
+
 CELERY_BROKER_URL = _resolve_celery_broker_url(config)
+CELERY_BROKER_USE_SSL = _broker_ssl_options(CELERY_BROKER_URL, config)
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE
@@ -871,10 +1017,13 @@ BACKUP_STORAGE_STALE_SECONDS = int(
     config.get("BACKUP_STORAGE_STALE_SECONDS", 6 * 60 * 60)
 )
 
-# Lifetime (seconds) of presigned download URLs generated for backup archives. 24h by
-# default; lower it for immutable/compliance destinations where long-lived URLs weaken
-# the protection story.
-S3_DOWNLOAD_URL_EXPIRES = int(config.get("S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))
+# Lifetime (seconds) of provider-signed archive download URLs. Five minutes is the
+# secure default and one hour is the hard configuration ceiling.
+S3_DOWNLOAD_URL_EXPIRES = _bounded_positive_int(
+    "S3_DOWNLOAD_URL_EXPIRES",
+    5 * 60,
+    60 * 60,
+)
 
 # Paramiko and the system SSH client both require a verified host key for SSH/SFTP
 # backup sources.  Keep the file under the persistent _storage volume by default so

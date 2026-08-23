@@ -18,6 +18,8 @@ Before making an instance reachable from the internet:
 - [ ] terminate TLS at a trusted reverse proxy and set `DJANGO_HTTPS=true` only after it
       forwards `X-Forwarded-Proto: https`;
 - [ ] set `APP_PROTOCOL=https://` and `APP_DOMAIN` to the real public host;
+- [ ] keep browser sessions at or below 12 hours and require reauthentication after the
+      browser closes (`SESSION_COOKIE_AGE=43200`, `SESSION_EXPIRE_AT_BROWSER_CLOSE=true`);
 - [ ] block public access to PostgreSQL, RabbitMQ and direct port `8000`;
 - [ ] restrict the console with firewall, VPN or identity-aware access when practical;
 - [ ] put Local Storage and the work directory on capacity-monitored durable storage;
@@ -40,6 +42,13 @@ Do not publish the `db` or `rabbitmq` ports. Stock Compose binds app port `8000`
 loopback; keep `BACKUPSHEEP_BIND_ADDRESS=127.0.0.1` and keep the host/cloud firewall closed
 to that port from untrusted networks. If the proxy is another container, connect it to an
 explicit reviewed network and avoid a public app-port mapping entirely.
+
+The exact stock `db` and `rabbitmq` service names, loopback, and PostgreSQL Unix sockets
+are the only production plaintext exceptions. They assume one controlled host and a
+private Docker bridge. For an external PostgreSQL endpoint, require
+`DB_SSLMODE=verify-full` and `DB_SSLROOTCERT=/path/to/ca.pem`. For any external RabbitMQ
+endpoint, use `amqps` with a valid hostname certificate; set `RABBITMQ_CA_CERT` only when
+the broker uses a private CA. RFC1918 addresses and internal DNS names still require TLS.
 
 Source systems and storage providers must allow the BackupSheep workers' outbound address.
 The connection setup UI shows the self-hosted server's detected public IPv4/IPv6 for
@@ -132,6 +141,11 @@ fail because cookies are Secure and requests redirect to HTTPS.
   managed private keys on the shared work volume with mode `0600`.
 - Use token authentication for external API clients and protect tokens as passwords.
   Browser-session API requests use Django CSRF enforcement.
+- Browser sessions are HttpOnly, SameSite=Lax, limited to 12 hours, and discarded on
+  browser close by default. BackupSheep-generated provider signatures default to five
+  minutes and cannot be configured above one hour; generate them only when the user is
+  ready to download and avoid putting them in logs or tickets. Provider-issued temporary
+  links whose APIs expose no lifetime control retain that provider's documented lifetime.
 - Review the repository's `SECURITY.md` and report vulnerabilities privately through a
   GitHub Security Advisory.
 
