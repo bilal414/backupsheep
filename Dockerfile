@@ -11,27 +11,27 @@
 #   - mysql (8.4) ........... Oracle MySQL client in /opt/mysql/bin for MySQL backups
 #   - postgresql-client-14..18  version-matched pg_dump (CoreAuthDatabase.bin_path)
 #   - gunicorn .............. WSGI server for the web service
-FROM python:3.14-bookworm
+FROM python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
 
 # set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get -y upgrade \
-    && apt-get -y install zsh htop libpq-dev gcc software-properties-common gnupg2 python3-dev musl-dev git g++-11 ruby ruby-full postgresql-server-dev-all \
-    && apt-get -y install curl dirmngr \
-    && curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | bash \
+    && apt-get -y install --no-install-recommends libpq-dev gcc software-properties-common gnupg2 python3-dev musl-dev git g++-11 postgresql-server-dev-all \
+    && apt-get -y install --no-install-recommends ca-certificates curl dirmngr \
+    && curl -fsSL https://r.mariadb.com/downloads/mariadb_repo_setup -o /tmp/mariadb_repo_setup \
+    && echo "7325ac7755809ca3312b446bd832542421699298f25b701f9a111bb42df0c7c1  /tmp/mariadb_repo_setup" | sha256sum -c - \
+    && bash /tmp/mariadb_repo_setup \
+    && rm -f /tmp/mariadb_repo_setup \
     && apt-get update \
-    && apt-get -y install mariadb-server mariadb-client \
-    && apt-get -y install tree build-essential vim openssh-server libffi-dev git libpq-dev python3-dev libffi-dev libjpeg-dev git zip unzip nano libmysqlclient-dev gunicorn g++ libzmq3-dev gcc \
-    && apt-get -y install libssl-dev libxml2-dev libxslt1-dev python3-dev libcurl4-openssl-dev libffi-dev unixodbc unixodbc-dev libsqlite3-dev ncurses-dev  libexpat1-dev \
-    && apt-get -y install pkg-config ncurses-dev libreadline6-dev zlib1g-dev libssl-dev software-properties-common autoconf automake libtool pkg-config autoconf \
-    && apt-get -y install libncurses-dev libgnutls28-dev libexpat1-dev  pkg-config libreadline-dev  zlib1g-dev libssl-dev \
-    && apt-get -y install software-properties-common tree libfreetype6-dev \
-    && apt-get -y install tzdata \
-    && apt-get -y install lftp \
-    && pip install psycopg2
+    && apt-get -y install --no-install-recommends mariadb-client \
+    && apt-get -y install --no-install-recommends tree build-essential libffi-dev libpq-dev python3-dev libjpeg-dev zip unzip libmysqlclient-dev g++ libzmq3-dev gcc \
+    && apt-get -y install --no-install-recommends libssl-dev libxml2-dev libxslt1-dev libcurl4-openssl-dev unixodbc unixodbc-dev libsqlite3-dev ncurses-dev libexpat1-dev \
+    && apt-get -y install --no-install-recommends pkg-config libreadline6-dev zlib1g-dev autoconf automake libtool \
+    && apt-get -y install --no-install-recommends libncurses-dev libgnutls28-dev libreadline-dev libfreetype6-dev \
+    && apt-get -y install --no-install-recommends tzdata lftp \
+    && rm -rf /var/lib/apt/lists/*
 
 # PostgreSQL client tools (pg_dump / psql / pg_restore) for versions 14-18 from the
 # PGDG apt repo, installed side-by-side under /usr/lib/postgresql/<N>/bin. Database
@@ -41,7 +41,8 @@ RUN install -d /usr/share/postgresql-common/pgdg \
     && curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
-    && apt-get -y install postgresql-client-14 postgresql-client-15 postgresql-client-16 postgresql-client-17 postgresql-client-18
+    && apt-get -y install --no-install-recommends postgresql-client-14 postgresql-client-15 postgresql-client-16 postgresql-client-17 postgresql-client-18 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Oracle MySQL 8.4 LTS client tools (mysql / mysqldump) for MySQL targets, shipped in
 # /opt/mysql/bin (CoreAuthDatabase.bin_path prefers them there; the MariaDB client stays
@@ -56,22 +57,29 @@ RUN set -eux; \
         *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
     esac; \
     pkg="mysql-8.4.10-linux-glibc2.28-${mysql_arch}"; \
+    mysql_key_fingerprint="BCA43417C3B485DD128EC6D4B7B3B788A8D3785C"; \
+    export GNUPGHOME=/tmp/mysql-gnupg; \
+    install -d -m 0700 "$GNUPGHOME"; \
+    curl -fsSL -o /tmp/mysql-build-key.asc "https://repo.mysql.com/RPM-GPG-KEY-mysql-2025"; \
+    actual_fingerprint="$(gpg --batch --with-colons --import-options show-only --import /tmp/mysql-build-key.asc | awk -F: '$1 == "fpr" { print $10; exit }')"; \
+    test "$actual_fingerprint" = "$mysql_key_fingerprint"; \
+    gpg --batch --import /tmp/mysql-build-key.asc; \
     curl -fsSL -o /tmp/mysql-client.tar.xz "https://dev.mysql.com/get/Downloads/MySQL-8.4/${pkg}.tar.xz"; \
+    curl -fsSL -o /tmp/mysql-client.tar.xz.asc "https://cdn.mysql.com/Downloads/MySQL-8.4/${pkg}.tar.xz.asc"; \
+    gpg --batch --verify /tmp/mysql-client.tar.xz.asc /tmp/mysql-client.tar.xz; \
     mkdir -p /tmp/mysql-client; \
     tar -xJf /tmp/mysql-client.tar.xz -C /tmp/mysql-client "${pkg}/bin/mysql" "${pkg}/bin/mysqldump"; \
     install -d /opt/mysql/bin; \
     mv "/tmp/mysql-client/${pkg}/bin/mysql" "/tmp/mysql-client/${pkg}/bin/mysqldump" /opt/mysql/bin/; \
-    rm -rf /tmp/mysql-client /tmp/mysql-client.tar.xz; \
+    rm -rf /tmp/mysql-client /tmp/mysql-client.tar.xz /tmp/mysql-client.tar.xz.asc /tmp/mysql-build-key.asc "$GNUPGHOME"; \
     /opt/mysql/bin/mysqldump --version
-
-RUN wget https://github.com/robbyrussell/oh-my-zsh/raw/master/tools/install.sh -O - | zsh || true
 
 WORKDIR /code
 
 # install python dependencies (kept before the source copy so code changes don't
 # invalidate the cached dependency layer)
 COPY requirements.txt requirements.txt
-RUN pip install --upgrade pip \
+RUN pip install --no-cache-dir --upgrade "pip==26.2.1" \
     && pip install --no-cache-dir -r requirements.txt
 
 # copy project

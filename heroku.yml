@@ -25,4 +25,4 @@ run:
   beat:
     image: web
     command:
-      - celery -A backupsheep beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+      - celery -A backupsheep beat --loglevel=info --scheduler backupsheep.scheduler:BackupDatabaseScheduler

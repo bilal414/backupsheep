@@ -103,11 +103,13 @@ BackupSheep accepts RabbitMQ brokers only. Configuration precedence is:
    `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD` and `RABBITMQ_VHOST`;
 2. otherwise use `CLOUDAMQP_URL` when present;
 3. otherwise use `CELERY_BROKER_URL`;
-4. otherwise fall back to the bundled `rabbitmq` service.
+4. otherwise production fails closed until a broker URL or dedicated fragment credentials
+   are set (non-production development retains a warning-only compatibility fallback).
 
-Use `amqp://` or `amqps://`. The well-known `guest/guest` credentials are acceptable
-only inside the private Compose network; set unique credentials for any external broker.
-The stock RabbitMQ service persists `/var/lib/rabbitmq` in `rabbitmq_data`.
+Use `amqp://` or `amqps://`. Never use RabbitMQ's well-known `guest/guest` account, even
+on an internal network. Stock Compose requires a non-empty `RABBITMQ_PASSWORD`, creates a
+dedicated `backupsheep` user/vhost only on a fresh volume, and persists broker state in
+`rabbitmq_data`.
 
 ## Filesystem configuration
 

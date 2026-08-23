@@ -40,6 +40,15 @@ values are false. Defaults below are repository defaults for `develop`.
 `APP_PROTOCOL`, `APP_DOMAIN`, proxy forwarding and `DJANGO_HTTPS` must describe the same
 public URL. Keep `DJANGO_SECRET_KEY` stable and backed up as a secret.
 
+## API tokens
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `API_TOKEN_TTL_SECONDS` | `2592000` | Personal API token lifetime in seconds (30 days); values above the 90-day maximum are rejected |
+
+Shorten this value for stricter environments. It controls the lifetime assigned when an
+API token is issued.
+
 ## PostgreSQL
 
 | Variable | Default | Meaning |
@@ -60,16 +69,16 @@ existing database role.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `CELERY_BROKER_URL` | `amqp://guest:guest@rabbitmq:5672//` | Complete RabbitMQ URL |
+| `CELERY_BROKER_URL` | blank | Complete managed/external RabbitMQ URL |
 | `CLOUDAMQP_URL` | unset | Managed RabbitMQ URL used ahead of `CELERY_BROKER_URL` |
-| `RABBITMQ_HOST` | blank | When non-empty, fragment mode takes highest precedence |
+| `RABBITMQ_HOST` | `rabbitmq` | When non-empty, fragment mode takes highest precedence |
 | `RABBITMQ_PORT` | `5672` | Fragment-mode port |
-| `RABBITMQ_USER` | blank | Fragment-mode username; blank falls back to `guest` with a warning |
-| `RABBITMQ_PASSWORD` | blank | Fragment-mode password; blank falls back to `guest` with a warning |
-| `RABBITMQ_VHOST` | `/` | Fragment-mode virtual host; components are URL encoded |
+| `RABBITMQ_USER` | `backupsheep` | Dedicated bundled-broker username |
+| `RABBITMQ_PASSWORD` | blank (required by Compose) | Dedicated broker password; `install.sh` generates it |
+| `RABBITMQ_VHOST` | `backupsheep` | Dedicated virtual host; components are URL encoded |
 
-Only `amqp://` and `amqps://` broker URLs are accepted. Never expose `guest/guest` outside
-the private Compose network.
+Only `amqp://` and `amqps://` broker URLs are accepted. The stock Compose deployment does
+not use RabbitMQ's well-known `guest` account.
 
 ## Paths, logs and downloads
 

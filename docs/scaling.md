@@ -67,8 +67,8 @@ measurements. Scaling a Compose service multiplies that service's configured con
   than `LOG_RETENTION_DAYS` from local disk.
 - `delete_old_db_logs` runs daily at 03:30 (worker timezone) via beat, pruning activity-log
   (`CoreLog`) rows older than `LOG_RETENTION_DAYS` from the database.
-- Scheduled backups are stored in `django_celery_beat`'s database tables and synced by the
-  `DatabaseScheduler` on beat startup.
+- Scheduled backups are stored in `django_celery_beat`'s database tables and atomically
+  reserved by `BackupDatabaseScheduler` on Beat startup/ticks.
 
 ## Health & restarts
 

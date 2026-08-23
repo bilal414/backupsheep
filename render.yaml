@@ -114,7 +114,7 @@ services:
     plan: starter
     numInstances: 1
     autoDeployTrigger: off
-    dockerCommand: celery -A backupsheep beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    dockerCommand: celery -A backupsheep beat --loglevel=info --scheduler backupsheep.scheduler:BackupDatabaseScheduler
     envVars:
       - fromGroup: backupsheep-common
       - key: APP_DOMAIN
@@ -163,7 +163,7 @@ services:
     plan: starter
     numInstances: 1
     image:
-      url: docker.io/library/rabbitmq:4.3.4-management-alpine
+      url: docker.io/library/rabbitmq:4.3.5-alpine
     disk:
       name: rabbitmq-data
       mountPath: /var/lib/rabbitmq

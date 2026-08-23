@@ -15,9 +15,10 @@ curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.s
 
 The script is part of this repository. It installs Git, Docker Engine, and Docker Compose
 from Docker's official apt repository; clones BackupSheep into `/opt/backupsheep`; creates
-a root-readable-only `.env` with random Django, PostgreSQL, and onboarding secrets; and
-builds/starts the complete stack. It then waits for the app health check and prints the
-URL plus the onboarding token needed by the first-run wizard.
+a root-readable-only `.env` with random Django, PostgreSQL, RabbitMQ, and onboarding
+secrets; and builds/starts the complete stack. It then waits for the app health check and
+prints an SSH-tunnel command plus an explicit server-side token retrieval command. The
+token itself is never written to unattended install logs.
 
 By default it detects your public IPv4 address. If this server has a DNS name, configure
 that from the start so Django accepts requests for it:
@@ -35,10 +36,10 @@ Useful options:
 --skip-start        install/configure only; do not start Docker Compose
 ```
 
-The initial setup intentionally serves **plain HTTP on port 8000**. Open that port in
-your host/cloud firewall if needed. Before public use, put it behind a TLS reverse proxy
-and follow the [production deployment guide](deployment.md); the installer never opens a
-firewall port or enables HTTPS on your behalf.
+The initial setup binds plain HTTP to **server loopback at `127.0.0.1:8000`**. Use the
+printed SSH tunnel for onboarding; do not open port 8000 in the host/cloud firewall. Before
+public use, put it behind a TLS reverse proxy and follow the
+[production deployment guide](deployment.md).
 
 To operate the installation later:
 
@@ -63,6 +64,7 @@ sudo docker compose up --build -d
 git clone <your-fork-or-this-repo-url> backupsheep
 cd backupsheep
 cp .env_sample .env
+chmod 600 .env
 ```
 
 Open `.env` and set, at minimum:
@@ -71,13 +73,15 @@ Open `.env` and set, at minimum:
 |----------|-----------|
 | `DJANGO_SECRET_KEY` | A long random string. Generate one: `python -c "import secrets; print(secrets.token_urlsafe(64))"`. **Keep it stable** — changing it later logs everyone out and makes stored email credentials undecryptable. |
 | `DB_PASSWORD` | Any password you choose for the bundled PostgreSQL. |
+| `RABBITMQ_PASSWORD` | A separate random password for the bundled RabbitMQ user. Generate one with `python -c "import secrets; print(secrets.token_hex(32))"`. Compose refuses to start when it is blank. |
 | `DJANGO_ALLOWED_HOSTS` | The hostname/IP browsers will use, for example `backup.example.com` or `203.0.113.10`. |
-| `APP_DOMAIN` | That same public host, with `:8000` for direct HTTP, for example `backup.example.com:8000`. |
+| `APP_DOMAIN` | The public hostname used after the TLS proxy is configured. For local-only setup, keep `localhost:8000`. |
 
 The remaining defaults are already wired for the Compose stack:
 
 - `DB_HOST=db`, `DB_PORT=5432`, `DB_NAME=backupsheep`, `DB_USER=backupsheep`
-- `CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//`
+- `RABBITMQ_HOST=rabbitmq`, `RABBITMQ_USER=backupsheep`, `RABBITMQ_VHOST=backupsheep`
+- `BACKUPSHEEP_BIND_ADDRESS=127.0.0.1` (put a TLS proxy on the same host)
 - `DJANGO_DEBUG=false`, `DJANGO_HTTPS=false` (enable HTTPS only behind a real TLS proxy)
 
 Provider/email/storage credentials can stay blank — you add those later through the UI or
@@ -102,7 +106,7 @@ Add `-d` to run detached. To rebuild after pulling new code: `docker compose up 
 
 ### 3. Open the setup wizard
 
-Browse to **http://localhost:8000/** (or your host's address/port). A fresh install
+Browse to **http://localhost:8000/** on the Docker host (or through an SSH tunnel). A fresh install
 redirects you into the first-run wizard automatically. Walk through it — the first account
 you create becomes the admin and you're logged straight in. See
 [First-run wizard](first-run.md).
@@ -119,7 +123,7 @@ docker compose run --rm app python manage.py createsuperuser
 
 ### 5. Production
 
-The `app` service serves plain HTTP on `:8000`. For anything internet-facing, put a
+The `app` service serves plain HTTP on loopback `127.0.0.1:8000`. For anything internet-facing, put a
 TLS-terminating reverse proxy in front of it and harden the config — see
 [Production deployment](deployment.md) before you expose it.
 

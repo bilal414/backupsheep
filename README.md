@@ -113,17 +113,18 @@ curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.s
 ```
 
 The installer downloads BackupSheep from GitHub, installs Docker Engine with the Compose
-plugin and Git, generates secure application/database/onboarding secrets, builds the
-stack, and waits for the app health check. It prints the onboarding URL and token at the
-end. It detects the public IPv4 address by default; pass your hostname explicitly when
+plugin and Git, generates secure application/database/broker/onboarding secrets, builds the
+stack, and waits for the app health check. It prints an SSH-tunnel command and an explicit
+server-side token retrieval command, but never writes the token to install logs. It detects
+the public IPv4 address by default; pass your hostname explicitly when
 you know it:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash -s -- --domain backups.example.com
 ```
 
-The initial install serves plain HTTP on port 8000. Allow that port through your firewall
-if needed, and put the app behind HTTPS before exposing it publicly. See
+The initial install binds plain HTTP to `127.0.0.1:8000`; do not open that port publicly.
+Use the printed SSH tunnel for onboarding, then put the app behind HTTPS. See
 [Production deployment](docs/guides/production.md).
 
 ### DigitalOcean Droplet
@@ -178,15 +179,18 @@ git clone <your-fork-or-this-repo-url> backupsheep
 cd backupsheep
 
 cp .env_sample .env
+chmod 600 .env
 # Edit .env and set at least:
 #   DJANGO_SECRET_KEY  -> a long random string (python -c "import secrets; print(secrets.token_urlsafe(64))")
 #   DB_PASSWORD        -> a database password of your choice
-# The other defaults already target the bundled db/rabbitmq services.
+#   RABBITMQ_PASSWORD  -> a separate random broker password (python -c "import secrets; print(secrets.token_hex(32))")
+# The other defaults already target the bundled db/rabbitmq services. The web port binds
+# to 127.0.0.1 by default; connect a TLS reverse proxy rather than exposing port 8000.
 
 docker compose up --build
 ```
 
-Open **http://localhost:8000/** — the first-run wizard guides you through creating the
+Open **http://localhost:8000/** on the Docker host — the first-run wizard guides you through creating the
 admin account, email, storage, and your first source.
 
 > The app serves plain HTTP on port 8000 and is meant to sit behind your own

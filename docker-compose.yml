@@ -31,11 +31,20 @@
 # Configure .env (see .env_sample). For this stack use the service names below:
 #     DB_HOST=db
 #     DB_PORT=5432
-#     CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+#     RABBITMQ_HOST=rabbitmq
+#     RABBITMQ_USER=backupsheep
+#     RABBITMQ_PASSWORD=<a-long-random-secret>
+#     RABBITMQ_VHOST=backupsheep
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+    max-file: "${DOCKER_LOG_MAX_FILE:-5}"
 
 services:
   db:
-    image: postgres:18
+    image: postgres:18.6-bookworm@sha256:7d2695c3aa88e792e8b3b233e7e4adb296a20412c6c0ca361e3edaaacfada108
     environment:
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}
@@ -49,14 +58,21 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - backend
+    logging: *default-logging
     restart: unless-stopped
 
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
     # RabbitMQ derives its durable node database path from the node hostname.
     # Container IDs change on recreation, so keep the hostname stable or the same
     # named volume will appear to contain a brand-new, empty broker.
     hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER:-backupsheep}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD:?Set a non-empty RABBITMQ_PASSWORD in .env}"
+      RABBITMQ_DEFAULT_VHOST: "${RABBITMQ_VHOST:-backupsheep}"
     # Celery uses durable queues and persistent delivery, but RabbitMQ still needs
     # its own data directory persisted across container recreation. Without this,
     # `docker compose down && up` can discard queued backups before the database
@@ -68,10 +84,17 @@ services:
       # so the broker timeout must exceed their longest supported command budget.
       - ./deploy/rabbitmq/90-backupsheep.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # The official image starts as root and then drops privileges. Run the CLI as the
+      # broker user so an early probe cannot create a root-owned Erlang cookie and crash
+      # a still-booting node.
+      test: ["CMD", "su-exec", "rabbitmq", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 30s
+    networks:
+      - backend
+    logging: *default-logging
     restart: unless-stopped
 
   # One-shot: apply DB migrations once, then exit. Every app-image service below waits
@@ -83,6 +106,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - backend
+    logging: *default-logging
     restart: "no"
 
   app:
@@ -100,7 +126,7 @@ services:
       migrate:
         condition: service_completed_successfully
     ports:
-      - "8000:8000"
+      - "${BACKUPSHEEP_BIND_ADDRESS:-127.0.0.1}:${BACKUPSHEEP_BIND_PORT:-8000}:8000"
     volumes:
       # Connection validation must read the exact same reviewed SSH host keys and
       # optional managed private key used by files/database workers.
@@ -112,6 +138,10 @@ services:
       timeout: 5s
       retries: 5
       start_period: 60s
+    networks:
+      - backend
+      - egress
+    logging: *default-logging
     restart: unless-stopped
 
   # API-only provider snapshots + general/notification tasks. Stateless (no _storage
@@ -130,6 +160,10 @@ services:
         condition: service_completed_successfully
     volumes:
       - backup_storage:/backups
+    networks:
+      - backend
+      - egress
+    logging: *default-logging
     restart: unless-stopped
 
   # Database dumps (pg_dump/mysqldump). Heavy CPU/disk, low concurrency. Writes the dump
@@ -148,6 +182,10 @@ services:
     volumes:
       - backup_workdir:/code/_storage
       - backup_storage:/backups
+    networks:
+      - backend
+      - egress
+    logging: *default-logging
     restart: unless-stopped
 
   # Website / WordPress / Basecamp file dumps. Heavy CPU/disk, low concurrency. Writes the
@@ -166,6 +204,10 @@ services:
     volumes:
       - backup_workdir:/code/_storage
       - backup_storage:/backups
+    networks:
+      - backend
+      - egress
+    logging: *default-logging
     restart: unless-stopped
 
   # Dedicated upload pool: takes each finished dump from the shared backup_workdir volume,
@@ -187,6 +229,10 @@ services:
     volumes:
       - backup_workdir:/code/_storage
       - backup_storage:/backups
+    networks:
+      - backend
+      - egress
+    logging: *default-logging
     restart: unless-stopped
 
   # Log pipeline: writes log entries to the DB (send_log_to_db), fans out Slack/Telegram/
@@ -206,6 +252,10 @@ services:
         condition: service_completed_successfully
     volumes:
       - backup_workdir:/code/_storage
+    networks:
+      - backend
+      - egress
+    logging: *default-logging
     restart: unless-stopped
 
   beat:
@@ -219,7 +269,17 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    networks:
+      - backend
+    logging: *default-logging
     restart: unless-stopped
+
+networks:
+  # Database and broker traffic stays on a non-routed network. Application roles that
+  # call backup/storage providers also join the ordinary egress network below.
+  backend:
+    internal: true
+  egress:
 
 volumes:
   pgdata:

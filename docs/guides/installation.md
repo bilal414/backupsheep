@@ -69,7 +69,7 @@ Supported options are:
 
 | Option | Behavior |
 | --- | --- |
-| `--domain HOST` | Configures `http://HOST:8000`; accepts a hostname or IPv4 address without scheme, path or port |
+| `--domain HOST` | Configures the accepted/public hostname while the initial listener remains on server loopback; accepts a hostname or IPv4 address without scheme, path or port |
 | `--branch BRANCH` | Checks out that branch or tag; defaults to `main` |
 | `--install-dir PATH` | Uses an absolute directory other than `/`; defaults to `/opt/backupsheep` |
 | `--skip-start` | Installs/configures the host but does not build or start Compose |
@@ -83,14 +83,17 @@ On a new installation the script:
 1. installs Git, Docker Engine and the Compose plugin;
 2. clones the requested branch with a shallow checkout;
 3. copies `.env_sample` to `.env`;
-4. generates independent Django, PostgreSQL and onboarding secrets;
+4. generates independent Django, PostgreSQL, RabbitMQ and onboarding secrets;
 5. sets `.env` mode to `0600`;
-6. validates Compose, builds the shared image and starts the stack;
+6. validates Compose, builds the shared image and starts the stack on `127.0.0.1:8000`;
 7. waits up to five minutes for the `app` health check;
-8. prints the onboarding URL and install token.
+8. prints an SSH-tunnel command and an explicit server-side token retrieval command,
+   without writing the token itself to install logs.
 
 An existing directory is reused only when it already contains both
-`docker-compose.yml` and `.env_sample`. An existing `.env` is preserved.
+`docker-compose.yml` and `.env_sample`. An existing `.env` is preserved. If that file
+still contains the legacy bundled RabbitMQ credentials, the installer stops and directs
+the operator to the required broker migration gate instead of changing a live volume.
 
 ### Verify an installer deployment
 
@@ -128,12 +131,14 @@ DJANGO_ALLOWED_HOSTS='localhost,127.0.0.1,backups.example.com'
 APP_PROTOCOL='http://'
 APP_DOMAIN='localhost:8000'
 DB_PASSWORD='replace-with-a-strong-database-password'
+RABBITMQ_PASSWORD='replace-with-a-separate-random-broker-password'
 ```
 
 Generate a signing key without writing it to shell history:
 
 ```bash
 python3 -c 'import secrets; print(secrets.token_urlsafe(64))'
+python3 -c 'import secrets; print(secrets.token_hex(32))'
 ```
 
 Keep `DJANGO_SECRET_KEY` stable. It signs sessions and derives the key used for saved
@@ -152,6 +157,10 @@ docker compose ps --all
 `migrate` must exit with code `0`. The application and worker services wait for that
 one-shot service before starting. Migrations also seed the integration/storage catalogs
 and create the database-backed cache table.
+
+An existing RabbitMQ 3.13 volume requires the supported 3.13 -> 4.2 -> 4.3 sequence before
+this Compose file can be used. Follow the [RabbitMQ migration gate](rabbitmq-upgrade.md);
+never start the 4.3 image directly against a 3.13 data directory.
 
 If startup fails:
 

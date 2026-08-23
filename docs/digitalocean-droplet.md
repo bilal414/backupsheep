@@ -12,8 +12,9 @@ the complete stack.
 
 1. Create an Ubuntu 22.04+ or Debian 12+ Droplet with at least 2 GB RAM. Attach additional
    block storage first if you plan to retain large backups locally.
-2. Allow inbound TCP port 8000 in your DigitalOcean Cloud Firewall (or only expose your
-   reverse proxy's HTTPS port if you set one up first).
+2. Allow SSH only from your trusted address. Keep TCP port 8000 closed; the installer
+   binds it to loopback for an SSH tunnel. Expose only 80/443 after configuring a reverse
+   proxy.
 3. SSH into the Droplet and run:
 
    ```bash
@@ -27,8 +28,9 @@ the complete stack.
    ```
 
 The installer creates `/opt/backupsheep`, installs Docker Engine and its Compose plugin,
-generates application, database, and onboarding secrets, and starts the complete stack.
-It prints the onboarding URL and token when the web service is healthy.
+generates application, database, broker, and onboarding secrets, and starts the complete
+stack. When the web service is healthy, it prints an SSH-tunnel command and a trusted-shell
+token retrieval command without writing the token itself to install logs.
 
 ## Production notes
 

@@ -119,9 +119,10 @@ docker compose run --rm app python manage.py changepassword user@example.com
 
 ### Workers report connection refused
 
-Inside Compose, RabbitMQ is `rabbitmq`, not `localhost`. Keep the default
-`amqp://guest:guest@rabbitmq:5672//` only on the private Compose network. For an external
-broker, verify the `amqp`/`amqps` URL, credentials, vhost, TLS and firewall.
+Inside Compose, RabbitMQ is `rabbitmq`, not `localhost`. Keep `RABBITMQ_HOST=rabbitmq`, use
+the dedicated `backupsheep` user/vhost, and confirm `RABBITMQ_PASSWORD` is the same value
+used when the persistent broker volume was initialized. For an external broker, verify the
+`amqp`/`amqps` URL, credentials, vhost, TLS and firewall.
 
 ### One worker lane is missing
 

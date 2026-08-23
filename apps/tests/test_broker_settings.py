@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase
 
 from backupsheep.settings import _resolve_celery_broker_url
@@ -55,6 +56,23 @@ class CeleryBrokerSettingsTests(SimpleTestCase):
         with self.assertRaisesRegex(ValueError, "RabbitMQ"):
             _resolve_celery_broker_url({"CELERY_BROKER_URL": "memory://"})
 
+    def test_production_rejects_missing_or_default_guest_credentials(self):
+        with self.assertRaisesRegex(ImproperlyConfigured, "required"):
+            _resolve_celery_broker_url(
+                {
+                    "DJANGO_SERVER": "prod",
+                    "RABBITMQ_HOST": "rabbitmq",
+                }
+            )
+
+        with self.assertRaisesRegex(ImproperlyConfigured, "non-default"):
+            _resolve_celery_broker_url(
+                {
+                    "DJANGO_SERVER": "prod",
+                    "CELERY_BROKER_URL": "amqp://guest:guest@rabbitmq:5672//",
+                }
+            )
+
 
 class RabbitMQRuntimeContractTests(SimpleTestCase):
     def test_late_ack_timeout_exceeds_longest_external_command_budget(self):
@@ -86,6 +104,11 @@ class RabbitMQRuntimeContractTests(SimpleTestCase):
         )[0]
 
         self.assertIn("\n    hostname: rabbitmq\n", rabbitmq_service)
+
+    def test_default_broker_user_is_not_a_management_administrator(self):
+        config = RABBITMQ_CONFIG.read_text(encoding="utf-8")
+
+        self.assertIn("default_user_tags.administrator = false", config)
 
 
 class WorkerCapacityContractTests(SimpleTestCase):

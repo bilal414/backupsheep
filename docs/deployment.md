@@ -1,6 +1,7 @@
 # Production deployment
 
-The bundled stack runs the web app as plain HTTP gunicorn on port 8000. For an
+The bundled stack runs the web app as plain HTTP gunicorn bound to host loopback on port
+8000. For an
 internet-facing install you must put TLS in front of it and harden the configuration.
 
 ## Hardening checklist
@@ -17,6 +18,12 @@ Before exposing the instance:
 - [ ] **`APP_PROTOCOL=https://`** and **`APP_DOMAIN`** set to your public host (these build
       `APP_URL` and `CSRF_TRUSTED_ORIGINS`, and OAuth redirect URIs).
 - [ ] A strong **`DB_PASSWORD`**, and don't publish the database port.
+- [ ] A separate strong **`RABBITMQ_PASSWORD`** for the dedicated `backupsheep` user/vhost.
+- [ ] Keep **`BACKUPSHEEP_BIND_ADDRESS=127.0.0.1`** unless an equivalent private network
+      boundary has been explicitly reviewed.
+- [ ] For an existing RabbitMQ 3.13 volume, complete the documented
+      [3.13 -> 4.2 -> 4.3 migration gate](guides/rabbitmq-upgrade.md) before starting the
+      pinned 4.3 image.
 - [ ] Review [SECURITY.md](../SECURITY.md) for the browser-session/API CSRF note.
 
 ## TLS via a reverse proxy

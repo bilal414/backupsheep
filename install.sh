@@ -21,7 +21,7 @@ PUBLIC_HOST="${BACKUPSHEEP_DOMAIN:-}"
 SKIP_START=false
 ENV_FILE=""
 APP_DOMAIN=""
-ONBOARDING_TOKEN=""
+ENV_FILE_WAS_PRESENT=false
 
 log() {
     printf '\n==> %s\n' "$*"
@@ -44,8 +44,8 @@ Usage:
   install.sh [options]
 
 Options:
-  --domain HOST       Public hostname or IPv4 address for this server. The app will
-                      be configured for http://HOST:8000. If omitted, the installer
+  --domain HOST       Accepted/public hostname or IPv4 address for this server. The app
+                      listener remains on 127.0.0.1:8000. If omitted, the installer
                       detects the server's public IPv4 address.
   --branch BRANCH     Git branch or tag to install (default: main).
   --install-dir PATH  Installation directory (default: /opt/backupsheep).
@@ -208,7 +208,16 @@ set_env_value() {
 
 read_env_value() {
     local key="$1"
-    sed -n "s/^${key}='\([^']*\)'$/\1/p" "$ENV_FILE" | head -n 1
+    local raw=""
+    raw="$(sed -n "s/^${key}=//p" "$ENV_FILE" | head -n 1)"
+    if [[ "$raw" == \'*\' && "$raw" == *\' ]]; then
+        raw="${raw#\'}"
+        raw="${raw%\'}"
+    elif [[ "$raw" == \"*\" && "$raw" == *\" ]]; then
+        raw="${raw#\"}"
+        raw="${raw%\"}"
+    fi
+    printf '%s' "$raw"
 }
 
 clone_or_reuse_repository() {
@@ -230,9 +239,11 @@ clone_or_reuse_repository() {
 
 create_or_keep_env_file() {
     ENV_FILE="${INSTALL_DIR}/.env"
+    [[ ! -L "$ENV_FILE" ]] || die "Refusing to use symlinked configuration at ${ENV_FILE}."
     if [[ -f "$ENV_FILE" ]]; then
+        ENV_FILE_WAS_PRESENT=true
         log "Keeping existing configuration at ${ENV_FILE}"
-        ONBOARDING_TOKEN="$(read_env_value ONBOARDING_INSTALL_TOKEN)"
+        chmod 600 "$ENV_FILE"
         return
     fi
 
@@ -247,7 +258,49 @@ create_or_keep_env_file() {
     set_env_value APP_PROTOCOL "http://"
     set_env_value DJANGO_HTTPS "false"
     chmod 600 "$ENV_FILE"
-    ONBOARDING_TOKEN="$(read_env_value ONBOARDING_INSTALL_TOKEN)"
+}
+
+configure_rabbitmq_credentials() {
+    local broker_host=""
+    local broker_password=""
+    local broker_url=""
+
+    broker_host="$(read_env_value RABBITMQ_HOST)"
+    broker_password="$(read_env_value RABBITMQ_PASSWORD)"
+    broker_url="$(read_env_value CELERY_BROKER_URL)"
+
+    if [[ "$ENV_FILE_WAS_PRESENT" == true ]] \
+        && { [[ "$broker_url" == "amqp://guest:guest@rabbitmq:5672//" ]] \
+            || { [[ -z "$broker_url" ]] \
+                && { [[ -z "$broker_host" ]] || [[ "$broker_host" == "rabbitmq" ]]; } \
+                && [[ -z "$broker_password" ]]; }; }; then
+        die "Existing bundled RabbitMQ credentials require an operator migration. Do not replace them or start RabbitMQ 4.x against the existing volume automatically. Complete docs/guides/rabbitmq-upgrade.md, then rerun the installer."
+    fi
+
+    if [[ -n "$broker_host" && "$broker_host" != "rabbitmq" && -z "$broker_password" ]]; then
+        die "RABBITMQ_HOST points to an external broker but RABBITMQ_PASSWORD is empty. Configure the external broker credentials and run the installer again."
+    fi
+
+    # Initialize only a newly copied .env with a dedicated account. Existing broker
+    # databases must first create the user/vhost and complete the supported upgrade gate.
+    # The resolver URL-encodes these fragments before building AMQP.
+    if [[ "$broker_url" == "amqp://guest:guest@rabbitmq:5672//" ]] \
+        || { [[ -z "$broker_url" ]] && { [[ -z "$broker_host" ]] || [[ "$broker_host" == "rabbitmq" ]]; }; }; then
+        set_env_value CELERY_BROKER_URL ""
+        set_env_value RABBITMQ_HOST "rabbitmq"
+        set_env_value RABBITMQ_PORT "5672"
+        set_env_value RABBITMQ_USER "backupsheep"
+        set_env_value RABBITMQ_VHOST "backupsheep"
+        if [[ -z "$broker_password" ]]; then
+            set_env_value RABBITMQ_PASSWORD "$(random_hex 32)"
+        fi
+    elif [[ -z "$broker_password" ]]; then
+        # A complete external CELERY_BROKER_URL remains authoritative. This secret only
+        # initializes the otherwise-unused bundled broker so Compose still fails closed.
+        set_env_value RABBITMQ_PASSWORD "$(random_hex 32)"
+    fi
+
+    chmod 600 "$ENV_FILE"
 }
 
 warn_on_low_resources() {
@@ -323,20 +376,16 @@ wait_for_app() {
 }
 
 print_next_steps() {
-    local app_url="http://${APP_DOMAIN}"
-
     printf '\n'
     printf 'BackupSheep is running.\n\n'
-    printf 'Open: %s/onboarding/\n' "$app_url"
-    if [[ -n "$ONBOARDING_TOKEN" ]]; then
-        printf 'Onboarding token: %s\n' "$ONBOARDING_TOKEN"
-    else
-        printf 'Onboarding token: docker compose -f %s/docker-compose.yml exec app cat /code/_storage/install_token\n' "$INSTALL_DIR"
-    fi
+    printf 'The web port is bound to server loopback only. From a trusted workstation, run:\n'
+    printf '  ssh -L %s:127.0.0.1:%s user@%s\n' "$APP_PORT" "$APP_PORT" "$PUBLIC_HOST"
+    printf 'Then open: http://127.0.0.1:%s/onboarding/\n\n' "$APP_PORT"
+    printf 'Retrieve the onboarding token explicitly from the trusted server shell:\n'
+    printf '  sudo grep "^ONBOARDING_INSTALL_TOKEN=" %q\n' "$ENV_FILE"
     printf '\nInstallation directory: %s\n' "$INSTALL_DIR"
     printf 'View logs: cd %s && docker compose logs -f\n' "$INSTALL_DIR"
-    printf '\nThe installer exposes plain HTTP on port %s. Open that port in your firewall if needed.\n' "$APP_PORT"
-    printf 'Before exposing this instance publicly, configure a TLS reverse proxy and follow:\n'
+    printf '\nDo not publish port %s directly. Configure a TLS reverse proxy to the loopback listener and follow:\n' "$APP_PORT"
     printf 'https://github.com/bilal414/backupsheep/blob/main/docs/deployment.md\n'
 }
 
@@ -353,6 +402,7 @@ main() {
     warn_on_low_resources
     clone_or_reuse_repository
     create_or_keep_env_file
+    configure_rabbitmq_credentials
 
     if [[ "$SKIP_START" == true ]]; then
         log "Host and configuration are ready; Compose was not started (--skip-start)."

@@ -14,9 +14,9 @@ Use this guide with any provider that can create a supported VM, including:
 
 | Provider | Create | Networking and storage |
 |---|---|---|
-| AWS EC2 / Lightsail | Ubuntu 22.04+ or Debian 12+ instance | Allow SSH from your IP and TCP 8000 temporarily (or only 80/443 behind a reverse proxy); attach EBS for Local Storage. |
+| AWS EC2 / Lightsail | Ubuntu 22.04+ or Debian 12+ instance | Allow SSH from your IP; expose only 80/443 after configuring a reverse proxy. Keep TCP 8000 closed and attach EBS for Local Storage. |
 | Azure Virtual Machines | Ubuntu 22.04+ or Debian 12+ VM | Apply the same rules in the Network Security Group; attach a Managed Disk for Local Storage. |
-| Google Compute Engine | Ubuntu 22.04+ or Debian 12+ VM | Add a VPC firewall rule for the public endpoint; use a Persistent Disk for Local Storage. |
+| Google Compute Engine | Ubuntu 22.04+ or Debian 12+ VM | Add VPC firewall rules only for trusted SSH and the TLS proxy; keep TCP 8000 closed. Use a Persistent Disk for Local Storage. |
 | Hetzner Cloud / Vultr / Akamai Connected Cloud (Linode) | Ubuntu 22.04+ or Debian 12+ cloud server | Restrict SSH with the provider firewall; attach block storage if archive retention is local. |
 | OVHcloud / Scaleway / UpCloud / Oracle Cloud | Ubuntu 22.04+ or Debian 12+ instance | Open only the required ingress ports and use the provider's block volume for Local Storage. |
 
@@ -37,7 +37,9 @@ If the public hostname is already known, configure it from the first run:
 curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash -s -- --domain backups.example.com
 ```
 
-The installer prints the onboarding URL and private token after the health check passes.
+The installer prints an SSH-tunnel command and an explicit trusted-shell command for
+retrieving the onboarding token after the health check passes; it does not put the token
+in install logs.
 For all options, run the script with `--help` or see [installation](installation.md).
 
 ## Cloud-init / user data
@@ -53,17 +55,19 @@ To provide a hostname, replace the second `runcmd` entry with:
 - [bash, /tmp/backupsheep-install.sh, --domain, backups.example.com]
 ```
 
-After the VM starts, check its console/cloud-init output for the printed onboarding token,
-or SSH in and inspect the running stack:
+After the VM starts, use SSH or a provider's trusted console/command channel to inspect the
+stack and retrieve the token explicitly. It is intentionally absent from cloud-init logs:
 
 ```bash
 cd /opt/backupsheep
 sudo docker compose ps
+sudo grep '^ONBOARDING_INSTALL_TOKEN=' /opt/backupsheep/.env
 ```
 
 ## Before public use
 
 - Restrict SSH to trusted IP addresses.
+- Keep TCP 8000 closed publicly. Use an SSH tunnel for initial onboarding.
 - Place BackupSheep behind an HTTPS reverse proxy before public use, then set
   `DJANGO_HTTPS=true`, `APP_PROTOCOL=https://`, `APP_DOMAIN`, and
   `DJANGO_ALLOWED_HOSTS` in `/opt/backupsheep/.env`.

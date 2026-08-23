@@ -49,8 +49,8 @@ proxy. PostgreSQL, RabbitMQ, the app, workers and Beat are defined in
 
 | Component | Stock command or image | Responsibility | Scale notes |
 | --- | --- | --- | --- |
-| `db` | `postgres:18` | Accounts, configuration, schedules, credentials, backup/restore records, leases and evidence | Use one primary or an external managed PostgreSQL service |
-| `rabbitmq` | `rabbitmq:3-management` | Durable Celery queues and persistent message delivery | Use a compatible RabbitMQ topology when externalized |
+| `db` | digest-pinned `postgres:18.6-bookworm` | Accounts, configuration, schedules, credentials, backup/restore records, leases and evidence | Use one primary or an external managed PostgreSQL service |
+| `rabbitmq` | digest-pinned `rabbitmq:4.3.5-alpine` | Durable Celery queues and persistent message delivery | Dedicated credentials/vhost; backend network only |
 | `migrate` | `python manage.py migrate --noinput` | Applies schema migrations before other application roles start | One-shot; must complete successfully |
 | `app` | image entrypoint, then Gunicorn on port 8000 | Console, REST API, onboarding, connection validation and static files through WhiteNoise | Scale only behind a proxy and with shared state/mounts |
 | `worker-cloud` | queues `cloud,default`, concurrency 8 | Provider API snapshots/restores and general work | Does not use `backup_workdir`; stock Compose mounts Local Storage |

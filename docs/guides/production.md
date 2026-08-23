@@ -34,11 +34,10 @@ Internet -> TLS reverse proxy -> app:8000
                                                          -> workers / Beat
 ```
 
-Do not publish the `db` or `rabbitmq` ports. Keep the host/cloud firewall closed to port
-`8000` from untrusted networks. If the reverse proxy runs on the host, restrict the
-published app port to loopback in your deployment-managed Compose configuration or enforce
-the same boundary with the host firewall. If the proxy is another container, connect it to
-the Compose network and avoid a public app-port mapping entirely.
+Do not publish the `db` or `rabbitmq` ports. Stock Compose binds app port `8000` to host
+loopback; keep `BACKUPSHEEP_BIND_ADDRESS=127.0.0.1` and keep the host/cloud firewall closed
+to that port from untrusted networks. If the proxy is another container, connect it to an
+explicit reviewed network and avoid a public app-port mapping entirely.
 
 Source systems and storage providers must allow the BackupSheep workers' outbound address.
 The connection setup UI shows the self-hosted server's detected public IPv4/IPv6 for
@@ -130,6 +129,25 @@ fail because cookies are Secure and requests redirect to HTTPS.
   Browser-session API requests use Django CSRF enforcement.
 - Review the repository's `SECURITY.md` and report vulnerabilities privately through a
   GitHub Security Advisory.
+
+### Remaining image and bootstrap gates
+
+This release improves secure defaults but is not a claim of full build reproducibility or
+container isolation:
+
+- The shared application image still runs as root. Moving it to a fixed non-root UID and a
+  read-only root filesystem is intentionally deferred until every database client, website
+  staging path, SSH trust file, Local Storage path and worker cleanup path passes backup,
+  restore, crash-recovery and permission tests under that UID.
+- The generic cloud-init example still downloads the installer from mutable `main`, and the
+  installer clones a branch/tag rather than verifying a signed release commit. Enterprise
+  automation should mirror an approved installer, verify its SHA-256 or signature before
+  root execution, and install an approved immutable Git revision/image digest.
+- OS packages and Python transitive packages are not fully hash-locked. The image base,
+  PostgreSQL and RabbitMQ images are digest-pinned; the MariaDB repository bootstrap is
+  checksum-pinned; the MySQL client archive is verified with Oracle's fingerprint-pinned
+  release key. Complete the [dependency reproducibility gate](dependency-security.md)
+  before describing the resulting image as reproducible.
 
 ## Persistent data and capacity
 

@@ -6,12 +6,15 @@
 Make sure `.env` has a non-empty `DB_PASSWORD` (the Postgres image refuses to initialize
 with an empty password) and that `DB_HOST=db` / `DB_PORT=5432` for the Compose stack. If
 you changed `DB_NAME/DB_USER/DB_PASSWORD` *after* the `db` volume was first created, the
-volume keeps the original credentials — `docker compose down -v` to reset it (this
-**deletes** the database) or set the vars back.
+volume keeps the original credentials. Restore the original values or rotate the role from
+a trusted database console. Only for a disposable, proven-empty install may you recreate
+volumes; `docker compose down -v` irreversibly deletes the database and broker data.
 
 **Celery workers log "connection refused" to RabbitMQ (amqp).**
-Keep `CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//` (the Compose service name),
-not `localhost`.
+Keep `RABBITMQ_HOST=rabbitmq` (the Compose service name), not `localhost`, and verify the
+dedicated `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, and `RABBITMQ_VHOST` match the broker's
+persistent-volume initialization. Do not change them through Compose for an existing
+volume; use the [RabbitMQ migration gate](guides/rabbitmq-upgrade.md).
 
 **`migrate` exits with an error.**
 Check the `migrate` service logs: `docker compose logs migrate`. It applies schema

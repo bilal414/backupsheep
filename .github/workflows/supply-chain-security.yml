@@ -1,0 +1,60 @@
+name: Supply-chain security
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-and-deployment-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Audit Python dependency resolution
+        run: |
+          python -m pip install --disable-pip-version-check --no-cache-dir pip-audit==2.10.1
+          python -m pip_audit --requirement requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Audit frontend lock
+        run: npm audit --package-lock-only --audit-level=high
+
+      - name: Validate deployment manifests
+        run: |
+          cp .env_sample .env
+          sed -i "s/^DJANGO_SECRET_KEY=.*/DJANGO_SECRET_KEY='ci-only-not-a-secret'/" .env
+          sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD='ci-only-not-a-secret'/" .env
+          sed -i "s/^RABBITMQ_PASSWORD=.*/RABBITMQ_PASSWORD='ci-only-not-a-secret'/" .env
+          bash -n install.sh init.sh startup.sh
+          node -e 'for (const f of ["package.json", "package-lock.json", "app.json", "deploy/railway/web.railway.json", "deploy/railway/worker.railway.json", "deploy/railway/beat.railway.json"]) JSON.parse(require("fs").readFileSync(f, "utf8"))'
+          docker compose config --quiet
+          docker build --check .
+          python -m unittest apps.tests.test_deployment_hardening -v
+          test ! -e apps/console/_static/console/package.json
+          test ! -e apps/console/_static/console/package-lock.json
