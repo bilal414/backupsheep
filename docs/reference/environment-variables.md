@@ -4,21 +4,74 @@ BackupSheep loads settings once, when each process starts. The effective precede
 
 1. values from `.env_sample`;
 2. values from `.env`;
-3. process environment variables.
+3. process environment variables;
+4. allowlisted non-empty `*_FILE` values override their corresponding direct secrets.
 
-If the process environment contains `BACKUPSHEEP_SECRETS`, its value must be a JSON object
-and becomes the complete configuration instead. No sample, `.env` or other process values
-are merged into that object. It therefore must contain every key accessed by settings.
+If a non-Compose process environment contains a non-empty `BACKUPSHEEP_SECRETS`, its value
+must be a JSON object and becomes the complete configuration instead. No sample, `.env`
+or other process values are merged into that object. The stock installer and secure
+Compose wrapper reject this alternate source and stock Compose pins it blank.
 
-Compose supplies `.env` to application roles. After editing it, validate and recreate:
+Compose supplies non-secret and optional integration values from `.env` to application
+roles. Its four required installation secrets and optional managed SSH key are file-backed
+under `.secrets`; see below. After
+editing configuration, validate and recreate the core:
 
 ```bash
-docker compose config --quiet
-docker compose up --detach --remove-orphans
+./backupsheep-compose config --quiet
+./backupsheep-compose up --detach
+```
+
+Provider workers and Beat remain disabled unless the `operations` profile is explicitly
+enabled. Recreate them only after reviewing durable queue and recovery state:
+
+```bash
+./backupsheep-compose --profile operations up --detach
 ```
 
 Boolean values recognize `1`, `true`, `yes` or `on` (case-insensitive) as true; other
 values are false. Defaults below are repository defaults for `develop`.
+
+## Stock Docker and installer controls
+
+These values control Compose/installer behavior rather than Django application features:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `BACKUPSHEEP_IMAGE` | `backupsheep:local` | Exact locally built application image tag; the verified installer requires `backupsheep:<full-commit>` and application roles use `pull_policy: never` |
+| `BACKUPSHEEP_INSTALLATION_ID` | blank sample; installer generates it | Stable random 64-character lowercase hexadecimal ownership marker. Required by stock Compose; do not rotate or copy it between installations |
+| `BACKUPSHEEP_SECRETS_DIR` | `.secrets` | Host directory containing the stock Compose secret files; the verified installer accepts only this relative path |
+| `BACKUPSHEEP_BIND_ADDRESS` | `127.0.0.1` | Host address that publishes the app; the verified installer accepts loopback only |
+| `BACKUPSHEEP_BIND_PORT` | `8000` | Host loopback port published to container port 8000 |
+| `BACKUPSHEEP_RABBITMQ_DATA_GENERATION` | blank sample; wrapper/installer records `4.3` | Broker data-format witness, not a version switch. Never set it by guess to bypass the legacy-volume migration gate |
+
+The installation ID labels service containers and an empty `installation_identity`
+sentinel volume. The installer combines that persistent witness with Compose project,
+path, service/network/volume and configuration labels before mutating an existing
+project. A fresh installation refuses any pre-existing resources under its requested
+project name; an existing installation fails closed on missing, foreign, ambiguous or
+unexpected ownership evidence.
+
+Before any mutation, the installer also enumerates every exact Compose network and volume
+name for the selected project. An exact-name object that lacks the expected Compose
+project/logical-name labels is a collision, even if it is otherwise unused, and stops the
+install. Delete, rename or deliberately migrate that foreign object; never relabel it to
+bypass the ownership proof.
+
+For the broker witness, the installer records `4.3` only for a fresh project with no
+broker resources. Existing broker data delegates witness creation to the reviewed wrapper
+after the explicit 4.3 hop, and only when
+the post-transition container passes exact base-model, installation-ID, image-reference,
+local image-ID, health, version and Khepri attestation.
+The proof command runs inside the container as the named `rabbitmq` account using
+`rabbitmq-diagnostics -q server_version`; it does not borrow root's cookie. A stopped broker,
+orphan volume, duplicate resource, unknown generation, or 3.13/4.2 result requires the
+documented operator-run migration. The installer never migrates broker data automatically.
+
+Installer-managed `.env` files may not define `LD_AUDIT`, `LD_LIBRARY_PATH`,
+`LD_PRELOAD` or `SSLKEYLOGFILE`. Stock Compose blanks those four values, and the image
+entrypoint additionally clears shell/Python/loader startup hooks and establishes fixed
+executable/import paths before it invokes the requested command.
 
 ## Django and application identity
 
@@ -27,10 +80,12 @@ values are false. Defaults below are repository defaults for `develop`.
 | `DJANGO_SERVER` | `prod` | Environment label, including the Sentry environment tag |
 | `DJANGO_DEBUG` | `false` | Enables Django debug pages and browsable API; never enable publicly |
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated request hosts, without schemes/paths |
-| `DJANGO_SECRET_KEY` | unsafe placeholder | Stable signing key and email-credential key material; production refuses `change-this-key` |
+| `DJANGO_SECRET_KEY` | unsafe placeholder outside stock Compose; blank in stock `.env` | Stable signing key and email-credential key material; stock Compose resolves `/run/secrets/django_secret_key` |
+| `DJANGO_SECRET_KEY_FILE` | unset outside stock Compose | Absolute file-backed secret pointer; stock Compose sets `/run/secrets/django_secret_key` |
 | `DJANGO_SETTINGS_MODULE` | `backupsheep.settings` | Django settings module |
 | `DJANGO_HTTPS` | `false` | Secure cookies, HTTP redirect and one-year HSTS; requires a correct TLS proxy |
-| `ONBOARDING_INSTALL_TOKEN` | blank | Fixed first-owner token; blank generates `_storage/install_token` on first onboarding request |
+| `ONBOARDING_INSTALL_TOKEN` | blank | Fixed first-owner token for non-stock deployments; stock Compose deliberately leaves it blank |
+| `ONBOARDING_INSTALL_TOKEN_SECRET_FILE` | unset outside stock Compose | Fixed first-owner token file; stock `app` alone receives `/run/secrets/onboarding_token` |
 | `APP_DOMAIN` | `localhost:8000` | Public host and optional port, no scheme/path |
 | `APP_PROTOCOL` | `http://` | Public scheme, including `://`; combines with `APP_DOMAIN` for CSRF/OAuth URLs |
 | `APP_NAME` | `BackupSheep` | Display name |
@@ -47,6 +102,9 @@ values are false. Defaults below are repository defaults for `develop`.
 public URL. Keep `DJANGO_SECRET_KEY` stable and backed up as a secret.
 Session cookies are always HttpOnly and SameSite=Lax. They become Secure when
 `DJANGO_HTTPS=true`; do not serve an authenticated production console over plain HTTP.
+The Docker preflight's warning-level HTTPS deployment findings are expected only during
+deliberate loopback HTTP access through an SSH tunnel. Public deployments must use a real
+TLS proxy, the matching HTTPS tuple, and review/resolve every deployment warning.
 
 Authentication throttles ignore `X-Forwarded-For` and use `REMOTE_ADDR` unless trusted-
 proxy mode is explicitly enabled. In trusted-proxy mode, the direct peer must match
@@ -74,16 +132,18 @@ API token is issued.
 | --- | --- | --- |
 | `DB_NAME` | `backupsheep` | Database name; also initializes bundled PostgreSQL |
 | `DB_USER` | `backupsheep` | Database role; also initializes bundled PostgreSQL |
-| `DB_PASSWORD` | unsafe placeholder | Database password; set before creating `pgdata` |
+| `DB_PASSWORD` | unsafe placeholder outside stock Compose; blank in stock `.env` | Direct database password for non-stock deployments |
+| `DB_PASSWORD_FILE` | unset outside stock Compose | Absolute file-backed database-password pointer; stock application roles use `/run/secrets/db_password` |
 | `DB_HOST` | `db` | Database hostname in stock Compose |
 | `DB_PORT` | `5432` | Database port |
 | `DATABASE_URL` | blank | `postgres://` or `postgresql://` URL; overrides the five discrete Django values |
 | `DB_SSLMODE` | blank | libpq `sslmode`; external production databases require `verify-full` |
 | `DB_SSLROOTCERT` | blank | CA/root-certificate bundle for external PostgreSQL hostname verification |
 
-The bundled `db` service still consumes the discrete `DB_*` keys even when Django uses
-`DATABASE_URL`. Changing `DB_PASSWORD` after PostgreSQL initialized does not change the
-existing database role. In production, plaintext PostgreSQL is allowed only for an exact
+The bundled `db` service consumes `DB_NAME`/`DB_USER` and the same protected password file
+mounted as `POSTGRES_PASSWORD_FILE`, even when Django uses `DATABASE_URL`. Changing the
+file after PostgreSQL initialized does not change the existing database role. In
+production, plaintext PostgreSQL is allowed only for an exact
 stock `db` service name, loopback address, or Unix socket. Every other hostname or IP,
 including RFC1918 addresses, requires `sslmode=verify-full` plus `sslrootcert`; the two
 options may instead be supplied in the `DATABASE_URL` query string.
@@ -98,7 +158,8 @@ options may instead be supplied in the `DATABASE_URL` query string.
 | `RABBITMQ_PORT` | `5672` | Fragment-mode port |
 | `RABBITMQ_SCHEME` | `amqp` | Fragment-mode scheme; use `amqps` for every external broker |
 | `RABBITMQ_USER` | `backupsheep` | Dedicated bundled-broker username |
-| `RABBITMQ_PASSWORD` | blank (required by Compose) | Dedicated broker password; `install.sh` generates it |
+| `RABBITMQ_PASSWORD` | blank | Direct broker password for non-stock deployments; must remain blank in stock `.env` |
+| `RABBITMQ_PASSWORD_FILE` | unset outside stock Compose | Absolute file-backed broker-password pointer; stock application roles use `/run/secrets/rabbitmq_password` |
 | `RABBITMQ_VHOST` | `backupsheep` | Dedicated virtual host; components are URL encoded |
 | `RABBITMQ_CA_CERT` | blank | Optional private CA bundle for `amqps`; system roots are used when blank |
 
@@ -111,17 +172,43 @@ TLS query-string overrides are rejected. Production accepts one broker URL; put 
 high availability behind one certificate-valid load-balancer/DNS endpoint instead of a
 semicolon failover list whose members could cross transport trust boundaries.
 
+## Stock Compose secret files
+
+The verified installer creates `.secrets` as an owner-only mode-`0700` directory and
+stores `django_secret_key`, `db_password`, `rabbitmq_password` and `onboarding_token` as
+separate owner-owned, non-linked, mode-`0444` files. It also creates an empty optional
+`ssh_managed_private_key` file with the same ownership/link/mode rules. The private parent
+prevents host directory traversal while Docker bind-mounts each granted file read-only for
+the non-root application UID. Direct copies of the four required values and any legacy
+managed-key path remain blank in `.env`, Compose expansion and container inspection. Do
+not change the modes independently or add arbitrary entries to the installer-managed
+directory.
+
+Only `app`, `worker-database` and `worker-files` receive the managed-key source at
+`/run/secrets/ssh_managed_private_key`, mode `0444`. Empty means disabled. On each start,
+the entrypoint rejects a non-regular, NUL-containing, larger-than-64-KiB, encrypted or
+invalid non-empty key; otherwise it copies the key to private tmpfs at
+`/run/backupsheep/ssh/managed_private_key`, sets mode `0600`, and exports that runtime path
+as `SSH_MANAGED_PRIVATE_KEY_PATH`. Do not configure SSH to read the mode-`0444` source
+directly. See the upgrade guide before moving a key from legacy `_storage`.
+
+`BACKUPSHEEP_SECRETS_DIR` selects that host directory for Compose and defaults to
+`.secrets`; installer-managed installations require exactly that relative value. The
+runtime `*_FILE` paths above are separately fixed to `/run/secrets/...` by Compose and must
+not be repointed through `.env`.
+
 ## Paths, logs and downloads
 
 | Variable | Default | Unit / meaning |
 | --- | --- | --- |
-| `BACKUPSHEEP_PIDS_LIMIT` | `512` | Maximum processes per app/migrate/worker/Beat container in stock non-Swarm Compose |
+| `BACKUPSHEEP_PIDS_LIMIT` | `512` | Maximum processes per app/migrate/preflight/worker/Beat container in stock non-Swarm Compose |
 | `BS_LOCAL_STORAGE_PATH` | `/backups` | Root used by the Local Storage destination; mount identically in relevant roles |
 | `LOG_RETENTION_DAYS` | `30` | Days before local run logs and database activity are pruned |
 | `S3_DOWNLOAD_URL_EXPIRES` | `300` | Provider-signed archive URL seconds; hard maximum `3600` |
 | `WORDPRESS_PRIVATE_TARGET_CIDRS` | blank | Exact RFC1918/ULA CIDRs permitted for DNS-pinned, certificate-verified HTTPS WordPress targets; special/metadata ranges remain denied |
-| `SSH_KNOWN_HOSTS_PATH` | `_storage/ssh_known_hosts` | Reviewed OpenSSH known-hosts file; relative paths resolve under repository root |
-| `SSH_MANAGED_PRIVATE_KEY_PATH` | blank | Optional managed private key file; relative paths resolve under repository root |
+| `ALLOW_INSECURE_FTP` | `false` | Explicit legacy compatibility opt-in for plaintext FTP; prefer SFTP or certificate-verified FTPS |
+| `SSH_KNOWN_HOSTS_PATH` | `_storage/ssh_known_hosts` outside stock Compose | Reviewed OpenSSH known-hosts file; stock Compose overrides it to `/var/lib/backupsheep/ssh-trust/known_hosts` on the dedicated `ssh_trust` volume |
+| `SSH_MANAGED_PRIVATE_KEY_PATH` | blank outside stock Compose | Optional managed private key; stock entrypoint exports `/run/backupsheep/ssh/managed_private_key` only after validating/copying the file-backed source into private tmpfs |
 | `SSH_MANAGED_PUBLIC_KEY` | blank | Matching public key advertised by the console only when private key exists |
 
 `S3_DOWNLOAD_URL_EXPIRES` applies to the S3-compatible, Google Cloud, Azure, Alibaba and
@@ -154,6 +241,7 @@ below its corresponding lease.
 | `BACKUP_WORKER_HEARTBEAT_SECONDS` | `30` | Source-worker heartbeat interval |
 | `BACKUP_CREATE_LEASE_SECONDS` | `3600` | Provider create-phase lease |
 | `BACKUP_DELETE_LEASE_SECONDS` | `300` | Provider delete-phase lease |
+| `STORAGE_POINT_DELETE_LEASE_SECONDS` | `3600` | Fenced storage-point delete lease; coordinator recovery remains five minutes |
 | `BACKUP_STORAGE_LEASE_SECONDS` | `180` | Renewable destination-copy lease |
 | `BACKUP_STORAGE_HEARTBEAT_SECONDS` | `30` | Destination-copy heartbeat interval |
 | `BACKUP_STORAGE_STALE_SECONDS` | `21600` | Seconds before a storage upload claimant is stale |

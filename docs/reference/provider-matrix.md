@@ -13,7 +13,7 @@ encrypted at rest in PostgreSQL.
 
 | Source | Connection and backup | Restore behavior | Important limits |
 | --- | --- | --- | --- |
-| Website | FTP, explicit/implicit FTPS or SFTP; selected remote paths; incremental mirror or full collection; ZIP plus file manifest | Downloads one selected storage copy and writes it to the configured website target; overlay is default, optional exact mirror deletes target files absent from backup | SSH host keys are mandatory for SFTP. Server-side tar is an SFTP/SSH optimization, not a fourth protocol, and requires remote shell/tar permission. FTPS certificate verification is on by default. |
+| Website | Explicit/implicit FTPS or SFTP; selected remote paths; incremental mirror or full collection; ZIP plus file manifest. Plain FTP is a default-off compatibility mode. | Downloads one selected storage copy and writes it to the configured website target; overlay is default, optional exact mirror deletes target files absent from backup | SSH host keys are mandatory for SFTP. Server-side tar is an SFTP/SSH optimization, not a fourth protocol, and requires remote shell/tar permission. FTPS certificate verification is on by default. Plain FTP requires `ALLOW_INSECURE_FTP=true` and exposes credentials/data in transit. |
 | WordPress | WordPress connection combines site files and database-aware workflow into an archive | No automatic WordPress restore model is implemented; download or transfer the stored archive and recover with WordPress/database tooling | Validate both file and database access; a successful API/UI connection alone does not prove either data plane. |
 | Database | Direct or SSH-tunneled MySQL, MariaDB and PostgreSQL dumps; optional TLS; selected database | Downloads one selected storage copy; console restore defaults to a deterministic new-database fork, while the API also has an explicit in-place mode | In-place restore changes target data. Fork restore needs target-creation privileges. Client compatibility, free space, locks and TLS/authentication must be rehearsed. |
 | Basecamp | OAuth connection and API snapshot packaged for offsite storage | Backup/export is implemented; no dedicated in-place Basecamp restore model is present | Configure Basecamp application credentials and exact callback URL. Treat the artifact as export/recovery material. |
@@ -33,7 +33,13 @@ actual server/client pair before relying on it.
 
 Website authentication supports password, supplied private key and an optional
 operator-managed key pair. `SSH_MANAGED_PRIVATE_KEY_PATH` and
-`SSH_MANAGED_PUBLIC_KEY` must both be configured before managed-key mode appears.
+`SSH_MANAGED_PUBLIC_KEY` must both resolve before managed-key mode appears. In stock
+Compose, put the optional private key in `.secrets/ssh_managed_private_key` (or leave it
+empty to disable); only app/database/files receive its mode-`0444` source, and their
+entrypoint validates and copies it into private tmpfs as
+`/run/backupsheep/ssh/managed_private_key`, mode `0600`. SSH never reads the source mount
+directly. Reviewed host keys live separately in `ssh_trust` (app read/write,
+database/files read-only).
 
 Incremental mode maintains a persistent per-node cache under `backup_workdir`; full mode
 re-collects the selected tree. For eligible SFTP full backups, the server-side-tar path
@@ -98,7 +104,7 @@ operations BackupSheep actually performs.
 
 | Code | Destination | Credential/API style | Repository-specific notes |
 | --- | --- | --- | --- |
-| `local` | Local Storage | Mounted filesystem; no provider credential | Root is `BS_LOCAL_STORAGE_PATH` (`/backups` in Compose). It must be durable and visible to app/workers. |
+| `local` | Local Storage | Mounted filesystem; no provider credential | Root is `BS_LOCAL_STORAGE_PATH` (`/backups` in Compose). It must be durable; stock Compose grants read/write only to storage, read-only to app/cloud/database/files, and no mount to logs/Beat. |
 | `aws_s3` | Amazon S3 | AWS access/secret key, region and bucket | Supports expected bucket owner, version-aware records, presigned downloads, lifecycle transition settings and S3 Object Lock retention/legal hold. |
 | `backblaze_b2` | Backblaze B2 | S3-compatible key/secret, endpoint and bucket | Uses S3-compatible multipart upload with provider-specific error normalization. |
 | `wasabi` | Wasabi | S3-compatible key/secret, region/endpoint and bucket | Bucket must exist and match the selected service URL/region. |

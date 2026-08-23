@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 from dotenv import dotenv_values
 
 from backupsheep.sentry_security import scrub_sentry_event
+from backupsheep.runtime_secrets import resolve_file_backed_secrets
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -37,8 +38,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 # place as the relative "_storage/" paths they use; ensure it exists.
 os.makedirs(os.path.join(BASE_DIR, "_storage"), exist_ok=True)
 
-if "BACKUPSHEEP_SECRETS" in os.environ:
-    config = json.loads(os.environ.get("BACKUPSHEEP_SECRETS"))
+backupsheep_secrets_json = os.environ.get("BACKUPSHEEP_SECRETS")
+if backupsheep_secrets_json:
+    config = json.loads(backupsheep_secrets_json)
 else:
     config = {
         # Keep the sample's defaults available to PaaS deployments, where runtime
@@ -48,6 +50,12 @@ else:
         **dotenv_values(os.path.join(BASE_DIR, ".env")),
         **os.environ,  # override loaded values with environment variables
     }
+
+# The stock Docker deployment injects generated control-plane credentials as
+# individually granted, read-only files below /run/secrets. Resolve only the explicit
+# allowlist before any setting consumes those values. Direct environment variables stay
+# supported for PaaS/external deployments that do not use the Compose secret contract.
+config = resolve_file_backed_secrets(config)
 
 # Coerce env strings to real booleans: dotenv/docker env_file always yield strings, and
 # a bare bool("false") is True, so a raw string can never be turned off. Treat only the
@@ -919,6 +927,23 @@ CELERY_BEAT_SCHEDULER = "backupsheep.scheduler:BackupDatabaseScheduler"
 # any external bucket) and pruned by the delete_old_logs task after this many days.
 LOG_RETENTION_DAYS = int(config.get("LOG_RETENTION_DAYS", 30))
 
+# Notification providers are contacted only after a short database lease has
+# committed. Failed delivery retries use bounded exponential backoff, while the
+# periodic recovery sweep republishes only opaque outbox row IDs after broker or
+# worker loss.
+NOTIFICATION_DELIVERY_LEASE_SECONDS = int(
+    config.get("NOTIFICATION_DELIVERY_LEASE_SECONDS", 120)
+)
+NOTIFICATION_DELIVERY_BACKOFF_BASE_SECONDS = int(
+    config.get("NOTIFICATION_DELIVERY_BACKOFF_BASE_SECONDS", 30)
+)
+NOTIFICATION_DELIVERY_BACKOFF_MAX_SECONDS = int(
+    config.get("NOTIFICATION_DELIVERY_BACKOFF_MAX_SECONDS", 60 * 60)
+)
+NOTIFICATION_DELIVERY_RECOVERY_BATCH_SIZE = int(
+    config.get("NOTIFICATION_DELIVERY_RECOVERY_BATCH_SIZE", 100)
+)
+
 # A periodic recovery sweep catches tasks that were lost before late-ack redelivery
 # (for example during broker/server maintenance) and stale ETA poll messages. The
 # provider backup UUID/name is deterministic, so recovery can look up an already
@@ -963,6 +988,12 @@ BACKUP_STORAGE_LEASE_SECONDS = int(
 )
 BACKUP_STORAGE_HEARTBEAT_SECONDS = int(
     config.get("BACKUP_STORAGE_HEARTBEAT_SECONDS", 30)
+)
+# Storage-point deletion claims are committed before provider I/O. Keep this
+# comfortably above every bounded storage-provider timeout; it is separate from
+# cloud snapshot deletion's shorter BACKUP_DELETE_LEASE_SECONDS setting.
+STORAGE_POINT_DELETE_LEASE_SECONDS = int(
+    config.get("STORAGE_POINT_DELETE_LEASE_SECONDS", 3600)
 )
 RESTORE_WORKER_LEASE_SECONDS = int(
     config.get("RESTORE_WORKER_LEASE_SECONDS", 180)
@@ -1120,6 +1151,14 @@ S3_DOWNLOAD_URL_EXPIRES = _bounded_positive_int(
 # loopback, link-local, reserved and metadata targets remain forbidden regardless.
 WORDPRESS_PRIVATE_TARGET_CIDRS = _private_network_allowlist(
     "WORDPRESS_PRIVATE_TARGET_CIDRS"
+)
+
+# Plain FTP sends credentials and backup contents without transport encryption.
+# Keep it unavailable unless an operator accepts that risk explicitly for a legacy
+# endpoint. FTPS and SFTP remain enabled without this compatibility escape hatch.
+ALLOW_INSECURE_FTP = _as_bool(
+    config.get("ALLOW_INSECURE_FTP"),
+    default=False,
 )
 
 # Paramiko and the system SSH client both require a verified host key for SSH/SFTP
@@ -1289,6 +1328,28 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_lightsail_bucket_restores",
         "schedule": 60.0,
     },
+    # Local Storage validation/deletion requests are durable database states.
+    # These sweeps recover a broker publish lost after an API transaction commits;
+    # only worker-storage receives the tasks or a writable /backups mount.
+    "validate-pending-local-storages": {
+        "task": "validate_pending_local_storages",
+        "schedule": 60.0,
+    },
+    "resume-requested-storage-deletions": {
+        "task": "resume_requested_storage_deletions",
+        "schedule": 60.0,
+    },
+    "resume-requested-node-deletions": {
+        "task": "resume_requested_node_deletions",
+        "schedule": 60.0,
+    },
+    # Recover outbox publications lost after commit and processing leases left by
+    # a crashed logs worker. Provider delivery is at-least-once across the narrow
+    # crash-after-send/before-SENT window.
+    "recover-notification-deliveries": {
+        "task": "recover_notification_deliveries",
+        "schedule": 60.0,
+    },
 }
 
 # Task routing across the worker types (see docker-compose.yml):
@@ -1296,10 +1357,9 @@ CELERY_BEAT_SCHEDULE = {
 #   database .. database dumps (heavy CPU/disk); isolated so a big dump can't starve
 #               file backups
 #   files ..... website / wordpress / basecamp dumps (heavy CPU/disk); isolated
-#   storage ... uploads each dump to the storage backends + local cleanup; scalable pool
-#               (worker-storage) sharing the _storage volume with the dump workers
-#   logs ...... DB log entries, Slack/Telegram notifications, and on-disk
-#               run-log retention (worker-logs)
+#   storage ... uploads each dump to the storage backends + every local-artifact
+#               mutation/cleanup; scalable pool sharing _storage with dump workers
+#   logs ...... DB log entries and Slack/Telegram notifications; no artifact volume
 #
 # storage_upload/finalize_backup/delete_from_disk go to "storage" so they always run on a
 # worker that can see the files the dump produced. Anything not listed here falls to the
@@ -1318,6 +1378,22 @@ CELERY_TASK_ROUTES = {
     "storage_upload": {"queue": "storage"},
     "finalize_backup": {"queue": "storage"},
     "delete_from_disk": {"queue": "storage"},
+    "reset_incremental_cache": {"queue": "storage"},
+    "delete_old_logs": {"queue": "storage"},
+    "validate_local_storage": {"queue": "storage"},
+    "validate_pending_local_storages": {"queue": "storage"},
+    "delete_backup_requested": {"queue": "storage"},
+    "delete_storage_requested": {"queue": "storage"},
+    "resume_requested_storage_deletions": {"queue": "storage"},
+    # These legacy maintenance paths can invoke storage-point deletion. Keep
+    # them on the same RW boundary even when an older django-celery-beat row
+    # publishes the task by its historical name.
+    "node_delete_requested": {"queue": "storage"},
+    "resume_requested_node_deletions": {"queue": "storage"},
+    "clean_delete_failed_backups": {"queue": "storage"},
+    "delete_requested_integrations": {"queue": "storage"},
+    "delete_requested_storages": {"queue": "storage"},
+    "account_delete": {"queue": "storage"},
     # S3 lifecycle rule application + deferred Object Lock delete retries.
     "storage_aws_s3_sync_lifecycle": {"queue": "storage"},
     "retry_protected_storage_deletes": {"queue": "storage"},
@@ -1359,8 +1435,9 @@ CELERY_TASK_ROUTES = {
     # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram
     # fan-out, and on-disk run-log retention.
     "send_log_to_db": {"queue": "logs"},
+    "deliver_log_notification": {"queue": "logs"},
+    "recover_notification_deliveries": {"queue": "logs"},
     "send_log_to_slack": {"queue": "logs"},
     "send_log_to_telegram": {"queue": "logs"},
-    "delete_old_logs": {"queue": "logs"},
     "delete_old_db_logs": {"queue": "logs"},
 }

@@ -1,25 +1,42 @@
 # Configuration
 
-BackupSheep reads configuration when each process starts. Compose passes `.env` to every
-application service with `env_file: .env`; changing `.env` therefore requires recreating
-the affected containers.
+BackupSheep reads configuration when each process starts. Compose passes non-secret and
+optional integration settings from `.env` to each application service. The stock stack
+mounts the Django, PostgreSQL and RabbitMQ credentials from separate files in `.secrets`;
+only `app` also receives the onboarding-token file. Changing either configuration source
+requires recreating the affected containers.
 
 ## Configuration precedence
 
-Unless `BACKUPSHEEP_SECRETS` is set, settings are merged in this order:
+Unless `BACKUPSHEEP_SECRETS` is non-empty, settings are merged in this order:
 
 1. `.env_sample` supplies non-secret defaults;
 2. `.env` overrides the sample;
-3. process environment variables override both files.
+3. process environment variables override both files;
+4. each allowlisted non-empty `*_FILE` pointer overrides its corresponding direct secret.
 
-If `BACKUPSHEEP_SECRETS` exists in the process environment, its JSON object becomes the
-entire configuration. The sample and `.env` are not merged into it. This mode is for a
-secret-manager integration that can supply every required key; an incomplete object can
-prevent Django from starting.
+If `BACKUPSHEEP_SECRETS` is non-empty in a non-Compose process environment, its JSON
+object becomes the entire configuration. The sample and `.env` are not merged into it.
+This mode is for a separately reviewed PaaS/secret-manager integration that supplies
+every required key. The stock installer and `./backupsheep-compose` reject the variable,
+and stock Compose pins it blank, because it would bypass the file-backed deployment
+contract.
 
 For normal Compose deployments, copy `.env_sample` wholesale and retain optional blank
-keys. The exhaustive key list is in the
+keys. Keep `DJANGO_SECRET_KEY`, `DB_PASSWORD`, `RABBITMQ_PASSWORD` and
+`ONBOARDING_INSTALL_TOKEN` blank after creating the four required protected files and the
+optional `ssh_managed_private_key` file exactly as shown in the
+[installation guide](installation.md#manual-docker-compose-installation). Keep direct
+`SSH_MANAGED_PRIVATE_KEY_PATH` blank: the image entrypoint exports the validated private
+tmpfs copy itself. The
+exhaustive key list is in the
 [environment-variable reference](../reference/environment-variables.md).
+
+Treat `.env` as configuration data, never executable startup input. The verified installer
+rejects `LD_AUDIT`, `LD_LIBRARY_PATH`, `LD_PRELOAD` and `SSLKEYLOGFILE`; stock Compose
+also blanks those values before application-image startup. The immutable entrypoint then
+clears shell and Python startup hooks, loader paths and TLS-key logging, establishes fixed
+`PATH`/`PYTHONPATH` values, and executes configured commands as argv without `eval`.
 
 ## Safe editing workflow
 
@@ -28,16 +45,21 @@ cd /opt/backupsheep
 cp -p .env .env.before-config-change
 chmod 600 .env .env.before-config-change
 # Edit .env with your preferred editor.
-docker compose config --quiet
-docker compose up --detach --remove-orphans
-docker compose ps --all
-docker compose logs --tail=100 app worker-cloud beat
+./backupsheep-compose config --quiet
+./backupsheep-compose up --detach
+./backupsheep-compose ps --all
+./backupsheep-compose logs --tail=100 migrate preflight app
 ```
 
-`docker compose config` expands the Compose model and can include resolved environment
+`./backupsheep-compose config` expands the Compose model and can include resolved environment
 values. Do not paste its full output into issues or chat; use `--quiet` for validation.
 Remove the local backup copy after the change is verified, or store it in an encrypted
-secrets backup.
+configuration backup. If operations were already enabled and the change affects workers,
+review durable queue/recovery state before recreating them explicitly:
+
+```bash
+./backupsheep-compose --profile operations up --detach
+```
 
 ## The public URL tuple
 
@@ -60,9 +82,14 @@ DJANGO_HTTPS=true
 callback URLs. A mismatch commonly breaks sign-in cookies, generated links or OAuth
 callbacks.
 
+The Docker deployment preflight runs Django's deployment checks. HTTPS-related warnings
+are expected only for the deliberate loopback HTTP/SSH-tunnel onboarding mode. A public
+deployment must terminate real TLS, use the HTTPS tuple above, and review/resolve every
+deployment warning; the preflight's error threshold is not approval for public HTTP.
+
 ## Secrets that must remain stable
 
-`DJANGO_SECRET_KEY` is not a disposable deployment secret. It signs Django data and
+The value in `.secrets/django_secret_key` is not a disposable deployment secret. It signs Django data and
 derives the encryption key for email-provider credentials stored in PostgreSQL. Rotating
 it logs users out and makes those saved email credentials unreadable until re-entered.
 
@@ -70,9 +97,9 @@ Provider, source and storage credentials entered through the console are encrypt
 a per-account Fernet key stored with the account data. Back up PostgreSQL securely and
 treat it as sensitive even though credential fields are encrypted.
 
-For the bundled stack, set a strong `DB_PASSWORD` before the `pgdata` volume is created.
-Changing only `.env` after PostgreSQL initialization does not change the database role's
-existing password.
+For the bundled stack, create a strong `.secrets/db_password` before the `pgdata` volume is
+created. Changing that file after PostgreSQL initialization does not change the database
+role's existing password. Keep the direct `.env` key blank.
 
 ## Database configuration
 
@@ -81,10 +108,14 @@ The bundled database uses:
 ```dotenv
 DB_NAME='backupsheep'
 DB_USER='backupsheep'
-DB_PASSWORD='replace-me'
+DB_PASSWORD=''
 DB_HOST='db'
 DB_PORT='5432'
 ```
+
+The stock Compose file supplies `DB_PASSWORD_FILE=/run/secrets/db_password` to Django and
+`POSTGRES_PASSWORD_FILE=/run/secrets/db_password` to PostgreSQL from the protected host
+file. Do not duplicate the value in `.env`.
 
 For managed PostgreSQL, set `DATABASE_URL`. A non-empty URL overrides all five discrete
 connection values for Django. It must use `postgres://` or `postgresql://`. Production
@@ -108,15 +139,16 @@ and update dependency wiring deliberately; the stock Compose file always starts 
 BackupSheep accepts RabbitMQ brokers only. Configuration precedence is:
 
 1. if `RABBITMQ_HOST` is non-empty, build a URL from `RABBITMQ_SCHEME`,
-   `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD` and
-   `RABBITMQ_VHOST`;
+   `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, the resolved broker-password
+   secret and `RABBITMQ_VHOST`;
 2. otherwise use `CLOUDAMQP_URL` when present;
 3. otherwise use `CELERY_BROKER_URL`;
 4. otherwise production fails closed until a broker URL or dedicated fragment credentials
    are set (non-production development retains a warning-only compatibility fallback).
 
 Use `amqp://` or `amqps://`. Never use RabbitMQ's well-known `guest/guest` account, even
-on an internal network. Stock Compose requires a non-empty `RABBITMQ_PASSWORD`, creates a
+on an internal network. Stock Compose requires a non-empty
+`.secrets/rabbitmq_password`, keeps the direct environment value blank, creates a
 dedicated `backupsheep` user/vhost only on a fresh volume, and persists broker state in
 `rabbitmq_data`. Plaintext `amqp` is accepted in production only for loopback or the exact
 stock `rabbitmq` service. An external broker, including one reached over a private network,
@@ -126,24 +158,57 @@ Do not put `ssl_*` overrides in the broker URL; they are rejected so certificate
 cannot be disabled. Use one certificate-valid broker/load-balancer hostname in production
 rather than a semicolon-separated failover URL.
 
+## Website transfer security
+
+Use SFTP with an out-of-band-verified host key, or FTPS. FTPS always forces TLS for both
+the control and data connections; certificate and hostname verification are enabled by
+default. The per-connection verification switch exists for a reviewed private/self-signed
+endpoint, but disabling it permits a network attacker to impersonate that endpoint.
+
+Plain FTP exposes the username, password and backup contents in transit and is disabled
+by default. The `ALLOW_INSECURE_FTP=true` environment setting is a legacy compatibility
+escape hatch, not an enterprise-safe mode.
+
 ## Filesystem configuration
 
 | Path | Compose volume | Contents | Required visibility |
 | --- | --- | --- | --- |
-| `/code/_storage` | `backup_workdir` | Work files, restore logs, incremental website cache, reviewed SSH host keys, optional managed SSH private key, install token | `app`, database/files/storage/log workers as mounted in Compose |
-| `/backups` | `backup_storage` | Archives created by the Local Storage destination | `app` and all backup workers |
+| `/code/_storage` | `backup_workdir` | Staged work, restore/run logs, incremental website cache, manifests and worker locks | Read/write in database, files and storage workers; completely absent from app, cloud, logs and Beat |
+| `/var/lib/backupsheep/ssh-trust/known_hosts` | `ssh_trust` | UI-approved, out-of-band-verified OpenSSH host keys | Read/write in app; read-only in database and files workers; absent from cloud, storage, logs and Beat |
+| `/run/secrets/ssh_managed_private_key` -> `/run/backupsheep/ssh/managed_private_key` | `.secrets/ssh_managed_private_key` | Optional deployment-managed, unencrypted SSH private key; empty means disabled | Read-only mode-`0444` source mount in app/database/files only; entrypoint validates and copies it to private tmpfs mode `0600` before exporting the target path |
+| `/backups` | `backup_storage` | Archives created by the Local Storage destination | Read/write only in the storage worker; read-only in app, cloud, database and files workers; absent from logs and Beat |
 
 `BS_LOCAL_STORAGE_PATH` changes the Local Storage root inside each process. If it points
-somewhere other than `/backups`, mount that same durable path into every service that uses
-it. Do not point it at a container-only ephemeral filesystem.
+somewhere other than `/backups`, preserve the same role-specific access policy: writable
+only in the storage worker and read-only in roles that inspect or consume archives. Do not
+point it at a container-only ephemeral filesystem.
 
-`SSH_KNOWN_HOSTS_PATH` defaults to `_storage/ssh_known_hosts`. Relative values resolve
-beneath the repository base directory. Unknown SSH/SFTP hosts are rejected. Populate the
-file only after verifying the server fingerprint through an independent channel.
+The web/API process can request an incremental-cache reset but has no staging mount.
+`reset_incremental_cache` runs in the storage queue, validates the canonical node ID,
+anchors every removal to an opened cache-directory descriptor with no-follow checks, and
+takes the same per-node incremental lock held across mirror/archive work. It therefore
+cannot race a live cache writer or follow a swapped parent path. On-disk `delete_old_logs`,
+upload, finalization and local cleanup are also storage-routed. Keep custom queue routing
+and Compose overrides consistent with that boundary.
+
+Outside stock Compose, `SSH_KNOWN_HOSTS_PATH` defaults to `_storage/ssh_known_hosts` and
+relative values resolve beneath the repository base directory. Stock Compose instead
+fixes it to `/var/lib/backupsheep/ssh-trust/known_hosts` on the dedicated `ssh_trust`
+volume. Unknown SSH/SFTP hosts are rejected. Add a key through the app only after
+verifying the server fingerprint through an independent channel; workers consume the
+result read-only.
 
 Managed SSH-key authentication is advertised only when both
 `SSH_MANAGED_PRIVATE_KEY_PATH` and `SSH_MANAGED_PUBLIC_KEY` are configured and the private
-key file exists. Keep the private key on the shared work volume with mode `0600`.
+key file exists. In stock Compose, put the optional key in installer-managed
+`.secrets/ssh_managed_private_key` (mode `0444` beneath the mode-`0700` directory). Only
+app/database/files receive that immutable source. Docker's source mount cannot be used
+directly because OpenSSH rejects a private key with mode `0444`; the entrypoint accepts an
+empty file as disabled, otherwise requires a regular, unencrypted, valid key no larger
+than 64 KiB, copies it to private tmpfs as mode `0600`, and exports
+`SSH_MANAGED_PRIVATE_KEY_PATH=/run/backupsheep/ssh/managed_private_key`. Do not point SSH
+at `/run/secrets/ssh_managed_private_key`. Never store the key in `backup_workdir`,
+`.env`, a broker message, or an image.
 
 ## Email and notifications
 
@@ -156,6 +221,14 @@ Slack and Telegram are independent optional channels:
 - Slack requires `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` and `SLACK_TOKEN_URL` before
   connecting a workspace in the console.
 - Telegram requires `TELEGRAM_BOT_KEY`; the chat is selected in the console.
+
+New activity creation writes `CoreLog` to PostgreSQL before publishing anything. When
+notification fan-out is required, only the opaque integer row ID is queued to the logs
+worker after the surrounding transaction commits. That worker reloads the row and performs
+Slack/Telegram network I/O, keeping
+arbitrary error text, webhook URLs and provider credentials out of new broker messages and
+out of web/cloud/storage execution roles. Legacy dict-shaped messages are accepted only as
+an upgrade compatibility path and are persisted before delivery.
 
 After configuration, send provider/channel test messages from the corresponding console
 settings rather than assuming a successful container restart proves delivery.
@@ -199,11 +272,19 @@ reliability tests; they are not production tuning controls and must remain unset
 ## Apply and verify a change
 
 ```bash
-docker compose up --detach --remove-orphans
-docker compose ps --all
+./backupsheep-compose up --detach
+./backupsheep-compose ps --all
 curl -fsS http://127.0.0.1:8000/healthz/
-docker compose exec app python manage.py check
-docker compose exec worker-cloud celery -A backupsheep inspect ping
+./backupsheep-compose exec app python manage.py check
+```
+
+The profile-less command validates the core without executing provider work. If operations
+were previously authorized, recreate and inspect those services separately after checking
+durable queue/recovery state:
+
+```bash
+./backupsheep-compose --profile operations up --detach
+./backupsheep-compose --profile operations exec worker-cloud celery -A backupsheep inspect ping
 ```
 
 Then verify the affected behavior: complete an OAuth connection, send a test email,

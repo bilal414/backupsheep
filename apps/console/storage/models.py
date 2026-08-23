@@ -2789,40 +2789,137 @@ class CoreStorageLocal(TimeStampedModel):
 
         return os.path.realpath(settings.LOCAL_STORAGE_ROOT)
 
+    @staticmethod
+    def _path_parts(subpath):
+        """Return a canonical root-relative directory path without touching disk.
+
+        Local Storage configuration is accepted by the Internet-facing API, while
+        the mounted backup volume is writable only by ``worker-storage``.  Keep the
+        API-side check lexical: no create/open/unlink operation belongs in the web
+        process, and no absolute path is ever placed on the broker.
+        """
+
+        value = str(subpath or "")
+        if "\x00" in value or os.path.isabs(value):
+            raise ValueError("Path must be relative to the local storage root.")
+        normalized = value.replace("\\", "/")
+        parts = []
+        for part in normalized.split("/"):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                raise ValueError("Path must stay inside the local storage root.")
+            parts.append(part)
+        return tuple(parts)
+
+    @classmethod
+    def validate_configuration(cls, data=None):
+        """Validate only persisted configuration; never mutate ``/backups``."""
+
+        path = data.get("path") if isinstance(data, dict) else data
+        cls._path_parts(path)
+        return True
+
     def resolve_path(self, subpath=None):
         """Resolve `subpath` (defaults to this storage's `path`) to an absolute
         directory inside the local storage root. Rejects absolute paths and any
         '..' traversal escaping the root."""
         root = self.storage_root()
-        subpath = (subpath if subpath is not None else self.path) or ""
-        if os.path.isabs(subpath):
-            raise ValueError("Path must be relative to the local storage root.")
-        target = os.path.realpath(os.path.join(root, subpath))
+        subpath = subpath if subpath is not None else self.path
+        parts = self._path_parts(subpath)
+        target = os.path.realpath(os.path.join(root, *parts))
         if target != root and not target.startswith(root + os.sep):
             raise ValueError("Path must stay inside the local storage root.")
         return target
 
-    def validate(self, data=None, raise_exp=None):
-        if data is not None:
-            path = data.get("path")
-        else:
-            path = self.path
+    def _open_directory(self, *, create):
+        """Open the configured directory through no-follow directory fds.
 
-        target_dir = self.resolve_path(path)
-        os.makedirs(target_dir, exist_ok=True)
+        Walking from the already-open Local Storage root prevents a symlink in a
+        configured component from redirecting a validation/upload outside the
+        mounted volume.  The returned fd is owned by the caller.
+        """
 
-        # Validation can run concurrently when duplicate Celery deliveries race
-        # through backup_initiate. A second-resolution timestamp lets one probe
-        # delete another probe's file and falsely report the storage as invalid.
-        filename = f"backupsheep_test_{uuid.uuid4().hex}.txt"
-        test_file = os.path.join(target_dir, filename)
+        root = self.storage_root()
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        current_fd = os.open(root, flags)
+        try:
+            for part in self._path_parts(self.path):
+                if create:
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                    except FileExistsError:
+                        pass
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd
+        except Exception:
+            os.close(current_fd)
+            raise
 
-        with open(test_file, "w") as fh:
-            fh.write(filename)
+    def prepare_directory(self):
+        """Create/open the configured directory from ``worker-storage`` only."""
 
-        with open(test_file, "r") as fh:
-            if fh.read() != filename:
+        directory_fd = self._open_directory(create=True)
+        try:
+            return self.resolve_path()
+        finally:
+            os.close(directory_fd)
+
+    def probe_filesystem(self):
+        """Perform the destructive write/read/unlink probe on worker-storage."""
+
+        directory_fd = self._open_directory(create=True)
+        filename = f".backupsheep-validation-{uuid.uuid4().hex}"
+        file_fd = None
+        try:
+            flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            file_fd = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+            payload = filename.encode("ascii")
+            if os.write(file_fd, payload) != len(payload):
                 return False
+            os.fsync(file_fd)
+            os.lseek(file_fd, 0, os.SEEK_SET)
+            return os.read(file_fd, len(payload) + 1) == payload
+        finally:
+            if file_fd is not None:
+                os.close(file_fd)
+            try:
+                os.unlink(filename, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            os.close(directory_fd)
 
-        os.remove(test_file)
-        return True
+    def validate(self, data=None, raise_exp=None):
+        """Return durable configuration eligibility without touching the volume.
+
+        New/updated Local Storage rows remain ``PENDING`` until the dedicated
+        storage worker completes :meth:`probe_filesystem`.  Backup source workers
+        can therefore evaluate a destination without acquiring write access to
+        ``/backups``.
+        """
+
+        if data is not None:
+            return self.validate_configuration(data)
+        self.validate_configuration(self.path)
+        return bool(
+            self.storage_id
+            and self.storage.status == self.storage.Status.ACTIVE
+        )
+
+
+class CoreStorageDeletionLease(TimeStampedModel):
+    """Internal coordinator lease for one storage-configuration deletion."""
+
+    storage = models.OneToOneField(
+        CoreStorage, related_name="deletion_lease", on_delete=models.CASCADE
+    )
+    owner = models.CharField(max_length=255, blank=True, default="")
+    token = models.UUIDField(null=True, blank=True, editable=False)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "core_storage_deletion_lease"

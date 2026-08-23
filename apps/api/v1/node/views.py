@@ -2,15 +2,12 @@ import hashlib
 import hmac
 import json
 import math
-import os
 import re
-import shutil
 import unicodedata
 import uuid
 from collections.abc import Mapping
 from functools import partial
 
-from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -47,7 +44,7 @@ from apps._tasks.exceptions import (
 from apps._tasks.integration.basecamp import backup_basecamp
 from apps._tasks.integration.website import backup_website
 from ..utils.api_filters import DateRangeFilter
-from apps._tasks.helper.tasks import node_delete_requested
+from apps._tasks.helper.tasks import node_delete_requested, reset_incremental_cache
 
 
 def _log_activity(request, log_type, data):
@@ -449,7 +446,10 @@ class CoreNodeView(viewsets.ModelViewSet):
 
     def get_queryset(self):
         member = self.request.user.member
-        return visible_nodes(member)
+        # While the storage worker owns deletion, no interactive endpoint may
+        # resume/update the node and race its provider or Local Storage cleanup.
+        # A protected backup restores the node to visible PAUSED state.
+        return visible_nodes(member).exclude(status=CoreNode.Status.DELETE_REQUESTED)
 
     def perform_create(self, serializer):
         node = serializer.save()
@@ -1386,9 +1386,16 @@ class CoreNodeView(viewsets.ModelViewSet):
         """
         Delete Node
         """
-        node_delete_requested.apply_async(
-            args=[node.id],
-        )
+        def publish_delete():
+            try:
+                # Only the already-authorized row id crosses the broker boundary.
+                # A periodic storage-worker sweep recovers a failed publication
+                # from the durable DELETE_REQUESTED state.
+                node_delete_requested.apply_async(args=[node.id])
+            except Exception:
+                pass
+
+        transaction.on_commit(publish_delete)
 
         _log_activity(
             request,
@@ -1403,26 +1410,23 @@ class CoreNodeView(viewsets.ModelViewSet):
                 "connection_name": node.connection.name,
             },
         )
-        return Response({"detail": "Node will be deleted soon."}, status=status.HTTP_200_OK)
+        return Response(
+            {"detail": "Node deletion was scheduled on the storage worker."},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     @action(detail=True, methods=["post"])
     def reset_incremental(self, request, pk=None):
         node = self.get_object()
-        # Wipe the per-node local mirror cache (and its fingerprint) so the next
-        # incremental backup re-downloads everything. Confined to _storage.
-        storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
-        cache_base = os.path.realpath(os.path.join(storage_dir, "website_cache", node.uuid_str))
-        if cache_base != storage_dir and os.path.commonpath([storage_dir, cache_base]) == storage_dir:
-            shutil.rmtree(cache_base, ignore_errors=True)
-            try:
-                os.remove(cache_base + ".meta.json")
-            except FileNotFoundError:
-                pass
+        # The HTTP role has read-only access to staged backup data. Dispatch the
+        # exact cache mutation to the storage worker, whose queue is the authorized
+        # local-artifact boundary.
+        reset_incremental_cache.apply_async(args=[node.pk])
         _log_activity(
             request,
             CoreLog.Type.NODE,
             {
-                "message": f"Incremental backups reset for node '{node.name}'.",
+                "message": f"Incremental backup cache reset scheduled for node '{node.name}'.",
                 "action": "reset_incremental",
                 "actor_email": request.user.email,
                 "node_id": node.id,
@@ -1431,7 +1435,15 @@ class CoreNodeView(viewsets.ModelViewSet):
                 "connection_name": node.connection.name,
             },
         )
-        return Response({"detail": "We have reset the incremental backups. Your next backup will be a full backup."}, status=status.HTTP_200_OK)
+        return Response(
+            {
+                "detail": (
+                    "Incremental cache reset scheduled. Your next backup will be "
+                    "a full backup after the storage worker applies it."
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["get"])
     def validate(self, request, pk=None):

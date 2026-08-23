@@ -483,11 +483,11 @@ class StorageCostSummaryTests(BaseTestCase):
 class LocalStorageModelTests(BaseTestCase):
     def test_validate_roundtrip_at_root(self):
         with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
-            self.assertTrue(CoreStorageLocal().validate({"path": None, "no_delete": None}))
+            self.assertTrue(CoreStorageLocal(path=None).probe_filesystem())
 
     def test_validate_roundtrip_with_subdirectory(self):
         with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
-            self.assertTrue(CoreStorageLocal().validate({"path": "server1"}))
+            self.assertTrue(CoreStorageLocal(path="server1").probe_filesystem())
             target_dir = os.path.join(os.path.realpath(tmp), "server1")
             self.assertTrue(os.path.isdir(target_dir))
             # the write/read test file is cleaned up afterwards
@@ -497,7 +497,7 @@ class LocalStorageModelTests(BaseTestCase):
         with tempfile.TemporaryDirectory() as tmp, override_settings(LOCAL_STORAGE_ROOT=tmp):
             local = CoreStorageLocal(path="concurrent")
             with ThreadPoolExecutor(max_workers=8) as pool:
-                results = list(pool.map(lambda _unused: local.validate(), range(8)))
+                results = list(pool.map(lambda _unused: local.probe_filesystem(), range(8)))
 
             self.assertEqual(results, [True] * 8)
             self.assertEqual(os.listdir(os.path.join(tmp, "concurrent")), [])

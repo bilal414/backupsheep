@@ -8,23 +8,26 @@ account must present an install token that proves access to the host or containe
 Confirm that migrations succeeded and the application is healthy:
 
 ```bash
-docker compose ps --all
-docker compose logs --tail=100 migrate app
+./backupsheep-compose ps --all
+./backupsheep-compose logs --tail=100 migrate preflight app
 curl -fsS http://127.0.0.1:8000/healthz/
 ```
 
-The `migrate` service should be `Exited (0)`, `app` should become healthy and the health
-request should return `ok`.
+The `migrate` and `preflight` services should be `Exited (0)`, `app` should become healthy
+and the health request should return `ok`.
 
-If `ONBOARDING_INSTALL_TOKEN` is set in `.env`, use that value. When it is blank, make one
-request to `/onboarding/` so the app creates a token, then read it from the shared volume:
+The verified installer and stock Compose deployment mount a fixed onboarding token only
+into `app`; its direct `.env` value remains blank. Read it from the protected host file as
+the installation owner:
 
 ```bash
-docker compose exec app cat /code/_storage/install_token
+cat .secrets/onboarding_token
 ```
 
 Treat the token as a temporary secret. Anyone who can reach an unconfigured instance and
-has the token can create the first account.
+has the token can create the first account. Do not print it in installation logs, issue
+reports or shell transcripts. Non-Compose deployments may instead use the documented
+`ONBOARDING_INSTALL_TOKEN` or `ONBOARDING_INSTALL_TOKEN_SECRET_FILE` setting.
 
 ## The five steps
 
@@ -72,7 +75,7 @@ With email disabled, backups still run, but password-reset and invitation messag
 be delivered. An operator can recover a password from the host:
 
 ```bash
-docker compose run --rm app python manage.py changepassword owner@example.com
+./backupsheep-compose run --rm app python manage.py changepassword owner@example.com
 ```
 
 ### 4. Add storage
@@ -101,6 +104,14 @@ Submitting the final step sets `setup_completed` and its timestamp, then redirec
 dashboard. Once the running processes observe completion, all onboarding URLs redirect to
 the console.
 
+Provider workers and Beat are disabled in the stock profile-less stack. After onboarding,
+review credentials, any restored database/broker state and durable queued/recoverable work
+before enabling them. Starting this profile can execute existing provider mutations:
+
+```bash
+./backupsheep-compose --profile operations up --detach
+```
+
 ## Console owner versus Django superuser
 
 The first account is the BackupSheep account owner, not a Django superuser. These roles are
@@ -115,7 +126,7 @@ Create a Django superuser only when direct Django administration is operationall
 required:
 
 ```bash
-docker compose run --rm app python manage.py createsuperuser
+./backupsheep-compose run --rm app python manage.py createsuperuser
 ```
 
 A Django superuser is not a substitute for a BackupSheep member and is redirected away

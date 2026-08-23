@@ -266,6 +266,107 @@ def _mark_missing_source(stored_backup):
         ) from error
 
 
+def delete_local_object(stored_backup):
+    """Verify and unlink one exact DB-owned Local Storage object via dir fds.
+
+    The caller supplies a storage-point id to the Celery task; this helper derives
+    every path component from the persisted, root-relative ownership witness.  It
+    never accepts a path from an HTTP request or broker message.
+    """
+
+    backup = stored_backup.backup
+    identifier = _backup_identifier(backup)
+    filename = f"{identifier}.zip"
+    root = stored_backup.storage.storage_local.storage_root()
+    _metadata, state = _state(stored_backup)
+    object_key = str(state.get("object_key") or "")
+
+    if object_key:
+        if (
+            "\x00" in object_key
+            or "\\" in object_key
+            or os.path.isabs(object_key)
+        ):
+            raise _LocalStorageIntegrityError("The local object key is invalid.")
+        parts = [part for part in object_key.split("/") if part not in ("", ".")]
+        if not parts or any(part == ".." for part in parts):
+            raise _LocalStorageIntegrityError("The local object key is invalid.")
+    else:
+        pointer = str(getattr(stored_backup, "storage_file_id", None) or "")
+        target = _confined_path(root, pointer, allow_relative=False)
+        parts = os.path.relpath(target, root).split(os.sep)
+
+    if parts[-1] != filename:
+        raise _LocalStorageIntegrityError("The local object is not this backup.")
+    target = os.path.realpath(os.path.join(root, *parts))
+    if getattr(stored_backup, "storage_file_id", None):
+        pointer = _confined_path(
+            root, str(stored_backup.storage_file_id), allow_relative=False
+        )
+        if pointer != target:
+            raise _LocalStorageIntegrityError(
+                "The local object ownership witnesses disagree."
+            )
+
+    expected = stored_backup.committed_integrity_identity()
+    if expected is None:
+        raise _LocalStorageIntegrityError(
+            "The local object integrity witness is unavailable."
+        )
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(root, directory_flags)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+
+        file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            file_fd = os.open(filename, file_flags, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return False
+        try:
+            opened_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                raise _LocalStorageIntegrityError(
+                    "The local object is not a regular file."
+                )
+            digest = hashlib.sha256()
+            byte_count = 0
+            while True:
+                chunk = os.read(file_fd, CHUNK_SIZE)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                byte_count += len(chunk)
+            if not _same_identity(
+                {"sha256": digest.hexdigest(), "size_bytes": byte_count},
+                expected,
+            ):
+                raise _LocalStorageIntegrityError(
+                    "The local object failed its integrity check."
+                )
+            current_stat = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                current_stat.st_dev != opened_stat.st_dev
+                or current_stat.st_ino != opened_stat.st_ino
+                or not stat.S_ISREG(current_stat.st_mode)
+            ):
+                raise _LocalStorageIntegrityError(
+                    "The local object changed during deletion."
+                )
+            os.unlink(filename, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            return True
+        finally:
+            os.close(file_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def storage_local(stored_backup):
     """Upload one local backup with atomic publication and verified adoption."""
     try:
@@ -275,8 +376,10 @@ def storage_local(stored_backup):
         local_zip = os.path.join("_storage", filename)
         storage_local_config = stored_backup.storage.storage_local
         root = storage_local_config.storage_root()
-        target_dir = storage_local_config.resolve_path()
-        os.makedirs(target_dir, exist_ok=True)
+        # Directory creation is anchored to the Local Storage root with
+        # O_NOFOLLOW by the model helper.  Source/web roles never execute this
+        # mutation and never receive a writable /backups mount.
+        target_dir = storage_local_config.prepare_directory()
         default_target = _confined_path(root, os.path.join(target_dir, filename))
 
         _metadata, state = _state(stored_backup)

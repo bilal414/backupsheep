@@ -5,24 +5,30 @@ notification-email API, and the email templates themselves.
 All provider sends (email HTTP APIs, Slack webhooks, Telegram, celery broker
 publishes) are mocked -- no external service is ever contacted.
 """
+import threading
 import uuid
+from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.db import close_old_connections, connection
 from django.template.loader import render_to_string
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps._tasks.helper import tasks as helper_tasks
 from apps._tasks.integration import restore as restore_tasks
 from apps._tasks.integration.restore_common import RestoreError
 from apps.api.v1.notification.views import CoreNotificationEmailView
+from apps.api.v1.utils.http import request_timeout
 from apps.console.account.models import CoreAccount
 from apps.console.backup.models import CoreWebsiteRestore
 from apps.console.log.models import CoreLog
 from apps.console.member.models import CoreMember, CoreMemberAccount
 from apps.console.notification.models import (
     CoreNotificationEmail,
+    CoreNotificationDelivery,
     CoreNotificationLogEmail,
     CoreNotificationSlack,
     CoreNotificationTelegram,
@@ -158,18 +164,112 @@ class GenericEmailTaskTests(BaseTestCase):
 
 
 class SendLogToDbNotificationTests(BaseTestCase):
-    """BREAK-1: send_log_to_db fans bot messages out via account.send_notification."""
+    """The log task creates durable per-channel, ID-only outbox work."""
 
-    def test_bot_message_fans_out(self):
-        with mock.patch.object(CoreAccount, "send_notification") as notify:
+    @mock.patch("apps._tasks.helper.tasks.send_log_to_db.apply_async")
+    def test_account_log_enqueues_only_opaque_committed_row_id(self, apply_async):
+        channel = CoreNotificationTelegram.objects.create(
+            account=self.account,
+            chat_id="42",
+            channel_name="ops",
+            added_by=self.member,
+        )
+        with self.captureOnCommitCallbacks(execute=True), mock.patch.object(
+            CoreAccount, "send_notification"
+        ) as notify:
+            log = self.account.create_log(
+                {
+                    "sender_name": "BackupSheep - Notification Bot",
+                    "message": "sensitive provider detail",
+                    "error_details": "opaque database value",
+                }
+            )
+
+        apply_async.assert_called_once_with(args=[log.pk])
+        notify.assert_not_called()
+        delivery = CoreNotificationDelivery.objects.get(log=log)
+        self.assertEqual(
+            (delivery.channel_type, delivery.channel_id),
+            (CoreNotificationDelivery.ChannelType.TELEGRAM, channel.pk),
+        )
+        self.assertNotIn(
+            "sensitive provider detail", repr(apply_async.call_args)
+        )
+
+    @mock.patch(
+        "apps._tasks.helper.tasks.send_log_to_db.apply_async",
+        side_effect=RuntimeError("broker unavailable"),
+    )
+    def test_initial_publish_loss_leaves_due_delivery_for_recovery(self, apply_async):
+        channel = CoreNotificationTelegram.objects.create(
+            account=self.account,
+            chat_id="42",
+            channel_name="ops",
+            added_by=self.member,
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            log = self.account.create_log(
+                {
+                    "sender_name": "BackupSheep - Notification Bot",
+                    "message": "sensitive provider detail",
+                }
+            )
+
+        # The on-commit wake-up failed after the database commit. The durable row
+        # remains due and the periodic recovery task publishes only its integer ID.
+        delivery = CoreNotificationDelivery.objects.get(
+            log=log,
+            channel_type=CoreNotificationDelivery.ChannelType.TELEGRAM,
+            channel_id=channel.pk,
+        )
+        with mock.patch.object(
+            helper_tasks.deliver_log_notification, "apply_async"
+        ) as recovered_publish:
+            helper_tasks.recover_notification_deliveries.run()
+        recovered_publish.assert_called_once_with(args=[delivery.pk])
+
+    def test_legacy_dict_is_persisted_then_fans_out_as_delivery_ids(self):
+        CoreNotificationSlack.objects.create(
+            account=self.account,
+            app_id="A1",
+            token_type="bot",
+            access_token="xoxb-1",
+            bot_user_id="U1",
+            refresh_token="r1",
+            channel="general",
+            channel_id="C-general",
+            configuration_url="https://slack.com/configure/1",
+            url="https://hooks.slack.com/services/general",
+            data={"team": {"name": "team"}},
+            added_by=self.member,
+        )
+        CoreNotificationTelegram.objects.create(
+            account=self.account,
+            chat_id="42",
+            channel_name="ops",
+            added_by=self.member,
+        )
+        with mock.patch.object(
+            helper_tasks.deliver_log_notification, "apply_async"
+        ) as publish, mock.patch(
+            "apps._tasks.helper.tasks.transaction.on_commit",
+            side_effect=lambda callback: callback(),
+        ):
             helper_tasks.send_log_to_db({
                 "account_id": self.account.id,
                 "sender_name": "BackupSheep - Notification Bot",
-                "message": "backup done",
+                "message": "sensitive backup detail",
                 "error_details": "",
             })
-        notify.assert_called_once_with("backup done")
+
         self.assertTrue(CoreLog.objects.filter(account=self.account).exists())
+        deliveries = list(CoreNotificationDelivery.objects.order_by("pk"))
+        self.assertEqual(len(deliveries), 2)
+        self.assertEqual(
+            [call.kwargs for call in publish.call_args_list],
+            [{"args": [row.pk]} for row in deliveries],
+        )
+        self.assertNotIn("sensitive backup detail", repr(publish.call_args_list))
 
 
 class AccountSendNotificationTests(BaseTestCase):
@@ -214,6 +314,225 @@ class AccountSendNotificationTests(BaseTestCase):
             self.account.send_notification("hello")
         self.assertEqual(slack_send.call_count, 2)
         telegram_send.assert_called_once_with("hello")
+
+    @override_settings(TELEGRAM_BOT_KEY="test-bot-token")
+    def test_telegram_sends_in_process_without_plaintext_broker_message(self):
+        telegram = self._telegram()
+        response = mock.Mock(status_code=200)
+
+        with mock.patch(
+            "apps.console.notification.models.requests.post",
+            return_value=response,
+        ) as post, mock.patch(
+            "apps._tasks.helper.tasks.send_log_to_telegram.delay"
+        ) as legacy_delay:
+            result = telegram.send("sensitive provider detail")
+
+        self.assertTrue(result)
+        legacy_delay.assert_not_called()
+        post.assert_called_once_with(
+            "https://api.telegram.org/bottest-bot-token/sendMessage",
+            json={"chat_id": "42", "text": "sensitive provider detail"},
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
+
+
+class NotificationDeliveryOutboxTests(TransactionTestCase):
+    """Durability, retry, terminal-state, and lease behavior for bot delivery."""
+
+    def setUp(self):
+        super().setUp()
+        self.account, self.member, self.user = factories.make_account()
+
+    def _slack(self, *, account=None, channel="general"):
+        account = account or self.account
+        member = self.member
+        if account != self.account:
+            member = account.memberships.get(primary=True).member
+        return CoreNotificationSlack.objects.create(
+            account=account,
+            app_id="A1",
+            token_type="bot",
+            access_token="xoxb-1",
+            bot_user_id="U1",
+            refresh_token="r1",
+            channel=channel,
+            channel_id=f"C-{channel}",
+            configuration_url="https://slack.com/configure/1",
+            url=f"https://hooks.slack.com/services/{channel}",
+            data={"team": {"name": "team"}},
+            added_by=member,
+        )
+
+    def _delivery(self, channel, *, status=CoreNotificationDelivery.Status.PENDING):
+        log = CoreLog.objects.create(
+            account=self.account,
+            data={
+                "sender_name": "BackupSheep - Notification Bot",
+                "message": "sensitive provider detail",
+                "error_details": "temporary failure",
+            },
+        )
+        return CoreNotificationDelivery.objects.create(
+            log=log,
+            channel_type=CoreNotificationDelivery.ChannelType.SLACK,
+            channel_id=channel.pk,
+            status=status,
+        )
+
+    @override_settings(
+        NOTIFICATION_DELIVERY_BACKOFF_BASE_SECONDS=7,
+        NOTIFICATION_DELIVERY_BACKOFF_MAX_SECONDS=20,
+    )
+    def test_transient_failure_is_committed_and_recovered_with_id_only(self):
+        channel = self._slack()
+        delivery = self._delivery(channel)
+        transaction_state = []
+
+        def reject(_message):
+            transaction_state.append(connection.in_atomic_block)
+            return False
+
+        with mock.patch.object(
+            CoreNotificationSlack, "send", side_effect=reject
+        ) as send, mock.patch.object(
+            helper_tasks.deliver_log_notification, "apply_async"
+        ) as publish:
+            helper_tasks.deliver_log_notification.run(delivery.pk)
+
+        send.assert_called_once_with(
+            "sensitive provider detail :: temporary failure"
+        )
+        self.assertEqual(transaction_state, [False])
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, CoreNotificationDelivery.Status.RETRY)
+        self.assertEqual(delivery.attempt_count, 1)
+        self.assertEqual(delivery.outcome_code, "provider_rejected")
+        self.assertIsNone(delivery.lease_token)
+        publish.assert_called_once_with(args=[delivery.pk], countdown=7)
+        self.assertNotIn("sensitive provider detail", repr(publish.call_args))
+
+        CoreNotificationDelivery.objects.filter(pk=delivery.pk).update(
+            next_attempt_at=timezone.now() - timedelta(seconds=1)
+        )
+        with mock.patch.object(
+            helper_tasks.deliver_log_notification, "apply_async"
+        ) as recovered_publish:
+            helper_tasks.recover_notification_deliveries.run()
+        recovered_publish.assert_called_once_with(args=[delivery.pk])
+
+        with mock.patch.object(CoreNotificationSlack, "send", return_value=True):
+            helper_tasks.deliver_log_notification.run(delivery.pk)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, CoreNotificationDelivery.Status.SENT)
+        self.assertEqual(delivery.attempt_count, 2)
+
+    def test_sent_delivery_is_never_sent_or_published_again(self):
+        channel = self._slack()
+        delivery = self._delivery(
+            channel, status=CoreNotificationDelivery.Status.SENT
+        )
+
+        with mock.patch.object(CoreNotificationSlack, "send") as send:
+            helper_tasks.deliver_log_notification.run(delivery.pk)
+        send.assert_not_called()
+
+        with mock.patch.object(
+            helper_tasks.deliver_log_notification, "apply_async"
+        ) as publish:
+            helper_tasks.send_log_to_db.run(delivery.log_id)
+        publish.assert_not_called()
+        self.assertEqual(
+            CoreNotificationDelivery.objects.filter(log_id=delivery.log_id).count(),
+            1,
+        )
+
+    def test_lost_recovery_publish_leaves_due_row_for_next_sweep(self):
+        channel = self._slack()
+        delivery = self._delivery(channel)
+
+        with mock.patch.object(
+            helper_tasks.deliver_log_notification,
+            "apply_async",
+            side_effect=RuntimeError("broker unavailable"),
+        ) as failed_publish:
+            helper_tasks.recover_notification_deliveries.run()
+        failed_publish.assert_called_once_with(args=[delivery.pk])
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, CoreNotificationDelivery.Status.PENDING)
+
+        with mock.patch.object(
+            helper_tasks.deliver_log_notification, "apply_async"
+        ) as next_publish:
+            helper_tasks.recover_notification_deliveries.run()
+        next_publish.assert_called_once_with(args=[delivery.pk])
+
+    def test_deleted_or_mismatched_channel_is_terminally_skipped(self):
+        channel = self._slack()
+        missing = self._delivery(channel)
+        channel.delete()
+        helper_tasks.deliver_log_notification.run(missing.pk)
+        missing.refresh_from_db()
+        self.assertEqual(missing.status, CoreNotificationDelivery.Status.SKIPPED)
+        self.assertEqual(missing.outcome_code, "channel_missing")
+
+        other_account, _other_member, _other_user = factories.make_account()
+        other_channel = self._slack(account=other_account, channel="other")
+        mismatched = self._delivery(other_channel)
+        helper_tasks.deliver_log_notification.run(mismatched.pk)
+        mismatched.refresh_from_db()
+        self.assertEqual(
+            mismatched.status, CoreNotificationDelivery.Status.SKIPPED
+        )
+        self.assertEqual(mismatched.outcome_code, "channel_missing")
+
+    @override_settings(NOTIFICATION_DELIVERY_LEASE_SECONDS=60)
+    def test_committed_lease_fences_concurrent_duplicate_tasks(self):
+        channel = self._slack()
+        delivery = self._delivery(channel)
+        entered_send = threading.Event()
+        release_send = threading.Event()
+        errors = []
+
+        def blocked_send(_message):
+            entered_send.set()
+            if not release_send.wait(10):
+                raise AssertionError("test did not release provider send")
+            return True
+
+        def invoke():
+            close_old_connections()
+            try:
+                helper_tasks.deliver_log_notification.run(delivery.pk)
+            except Exception as error:
+                errors.append(error)
+            finally:
+                close_old_connections()
+
+        with mock.patch.object(
+            CoreNotificationSlack, "send", side_effect=blocked_send
+        ) as send:
+            first = threading.Thread(target=invoke)
+            first.start()
+            self.assertTrue(entered_send.wait(10))
+
+            duplicate = threading.Thread(target=invoke)
+            duplicate.start()
+            duplicate.join(10)
+            self.assertFalse(duplicate.is_alive())
+            self.assertEqual(send.call_count, 1)
+
+            release_send.set()
+            first.join(10)
+            self.assertFalse(first.is_alive())
+
+        self.assertEqual(errors, [])
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, CoreNotificationDelivery.Status.SENT)
+        self.assertEqual(delivery.attempt_count, 1)
 
 
 class RestoreNotificationTests(RestoreBackendBase):

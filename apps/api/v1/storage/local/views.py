@@ -2,6 +2,7 @@ import os
 
 from django.conf import settings
 from django.http import FileResponse, Http404
+from django.db import transaction
 from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, status
@@ -12,12 +13,16 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_datatables.filters import DatatablesFilterBackend
+from sentry_sdk import capture_exception
 
 from apps.console.storage.models import CoreStorage
+from apps._tasks.integration.storage.tasks import (
+    delete_storage_requested,
+    validate_local_storage,
+)
 from .filters import CoreStorageLocalFilter
 from .permissions import CoreStorageLocalPermissions
 from .serializers import CoreStorageReadSerializer, CoreStorageWriteSerializer
-from apps._tasks.exceptions import StorageValidationFailed
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_helpers import visible_nodes
 from ...utils.api_permissions import member_has_perm
@@ -41,38 +46,51 @@ class CoreStorageLocalView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         member = self.request.user.member
         query = Q(account=member.get_current_account(), type__code="local")
-        # query &= ~Q(status=CoreStorage.Status.DELETE_REQUESTED)
+        # A deletion lease may already be mutating a point. Keep the durable
+        # request out of every interactive action until it completes or is
+        # restored to ACTIVE because deletion protection deferred it.
+        query &= ~Q(status=CoreStorage.Status.DELETE_REQUESTED)
         queryset = CoreStorage.objects.filter(query)
         return queryset
+
+    @staticmethod
+    def _publish_after_commit(task, storage_id):
+        def publish():
+            try:
+                task.apply_async(args=[storage_id])
+            except Exception as error:
+                # The PENDING/DELETE_REQUESTED row is the durable recovery source;
+                # Beat republishes it after a transient broker outage.
+                capture_exception(error)
+
+        transaction.on_commit(publish)
 
     def destroy(self, request, *args, **kwargs):
         storage = self.get_object()
         storage.delete_requested()
-        return Response(status=status.HTTP_204_NO_CONTENT, data={})
+        self._publish_after_commit(delete_storage_requested, storage.pk)
+        return Response(
+            {"detail": "Local Storage deletion was scheduled."},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     @action(detail=True, methods=["get"])
     def validate(self, request, pk=None):
-        try:
-            storage = self.get_object()
-            validation = storage.storage_local.validate()
-            if validation:
-                return Response(
-                    {"detail": "Validation passed. Storage is good for backups."},
-                    status=status.HTTP_200_OK,
+        storage = self.get_object()
+        # The API records intent only. The RW worker resolves the configured path
+        # from this account-scoped row and never accepts a path via Celery.
+        storage.status = CoreStorage.Status.PENDING
+        storage.save(update_fields=["status", "modified"])
+        self._publish_after_commit(validate_local_storage, storage.pk)
+        return Response(
+            {
+                "detail": (
+                    "Local Storage validation was scheduled. The destination "
+                    "will become Active only after the storage worker verifies it."
                 )
-            else:
-                return Response(
-                    {
-                        "detail": "Validation failed. Backups will fail. Check storage details immediately."
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        except Exception as e:
-            from sentry_sdk import capture_exception
-            capture_exception(e)
-            raise StorageValidationFailed(
-                "Storage validation failed safely. Verify the credentials and configuration, then retry."
-            )
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class LocalStorageFileDownloadView(APIView):

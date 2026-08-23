@@ -462,24 +462,95 @@ class CoreNotificationTelegram(TimeStampedModel):
     class Meta:
         db_table = "core_notification_telegram"
 
-    def send(self, message):
-        from apps._tasks.helper.tasks import send_log_to_telegram
+    def _post_message(self, message):
+        """Send without copying notification plaintext into another queue."""
 
-        send_log_to_telegram.delay(chat_id=self.chat_id, message=message)
+        bot_key = settings.TELEGRAM_BOT_KEY
+        if not bot_key:
+            return False
+        try:
+            result = requests.post(
+                f"https://api.telegram.org/bot{bot_key}/sendMessage",
+                json={"chat_id": self.chat_id, "text": str(message)},
+                headers={"Accept": "application/json"},
+                allow_redirects=False,
+                verify=True,
+                timeout=request_timeout(),
+            )
+            return result.status_code == 200
+        except Exception:
+            # Do not report this exception through Sentry here: SDK local-variable
+            # capture could retain the token-bearing endpoint and message.
+            return False
+
+    def send(self, message):
+        # This method already runs in the logs worker after the opaque CoreLog ID
+        # has been resolved. A second Celery task would put plaintext back into
+        # the shared broker.
+        return self._post_message(message)
 
     def validate(self):
-        try:
-            result = requests.get(
-                f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_KEY}/sendMessage?"
-                f"chat_id={self.chat_id}"
-                f"&text=Hey! This is validation message that your Telegram integration is working fine.",
-                headers={"content-type": "application/json"},
-                verify=True,
-            )
-            if result.status_code == 200:
-                return True
-            else:
-                raise ValueError(result.json().get("description"))
-        except Exception as e:
-            capture_exception(e)
-            return False
+        return self._post_message(
+            "Hey! This is validation message that your Telegram integration is working fine."
+        )
+
+
+class CoreNotificationDelivery(TimeStampedModel):
+    """Durable, opaque notification-channel delivery state.
+
+    The notification text remains in ``CoreLog`` and provider credentials remain
+    in their channel rows. Celery receives only this row's integer primary key.
+    A committed lease fences concurrent workers while the provider request runs
+    outside a database transaction. Provider APIs do not offer a portable
+    idempotency key, so a crash after a successful request but before ``SENT`` is
+    committed can result in an at-least-once duplicate after lease recovery.
+    """
+
+    class ChannelType(models.TextChoices):
+        SLACK = "slack", "Slack"
+        TELEGRAM = "telegram", "Telegram"
+
+    class Status(models.IntegerChoices):
+        PENDING = 0, "Pending"
+        PROCESSING = 1, "Processing"
+        RETRY = 2, "Retry"
+        SENT = 3, "Sent"
+        SKIPPED = 4, "Skipped"
+
+    log = models.ForeignKey(
+        "CoreLog",
+        related_name="notification_deliveries",
+        on_delete=models.CASCADE,
+    )
+    channel_type = models.CharField(max_length=16, choices=ChannelType.choices)
+    # A generic integer reference deliberately avoids copying channel credentials
+    # or recipient identifiers into this outbox. The worker verifies account
+    # ownership again immediately before delivery.
+    channel_id = models.PositiveBigIntegerField()
+    status = models.IntegerField(choices=Status.choices, default=Status.PENDING)
+    attempt_count = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(default=timezone.now)
+    lease_token = models.UUIDField(null=True, blank=True, editable=False)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    # Safe machine codes only. Never persist provider responses or exceptions:
+    # either can contain notification plaintext or bearer credentials.
+    outcome_code = models.CharField(max_length=32, blank=True, default="")
+
+    class Meta:
+        db_table = "core_notification_delivery"
+        constraints = [
+            UniqueConstraint(
+                fields=["log", "channel_type", "channel_id"],
+                name="unique_log_notification_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["status", "next_attempt_at"],
+                name="notification_due_idx",
+            ),
+            models.Index(
+                fields=["status", "lease_expires_at"],
+                name="notification_lease_idx",
+            ),
+        ]

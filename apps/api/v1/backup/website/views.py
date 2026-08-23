@@ -67,6 +67,7 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     serializer_class = CoreWebsiteBackupSerializer
     backup_model = CoreWebsiteBackup
     backup_node_relation = "website"
+    backup_delete_model_key = "website"
     all_fields = [f.name for f in CoreWebsiteBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -79,8 +80,7 @@ class CoreWebsiteBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
-        instance.soft_delete()
-        return Response(status=status.HTTP_204_NO_CONTENT, data={})
+        return self.request_backup_delete(instance)
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, *args, **kwargs):

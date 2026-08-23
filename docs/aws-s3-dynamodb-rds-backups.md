@@ -70,11 +70,13 @@ instance, or any resource not owned by that BackupSheep backup row.
 
 ## Verification
 
-Focused local coverage:
+Focused local coverage, after creating the manual Compose configuration and protected
+`.secrets` files from the installation guide:
 
-```text
-docker compose run --rm --no-deps \
-  -e DJANGO_SECRET_KEY=codex-local-test-secret app \
+```bash
+./backupsheep-compose build app
+./backupsheep-compose --allow-reviewed-runtime-overrides run --rm --no-deps \
+  -e DJANGO_SERVER=test app \
   python manage.py test apps.tests.test_aws_backup_resources
 ```
 

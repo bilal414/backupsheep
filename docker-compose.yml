@@ -10,12 +10,19 @@
 #   worker-files .... website/wordpress/basecamp dumps. Heavy CPU/disk.
 #   worker-storage .. uploads each finished dump to the storage backends + cleanup.
 #                     Scale this out for upload throughput:
-#                         docker compose up -d --scale worker-storage=4
+#                         ./backupsheep-compose --profile operations up -d --scale worker-storage=4
 #   worker-logs ..... DB log entries, Slack/Telegram/Firebase notifications, and pruning
 #                     old run logs from disk (delete_old_logs).
 #   beat ............ Celery beat scheduler. BackupSheep scheduled-backup entries use a
 #                     transactional occurrence claim, so duplicate Beat processes
 #                     converge safely; keep ordinary maintenance entries singleton.
+#
+# A profile-less `./backupsheep-compose up` is provider-operation-disabled/core-only: it
+# creates or restarts PostgreSQL, RabbitMQ and the web UI and can apply irreversible
+# database migrations. Use `./backupsheep-compose config --quiet` for non-mutating model
+# validation. Provider workers and Beat require the explicit `operations` profile after
+# credentials and recovery state have been reviewed:
+#     ./backupsheep-compose --profile operations up -d
 #
 # All disk-touching workers (database, files, storage) share the backup_workdir volume,
 # so any of them can see any backup's in-progress files. On a SINGLE host you can scale
@@ -25,16 +32,24 @@
 # backup_workdir must be a shared network filesystem (NFS/EFS) so replicas see each
 # other's files.
 #
-# Plus PostgreSQL and RabbitMQ (the Celery broker). Build and start everything with:
-#     docker compose up --build
+# Plus PostgreSQL and RabbitMQ (the Celery broker). Build the reviewed app image, then
+# start the core with the model-locking wrapper:
+#     ./backupsheep-compose build app
+#     ./backupsheep-compose up -d
 #
 # Configure .env (see .env_sample). For this stack use the service names below:
 #     DB_HOST=db
 #     DB_PORT=5432
 #     RABBITMQ_HOST=rabbitmq
 #     RABBITMQ_USER=backupsheep
-#     RABBITMQ_PASSWORD=<a-long-random-secret>
 #     RABBITMQ_VHOST=backupsheep
+# The installer stores the Django, database, broker, and onboarding secrets as private
+# file-backed Compose secrets under `.secrets`; their `.env` counterparts stay blank.
+
+# Persist the installer-reviewed project identity in configuration as well as the
+# command line. This prevents a manual rerun from silently selecting a new project
+# name and creating an apparently empty second database/broker volume set.
+name: "${BACKUPSHEEP_COMPOSE_PROJECT_NAME:?BACKUPSHEEP_COMPOSE_PROJECT_NAME is required}"
 
 x-default-logging: &default-logging
   driver: json-file
@@ -42,18 +57,133 @@ x-default-logging: &default-logging
     max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
     max-file: "${DOCKER_LOG_MAX_FILE:-5}"
 
+# A random installer-owned identity is attached to every service container and one
+# empty sentinel volume. The installer combines it with Compose's standard labels
+# before mutation, without changing labels on existing data volumes during upgrades.
+x-installation-labels: &installation-labels
+  com.backupsheep.installation-id: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+
 # Least-privilege defaults for services built from the BackupSheep application image.
-# Database and broker images retain their vendor-supported runtime requirements.
+# The explicit UID is defense in depth if an image's USER metadata regresses. The root
+# filesystem is immutable; only the named data volumes and bounded tmpfs are writable.
 x-app-runtime: &app-runtime
+  labels: *installation-labels
+  user: "10001:10001"
+  # Never substitute an untrusted registry image when the reviewed local build is
+  # absent. The installer builds the exact commit before it starts any service.
+  pull_policy: never
+  privileged: false
+  read_only: true
   init: true
+  cgroup: private
+  ipc: private
   pids_limit: "${BACKUPSHEEP_PIDS_LIMIT:-512}"
   cap_drop:
     - ALL
   security_opt:
     - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=${BACKUPSHEEP_TMPFS_SIZE:-256m},mode=1777
+    - /run/backupsheep:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10001,gid=10001
+  ulimits:
+    core:
+      soft: 0
+      hard: 0
+    nofile:
+      soft: 4096
+      hard: 4096
+  stop_grace_period: "${BACKUPSHEEP_STOP_GRACE_PERIOD:-5m}"
+
+# `env_file` remains the compatibility/configuration surface, but direct copies of the
+# four installation secrets are explicitly removed from every application container.
+# Settings resolves the first three from the read-only secret files instead. Only the
+# web service receives the onboarding token secret.
+x-app-secret-environment: &app-secret-environment
+  # `env_file` is evaluated before the image entrypoint. Blank loader hooks here so
+  # a stale/tampered .env cannot inject a shared library before init.sh can sanitize
+  # its descendants or capture TLS session keys.
+  LD_AUDIT: ""
+  LD_LIBRARY_PATH: ""
+  LD_PRELOAD: ""
+  SSLKEYLOGFILE: ""
+  # The stock image also supports a JSON configuration blob for non-Compose PaaS
+  # deployments. Suppress that alternate source here so it cannot replace the
+  # reviewed .env plus file-backed secret model. Pin the only settings module whose
+  # deployment preflight and hardening contract are reviewed by this stack.
+  BACKUPSHEEP_SECRETS: ""
+  DJANGO_SETTINGS_MODULE: backupsheep.settings
+  DJANGO_SECRET_KEY: ""
+  DJANGO_SECRET_KEY_FILE: /run/secrets/django_secret_key
+  # URL-style overrides embed credentials and take precedence over the reviewed
+  # file-backed fragments in Django/Celery. Blank them even when a legacy .env
+  # still contains one; the deployment preflight independently enforces this.
+  DATABASE_URL: ""
+  DB_PASSWORD: ""
+  DB_PASSWORD_FILE: /run/secrets/db_password
+  CELERY_BROKER_URL: ""
+  RABBITMQ_PASSWORD: ""
+  RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_password
+  ONBOARDING_INSTALL_TOKEN: ""
+  # Keep SSH trust and the optional managed identity out of the shared backup
+  # work volume. Compose mounts the trust store only into roles that use SSH,
+  # and mounts the managed private key as a read-only file-backed secret.
+  SSH_KNOWN_HOSTS_PATH: /var/lib/backupsheep/ssh-trust/known_hosts
+  SSH_MANAGED_PRIVATE_KEY_PATH: /run/backupsheep/ssh/managed_private_key
+
+x-app-secrets: &app-secrets
+  - django_secret_key
+  - db_password
+  - rabbitmq_password
+
+# PostgreSQL and RabbitMQ bootstrap as root solely to repair their named-volume
+# ownership before dropping to their vendor users. Retain only the capabilities that
+# their reviewed entrypoints need for that transition. Their application roots are
+# immutable and their writable runtime/data paths are explicit below.
+x-stateful-runtime: &stateful-runtime
+  labels: *installation-labels
+  privileged: false
+  read_only: true
+  # Do not inject Docker's root-owned init shim here. Both vendor entrypoints
+  # exec their long-running server after dropping privileges, so the server can
+  # be non-root PID 1 and handle its own documented shutdown path.
+  cgroup: private
+  ipc: private
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    - SETGID
+    - SETUID
+  security_opt:
+    - no-new-privileges:true
+  ulimits:
+    core:
+      soft: 0
+      hard: 0
+    nofile:
+      soft: 65536
+      hard: 65536
+
+# One externally routed bridge per outward-facing role prevents compromised roles from
+# reaching each other on their egress interface. Each outward service assigns that
+# bridge `gw_priority: 1` so an internal bridge cannot become its default route.
+x-egress-network: &egress-network
+  attachable: false
+  driver_opts:
+    com.docker.network.bridge.enable_icc: "false"
+
+# Every database/broker attachment is a distinct internal bridge. A worker can reach
+# only its required stateful endpoints, not another BackupSheep role. The database and
+# broker never share a bridge with each other.
+x-internal-network: &internal-network
+  internal: true
+  attachable: false
 
 services:
   db:
+    <<: *stateful-runtime
     # Keep the Debian generation aligned with the PostgreSQL 18 image used to
     # initialize existing volumes. Moving a cluster created with glibc 2.41 to
     # Bookworm's older glibc 2.36 produces a collation-version mismatch and can
@@ -62,22 +192,45 @@ services:
     environment:
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      # The official PostgreSQL entrypoint resolves this file and unsets the pointer
+      # before it starts postgres, keeping the password out of container inspection.
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
     volumes:
       # postgres:18+ images keep data in a versioned subdir of /var/lib/postgresql
       # and refuse to start when the mount is at the old .../data path.
       - pgdata:/var/lib/postgresql
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${POSTGRES_TMPFS_SIZE:-128m},mode=1777
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=3775,uid=999,gid=999
+    pids_limit: "${POSTGRES_PIDS_LIMIT:-256}"
+    mem_limit: "${POSTGRES_MEMORY_LIMIT:-2g}"
+    cpus: "${POSTGRES_CPU_LIMIT:-2.0}"
+    shm_size: "${POSTGRES_SHM_SIZE:-256m}"
+    stop_grace_period: "${POSTGRES_STOP_GRACE_PERIOD:-1m}"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      # pg_isready reports server readiness even when authentication fails. Prove
+      # the rotated file-backed credential over the same TCP path used by Django.
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$(cat /run/secrets/db_password)\" psql --no-password --host=127.0.0.1 --username=\"$${POSTGRES_USER}\" --dbname=\"$${POSTGRES_DB}\" --tuples-only --no-align --command='SELECT 1' | grep -qx '1'"]
       interval: 5s
       timeout: 5s
       retries: 10
     networks:
-      - backend
+      - app-database
+      - migrate-database
+      - cloud-database
+      - database-database
+      - files-database
+      - storage-database
+      - logs-database
+      - beat-database
+      - preflight-database
     logging: *default-logging
     restart: unless-stopped
 
   rabbitmq:
+    <<: *stateful-runtime
     image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
     # RabbitMQ derives its durable node database path from the node hostname.
     # Container IDs change on recreation, so keep the hostname stable or the same
@@ -85,8 +238,18 @@ services:
     hostname: rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER:-backupsheep}"
-      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD:?Set a non-empty RABBITMQ_PASSWORD in .env}"
       RABBITMQ_DEFAULT_VHOST: "${RABBITMQ_VHOST:-backupsheep}"
+      RABBITMQ_DEFAULT_PASS: ""
+    # RabbitMQ 4.3 rejects the formerly supported RABBITMQ_DEFAULT_PASS_FILE variable.
+    # Read the mounted secret in-process, then hand control back to the vendor entrypoint
+    # so its volume repair and UID 100 privilege drop remain intact.
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export RABBITMQ_DEFAULT_PASS="$$(cat /run/secrets/rabbitmq_password)"
+        exec /usr/local/bin/docker-entrypoint.sh rabbitmq-server
+    secrets:
+      - rabbitmq_password
     # Celery uses durable queues and persistent delivery, but RabbitMQ still needs
     # its own data directory persisted across container recreation. Without this,
     # `docker compose down && up` can discard queued backups before the database
@@ -97,6 +260,13 @@ services:
       # work. Database/file/storage commands can legitimately run for many hours,
       # so the broker timeout must exceed their longest supported command budget.
       - ./deploy/rabbitmq/90-backupsheep.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${RABBITMQ_TMPFS_SIZE:-128m},mode=1777
+      - /var/log/rabbitmq:rw,noexec,nosuid,nodev,size=64m,mode=0750,uid=100,gid=101
+    pids_limit: "${RABBITMQ_PIDS_LIMIT:-512}"
+    mem_limit: "${RABBITMQ_MEMORY_LIMIT:-1g}"
+    cpus: "${RABBITMQ_CPU_LIMIT:-1.0}"
+    stop_grace_period: "${RABBITMQ_STOP_GRACE_PERIOD:-3m}"
     healthcheck:
       # The official image starts as root and then drops privileges. Run the CLI as the
       # broker user so an early probe cannot create a root-owned Erlang cookie and crash
@@ -107,7 +277,14 @@ services:
       retries: 10
       start_period: 30s
     networks:
-      - backend
+      - app-broker
+      - cloud-broker
+      - database-broker
+      - files-broker
+      - storage-broker
+      - logs-broker
+      - beat-broker
+      - preflight-broker
     logging: *default-logging
     restart: unless-stopped
 
@@ -117,12 +294,41 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
+    environment: *app-secret-environment
+    secrets: *app-secrets
     command: ["python", "manage.py", "migrate", "--noinput"]
+    mem_limit: "${MIGRATE_MEMORY_LIMIT:-2g}"
+    cpus: "${MIGRATE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
     networks:
-      - backend
+      - migrate-database
+    logging: *default-logging
+    restart: "no"
+
+  # One-shot fail-closed deployment gate. The command verifies production settings,
+  # secret-file resolution, database/broker isolation, and required migrations before
+  # either the web process or an externally mutating worker can start.
+  preflight:
+    <<: *app-runtime
+    image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
+    env_file: .env
+    environment: *app-secret-environment
+    secrets: *app-secrets
+    command: ["python", "manage.py", "docker_preflight"]
+    mem_limit: "${PREFLIGHT_MEMORY_LIMIT:-1g}"
+    cpus: "${PREFLIGHT_CPU_LIMIT:-1.0}"
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - preflight-database
+      - preflight-broker
     logging: *default-logging
     restart: "no"
 
@@ -133,7 +339,16 @@ services:
       dockerfile: Dockerfile
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
-    # Uses the image ENTRYPOINT (init.sh): collectstatic, then gunicorn on :8000.
+    environment:
+      <<: *app-secret-environment
+      ONBOARDING_INSTALL_TOKEN_SECRET_FILE: /run/secrets/onboarding_token
+    secrets:
+      - django_secret_key
+      - db_password
+      - rabbitmq_password
+      - onboarding_token
+      - ssh_managed_private_key
+    # Uses the image ENTRYPOINT (init.sh) to start gunicorn on :8000.
     depends_on:
       db:
         condition: service_healthy
@@ -141,13 +356,28 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      preflight:
+        condition: service_completed_successfully
     ports:
       - "${BACKUPSHEEP_BIND_ADDRESS:-127.0.0.1}:${BACKUPSHEEP_BIND_PORT:-8000}:8000"
+    mem_limit: "${APP_MEMORY_LIMIT:-2g}"
+    cpus: "${APP_CPU_LIMIT:-2.0}"
     volumes:
-      # Connection validation must read the exact same reviewed SSH host keys and
-      # optional managed private key used by files/database workers.
-      - backup_workdir:/code/_storage
-      - backup_storage:/backups
+      # The Internet-facing web process can update only the reviewed SSH trust
+      # database. It receives no backup_workdir mount, so staged archives, cache,
+      # logs and worker locks are neither readable nor writable after web RCE.
+      - ssh_trust:/var/lib/backupsheep/ssh-trust
+      - type: volume
+        source: backup_storage
+        target: /backups
+        read_only: true
+      # Empty, read-only sentinel volume whose immutable Docker label lets the
+      # installer prove project ownership even after `docker compose down` removes
+      # all containers and networks. It contains no application or secret data.
+      - type: volume
+        source: installation_identity
+        target: /run/backupsheep-installation
+        read_only: true
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=3)"]
       interval: 15s
@@ -155,19 +385,27 @@ services:
       retries: 5
       start_period: 60s
     networks:
-      - backend
-      - egress
+      app-database: {}
+      app-broker: {}
+      app-egress:
+        gw_priority: 1
     logging: *default-logging
     restart: unless-stopped
 
   # API-only provider snapshots + general/notification tasks. Stateless (no _storage
-  # volume), so this is the only worker safe to scale horizontally. Cloud tasks just
-  # wait on provider HTTP, so concurrency can run high.
+  # or /backups volume), so this is the only worker safe to scale horizontally.
+  # Local Storage probes and every deletion path are routed to worker-storage. Cloud
+  # tasks just wait on provider HTTP, so concurrency can run high.
   worker-cloud:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
+    environment: *app-secret-environment
+    secrets: *app-secrets
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=${CELERY_CLOUD_CONCURRENCY:-4}", "--prefetch-multiplier=${CELERY_CLOUD_PREFETCH_MULTIPLIER:-1}"]
+    profiles: ["operations"]
+    mem_limit: "${WORKER_CLOUD_MEMORY_LIMIT:-1g}"
+    cpus: "${WORKER_CLOUD_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
@@ -175,11 +413,13 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    volumes:
-      - backup_storage:/backups
+      preflight:
+        condition: service_completed_successfully
     networks:
-      - backend
-      - egress
+      cloud-database: {}
+      cloud-broker: {}
+      cloud-egress:
+        gw_priority: 1
     logging: *default-logging
     restart: unless-stopped
 
@@ -189,7 +429,16 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
+    environment: *app-secret-environment
+    secrets:
+      - django_secret_key
+      - db_password
+      - rabbitmq_password
+      - ssh_managed_private_key
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
+    profiles: ["operations"]
+    mem_limit: "${WORKER_DATABASE_MEMORY_LIMIT:-2g}"
+    cpus: "${WORKER_DATABASE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
@@ -197,12 +446,23 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      preflight:
+        condition: service_completed_successfully
     volumes:
       - backup_workdir:/code/_storage
-      - backup_storage:/backups
+      - type: volume
+        source: ssh_trust
+        target: /var/lib/backupsheep/ssh-trust
+        read_only: true
+      - type: volume
+        source: backup_storage
+        target: /backups
+        read_only: true
     networks:
-      - backend
-      - egress
+      database-database: {}
+      database-broker: {}
+      database-egress:
+        gw_priority: 1
     logging: *default-logging
     restart: unless-stopped
 
@@ -212,7 +472,16 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
+    environment: *app-secret-environment
+    secrets:
+      - django_secret_key
+      - db_password
+      - rabbitmq_password
+      - ssh_managed_private_key
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
+    profiles: ["operations"]
+    mem_limit: "${WORKER_FILES_MEMORY_LIMIT:-2g}"
+    cpus: "${WORKER_FILES_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
@@ -220,12 +489,23 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      preflight:
+        condition: service_completed_successfully
     volumes:
       - backup_workdir:/code/_storage
-      - backup_storage:/backups
+      - type: volume
+        source: ssh_trust
+        target: /var/lib/backupsheep/ssh-trust
+        read_only: true
+      - type: volume
+        source: backup_storage
+        target: /backups
+        read_only: true
     networks:
-      - backend
-      - egress
+      files-database: {}
+      files-broker: {}
+      files-egress:
+        gw_priority: 1
     logging: *default-logging
     restart: unless-stopped
 
@@ -233,37 +513,50 @@ services:
   # uploads it to every configured storage backend (storage_upload), finalizes the backup
   # and cleans up local files. Reads the same volume the dump workers write, so scale it
   # out freely for more upload throughput:
-  #     docker compose up -d --scale worker-storage=4
+  #     ./backupsheep-compose --profile operations up -d --scale worker-storage=4
   worker-storage:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
+    environment: *app-secret-environment
+    secrets: *app-secrets
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=storage@%h", "-Q", "storage", "--concurrency=${CELERY_STORAGE_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_STORAGE_PREFETCH_MULTIPLIER:-1}"]
+    profiles: ["operations"]
+    mem_limit: "${WORKER_STORAGE_MEMORY_LIMIT:-2g}"
+    cpus: "${WORKER_STORAGE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
       migrate:
+        condition: service_completed_successfully
+      preflight:
         condition: service_completed_successfully
     volumes:
       - backup_workdir:/code/_storage
       - backup_storage:/backups
     networks:
-      - backend
-      - egress
+      storage-database: {}
+      storage-broker: {}
+      storage-egress:
+        gw_priority: 1
     logging: *default-logging
     restart: unless-stopped
 
-  # Log pipeline: writes log entries to the DB (send_log_to_db), fans out Slack/Telegram
-  # notifications, and prunes old run logs (delete_old_logs). Mounts the shared
-  # backup_workdir volume so it can see and prune the run logs the dump workers leave in
-  # _storage. Stateless otherwise -> scale out if log/notification volume is high.
+  # Log pipeline: writes log entries to the DB (send_log_to_db) and fans out
+  # Slack/Telegram notifications. Local run-log pruning is routed to worker-storage,
+  # keeping this externally connected notification role away from staged artifacts.
   worker-logs:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
+    environment: *app-secret-environment
+    secrets: *app-secrets
     command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=logs@%h", "-Q", "logs", "--concurrency=${CELERY_LOGS_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_LOGS_PREFETCH_MULTIPLIER:-1}"]
+    profiles: ["operations"]
+    mem_limit: "${WORKER_LOGS_MEMORY_LIMIT:-512m}"
+    cpus: "${WORKER_LOGS_CPU_LIMIT:-1.0}"
     depends_on:
       db:
         condition: service_healthy
@@ -271,11 +564,13 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    volumes:
-      - backup_workdir:/code/_storage
+      preflight:
+        condition: service_completed_successfully
     networks:
-      - backend
-      - egress
+      logs-database: {}
+      logs-broker: {}
+      logs-egress:
+        gw_priority: 1
     logging: *default-logging
     restart: unless-stopped
 
@@ -283,7 +578,12 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
+    environment: *app-secret-environment
+    secrets: *app-secrets
     command: ["celery", "-A", "backupsheep", "beat", "--loglevel=info", "--scheduler", "backupsheep.scheduler:BackupDatabaseScheduler"]
+    profiles: ["operations"]
+    mem_limit: "${BEAT_MEMORY_LIMIT:-512m}"
+    cpus: "${BEAT_CPU_LIMIT:-0.5}"
     depends_on:
       db:
         condition: service_healthy
@@ -291,22 +591,46 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      preflight:
+        condition: service_completed_successfully
     networks:
-      - backend
+      - beat-database
+      - beat-broker
     logging: *default-logging
     restart: unless-stopped
 
 networks:
-  # Database and broker traffic stays on a non-routed network. Application roles that
-  # call backup/storage providers also join the ordinary egress network below.
-  backend:
-    internal: true
-  egress:
+  app-database: *internal-network
+  app-broker: *internal-network
+  migrate-database: *internal-network
+  cloud-database: *internal-network
+  cloud-broker: *internal-network
+  database-database: *internal-network
+  database-broker: *internal-network
+  files-database: *internal-network
+  files-broker: *internal-network
+  storage-database: *internal-network
+  storage-broker: *internal-network
+  logs-database: *internal-network
+  logs-broker: *internal-network
+  beat-database: *internal-network
+  beat-broker: *internal-network
+  preflight-database: *internal-network
+  preflight-broker: *internal-network
+  app-egress: *egress-network
+  cloud-egress: *egress-network
+  database-egress: *egress-network
+  files-egress: *egress-network
+  storage-egress: *egress-network
+  logs-egress: *egress-network
 
 volumes:
   pgdata:
   rabbitmq_data:
   backup_workdir:
+  # UI-approved host keys are isolated from staged backup data. The app is the
+  # only writer; SSH-capable workers mount this trust store read-only.
+  ssh_trust:
   # This is where 'Local Storage' backups live (mounted at /backups in the app and
   # worker containers). To keep backups on a big disk or an NFS share instead of the
   # Docker-managed volume, override with a bind mount in docker-compose.override.yml:
@@ -318,3 +642,23 @@ volumes:
   #         o: bind
   #         device: /mnt/storage/backupsheep
   backup_storage:
+  installation_identity:
+    labels: *installation-labels
+
+# Compose bind-mounts these installation files read-only under /run/secrets,
+# so their values never appear in container inspection. Environment-sourced Compose
+# secrets cannot be materialized into an immutable root filesystem; the installer
+# therefore owns `.secrets` as a mode-0700 directory containing mode-0444 files. The
+# private directory blocks host traversal while the bind-mounted file stays readable by
+# the non-root container UID. This is application state, not a host-security change.
+secrets:
+  django_secret_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/django_secret_key
+  db_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_password
+  rabbitmq_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_password
+  onboarding_token:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/onboarding_token
+  ssh_managed_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/ssh_managed_private_key

@@ -33,7 +33,7 @@
 
 | Source | Details |
 |---|---|
-| **Websites / files** | FTP, FTPS, SFTP, SSH. Include/exclude rules (regex + glob), parallel transfers, all key types (Ed25519/ECDSA/RSA, incl. passphrase-protected), server-side tar transport for SSH sources. |
+| **Websites / files** | FTPS, SFTP, SSH, and explicit opt-in legacy FTP. Include/exclude rules (regex + glob), parallel transfers, all key types (Ed25519/ECDSA/RSA, incl. passphrase-protected), server-side tar transport for SSH sources. Plain FTP is disabled by default because it exposes credentials and backup data. |
 | **Databases** | MySQL (bundled Oracle MySQL 8.4 client), MariaDB, PostgreSQL (version-matched `pg_dump` 14–18). Direct TCP or SSH tunnel, all databases or per-table selection, stored procedures, SSL/TLS. |
 | **Cloud servers & volumes** | DigitalOcean, AWS (EC2, RDS, Lightsail), Hetzner, Vultr, UpCloud, Oracle Cloud, Google Cloud, OVH (CA/EU/US) — provider-native snapshots. |
 | **SaaS apps** | WordPress, Basecamp. |
@@ -104,24 +104,27 @@ console does · specialized Celery worker queues you can scale independently.
 
 ## Quick start
 
-### One-command server install
+### Verified server install
 
-On a fresh **Ubuntu 22.04+ or Debian 12+** server, run:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash
-```
-
-The installer downloads BackupSheep from GitHub, installs Docker Engine with the Compose
-plugin and Git, generates secure application/database/broker/onboarding secrets, builds the
-stack, and waits for the app health check. It prints an SSH-tunnel command and an explicit
-server-side token retrieval command, but never writes the token to install logs. It detects
-the public IPv4 address by default; pass your hostname explicitly when
-you know it:
+The host operator supplies Git, Docker Engine 28.0.0+ and Docker Compose 2.33.1+.
+Choose a reviewed release commit, download the installer from that exact immutable
+commit, inspect it, and run it as the unprivileged user already authorized for Docker:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash -s -- --domain backups.example.com
+COMMIT='<40-character-reviewed-release-commit>'
+curl -fSLo install.sh \
+  "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
+less install.sh
+chmod 700 install.sh
+./install.sh --ref "${COMMIT}" --domain backups.example.com
 ```
+
+Do not pipe a remote script to a shell. The installer does not install packages or
+change Docker, firewall, kernel, daemon, TLS, DNS, or service configuration. It verifies
+the exact checkout, generates protected file-backed secrets, builds the image, and starts
+only PostgreSQL, RabbitMQ, migrations, the security preflight, and the web UI. Provider
+workers and Beat require a later explicit `--enable-operations` after recovery state and
+credentials have been reviewed.
 
 The initial install binds plain HTTP to `127.0.0.1:8000`; do not open that port publicly.
 Use the printed SSH tunnel for onboarding, then put the app behind HTTPS. See
@@ -132,16 +135,18 @@ Use the printed SSH tunnel for onboarding, then put the app behind HTTPS. See
 DigitalOcean App Platform's deploy button supports only a single service (optionally with
 a development database), while BackupSheep needs a web process, queue worker, scheduler,
 database, and broker. Create an Ubuntu 22.04+ or Debian 12+ Droplet, then use the
-[one-command installer](docs/digitalocean-droplet.md). It deploys the complete Docker
-Compose stack with persistent volumes.
+[verified installer](docs/digitalocean-droplet.md). It deploys the complete Docker
+Compose definition with persistent volumes, while leaving backup workers and Beat off
+until the operator explicitly enables operations.
 
 ### Other cloud VMs
 
 The same complete installer works on fresh Ubuntu 22.04+ or Debian 12+ VMs from **AWS**,
 **Azure**, **Google Cloud**, **Hetzner**, **Vultr**, **Akamai/Linode**, **OVHcloud**,
 **Scaleway**, **UpCloud**, and similar providers. The [cloud VM guide](docs/cloud-vms.md)
-includes the exact one-command and reusable cloud-init configuration. This is the preferred
-path for durable local archives and independently scalable worker pools.
+includes the exact verified-install commands. Unattended root cloud-init installation is
+intentionally disabled; host provisioning remains the operator's responsibility. This is
+the preferred path for durable local archives and independently scalable worker pools.
 
 ### Render
 
@@ -172,26 +177,16 @@ backup archives.
 
 ### Manual Docker Compose install
 
-You need [Docker](https://docs.docker.com/get-docker/) with the Compose plugin, and `git`.
+The manual path uses the same exact-commit checkout, `.secrets` file mounts, core-only
+default startup, and explicit `operations` profile. Follow the complete
+[Docker installation guide](docs/guides/installation.md); a plain `.env` containing
+database or broker passwords is no longer the supported security model. Use the shipped
+`./backupsheep-compose` wrapper for manual operations so ambient Compose/Bake/profile
+variables and implicit override discovery cannot change the reviewed model.
 
-```bash
-git clone <your-fork-or-this-repo-url> backupsheep
-cd backupsheep
-
-cp .env_sample .env
-chmod 600 .env
-# Edit .env and set at least:
-#   DJANGO_SECRET_KEY  -> a long random string (python -c "import secrets; print(secrets.token_urlsafe(64))")
-#   DB_PASSWORD        -> a database password of your choice
-#   RABBITMQ_PASSWORD  -> a separate random broker password (python -c "import secrets; print(secrets.token_hex(32))")
-# The other defaults already target the bundled db/rabbitmq services. The web port binds
-# to 127.0.0.1 by default; connect a TLS reverse proxy rather than exposing port 8000.
-
-docker compose up --build
-```
-
-Open **http://localhost:8000/** on the Docker host — the first-run wizard guides you through creating the
-admin account, email, storage, and your first source.
+After the core preflight passes, open **http://localhost:8000/** on the Docker host. The
+first-run wizard guides you through creating the admin account, email, storage, and your
+first source.
 
 > The app serves plain HTTP on port 8000 and is meant to sit behind your own
 > TLS-terminating reverse proxy in production. Before exposing it, read

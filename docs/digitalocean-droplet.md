@@ -15,28 +15,33 @@ the complete stack.
 2. Allow SSH only from your trusted address. Keep TCP port 8000 closed; the installer
    binds it to loopback for an SSH tunnel. Expose only 80/443 after configuring a reverse
    proxy.
-3. SSH into the Droplet and run:
+3. Install and secure Git, Docker Engine 28.0.0+ and Docker Compose 2.33.1+ using your
+   host-management policy. Grant the intended unprivileged application user access to
+   that Docker daemon.
+4. As that user, download the installer from the exact reviewed release commit and run
+   it without `sudo`:
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash
+   COMMIT='<40-character-reviewed-release-commit>'
+   curl -fSLo install.sh \
+     "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
+   less install.sh
+   chmod 700 install.sh
+   ./install.sh --ref "${COMMIT}" --domain backups.example.com
    ```
 
-4. For a DNS name, pass it to the installer from the start:
-
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash -s -- --domain backups.example.com
-   ```
-
-The installer creates `/opt/backupsheep`, installs Docker Engine and its Compose plugin,
-generates application, database, broker, and onboarding secrets, and starts the complete
-stack. When the web service is healthy, it prints an SSH-tunnel command and a trusted-shell
-token retrieval command without writing the token itself to install logs.
+The installer changes no host settings. It verifies the exact checkout, generates
+file-backed application/database/broker/onboarding secrets, builds the reviewed image and
+starts only the core stack. When the web service is healthy, it prints an SSH-tunnel and
+trusted-shell token retrieval command without writing the token to logs. Provider workers
+and Beat remain stopped until the operator reviews recovery/queue state and explicitly
+runs the same installer with `--enable-operations`.
 
 ## Production notes
 
 - Put a TLS-terminating reverse proxy in front of BackupSheep before public use, then set
   `DJANGO_HTTPS=true`, `APP_PROTOCOL=https://`, `APP_DOMAIN`, and
-  `DJANGO_ALLOWED_HOSTS` in `/opt/backupsheep/.env`.
+  `DJANGO_ALLOWED_HOSTS` in the installation `.env`.
 - Mount an attached DigitalOcean Block Storage volume over `/backups` if you use **Local
   Storage** as a backup destination. See [Configuration](configuration.md#local-storage-backup-destination-optional).
 - Object storage destinations such as DigitalOcean Spaces, S3, B2, or R2 are generally a

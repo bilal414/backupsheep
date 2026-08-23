@@ -1,5 +1,6 @@
 import subprocess
 import time
+import uuid
 from datetime import timedelta
 from billiard.exceptions import SoftTimeLimitExceeded
 from boto3.exceptions import S3UploadFailedError
@@ -7,9 +8,11 @@ from botocore.exceptions import ClientError
 from celery import current_app
 from celery.exceptions import MaxRetriesExceededError
 from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from sentry_sdk import capture_exception, capture_message
 
 from apps._tasks.diagnostics import capture_backup_diagnostic
@@ -101,7 +104,11 @@ from apps.console.backup.models import (
     StoragePointLeaseLostError,
 )
 from apps.console.node.models import CoreNode
-from apps.console.storage.models import CoreStorage
+from apps.console.storage.models import (
+    CoreStorage,
+    CoreStorageDeletionLease,
+    CoreStorageLocal,
+)
 from apps.console.utils.models import UtilBackup
 
 
@@ -162,6 +169,523 @@ _STORAGE_POINT_MODELS = {
 _STORAGE_POINT_MODEL_KEYS = {
     model: key for key, model in _STORAGE_POINT_MODELS.items()
 }
+_BACKUP_MODELS = {
+    "website": CoreWebsiteBackup,
+    "database": CoreDatabaseBackup,
+    "wordpress": CoreWordPressBackup,
+    "basecamp": CoreBasecampBackup,
+}
+_BACKUP_POINT_RELATIONS = {
+    "website": "stored_website_backups",
+    "database": "stored_database_backups",
+    "wordpress": "stored_wordpress_backups",
+    "basecamp": "stored_basecamp_backups",
+}
+
+
+def _canonical_positive_id(value):
+    """Accept a canonical positive database id, never a path-like payload."""
+
+    try:
+        canonical = int(value)
+    except (TypeError, ValueError):
+        return None
+    if canonical <= 0 or str(canonical) != str(value):
+        return None
+    return canonical
+
+
+def _validate_local_storage_id(storage_id):
+    canonical_id = _canonical_positive_id(storage_id)
+    if canonical_id is None:
+        return {"result": "invalid_id"}
+
+    with transaction.atomic():
+        storage = (
+            CoreStorage.objects.select_for_update()
+            .select_related("type")
+            .filter(pk=canonical_id, type__code="local")
+            .first()
+        )
+        if storage is None:
+            return {"result": "not_found"}
+        if storage.status != CoreStorage.Status.PENDING:
+            return {"result": "not_pending"}
+        local_storage = CoreStorageLocal.objects.select_for_update().get(
+            storage_id=storage.pk
+        )
+
+        try:
+            valid = bool(local_storage.probe_filesystem())
+        except Exception as error:
+            capture_exception(error)
+            valid = False
+        storage.status = (
+            CoreStorage.Status.ACTIVE if valid else CoreStorage.Status.SUSPENDED
+        )
+        storage.save(update_fields=["status", "modified"])
+        return {"result": "valid" if valid else "invalid"}
+
+
+@current_app.task(name="validate_local_storage", ignore_result=True)
+def validate_local_storage(storage_id):
+    """Validate one persisted Local Storage row from the RW storage boundary."""
+
+    return _validate_local_storage_id(storage_id)
+
+
+@current_app.task(name="validate_pending_local_storages", ignore_result=True)
+def validate_pending_local_storages():
+    """Recover validation publishes lost to a broker outage or worker restart."""
+
+    storage_ids = list(
+        CoreStorage.objects.filter(
+            type__code="local", status=CoreStorage.Status.PENDING
+        ).values_list("pk", flat=True)[:100]
+    )
+    return [_validate_local_storage_id(storage_id) for storage_id in storage_ids]
+
+
+def _delete_lease_seconds():
+    try:
+        configured = int(
+            getattr(settings, "STORAGE_POINT_DELETE_LEASE_SECONDS", 3600)
+        )
+    except (TypeError, ValueError):
+        configured = 3600
+    return max(300, min(configured, 24 * 3600))
+
+
+def _delete_coordinator_lease_seconds():
+    # The point lease, not the coordinator, excludes external side effects. A
+    # short coordinator lease lets the sweep finalize a point already committed
+    # before its worker crashed, while the longer point fence still blocks overlap.
+    return min(_delete_lease_seconds(), 300)
+
+
+def _lease_is_live(expires_at, now=None):
+    if isinstance(expires_at, str):
+        expires_at = parse_datetime(expires_at)
+    return bool(expires_at and expires_at > (now or timezone.now()))
+
+
+def _point_is_deletion_protected(point):
+    if point.storage.is_air_gapped:
+        return True
+    try:
+        config = getattr(point.storage, f"storage_{point.storage.type.code}")
+    except (AttributeError, ObjectDoesNotExist):
+        return False
+    return bool(getattr(config, "no_delete", False))
+
+
+def _restore_previous_backup_status(request_state):
+    try:
+        previous_status = int(request_state.get("previous_status"))
+    except (TypeError, ValueError):
+        previous_status = int(UtilBackup.Status.COMPLETE)
+    forbidden = {
+        int(UtilBackup.Status.DELETE_REQUESTED),
+        int(UtilBackup.Status.DELETE_IN_PROGRESS),
+        int(UtilBackup.Status.DELETE_COMPLETED),
+    }
+    valid = {int(value) for value, _label in UtilBackup.Status.choices}
+    return (
+        previous_status
+        if previous_status in valid and previous_status not in forbidden
+        else int(UtilBackup.Status.COMPLETE)
+    )
+
+
+def _claim_backup_deletion(model, backup_id, owner):
+    token = uuid.uuid4()
+    now = timezone.now()
+    with transaction.atomic():
+        backup = model.objects.select_for_update().filter(pk=backup_id).first()
+        if backup is None:
+            return None, "not_requested"
+        metadata = dict(backup.metadata or {})
+        existing = dict(metadata.get("_deletion_claim") or {})
+        if backup.status == UtilBackup.Status.DELETE_IN_PROGRESS:
+            if _lease_is_live(existing.get("expires_at"), now):
+                return None, "busy"
+        elif backup.status != UtilBackup.Status.DELETE_REQUESTED:
+            return None, "not_requested"
+
+        request_state = dict(metadata.get("_deletion_request") or {})
+        request_state.setdefault("previous_status", int(UtilBackup.Status.COMPLETE))
+        request_state.update({"state": "in_progress", "last_attempt_at": now.isoformat()})
+        metadata["_deletion_request"] = request_state
+        metadata["_deletion_claim"] = {
+            "owner": owner,
+            "token": str(token),
+            "expires_at": (
+                now + timedelta(seconds=_delete_coordinator_lease_seconds())
+            ).isoformat(),
+        }
+        backup.metadata = metadata
+        backup.status = UtilBackup.Status.DELETE_IN_PROGRESS
+        backup.save(update_fields=["status", "metadata", "modified"])
+    return token, "claimed"
+
+
+def _claim_storage_point_delete(model_key, point_id, owner):
+    model = _STORAGE_POINT_MODELS[model_key]
+    now = timezone.now()
+    token = uuid.uuid4()
+    with transaction.atomic():
+        point = model.objects.select_for_update().filter(pk=point_id).first()
+        if point is None:
+            return None, "missing"
+        if point.status == point.Status.DELETE_COMPLETED:
+            return None, "deleted"
+        if _lease_is_live(point.upload_lease_expires_at, now):
+            return None, "busy"
+
+        metadata = dict(point.metadata or {})
+        prior_claim = dict(metadata.get("_deletion_claim") or {})
+        previous_status = prior_claim.get("previous_status", int(point.status))
+        metadata["_deletion_claim"] = {
+            "owner": owner,
+            "token": str(token),
+            "previous_status": previous_status,
+            "claimed_at": now.isoformat(),
+        }
+        point.metadata = metadata
+        point.status = point.Status.DELETE_REQUESTED
+        point.upload_lease_owner = owner
+        point.upload_lease_token = token
+        point.upload_lease_expires_at = now + timedelta(
+            seconds=_delete_lease_seconds()
+        )
+        point.upload_heartbeat_at = now
+        point.save(
+            update_fields=[
+                "metadata",
+                "status",
+                "upload_lease_owner",
+                "upload_lease_token",
+                "upload_lease_expires_at",
+                "upload_heartbeat_at",
+                "modified",
+            ]
+        )
+    return token, "claimed"
+
+
+def _delete_one_storage_point(model_key, point_id, owner):
+    model = _STORAGE_POINT_MODELS[model_key]
+    token, claim_result = _claim_storage_point_delete(model_key, point_id, owner)
+    if token is None:
+        return claim_result
+
+    point = model.objects.select_related(
+        "storage__type", "storage__account", "backup"
+    ).get(pk=point_id)
+    point.bind_upload_fence(owner, token)
+    try:
+        point.ensure_upload_fence()
+        deleted = point.soft_delete()
+    except StoragePointLeaseLostError:
+        return "busy"
+    except Exception as error:
+        capture_exception(error)
+        deleted = False
+
+    with transaction.atomic():
+        current = model.objects.select_for_update().filter(pk=point_id).first()
+        if current is None:
+            return "deleted"
+        if (
+            current.upload_lease_owner != owner
+            or str(current.upload_lease_token or "") != str(token)
+        ):
+            return "busy"
+        metadata = dict(current.metadata or {})
+        claim = dict(metadata.pop("_deletion_claim", {}) or {})
+        protected = bool(metadata.get("deletion_protection"))
+        if deleted:
+            current.status = current.Status.DELETE_COMPLETED
+            outcome = "deleted"
+        elif protected:
+            try:
+                previous_status = int(claim.get("previous_status"))
+            except (TypeError, ValueError):
+                previous_status = int(current.Status.UPLOAD_COMPLETE)
+            current.status = previous_status
+            outcome = "protected"
+        else:
+            if current.status == current.Status.DELETE_REQUESTED:
+                current.status = current.Status.DELETE_FAILED
+            outcome = "pending"
+        current.metadata = metadata
+        current.upload_lease_owner = ""
+        current.upload_lease_token = None
+        current.upload_lease_expires_at = None
+        current.upload_heartbeat_at = None
+        current.save(
+            update_fields=[
+                "metadata",
+                "status",
+                "upload_lease_owner",
+                "upload_lease_token",
+                "upload_lease_expires_at",
+                "upload_heartbeat_at",
+                "modified",
+            ]
+        )
+    return outcome
+
+
+def _delete_backup_requested_id(model_key, backup_id, *, owner=None):
+    model_key = str(model_key or "")
+    model = _BACKUP_MODELS.get(model_key)
+    canonical_id = _canonical_positive_id(backup_id)
+    if model is None or canonical_id is None:
+        return {"result": "invalid_request"}
+    owner = str(owner or f"backup-delete-{uuid.uuid4().hex}")[:255]
+    token, claim_result = _claim_backup_deletion(model, canonical_id, owner)
+    if token is None:
+        return {"result": claim_result}
+
+    backup = model.objects.get(pk=canonical_id)
+    relation_name = _BACKUP_POINT_RELATIONS[model_key]
+    points = getattr(backup, relation_name).select_related(
+        "storage__type"
+    ).order_by("pk")
+
+    # Refuse the whole request before deleting any unprotected sibling. This keeps
+    # a multi-destination backup fully restorable when one destination is an
+    # intentional air-gap/no-delete copy.
+    protected_point = next(
+        (point for point in points if _point_is_deletion_protected(point)), None
+    )
+    if protected_point is not None:
+        protected_point.defer_protected_delete(
+            "destination deletion protection is enabled"
+        )
+        point_result = "protected"
+    else:
+        point = points.exclude(status=points.model.Status.DELETE_COMPLETED).first()
+        point_result = (
+            _delete_one_storage_point(model_key, point.pk, owner)
+            if point is not None
+            else "deleted"
+        )
+
+    republish = False
+    with transaction.atomic():
+        current = model.objects.select_for_update().filter(pk=canonical_id).first()
+        if current is None:
+            return {"result": "deleted"}
+        metadata = dict(current.metadata or {})
+        claim = dict(metadata.get("_deletion_claim") or {})
+        if claim.get("owner") != owner or claim.get("token") != str(token):
+            return {"result": "stale"}
+        metadata.pop("_deletion_claim", None)
+        request_state = dict(metadata.get("_deletion_request") or {})
+        now = timezone.now().isoformat()
+
+        if point_result == "protected":
+            current.status = _restore_previous_backup_status(request_state)
+            request_state.update(
+                {"state": "deferred_protected", "completed_at": now}
+            )
+            result = "protected"
+        elif point_result == "deleted" and not getattr(
+            current, relation_name
+        ).exclude(status=points.model.Status.DELETE_COMPLETED).exists():
+            current.status = UtilBackup.Status.DELETE_COMPLETED
+            request_state.update({"state": "complete", "completed_at": now})
+            result = "deleted"
+        else:
+            current.status = UtilBackup.Status.DELETE_REQUESTED
+            request_state.update({"state": "pending", "last_attempt_at": now})
+            result = "pending" if point_result != "busy" else "busy"
+            republish = point_result == "deleted"
+        metadata["_deletion_request"] = request_state
+        current.metadata = metadata
+        current.save(update_fields=["status", "metadata", "modified"])
+
+        if republish:
+            transaction.on_commit(
+                lambda: delete_backup_requested.apply_async(
+                    args=[model_key, canonical_id]
+                )
+            )
+    return {"result": result}
+
+
+@current_app.task(
+    name="delete_backup_requested",
+    bind=True,
+    default_retry_delay=60,
+    max_retries=16,
+    ignore_result=True,
+)
+def delete_backup_requested(self, model_key, backup_id):
+    """Delete one already-authorized backup by allowlisted model key and DB id."""
+
+    try:
+        owner = str(self.request.id or f"backup-delete-{uuid.uuid4().hex}")
+        return _delete_backup_requested_id(model_key, backup_id, owner=owner)
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(exc=error)
+
+
+def _claim_storage_deletion(storage_id, owner):
+    token = uuid.uuid4()
+    now = timezone.now()
+    with transaction.atomic():
+        storage = CoreStorage.objects.select_for_update().filter(
+            pk=storage_id, status=CoreStorage.Status.DELETE_REQUESTED
+        ).first()
+        if storage is None:
+            return None, "not_requested"
+        lease, _created = CoreStorageDeletionLease.objects.get_or_create(
+            storage=storage
+        )
+        lease = CoreStorageDeletionLease.objects.select_for_update().get(
+            pk=lease.pk
+        )
+        if _lease_is_live(lease.expires_at, now):
+            return None, "busy"
+        lease.owner = owner
+        lease.token = token
+        lease.expires_at = now + timedelta(
+            seconds=_delete_coordinator_lease_seconds()
+        )
+        lease.save(
+            update_fields=["owner", "token", "expires_at", "modified"]
+        )
+    return token, "claimed"
+
+
+def _delete_storage_requested_id(storage_id, *, owner=None):
+    canonical_id = _canonical_positive_id(storage_id)
+    if canonical_id is None:
+        return {"result": "invalid_id"}
+    owner = str(owner or f"storage-delete-{uuid.uuid4().hex}")[:255]
+    token, claim_result = _claim_storage_deletion(canonical_id, owner)
+    if token is None:
+        return {"result": claim_result}
+
+    storage = CoreStorage.objects.get(pk=canonical_id)
+    candidates = []
+    protected_point = None
+    for model_key, model in _STORAGE_POINT_MODELS.items():
+        for point in model.objects.filter(storage_id=canonical_id).select_related(
+            "storage__type"
+        ).order_by("pk"):
+            if _point_is_deletion_protected(point):
+                protected_point = point
+                break
+            if point.status != point.Status.DELETE_COMPLETED:
+                candidates.append((model_key, point.pk))
+        if protected_point is not None:
+            break
+
+    if protected_point is not None:
+        protected_point.defer_protected_delete(
+            "destination deletion protection is enabled"
+        )
+        point_result = "protected"
+    elif candidates:
+        model_key, point_id = candidates[0]
+        point_result = _delete_one_storage_point(model_key, point_id, owner)
+    else:
+        point_result = "deleted"
+
+    republish = False
+    with transaction.atomic():
+        current = CoreStorage.objects.select_for_update().filter(
+            pk=canonical_id
+        ).first()
+        if current is None:
+            return {"result": "deleted"}
+        lease = CoreStorageDeletionLease.objects.select_for_update().get(
+            storage_id=canonical_id
+        )
+        if (
+            lease.owner != owner
+            or str(lease.token or "") != str(token)
+        ):
+            return {"result": "stale"}
+        if point_result == "protected":
+            current.status = CoreStorage.Status.ACTIVE
+            result = "protected"
+        elif point_result == "deleted":
+            remaining = any(
+                model.objects.filter(storage_id=canonical_id)
+                .exclude(status=model.Status.DELETE_COMPLETED)
+                .exists()
+                for model in _STORAGE_POINT_MODELS.values()
+            )
+            if not remaining:
+                current.delete()
+                return {"result": "deleted"}
+            result = "pending"
+            republish = True
+        else:
+            result = "pending" if point_result != "busy" else "busy"
+        current.save(update_fields=["status", "modified"])
+        lease.owner = ""
+        lease.token = None
+        lease.expires_at = None
+        lease.save(
+            update_fields=["owner", "token", "expires_at", "modified"]
+        )
+        if republish:
+            transaction.on_commit(
+                lambda: delete_storage_requested.apply_async(args=[canonical_id])
+            )
+    return {"result": result}
+
+
+@current_app.task(
+    name="delete_storage_requested",
+    bind=True,
+    default_retry_delay=60,
+    max_retries=16,
+    ignore_result=True,
+)
+def delete_storage_requested(self, storage_id):
+    """Delete one requested storage config only after its objects are resolved."""
+
+    try:
+        owner = str(self.request.id or f"storage-delete-{uuid.uuid4().hex}")
+        return _delete_storage_requested_id(storage_id, owner=owner)
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(exc=error)
+
+
+@current_app.task(name="resume_requested_storage_deletions", ignore_result=True)
+def resume_requested_storage_deletions():
+    """Republish exact durable deletion requests without doing provider I/O here."""
+
+    backup_requests = []
+    for model_key, model in _BACKUP_MODELS.items():
+        backup_ids = list(
+            model.objects.filter(
+                status__in=(
+                    UtilBackup.Status.DELETE_REQUESTED,
+                    UtilBackup.Status.DELETE_IN_PROGRESS,
+                )
+            )
+            .values_list("pk", flat=True)[:100]
+        )
+        for backup_id in backup_ids:
+            delete_backup_requested.apply_async(args=[model_key, backup_id])
+            backup_requests.append((model_key, backup_id))
+    storage_ids = list(
+        CoreStorage.objects.filter(status=CoreStorage.Status.DELETE_REQUESTED)
+        .values_list("pk", flat=True)[:100]
+    )
+    for storage_id in storage_ids:
+        delete_storage_requested.apply_async(args=[storage_id])
+    return {"backup_requests": backup_requests, "storage_ids": storage_ids}
 
 
 def _terminal_cleanup_statuses(model):

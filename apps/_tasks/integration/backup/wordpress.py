@@ -1,8 +1,8 @@
 import subprocess
 import os
+import secrets
 from sentry_sdk import capture_exception
 from apps._tasks.integration.backup.errors import safe_backup_failure
-import hashlib
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.backup._archive import create_zip
 from apps.api.v1.utils.api_helpers import check_string_in_file, aws_s3_upload_log_file
@@ -171,8 +171,9 @@ def snapshot_wordpress(backup):
         msg = "We have list of backup files."
         log_file.write(f"INFO: {msg} \n")
 
-        # We have changed the file names to add MD5 so files can be restored.
-        md5_code = hashlib.md5(str(int(time.time())).encode()).hexdigest()[0:12]
+        # Replace the plugin's backup UUID with an opaque per-run filename token.
+        # Random bytes avoid timestamp collisions and do not imply MD5 integrity.
+        filename_token = secrets.token_hex(6)
 
         backup_files = []
         for remote_file in result.json().get("files", []):
@@ -200,7 +201,9 @@ def snapshot_wordpress(backup):
             r.raise_for_status()
             # Strip any directory component the remote site may include so the write
             # stays inside the backup's _storage directory.
-            backup_file_alt = safe_basename(backup_file.replace(backup.uuid_str, md5_code))
+            backup_file_alt = safe_basename(
+                backup_file.replace(backup.uuid_str, filename_token)
+            )
 
             # Some servers return database .gz files with a .zip suffix.
             if backup_file_alt.endswith("-db.gz.zip"):

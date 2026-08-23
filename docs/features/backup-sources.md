@@ -82,9 +82,13 @@ new database fork; see [Restores](restores.md).
 
 ## Website archives
 
-Website connections support FTP, FTPS, and SFTP. SFTP can use a password,
+Website connections support FTPS and SFTP. SFTP can use a password,
 private key, or BackupSheep-managed public key. FTPS supports explicit TLS and
 certificate-verification settings.
+
+Plain FTP is retained only for legacy compatibility and is disabled by default. It
+requires `ALLOW_INSECURE_FTP=true`; use it only after accepting that credentials and
+backup data are exposed in transit.
 
 A website node can protect selected paths or all paths and define include or
 exclude rules using explicit lists, glob patterns, and regular expressions.

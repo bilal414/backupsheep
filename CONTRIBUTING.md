@@ -6,6 +6,9 @@ Thanks for your interest in improving BackupSheep! It's a Django 6 project (Pyth
 ## Development setup
 
 The fastest path is the Docker Compose stack (see [docs/installation.md](docs/installation.md)).
+Its reviewed production model requires Docker Engine 28.0.0+ and Compose 2.33.1+, an
+explicit local `./backupsheep-compose build app`, and a profile-less core start. Provider workers
+and Beat run only with the opt-in `operations` profile.
 For a local Python environment:
 
 ```bash
@@ -53,7 +56,7 @@ python manage.py makemigrations --check --dry-run   # no un-committed model chan
 
 ## Reporting bugs & requesting features
 
-Open a GitHub issue with clear reproduction steps (and `docker compose logs`, secrets
+Open a GitHub issue with clear reproduction steps (and redacted `./backupsheep-compose logs`, secrets
 redacted, for runtime problems). For **security** issues, follow [SECURITY.md](SECURITY.md)
 instead of filing a public issue.
 

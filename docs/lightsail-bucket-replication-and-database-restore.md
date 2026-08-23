@@ -122,10 +122,12 @@ The focused suite is `apps.tests.test_lightsail_relational_database` plus
 | Exception recovery | A task exception leaves the run resumable, not terminal | PASS |
 | Repository regression | Full Django suite | 359/359 PASS |
 
-Focused test command:
+Focused test command, after creating the manual Compose configuration and protected
+`.secrets` files from the installation guide:
 
-```text
-docker compose run --rm --no-deps -e DJANGO_SERVER=dev --entrypoint python \
+```bash
+./backupsheep-compose build app
+./backupsheep-compose --allow-reviewed-runtime-overrides --profile operations run --rm --no-deps -e DJANGO_SERVER=test --entrypoint python \
   worker-cloud manage.py test \
   apps.tests.test_lightsail_relational_database \
   apps.tests.test_lightsail_bucket_replication --noinput
@@ -133,8 +135,8 @@ docker compose run --rm --no-deps -e DJANGO_SERVER=dev --entrypoint python \
 
 Full regression command:
 
-```text
-docker compose run --rm --no-deps -e DJANGO_SERVER=dev --entrypoint python \
+```bash
+./backupsheep-compose --allow-reviewed-runtime-overrides --profile operations run --rm --no-deps -e DJANGO_SERVER=test --entrypoint python \
   worker-cloud manage.py test --noinput
 ```
 

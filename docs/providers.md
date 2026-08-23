@@ -49,8 +49,10 @@ The **Database** source (`database`) dumps and stores your databases offsite:
   (`/opt/mysql/bin`); MariaDB targets use `mariadb-dump` / `mysqldump`.
 
 ### Websites / servers (offsite file backups)
-The **Website** source (`website`) backs up files from any Linux host over **FTP, FTPS,
+The **Website** source (`website`) backs up files from any Linux host over **FTPS,
 SFTP, or SSH** (transfers use `lftp`). Per-connection FTPS TLS verification is supported.
+Legacy plaintext FTP requires the explicit `ALLOW_INSECURE_FTP=true` compatibility
+opt-in because it exposes credentials and backup data in transit.
 Backups can run in **incremental** mode (after the first run only new/changed files are
 downloaded, into a per-node local cache — every backup is still a complete zip) or
 **full** mode (re-download everything every run); see

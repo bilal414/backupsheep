@@ -1,9 +1,10 @@
 # Cloud VM deployments
 
-BackupSheep's one-command installer works on a fresh **Ubuntu 22.04+** or **Debian 12+**
-VM regardless of the cloud provider. It installs Docker Engine and the Compose plugin,
-then starts the complete stack: PostgreSQL, **RabbitMQ**, web console, workers, and Celery
-Beat.
+BackupSheep's verified installer works on a Linux VM where the host operator has already
+installed and secured Git, Docker Engine 28.0.0+ and Docker Compose 2.33.1+. It changes no
+host package, service, daemon, firewall or kernel settings. By default it starts only
+PostgreSQL, RabbitMQ, migrations, the security preflight and web console; provider workers
+and Beat require a separate explicit opt-in.
 
 This is the recommended deployment path when you need durable Local Storage archives,
 large temporary backup files, or separately scalable workers.
@@ -25,16 +26,17 @@ compressed archive. Use external object storage for a second, off-server copy.
 
 ## SSH installation
 
-Create the VM, connect as an administrator, then run:
+Create and secure the VM according to your host policy. As the unprivileged user already
+authorized to use the intended Docker daemon, download the installer from the exact
+reviewed release commit:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash
-```
-
-If the public hostname is already known, configure it from the first run:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.sh | sudo bash -s -- --domain backups.example.com
+COMMIT='<40-character-reviewed-release-commit>'
+curl -fSLo install.sh \
+  "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
+less install.sh
+chmod 700 install.sh
+./install.sh --ref "${COMMIT}" --domain backups.example.com
 ```
 
 The installer prints an SSH-tunnel command and an explicit trusted-shell command for
@@ -44,24 +46,19 @@ For all options, run the script with `--help` or see [installation](installation
 
 ## Cloud-init / user data
 
-For a no-SSH first install, paste
-[deploy/cloud-init/backupsheep.yaml](../deploy/cloud-init/backupsheep.yaml) into the
-provider's cloud-init, custom-data, or user-data field when creating the VM. Cloud-init
-runs it as root, so it must not be prefixed with `sudo`.
+BackupSheep intentionally no longer provides unattended root cloud-init installation.
+The compatibility file at
+[deploy/cloud-init/backupsheep.yaml](../deploy/cloud-init/backupsheep.yaml) is inert.
+Provision Docker, users, networking and host security using your own reviewed image or
+infrastructure code, then run the exact-commit installer as the Docker-authorized user.
 
-To provide a hostname, replace the second `runcmd` entry with:
-
-```yaml
-- [bash, /tmp/backupsheep-install.sh, --domain, backups.example.com]
-```
-
-After the VM starts, use SSH or a provider's trusted console/command channel to inspect the
-stack and retrieve the token explicitly. It is intentionally absent from cloud-init logs:
+After the core passes preflight, retrieve the token explicitly. It is intentionally
+absent from installation logs:
 
 ```bash
-cd /opt/backupsheep
-sudo docker compose ps
-sudo grep '^ONBOARDING_INSTALL_TOKEN=' /opt/backupsheep/.env
+cd "$HOME/.local/share/backupsheep"
+./backupsheep-compose ps
+cat .secrets/onboarding_token
 ```
 
 ## Before public use
@@ -70,7 +67,7 @@ sudo grep '^ONBOARDING_INSTALL_TOKEN=' /opt/backupsheep/.env
 - Keep TCP 8000 closed publicly. Use an SSH tunnel for initial onboarding.
 - Place BackupSheep behind an HTTPS reverse proxy before public use, then set
   `DJANGO_HTTPS=true`, `APP_PROTOCOL=https://`, `APP_DOMAIN`, and
-  `DJANGO_ALLOWED_HOSTS` in `/opt/backupsheep/.env`.
+  `DJANGO_ALLOWED_HOSTS` in the installation `.env`.
 - If using Local Storage, mount the provider block volume at `/backups` before retaining
   archives there. An external storage destination remains the safer long-term target.
 

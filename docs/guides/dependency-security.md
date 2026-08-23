@@ -1,25 +1,37 @@
 # Dependency security and reproducibility
 
-`requirements.txt` is the reviewed list of direct Python constraints. The supply-chain
-workflow resolves it on Python 3.14 and fails when `pip-audit` reports a known advisory.
-The root `package-lock.json` remains the single frontend lock and is audited separately.
+`requirements.txt` is the reviewed list of direct Python constraints and
+`requirements.lock` is the generated, fully pinned hash lock consumed by the image build.
+The supply-chain workflow resolves it on Python 3.14 and fails when `pip-audit` reports a
+known advisory. The root `package-lock.json` remains the single frontend lock and is
+audited separately.
 
-## Hash-lock adoption plan
+## Current hash-lock boundary
 
-Python transitive dependencies are not yet hash-locked. Do not label an image build
-reproducible until this gate is complete:
+The Docker build verifies that the lock records the exact `requirements.txt` digest, then
+downloads/builds the authenticated dependency set under pip's `--require-hashes` mode.
+Locally built source-package wheels have new hashes, so the builder creates a second lock
+over the exact platform wheelhouse. The final image installs that wheelhouse offline with
+`--no-index --require-hashes` and runs `pip check`.
 
-1. Generate a fully pinned, hash-bearing lock from `requirements.txt` with a pinned
-   `pip-tools` or `uv` release.
-2. Resolve and install that candidate on Linux `amd64` and `arm64`, Python 3.14, using
-   `pip install --require-hashes --only-binary=:all:`.
-3. Run the Django test suite plus backup/restore client smoke tests for PostgreSQL,
-   MySQL, MariaDB, SFTP and every enabled cloud SDK.
-4. Make the Docker build install only the verified lock, keep `requirements.txt` as its
-   human-reviewed input, and have CI fail when regeneration changes the lock.
-5. Generate an SPDX or CycloneDX SBOM from the built image, attach it to the release,
-   and sign both image digest and provenance.
+Regenerate the lock only as a reviewed dependency change. A changed direct-constraint
+digest, missing artifact hash or unexpected dependency causes the image build to fail.
 
-The multi-architecture install gate matters: cloud SDK and cryptography wheels can differ
-by platform. A lock generated and tested on only a developer Mac is not a production
-reproducibility control.
+## Remaining reproducibility gate
+
+Hash authentication is not byte-for-byte reproducibility. Locally built wheels can differ
+by toolchain/date, and signed Debian/PGDG repository snapshots can change even though the
+Dockerfile exact-version selects packages. Before calling a release fully reproducible:
+
+1. build and test the exact commit on Linux `amd64` and `arm64` with the pinned Dockerfile
+   frontend/base image and compare dependency inventories;
+2. run Django plus PostgreSQL, MySQL, MariaDB, SFTP and enabled provider client smoke tests
+   against each resulting image;
+3. generate an SPDX or CycloneDX SBOM, attach it to the release, and sign the image digest
+   and provenance;
+4. retain or mirror the exact authenticated APT and upstream source artifacts required to
+   rebuild after repositories move.
+
+The multi-architecture gate matters because cloud SDK, cryptography and source-built wheel
+outputs can differ by platform. A lock generated on one developer machine is artifact
+authentication input, not sufficient release reproducibility evidence.

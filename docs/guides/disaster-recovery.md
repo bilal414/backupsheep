@@ -23,16 +23,32 @@ domain it is intended to recover.
 | Material | Why it matters | Recommended protection |
 | --- | --- | --- |
 | PostgreSQL | All product configuration, encrypted credentials, schedules, backup/restore rows and durable orchestration | Frequent logical dumps or managed-PostgreSQL PITR, encrypted off-host |
-| `.env` / secret-manager object | Django signing/email key, DB/broker credentials, OAuth app secrets and runtime settings | Encrypted secret backup with tightly audited access |
+| `.env`, `.secrets` / secret-manager object | Runtime/integration settings plus the file-backed Django, DB, broker, onboarding and optional managed-SSH-key secrets | Encrypted secret backup with tightly audited access; preserve ownership and modes |
 | Deployment metadata | Exact Git revision/image, Compose overrides, proxy and firewall configuration | Versioned infrastructure repository or encrypted configuration backup |
 | `backup_storage` | Archives stored by the Local Storage destination | Filesystem snapshot/backup to a second system; never the only archive copy |
-| Critical `backup_workdir` files | In-flight material, website cache, reviewed SSH `known_hosts`, optional managed key and install token | Back up trust/key material; snapshot active work if preserving in-progress local jobs is required |
+| Critical `backup_workdir` files | In-flight material, restore/run logs and website/database incremental caches | Snapshot active work if preserving in-progress local jobs is required |
+| `ssh_trust` | Reviewed SSH `known_hosts` used by app/database/files | Back up independently and preserve out-of-band fingerprint evidence |
 | Remote storage/provider state | Cloud snapshots and offsite archive objects live outside the host | Provider-native protection, independent inventory and restore rehearsal |
 
 RabbitMQ persists queued messages in `rabbitmq_data`, but broker state is not the product
 source of truth. The database outbox and recovery sweeps can republish durable work. Prefer
 a clean compatible broker during disaster recovery unless you have a tested,
 application-consistent broker-volume restore procedure.
+
+## Pin the Compose control plane
+
+Run every command below from the exact reviewed checkout. The shipped wrapper reads and
+validates the preserved project witness in `.env`; keep this command array in the same
+maintenance shell. It prevents ambient application, profile, Bake or orphan-removal
+variables from redirecting a recovery command and refuses to silently ignore an override.
+
+```bash
+BS_COMPOSE=("$PWD/backupsheep-compose")
+# After restoring and reviewing an override, add its exact path:
+# BS_COMPOSE+=(--approved-compose-file "$PWD/docker-compose.override.yml")
+bs_compose() { "${BS_COMPOSE[@]}" "$@"; }
+bs_compose config --quiet
+```
 
 ## Back up the control plane
 
@@ -42,7 +58,7 @@ Run from the Compose directory and write directly to a protected filesystem:
 
 ```bash
 umask 077
-docker compose exec -T db sh -c \
+bs_compose exec -T db sh -c \
   'pg_dump --format=custom --no-owner --username="$POSTGRES_USER" "$POSTGRES_DB"' \
   > /secure/backups/backupsheep-control-plane.dump
 ```
@@ -50,7 +66,7 @@ docker compose exec -T db sh -c \
 Verify that the custom archive is readable:
 
 ```bash
-docker compose exec -T db pg_restore --list \
+bs_compose exec -T db pg_restore --list \
   < /secure/backups/backupsheep-control-plane.dump > /dev/null
 ```
 
@@ -64,6 +80,10 @@ dumps. Validate retention, encryption, account isolation and restore permissions
 
 ```bash
 install -m 600 .env /secure/backups/backupsheep.env
+install -d -m 700 /secure/backups/backupsheep.secrets
+for secret in django_secret_key db_password rabbitmq_password onboarding_token ssh_managed_private_key; do
+  install -m 400 ".secrets/${secret}" "/secure/backups/backupsheep.secrets/${secret}"
+done
 test ! -f docker-compose.override.yml || \
   install -m 600 docker-compose.override.yml /secure/backups/docker-compose.override.yml
 git rev-parse HEAD > /secure/backups/backupsheep.git-revision
@@ -78,8 +98,11 @@ Identify the exact mounted volumes and destinations instead of guessing Compose-
 volume names:
 
 ```bash
-docker inspect "$(docker compose ps -q app)" \
-  --format '{{range .Mounts}}{{println .Name "->" .Destination}}{{end}}'
+for service in app worker-database worker-storage; do
+  container="$(bs_compose --profile operations ps -q "${service}")"
+  test -z "${container}" || docker inspect "${container}" \
+    --format '{{range .Mounts}}{{println .Name "->" .Destination}}{{end}}'
+done
 ```
 
 Use an existing filesystem/volume backup product to protect the exact source behind
@@ -91,11 +114,13 @@ For an application-consistent snapshot of active work material:
 1. stop Beat so new schedules are not dispatched;
 2. let active database/file/storage/restore work drain;
 3. stop `app` and all workers;
-4. snapshot/copy `backup_workdir` and `backup_storage`;
+4. snapshot/copy `backup_workdir`, `ssh_trust` and `backup_storage`;
 5. restart the stack and verify recovery.
 
-At minimum, separately retain reviewed `ssh_known_hosts` and any managed SSH private key.
-Website incremental caches can rebuild, but a missing in-flight dump may require the
+At minimum, separately retain the `ssh_trust` volume and
+`.secrets/ssh_managed_private_key`. The app has no `backup_workdir` mount; do not infer
+work-volume protection from inspecting only its container. Website incremental caches can
+rebuild, but a missing in-flight dump may require the
 durable backup row to retry from its safe boundary.
 
 ## Restore to a replacement host
@@ -105,19 +130,27 @@ production provider resources.
 
 ### 1. Prepare matching software and storage
 
-- install Docker Engine/Compose on a supported host;
+- provide operator-managed Docker Engine 28.0.0+ and Compose 2.33.1+ on a supported host;
 - check out the recorded BackupSheep revision (or a reviewed compatible newer release);
-- restore `.env` with mode `0600` and restore deployment overrides;
-- recreate/mount the Local Storage and work filesystems at the same container paths;
+- restore `.env` with mode `0600`, `.secrets` as mode `0700`, its four required
+  owner-owned files and optional `ssh_managed_private_key` source as mode `0444`; an empty
+  optional file means disabled; restore deployment overrides;
+- recreate/mount the Local Storage, work and `ssh_trust` filesystems at the same container
+  paths;
 - keep the public endpoint isolated until the database is restored and the first owner is
   confirmed.
 
 ### 2. Start only the database and broker
 
+Build the exact checked-out application image before any application role is started. The
+stock services use `pull_policy: never`; they will not fetch an unreviewed registry
+substitute:
+
 ```bash
-docker compose up --detach db rabbitmq
-docker compose exec -T db pg_isready -U backupsheep -d backupsheep
-docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping
+bs_compose build app
+bs_compose up --detach db rabbitmq
+bs_compose exec -T db pg_isready -U backupsheep -d backupsheep
+bs_compose exec -T rabbitmq rabbitmq-diagnostics -q ping
 ```
 
 The target database must be disposable/empty or explicitly approved for replacement.
@@ -128,7 +161,7 @@ Take a final safety dump of any database that already exists before proceeding.
 With application services stopped:
 
 ```bash
-docker compose exec -T db sh -c \
+bs_compose exec -T db sh -c \
   'pg_restore --clean --if-exists --no-owner --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' \
   < /secure/backups/backupsheep-control-plane.dump
 ```
@@ -139,14 +172,24 @@ never run this against an unverified database.
 ### 4. Start the application
 
 ```bash
-docker compose up --build --detach --remove-orphans
-docker compose ps --all
-docker compose logs --tail=200 migrate app
-docker compose exec -T app python manage.py check
+bs_compose up --detach
+bs_compose ps --all
+bs_compose logs --tail=200 migrate preflight app
+bs_compose exec -T app python manage.py check
 ```
 
 Forward migrations run automatically if the recovery code is newer than the dump. Do not
 attempt to restore a newer schema into older application code.
+
+This starts only the core. Keep workers and Beat disabled while inspecting restored
+durable rows, provider identities and broker queues. Once recovery ownership is proven,
+enable operations explicitly:
+
+```bash
+bs_compose --profile operations up --detach
+```
+
+That command can resume old provider mutations immediately.
 
 ### 5. Validate before reopening access
 
@@ -157,7 +200,10 @@ Verify:
 - source connections, storage destinations, schedules and retention policies match the
   recovery record;
 - Local Storage files are present and download through their recorded backup rows;
-- reviewed SSH trust/key files exist with restrictive permissions;
+- the app can write the restored `ssh_trust` file while database/files see it read-only;
+- when configured, the managed-key source is not used directly: app/database/files stage
+  the validated non-empty key in private tmpfs at
+  `/run/backupsheep/ssh/managed_private_key`, mode `0600`, while other roles receive no key;
 - `app`, PostgreSQL, RabbitMQ and every worker lane are healthy;
 - existing in-progress rows resume or reach a clear manual-review state;
 - a disposable backup and restore completes with data-level verification.
@@ -169,9 +215,10 @@ Only then update DNS/load balancer routing or reopen the firewall.
 ### Lost `DJANGO_SECRET_KEY`
 
 Sessions become invalid and saved email-provider credentials cannot be decrypted. Restore
-the exact key from the encrypted configuration backup. If it cannot be recovered, set a
-new key, reset access from the host and re-enter email credentials; do not claim full
-configuration recovery until every dependent secret is revalidated.
+the exact `.secrets/django_secret_key` file from the encrypted configuration backup. If it
+cannot be recovered, create a new key, reset access from the host and re-enter email
+credentials; do not claim full configuration recovery until every dependent secret is
+revalidated.
 
 ### Lost provider/account encryption material
 

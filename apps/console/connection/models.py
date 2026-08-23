@@ -1918,24 +1918,47 @@ class CoreAuthWebsite(TimeStampedModel):
 
     def check_connection(self, data=None, check_errors=None):
         import ftputil
-        from apps.api.v1.utils.api_helpers import bs_decrypt, FtpSession, FtpTlsSession
+        from apps.api.v1.utils.api_helpers import (
+            bs_decrypt,
+            FtpSession,
+            ftp_tls_session_factory,
+        )
         import paramiko
         import tempfile
         import os
+
+        raw_protocol = data.get("protocol") if data else self.protocol
+        try:
+            protocol = self.Protocol(int(raw_protocol))
+        except (TypeError, ValueError):
+            raise NodeConnectionErrorWebsite(
+                "The website transfer protocol is missing or unsupported."
+            ) from None
+        if (
+            protocol == self.Protocol.FTP
+            and not settings.ALLOW_INSECURE_FTP
+        ):
+            raise NodeConnectionErrorWebsite(
+                "Plain FTP is disabled because it exposes credentials and backup "
+                "data in transit. Use SFTP or FTPS, or explicitly set "
+                "ALLOW_INSECURE_FTP=true after accepting that risk."
+            )
 
         if data:
             username = data.get("username")
             password = data.get("password")
             port = data.get("port")
             host = data.get("host")
-            protocol = data.get("protocol")
+            verify_ssl = data.get("verify_ssl") is not False
+            ftps_use_explicit_ssl = bool(data.get("ftps_use_explicit_ssl"))
         else:
             encryption_key = self.connection.account.get_encryption_key()
             username = bs_decrypt(self.username, encryption_key)
             password = bs_decrypt(self.password, encryption_key)
             port = self.port
             host = self.host
-            protocol = self.protocol
+            verify_ssl = self.verify_ssl is not False
+            ftps_use_explicit_ssl = bool(self.ftps_use_explicit_ssl)
 
         if protocol == self.Protocol.FTP:
             try:
@@ -1961,7 +1984,10 @@ class CoreAuthWebsite(TimeStampedModel):
                     username,
                     password,
                     port=port,
-                    session_factory=FtpTlsSession,
+                    session_factory=ftp_tls_session_factory(
+                        verify_ssl=verify_ssl,
+                        explicit=ftps_use_explicit_ssl,
+                    ),
                 ) as hosting_host:
                     hosting_host.listdir(path or ".")
                     hosting_host.close()
@@ -2033,7 +2059,7 @@ class CoreAuthWebsite(TimeStampedModel):
             from apps.api.v1.utils.api_helpers import (
                 bs_decrypt,
                 FtpSession,
-                FtpTlsSession,
+                ftp_tls_session_factory,
                 isFile,
                 isdir,
             )
@@ -2088,7 +2114,10 @@ class CoreAuthWebsite(TimeStampedModel):
                     bs_decrypt(self.username, encryption_key),
                     bs_decrypt(self.password, encryption_key),
                     port=int(self.port),
-                    session_factory=FtpTlsSession,
+                    session_factory=ftp_tls_session_factory(
+                        verify_ssl=self.verify_ssl is not False,
+                        explicit=bool(self.ftps_use_explicit_ssl),
+                    ),
                 ) as hosting_host:
 
                     names = hosting_host.listdir(path or ".")

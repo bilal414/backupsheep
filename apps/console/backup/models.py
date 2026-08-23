@@ -1,6 +1,7 @@
 import json
 import hashlib
 import re
+import shutil
 import subprocess
 import time
 import uuid
@@ -62,6 +63,38 @@ def _presigned_url_expiry():
     except (TypeError, ValueError):
         configured = 5 * 60
     return min(max(configured, 1), 60 * 60)
+
+
+def _stop_legacy_backup_container(container_name):
+    """Best-effort cleanup for the retired per-backup Docker execution path.
+
+    Stock containers deliberately receive neither a Docker client nor the daemon
+    socket. Process-managed legacy deployments may still provide the client, but a
+    database value must never become a shell command or an arbitrary container name.
+    """
+    candidate = str(container_name or "").lower()
+    suffix = "-storage" if candidate.endswith("-storage") else ""
+    identifier = candidate[: -len(suffix)] if suffix else candidate
+    try:
+        canonical_identifier = str(uuid.UUID(identifier))
+    except (ValueError, AttributeError, TypeError):
+        return
+    if identifier != canonical_identifier:
+        return
+
+    docker_cli = shutil.which("docker")
+    if not docker_cli:
+        return
+    try:
+        subprocess.run(
+            [docker_cli, "stop", f"{canonical_identifier}{suffix}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
 
 
 class StoragePointLeaseLostError(RuntimeError):
@@ -4556,6 +4589,44 @@ class CoreGoogleCloudBackup(UtilBackup):
         self.google_cloud.node.backup_complete_reset()
 
 
+def _soft_delete_storage_backed_backup(backup, relation_name):
+    """Route every legacy caller through the committed deletion-lease path."""
+
+    model_key = {
+        "stored_website_backups": "website",
+        "stored_database_backups": "database",
+        "stored_wordpress_backups": "wordpress",
+        "stored_basecamp_backups": "basecamp",
+    }[relation_name]
+    with transaction.atomic():
+        locked = backup.__class__.objects.select_for_update().get(pk=backup.pk)
+        if locked.status == locked.Status.DELETE_COMPLETED:
+            backup.status = locked.status
+            return True
+        if locked.status not in (
+            locked.Status.DELETE_REQUESTED,
+            locked.Status.DELETE_IN_PROGRESS,
+        ):
+            metadata = dict(locked.metadata or {})
+            metadata["_deletion_request"] = {
+                "requested_at": timezone.now().isoformat(),
+                "previous_status": int(locked.status),
+                "state": "pending",
+            }
+            locked.metadata = metadata
+            locked.status = locked.Status.DELETE_REQUESTED
+            locked.save(update_fields=["metadata", "status", "modified"])
+
+    # Import locally to avoid the backup-model/task module cycle. The helper
+    # commits a short parent claim, mutates at most one point outside a database
+    # transaction, then commits the reconciled result.
+    from apps._tasks.integration.storage.tasks import _delete_backup_requested_id
+
+    outcome = _delete_backup_requested_id(model_key, backup.pk)
+    backup.refresh_from_db(fields=["status", "metadata"])
+    return outcome.get("result") == "deleted"
+
+
 class CoreWebsiteBackup(UtilBackup):
     UNZIP_REQUEST = Choices("requested", "in_progress", "available", "disable")
     website = models.ForeignKey(
@@ -4597,14 +4668,9 @@ class CoreWebsiteBackup(UtilBackup):
         db_table = "core_website_backup"
 
     def soft_delete(self):
-        deleted = all(
-            stored_website_backup.soft_delete() is not False
-            for stored_website_backup in self.stored_website_backups.all()
+        return _soft_delete_storage_backed_backup(
+            self, "stored_website_backups"
         )
-        if deleted:
-            self.status = self.Status.DELETE_COMPLETED
-            self.save()
-        return deleted
 
     def all_storage_points_uploaded(self):
         return self.stored_website_backups.all().count() == self.stored_website_backups.filter(
@@ -4660,14 +4726,7 @@ class CoreWebsiteBackup(UtilBackup):
         """
         Stop docker container if any
         """
-        execstr = f"sudo docker stop {self.uuid_str}"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
-            timeout=60,
-        )
+        _stop_legacy_backup_container(self.uuid_str)
 
 
 class CoreWebsiteBackupFiles(TimeStampedModel):
@@ -5975,40 +6034,15 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         Key=f"{self.storage_file_id}",
                     )
                 elif self.storage.type.code == "local":
-                    import hashlib
-                    import os
                     if not self.storage.storage_local.no_delete:
-                        # storage_file_id is the absolute path written by the local
-                        # upload backend; only ever unlink inside the storage root.
-                        local_root = os.path.realpath(settings.LOCAL_STORAGE_ROOT)
-                        target = os.path.realpath(self.storage_file_id)
-                        if target != local_root and not target.startswith(local_root + os.sep):
-                            raise ValueError("Local storage delete is outside its configured root.")
-                        if os.path.basename(target) != f"{self.backup.uuid_str}.zip":
-                            raise ValueError("Local storage object is not owned by this backup.")
-                        if os.path.exists(target):
-                            expected = self.committed_integrity_identity()
-                            if expected is None:
-                                raise ValueError(
-                                    "Local storage integrity evidence is unavailable; deletion was stopped."
-                                )
-                            digest = hashlib.sha256()
-                            byte_count = 0
-                            with open(target, "rb") as local_object:
-                                while True:
-                                    chunk = local_object.read(1024 * 1024)
-                                    if not chunk:
-                                        break
-                                    digest.update(chunk)
-                                    byte_count += len(chunk)
-                            if (
-                                digest.hexdigest() != expected["sha256"]
-                                or byte_count != expected["size_bytes"]
-                            ):
-                                raise ValueError(
-                                    "Local storage object integrity does not match this backup."
-                                )
-                            os.remove(target)
+                        from apps._tasks.integration.storage.local import (
+                            delete_local_object,
+                        )
+
+                        # The storage task receives only this point's database id.
+                        # Deletion derives an exact root-relative object key from
+                        # persisted ownership evidence and uses no-follow dir fds.
+                        delete_local_object(self)
 
                 self.status = self.Status.DELETE_COMPLETED
                 self.save()
@@ -6138,14 +6172,9 @@ class CoreWordPressBackup(UtilBackup):
         db_table = "core_wordpress_backup"
 
     def soft_delete(self):
-        deleted = all(
-            stored_wordpress_backup.soft_delete() is not False
-            for stored_wordpress_backup in self.stored_wordpress_backups.all()
+        return _soft_delete_storage_backed_backup(
+            self, "stored_wordpress_backups"
         )
-        if deleted:
-            self.status = self.Status.DELETE_COMPLETED
-            self.save()
-        return deleted
 
     def all_storage_points_uploaded(self):
         return self.stored_wordpress_backups.all().count() == self.stored_wordpress_backups.filter(
@@ -6199,26 +6228,12 @@ class CoreWordPressBackup(UtilBackup):
         """
         Stop main docker container if any
         """
-        execstr = f"sudo docker stop {self.uuid_str}"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
-            timeout=60,
-        )
+        _stop_legacy_backup_container(self.uuid_str)
 
         """
         Stop upload docker container if any
         """
-        execstr = f"sudo docker stop {self.uuid_str}-storage"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
-            timeout=60,
-        )
+        _stop_legacy_backup_container(f"{self.uuid_str}-storage")
 
         """
         Delete files from wordpress
@@ -6328,14 +6343,9 @@ class CoreBasecampBackup(UtilBackup):
         db_table = "core_basecamp_backup"
 
     def soft_delete(self):
-        deleted = all(
-            stored_basecamp_backup.soft_delete() is not False
-            for stored_basecamp_backup in self.stored_basecamp_backups.all()
+        return _soft_delete_storage_backed_backup(
+            self, "stored_basecamp_backups"
         )
-        if deleted:
-            self.status = self.Status.DELETE_COMPLETED
-            self.save()
-        return deleted
 
     def all_storage_points_uploaded(self):
         return (
@@ -6394,26 +6404,12 @@ class CoreBasecampBackup(UtilBackup):
         """
         Stop main docker container if any
         """
-        execstr = f"sudo docker stop {self.uuid_str}"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
-            timeout=60,
-        )
+        _stop_legacy_backup_container(self.uuid_str)
 
         """
         Stop upload docker container if any
         """
-        execstr = f"sudo docker stop {self.uuid_str}-storage"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
-            timeout=60,
-        )
+        _stop_legacy_backup_container(f"{self.uuid_str}-storage")
 
 
 class CoreBasecampBackupStoragePoints(BaseBackupStoragePoints):
@@ -6514,14 +6510,9 @@ class CoreDatabaseBackup(UtilBackup):
 
 
     def soft_delete(self):
-        deleted = all(
-            stored_database_backup.soft_delete() is not False
-            for stored_database_backup in self.stored_database_backups.all()
+        return _soft_delete_storage_backed_backup(
+            self, "stored_database_backups"
         )
-        if deleted:
-            self.status = self.Status.DELETE_COMPLETED
-            self.save()
-        return deleted
 
     @property
     def node(self):
