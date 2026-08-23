@@ -534,12 +534,16 @@ def _resolve_celery_broker_url(values):
     host = str(values.get("RABBITMQ_HOST") or "").strip()
     if host:
         if not (values.get("RABBITMQ_USER") and values.get("RABBITMQ_PASSWORD")):
-            # guest/guest is RabbitMQ's well-known default; fine for the private
-            # Compose network, dangerous for any broker reachable beyond it.
+            if str(values.get("DJANGO_SERVER") or "").strip().lower() == "prod":
+                raise ImproperlyConfigured(
+                    "RABBITMQ_USER and RABBITMQ_PASSWORD are required when "
+                    "RABBITMQ_HOST is configured in production."
+                )
+            # Retain the historical local-development fallback, but never permit
+            # it in production above.
             warnings.warn(
                 "RABBITMQ_HOST is set without RABBITMQ_USER/RABBITMQ_PASSWORD; "
-                "falling back to the well-known guest/guest credentials. Set explicit "
-                "credentials unless this broker is on a trusted private network.",
+                "using guest/guest for non-production development only.",
                 stacklevel=2,
             )
         port = str(values.get("RABBITMQ_PORT") or "5672").strip()
@@ -559,6 +563,14 @@ def _resolve_celery_broker_url(values):
         or values.get("CELERY_BROKER_URL")
         or DEFAULT_CELERY_BROKER_URL
     )
+    if (
+        str(values.get("DJANGO_SERVER") or "").strip().lower() == "prod"
+        and broker_url == DEFAULT_CELERY_BROKER_URL
+    ):
+        raise ImproperlyConfigured(
+            "A non-default RabbitMQ broker URL or explicit RabbitMQ credentials "
+            "are required in production."
+        )
     if urlparse(broker_url).scheme not in {"amqp", "amqps"}:
         raise ValueError("RabbitMQ broker URLs must use the amqp:// or amqps:// scheme.")
     return broker_url
