@@ -1,5 +1,5 @@
 import boto3
-from apps.api.v1.utils.http import requests
+from apps.api.v1.utils.http import request_timeout, requests
 from apps.api.v1.utils.boto import bounded_boto3_client
 from django.conf import settings
 from django.db import models
@@ -176,19 +176,31 @@ class CoreNotificationSlack(TimeStampedModel):
         db_table = "core_notification_slack"
 
     def refresh_auth_token(self):
-        from slack_sdk import WebClient, WebhookClient
         from datetime import datetime
         import time
+        from apps.api.v1.utils.oauth_security import validated_https_endpoint
 
-        token_request_url = (
-            f"{settings.SLACK_TOKEN_URL}?"
-            f"grant_type=refresh_token"
-            f"&client_id={settings.SLACK_CLIENT_ID}"
-            f"&client_secret={settings.SLACK_CLIENT_SECRET}"
-            f"&refresh_token={self.refresh_token}"
+        token_request_url = validated_https_endpoint(
+            settings.SLACK_TOKEN_URL,
+            allowed_hostnames={"slack.com"},
+            allowed_paths={"/api/oauth.v2.access"},
         )
+        if token_request_url is None:
+            return False
 
-        result = requests.post(token_request_url)
+        result = requests.post(
+            token_request_url,
+            data={
+                "grant_type": "refresh_token",
+                "client_id": settings.SLACK_CLIENT_ID,
+                "client_secret": settings.SLACK_CLIENT_SECRET,
+                "refresh_token": self.refresh_token,
+            },
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if result.status_code == 200:
             slack_data = result.json()
@@ -199,12 +211,14 @@ class CoreNotificationSlack(TimeStampedModel):
                 self.expiry = datetime.fromtimestamp((int(time.time()) + int(slack_data["expires_in"])))
                 self.data = slack_data
                 self.save()
+                return True
 
                 # # Send Welcome Message on Slack
                 # webhook = WebhookClient(self.url)
                 # webhook.send(
                 #     text="Hey! Your slack token is successfully refreshed.",
                 # )
+        return False
 
     def send(self, message):
         from apps._tasks.helper.tasks import send_log_to_slack

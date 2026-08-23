@@ -14,6 +14,10 @@ from apps.console.connection.models import CoreConnection, CoreIntegration
 from apps.console.storage.models import CoreStorage, CoreStorageType
 from requests_oauthlib import OAuth2Session
 from apps.api.v1.utils.api_permissions import member_has_perm
+from apps.api.v1.utils.oauth_security import (
+    issue_oauth_state,
+    validated_https_endpoint,
+)
 
 
 PCLOUD_OAUTH_STATE_SESSION_KEY = "pcloud_oauth_state"
@@ -49,14 +53,32 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
         if CoreIntegration.objects.filter(code=integration_code).exists():
             integration = CoreIntegration.objects.get(code=integration_code)
 
-            if integration.code == "basecamp":
-                context[
-                    "connect_url"
-                ] = f"{settings.BASECAMP_OAUTH_ENDPOINT}?" \
-                    f"client_id={settings.BASECAMP_CLIENT_ID}" \
-                    f"&type=web_server" \
-                    f"&response_type=code" \
-                    f"&redirect_uri={settings.APP_URL}{settings.BASECAMP_REDIRECT_URL}"
+            if integration.code == "basecamp" and member_has_perm(
+                request, "integration_changes"
+            ):
+                authorization_endpoint = validated_https_endpoint(
+                    settings.BASECAMP_OAUTH_ENDPOINT,
+                    allowed_hostnames={"launchpad.37signals.com"},
+                    allowed_paths={"/authorization/new"},
+                )
+                if authorization_endpoint:
+                    account = member.get_current_account()
+                    oauth_state = issue_oauth_state(
+                        request,
+                        provider="basecamp",
+                        member=member,
+                        account=account,
+                    )
+                    context["connect_url"] = authorization_endpoint + "?" + urlencode(
+                        {
+                            "client_id": settings.BASECAMP_CLIENT_ID,
+                            "type": "web_server",
+                            "response_type": "code",
+                            "redirect_uri": settings.APP_URL
+                            + settings.BASECAMP_REDIRECT_URL,
+                            "state": oauth_state["state"],
+                        }
+                    )
 
             query = Q(
                 account=member.get_current_account(),
@@ -159,18 +181,41 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
             context["elided_page_range"] = page.paginator.get_elided_page_range(p_no)
             context["storage"] = storage_type
 
-            if storage_type.code == "dropbox":
+            can_change_storage = member_has_perm(request, "storage_changes")
+
+            if storage_type.code == "dropbox" and can_change_storage:
                 # DROPBOX
-                context[
-                    "connect_url"
-                ] = f"https://www.dropbox.com/oauth2/authorize?" \
-                    f"client_id={settings.DROPBOX_APP_KEY}" \
-                    f"&response_type=code" \
-                    f"&token_access_type=offline" \
-                    f"&redirect_uri={settings.APP_URL}/api/v1/callback/dropbox"
-            elif storage_type.code == "google_drive":
+                oauth_state = issue_oauth_state(
+                    request,
+                    provider="dropbox",
+                    member=member,
+                    account=member.get_current_account(),
+                    use_pkce=True,
+                )
+                context["connect_url"] = (
+                    "https://www.dropbox.com/oauth2/authorize?"
+                    + urlencode(
+                        {
+                            "client_id": settings.DROPBOX_APP_KEY,
+                            "response_type": "code",
+                            "token_access_type": "offline",
+                            "redirect_uri": f"{settings.APP_URL}/api/v1/callback/dropbox",
+                            "state": oauth_state["state"],
+                            "code_challenge": oauth_state["code_challenge"],
+                            "code_challenge_method": "S256",
+                        }
+                    )
+                )
+            elif storage_type.code == "google_drive" and can_change_storage:
                 # GOOGLE DRIVE
                 scope = ["https://www.googleapis.com/auth/drive.file"]
+                oauth_state = issue_oauth_state(
+                    request,
+                    provider="google_drive",
+                    member=member,
+                    account=member.get_current_account(),
+                    use_pkce=True,
+                )
                 oauth = OAuth2Session(
                     settings.GOOGLE_CLIENT_ID,
                     redirect_uri=f"{settings.APP_URL}/api/v1/callback/google_drive/",
@@ -178,12 +223,15 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                 )
                 authorization_url, state = oauth.authorization_url(
                     "https://accounts.google.com/o/oauth2/v2/auth",
+                    state=oauth_state["state"],
                     access_type="offline",
                     prompt="consent",
+                    code_challenge=oauth_state["code_challenge"],
+                    code_challenge_method="S256",
                 )
                 context["connect_url"] = authorization_url
             elif storage_type.code == "pcloud":
-                if member_has_perm(request, "storage_changes"):
+                if can_change_storage:
                     state = secrets.token_urlsafe(32)
                     request.session[PCLOUD_OAUTH_STATE_SESSION_KEY] = {
                         "state": state,
@@ -202,15 +250,32 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                             }
                         )
                     )
-            elif storage_type.code == "onedrive":
-                context[
-                    "connect_url"
-                ] = f"{settings.MS_OAUTH_ENDPOINT}?" \
-                    f"client_id={settings.MS_CLIENT_ID}" \
-                    f"&response_type={settings.MS_RESPONSE_TYPE}" \
-                    f"&scope={settings.MS_SCOPE}" \
-                    f"&prompt=select_account" \
-                    f"&redirect_uri={settings.APP_URL}{settings.MS_REDIRECT_URL}"
+            elif storage_type.code == "onedrive" and can_change_storage:
+                authorization_endpoint = validated_https_endpoint(
+                    settings.MS_OAUTH_ENDPOINT,
+                    allowed_hostnames={"login.microsoftonline.com"},
+                    allowed_path_suffixes={"/oauth2/v2.0/authorize"},
+                )
+                if authorization_endpoint:
+                    oauth_state = issue_oauth_state(
+                        request,
+                        provider="microsoft",
+                        member=member,
+                        account=member.get_current_account(),
+                        use_pkce=True,
+                    )
+                    context["connect_url"] = authorization_endpoint + "?" + urlencode(
+                        {
+                            "client_id": settings.MS_CLIENT_ID,
+                            "response_type": settings.MS_RESPONSE_TYPE,
+                            "scope": settings.MS_SCOPE,
+                            "prompt": "select_account",
+                            "redirect_uri": settings.APP_URL + settings.MS_REDIRECT_URL,
+                            "state": oauth_state["state"],
+                            "code_challenge": oauth_state["code_challenge"],
+                            "code_challenge_method": "S256",
+                        }
+                    )
         else:
             return redirect("console:setup:integration_select")
 

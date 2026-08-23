@@ -39,18 +39,81 @@ import dropbox
 from cryptography.fernet import Fernet
 from google.oauth2 import id_token
 import google.oauth2.credentials
-from datetime import datetime
+from datetime import datetime, timezone
 from slack_sdk import WebClient, WebhookClient
 from slack_sdk.errors import SlackApiError
 import secrets
 from urllib.parse import urlsplit
 
-from apps.api.v1.utils.api_permissions import member_has_perm
+from apps.api.v1.utils.api_permissions import (
+    current_account_is_primary,
+    member_has_perm,
+)
+from apps.api.v1.utils.oauth_security import (
+    consume_oauth_state,
+    validated_https_endpoint,
+)
 
 
 PCLOUD_OAUTH_STATE_SESSION_KEY = "pcloud_oauth_state"
 PCLOUD_ALLOWED_HOSTNAMES = frozenset({"api.pcloud.com", "eapi.pcloud.com"})
 PCLOUD_OAUTH_STATE_TTL_SECONDS = 10 * 60
+
+
+def _post_oauth_token(
+    endpoint,
+    *,
+    allowed_hostnames,
+    data,
+    allowed_paths=None,
+    allowed_path_suffixes=None,
+    timeout=None,
+):
+    """POST credentials only to an exact provider host and never redirect."""
+
+    endpoint = validated_https_endpoint(
+        endpoint,
+        allowed_hostnames=allowed_hostnames,
+        allowed_paths=allowed_paths,
+        allowed_path_suffixes=allowed_path_suffixes,
+    )
+    if endpoint is None:
+        return None
+    return requests.post(
+        endpoint,
+        data=data,
+        headers={"Accept": "application/json"},
+        allow_redirects=False,
+        verify=True,
+        timeout=timeout or request_timeout(),
+    )
+
+
+def _get_oauth_resource(
+    endpoint,
+    *,
+    allowed_hostnames,
+    headers,
+    allowed_paths=None,
+    allowed_path_prefixes=None,
+):
+    """GET a bearer-protected resource without forwarding across redirects."""
+
+    endpoint = validated_https_endpoint(
+        endpoint,
+        allowed_hostnames=allowed_hostnames,
+        allowed_paths=allowed_paths,
+        allowed_path_prefixes=allowed_path_prefixes,
+    )
+    if endpoint is None:
+        return None
+    return requests.get(
+        endpoint,
+        headers=headers,
+        allow_redirects=False,
+        verify=True,
+        timeout=request_timeout(),
+    )
 
 
 def _validated_pcloud_hostname(value=None):
@@ -101,78 +164,100 @@ class APICallbackSlack(APIView):
         error_description = data.get("error_description", None)
         member = self.request.user.member
         account = member.get_current_account()
-
-        if error:
-            messages.add_message(request, messages.ERROR, error_description)
-            return redirect("console:settings:notification")
-        else:
-            state = data.get("state", None)
-            code = data.get("code", None)
-
-            token_request_url = (
-                f"{settings.SLACK_TOKEN_URL}?"
-                f"grant_type=authorization_code"
-                f"&code={code}"
-                f"&client_id={settings.SLACK_CLIENT_ID}"
-                f"&client_secret={settings.SLACK_CLIENT_SECRET}"
-                f"&redirect_uri={settings.APP_URL + '/api/v1/callback/slack/'}"
+        state_record = consume_oauth_state(
+            request,
+            provider="slack",
+            received_state=data.get("state"),
+            member=member,
+            account=account,
+        )
+        if not current_account_is_primary(request) or state_record is None:
+            messages.add_message(
+                request,
+                messages.ERROR,
+                "The Slack connection request expired or could not be verified. Please try again.",
             )
+            return redirect("console:settings:notification")
+        if error:
+            messages.add_message(
+                request,
+                messages.ERROR,
+                error_description or "Slack did not authorize the connection.",
+            )
+            return redirect("console:settings:notification")
 
-            result = requests.post(token_request_url)
+        code = data.get("code")
+        if not code:
+            messages.add_message(request, messages.ERROR, "The Slack callback was invalid.")
+            return redirect("console:settings:notification")
+        result = _post_oauth_token(
+            settings.SLACK_TOKEN_URL,
+            allowed_hostnames={"slack.com"},
+            allowed_paths={"/api/oauth.v2.access"},
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": settings.SLACK_CLIENT_ID,
+                "client_secret": settings.SLACK_CLIENT_SECRET,
+                "redirect_uri": f"{settings.APP_URL}/api/v1/callback/slack/",
+            },
+        )
+        if result is None or result.status_code != 200:
+            messages.add_message(
+                request,
+                messages.ERROR,
+                "Unable to connect account. Please contact support.",
+            )
+            return redirect("console:settings:notification")
 
-            if result.status_code == 200:
-                slack_data = result.json()
+        slack_data = result.json()
+        incoming_webhook = slack_data.get("incoming_webhook")
+        webhook_url = None
+        if isinstance(incoming_webhook, dict):
+            webhook_url = validated_https_endpoint(
+                incoming_webhook.get("url"),
+                allowed_hostnames={"hooks.slack.com", "hooks.slack-gov.com"},
+                allowed_path_prefixes={"/services/"},
+            )
+        if not slack_data.get("ok") or webhook_url is None:
+            messages.add_message(
+                request,
+                messages.ERROR,
+                "Slack returned an invalid authorization response. Please try again.",
+            )
+            return redirect("console:settings:notification")
 
-                if slack_data.get("ok"):
-                    n_slack, created = CoreNotificationSlack.objects.get_or_create(
-                        account=account,
-                        channel=slack_data.get("incoming_webhook").get("channel"),
-                        channel_id=slack_data.get("incoming_webhook").get("channel_id"),
-                    )
-                    n_slack.added_by = member
-                    n_slack.app_id = slack_data.get("app_id")
-                    n_slack.token_type = slack_data.get("token_type")
-                    n_slack.access_token = slack_data.get("access_token")
-                    n_slack.bot_user_id = slack_data.get("bot_user_id")
-                    n_slack.refresh_token = slack_data.get("refresh_token")
-                    n_slack.expiry = datetime.fromtimestamp((int(time.time()) + int(slack_data["expires_in"])))
-                    n_slack.channel = slack_data.get("incoming_webhook").get("channel")
-                    n_slack.url = slack_data.get("incoming_webhook").get("url")
-                    n_slack.data = slack_data
-                    n_slack.save()
+        n_slack, created = CoreNotificationSlack.objects.get_or_create(
+            account=account,
+            channel=incoming_webhook.get("channel"),
+            channel_id=incoming_webhook.get("channel_id"),
+        )
+        n_slack.added_by = member
+        n_slack.app_id = slack_data.get("app_id")
+        n_slack.token_type = slack_data.get("token_type")
+        n_slack.access_token = slack_data.get("access_token")
+        n_slack.bot_user_id = slack_data.get("bot_user_id")
+        n_slack.refresh_token = slack_data.get("refresh_token")
+        n_slack.expiry = datetime.fromtimestamp(
+            int(time.time()) + int(slack_data["expires_in"])
+        )
+        n_slack.channel = incoming_webhook.get("channel")
+        n_slack.url = webhook_url
+        n_slack.data = slack_data
+        n_slack.save()
 
-                    # Send Welcome Message on Slack
-                    webhook = WebhookClient(slack_data["incoming_webhook"]["url"])
-                    webhook.send(
-                        text="Hey! You successfully connected BackupSheep with your slack.",
-                    )
-
-                    messages.add_message(
-                        request,
-                        messages.SUCCESS,
-                        "Your slack is successfully connected.",
-                    )
-
-                    result.close()
-
-                    n_slack.refresh_auth_token()
-
-                    return redirect("console:settings:notification")
-                else:
-                    messages.add_message(
-                        request,
-                        messages.ERROR,
-                        f"Unable to connect account because of error {slack_data.get('error')}. Please contact support.",
-                    )
-                    return redirect("console:settings:notification")
-
-            else:
-                messages.add_message(
-                    request,
-                    messages.ERROR,
-                    "Unable to connect account. Please contact support.",
-                )
-                return redirect("console:settings:notification")
+        # The URL was constrained to Slack's exact webhook hosts above.
+        WebhookClient(webhook_url).send(
+            text="Hey! You successfully connected BackupSheep with your slack.",
+        )
+        messages.add_message(
+            request,
+            messages.SUCCESS,
+            "Your slack is successfully connected.",
+        )
+        result.close()
+        n_slack.refresh_auth_token()
+        return redirect("console:settings:notification")
 
 
 class APICallbackPCloud(APIView):
@@ -228,6 +313,8 @@ class APICallbackPCloud(APIView):
                         "redirect_uri": settings.APP_URL + settings.PCLOUD_REDIRECT_URL,
                     },
                     verify=True,
+                    allow_redirects=False,
+                    timeout=request_timeout(),
                 )
 
                 if r.status_code == 200:
@@ -266,7 +353,13 @@ class APICallbackPCloud(APIView):
                         "content-type": "application/json",
                         "Authorization": f"Bearer {result['access_token']}",
                     }
-                    r = requests.get(f"https://{hostname}/userinfo", headers=headers, verify=True)
+                    r = requests.get(
+                        f"https://{hostname}/userinfo",
+                        headers=headers,
+                        verify=True,
+                        allow_redirects=False,
+                        timeout=request_timeout(),
+                    )
 
                     if r.status_code == 200:
                         user_info = r.json()
@@ -311,95 +404,133 @@ class APICallbackMicrosoft(APIView):
 
     def get(self, request):
         data = self.request.query_params
-        error = data.get("error", None)
-        error_description = data.get("error_description", None)
         member = self.request.user.member
         account = member.get_current_account()
         encryption_key = account.get_encryption_key()
-
+        state_record = consume_oauth_state(
+            request,
+            provider="microsoft",
+            received_state=data.get("state"),
+            member=member,
+            account=account,
+        )
+        if not member_has_perm(request, "storage_changes") or state_record is None:
+            messages.add_message(
+                request,
+                messages.ERROR,
+                "The OneDrive connection request expired or could not be verified. Please try again.",
+            )
+            return redirect(
+                "console:setup:integration_storage_open", integration_code="onedrive"
+            )
+        if data.get("error"):
+            messages.add_message(
+                request,
+                messages.ERROR,
+                data.get("error_description")
+                or "Microsoft did not authorize the connection.",
+            )
+            return redirect(
+                "console:setup:integration_storage_open", integration_code="onedrive"
+            )
+        code = data.get("code")
+        if not code or not state_record.get("code_verifier"):
+            messages.add_message(request, messages.ERROR, "The OneDrive callback was invalid.")
+            return redirect(
+                "console:setup:integration_storage_open", integration_code="onedrive"
+            )
         try:
-            if error:
-                messages.add_message(request, messages.ERROR, error_description)
-                return redirect("console:setup:integration_storage_open", integration_code="onedrive")
-            else:
-                code = data.get("code", None)
-
-                params = {
+            token_request = _post_oauth_token(
+                settings.MS_OAUTH_TOKEN_URL,
+                allowed_hostnames={"login.microsoftonline.com"},
+                allowed_path_suffixes={"/oauth2/v2.0/token"},
+                data={
                     "grant_type": "authorization_code",
                     "code": code,
                     "client_id": settings.MS_CLIENT_ID,
                     "client_secret": settings.MS_CLIENT_SECRET_VALUE,
-                    "redirect_uri": f"{settings.APP_URL + settings.MS_REDIRECT_URL}",
-                }
+                    "redirect_uri": settings.APP_URL + settings.MS_REDIRECT_URL,
+                    "code_verifier": state_record["code_verifier"],
+                },
+                timeout=request_timeout(),
+            )
+            if token_request is None or token_request.status_code != 200:
+                raise ValueError("OneDrive token exchange failed")
+            token_data = token_request.json()
+            graph_base = validated_https_endpoint(
+                settings.MS_GRAPH_ENDPOINT,
+                allowed_hostnames={"graph.microsoft.com"},
+                allowed_paths={"/v1.0"},
+            )
+            if graph_base is None:
+                raise ValueError("OneDrive Graph endpoint is invalid")
+            headers = {"Authorization": f"Bearer {token_data['access_token']}"}
+            profile_request = _get_oauth_resource(
+                f"{graph_base}/me",
+                allowed_hostnames={"graph.microsoft.com"},
+                allowed_paths={"/v1.0/me"},
+                headers=headers,
+            )
+            drive_request = _get_oauth_resource(
+                f"{graph_base}/me/drive",
+                allowed_hostnames={"graph.microsoft.com"},
+                allowed_paths={"/v1.0/me/drive"},
+                headers=headers,
+            )
+            if (
+                profile_request is None
+                or profile_request.status_code != 200
+                or drive_request is None
+                or drive_request.status_code != 200
+            ):
+                raise ValueError("OneDrive account details could not be verified")
+            profile_data = profile_request.json()
+            drive_data = drive_request.json()
 
-                token_request = requests.post(settings.MS_OAUTH_TOKEN_URL, data=params)
+            storage = CoreStorage()
+            if CoreStorageOneDrive.objects.filter(
+                storage__account=account, user_id=profile_data.get("id")
+            ).exists():
+                storage_onedrive = CoreStorageOneDrive.objects.get(
+                    storage__account=account,
+                    user_id=profile_data.get("id"),
+                )
+                storage = storage_onedrive.storage
+            else:
+                storage_onedrive = CoreStorageOneDrive()
 
-                if token_request.status_code == 200:
-                    token_data = token_request.json()
+            storage.account = account
+            storage.name = f"{profile_data.get('userPrincipalName', '')}"
+            storage.status = CoreStorage.Status.ACTIVE
+            storage.type = CoreStorageType.objects.get(code="onedrive")
+            storage.save()
 
-                    url = f"{settings.MS_GRAPH_ENDPOINT}/me"
+            storage_onedrive.storage = storage
+            storage_onedrive.access_token = bs_encrypt(
+                token_data["access_token"], encryption_key
+            )
+            storage_onedrive.refresh_token = bs_encrypt(
+                token_data["refresh_token"], encryption_key
+            )
+            storage_onedrive.token_type = token_data["token_type"]
+            storage_onedrive.scope = token_data["scope"]
+            storage_onedrive.user_id = profile_data.get("id")
+            storage_onedrive.drive_id = drive_data.get("id")
+            storage_onedrive.drive_type = drive_data.get("driveType")
+            storage_onedrive.metadata = drive_data
+            storage_onedrive.expiry = datetime.fromtimestamp(
+                int(time.time()) + int(token_data["expires_in"])
+            )
+            storage_onedrive.save()
 
-                    headers = {"Authorization": f"Bearer {token_data['access_token']}"}
-
-                    profile_request = requests.request("GET", url, headers=headers, data={})
-
-                    if profile_request.status_code == 200:
-                        profile_data = profile_request.json()
-
-                        url = f"{settings.MS_GRAPH_ENDPOINT}/users/{profile_data['id']}/drive"
-                        drive_request = requests.request("GET", url, headers=headers, data={})
-
-                        if drive_request.status_code == 200:
-                            drive_data = drive_request.json()
-
-                            storage = CoreStorage()
-
-                            if CoreStorageOneDrive.objects.filter(
-                                storage__account=account, user_id=profile_data.get("id")
-                            ).exists():
-                                storage_onedrive = CoreStorageOneDrive.objects.get(
-                                    storage__account=account,
-                                    user_id=profile_data.get("id"),
-                                )
-                                storage = storage_onedrive.storage
-                            else:
-                                storage_onedrive = CoreStorageOneDrive()
-
-                            storage.account = account
-
-                            storage.name = f"{profile_data.get('userPrincipalName', '')}"
-                            storage.status = CoreStorage.Status.ACTIVE
-                            storage.type = CoreStorageType.objects.get(code="onedrive")
-                            storage.save()
-
-                            storage_onedrive.storage = storage
-                            storage_onedrive.access_token = bs_encrypt(token_data["access_token"], encryption_key)
-                            storage_onedrive.refresh_token = bs_encrypt(token_data["refresh_token"], encryption_key)
-                            storage_onedrive.token_type = token_data["token_type"]
-                            storage_onedrive.scope = token_data["scope"]
-                            storage_onedrive.user_id = profile_data.get("id")
-                            storage_onedrive.drive_id = drive_data.get("id")
-                            storage_onedrive.drive_type = drive_data.get("driveType")
-                            storage_onedrive.metadata = drive_data
-                            storage_onedrive.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])))
-                            storage_onedrive.save()
-
-                            messages.add_message(request, messages.SUCCESS, "Your storage is successfully connected.")
-
-                            return redirect("console:setup:integration_storage_open", integration_code="onedrive")
-                    else:
-                        messages.add_message(
-                            request,
-                            messages.ERROR,
-                            "Unable to connect your storage. Please contact support at " "support@backupsheep.com",
-                        )
-                else:
-                    messages.add_message(
-                        request,
-                        messages.ERROR,
-                        "Unable to connect your storage. Please contact support at " "support@backupsheep.com",
-                    )
-                    return redirect("console:setup:integration_storage_open", integration_code="onedrive")
+            messages.add_message(
+                request,
+                messages.SUCCESS,
+                "Your storage is successfully connected.",
+            )
+            return redirect(
+                "console:setup:integration_storage_open", integration_code="onedrive"
+            )
         except Exception as e:
             capture_exception(e)
             messages.add_message(
@@ -407,7 +538,9 @@ class APICallbackMicrosoft(APIView):
                 messages.ERROR,
                 "Unable to connect your storage. Please contact support at " "support@backupsheep.com",
             )
-            return redirect("console:setup:integration_storage_open", integration_code="onedrive")
+            return redirect(
+                "console:setup:integration_storage_open", integration_code="onedrive"
+            )
 
 
 class APICallbackBasecamp(APIView):
@@ -415,90 +548,109 @@ class APICallbackBasecamp(APIView):
 
     def get(self, request):
         data = self.request.query_params
-        error = data.get("error", None)
-        error_description = data.get("error_description", None)
         member = self.request.user.member
         account = member.get_current_account()
         encryption_key = account.get_encryption_key()
-
+        state_record = consume_oauth_state(
+            request,
+            provider="basecamp",
+            received_state=data.get("state"),
+            member=member,
+            account=account,
+        )
+        if not member_has_perm(request, "integration_changes") or state_record is None:
+            messages.add_message(
+                request,
+                messages.ERROR,
+                "The Basecamp connection request expired or could not be verified. Please try again.",
+            )
+            return redirect(
+                "console:setup:integration_open", integration_code="basecamp"
+            )
+        if data.get("error"):
+            messages.add_message(
+                request,
+                messages.ERROR,
+                data.get("error_description")
+                or "Basecamp did not authorize the connection.",
+            )
+            return redirect(
+                "console:setup:integration_open", integration_code="basecamp"
+            )
+        code = data.get("code")
+        if not code:
+            messages.add_message(request, messages.ERROR, "The Basecamp callback was invalid.")
+            return redirect(
+                "console:setup:integration_open", integration_code="basecamp"
+            )
         try:
-            if error:
-                messages.add_message(request, messages.ERROR, error_description)
-                return redirect("console:setup:integration_open", integration_code="basecamp")
-            else:
-                code = data.get("code", None)
-
-                params = {
+            token_request = _post_oauth_token(
+                settings.BASECAMP_TOKEN_ENDPOINT,
+                allowed_hostnames={"launchpad.37signals.com"},
+                allowed_paths={"/authorization/token"},
+                data={
                     "grant_type": "authorization_code",
                     "code": code,
                     "type": "web_server",
                     "client_id": settings.BASECAMP_CLIENT_ID,
                     "client_secret": settings.BASECAMP_CLIENT_SECRET,
-                    "redirect_uri": f"{settings.APP_URL + settings.BASECAMP_REDIRECT_URL}",
-                }
+                    "redirect_uri": settings.APP_URL + settings.BASECAMP_REDIRECT_URL,
+                },
+            )
+            if token_request is None or token_request.status_code != 200:
+                raise ValueError("Basecamp token exchange failed")
+            token_data = token_request.json()
+            response = _get_oauth_resource(
+                "https://launchpad.37signals.com/authorization.json",
+                allowed_hostnames={"launchpad.37signals.com"},
+                allowed_paths={"/authorization.json"},
+                headers={"Authorization": f"Bearer {token_data['access_token']}"},
+            )
+            if response is None or response.status_code != 200:
+                raise ValueError("Basecamp authorization identity lookup failed")
+            authorization = response.json()
+            identity = authorization.get("identity")
+            if not isinstance(identity, dict) or identity.get("id") is None:
+                raise ValueError("Basecamp returned an invalid authorization identity")
 
-                token_request = requests.post(settings.BASECAMP_TOKEN_ENDPOINT, data=params)
+            if CoreAuthBasecamp.objects.filter(
+                connection__account=account, identity_id=identity["id"]
+            ).exists():
+                auth = CoreAuthBasecamp.objects.get(
+                    connection__account=account, identity_id=identity["id"]
+                )
+            else:
+                connection = CoreConnection()
+                connection.integration = CoreIntegration.objects.get(code="basecamp")
+                connection.name = (
+                    f'{identity.get("email_address")} ({identity.get("id")})'
+                )
+                connection.account = account
+                connection.location = connection.integration.locations.all().order_by(
+                    "?"
+                )[0]
+                connection.save()
+                auth = CoreAuthBasecamp(connection=connection)
 
-                if token_request.status_code == 200:
-                    token_data = token_request.json()
+            auth.access_token = bs_encrypt(token_data["access_token"], encryption_key)
+            auth.refresh_token = bs_encrypt(token_data["refresh_token"], encryption_key)
+            auth.expiry = datetime.fromtimestamp(
+                int(time.time()) + int(token_data["expires_in"])
+            )
+            auth.identity_id = identity["id"]
+            auth.metadata = authorization
+            auth.save()
 
-                    url = "https://launchpad.37signals.com/authorization.json"
-
-                    headers = {"Authorization": f"Bearer {token_data['access_token']}"}
-
-                    response = requests.request("GET", url, headers=headers, data={})
-
-                    if response.status_code == 200:
-                        authorization = response.json()
-
-                        if CoreAuthBasecamp.objects.filter(
-                            connection__account=account, identity_id=authorization.get("identity").get("id")
-                        ).exists():
-                            auth = CoreAuthBasecamp.objects.get(
-                                connection__account=account, identity_id=authorization.get("identity").get("id")
-                            )
-                        else:
-                            connection = CoreConnection()
-                            connection.integration = CoreIntegration.objects.get(code="basecamp")
-                            connection.name = f'{authorization.get("identity").get("email_address")} ({authorization.get("identity").get("id")})'
-                            connection.account = account
-                            connection.location = connection.integration.locations.all().order_by("?")[0]
-                            connection.save()
-                            auth = CoreAuthBasecamp(connection=connection)
-
-                        auth.access_token = bs_encrypt(token_data["access_token"], encryption_key)
-                        auth.refresh_token = bs_encrypt(token_data["refresh_token"], encryption_key)
-
-                        auth.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])))
-
-                        auth.identity_id = authorization.get("identity").get("id")
-                        auth.metadata = authorization
-                        auth.save()
-
-                        # set connection status to active
-                        auth.connection.status = CoreConnection.Status.ACTIVE
-                        auth.connection.save()
-
-                        messages.add_message(
-                            request,
-                            messages.SUCCESS,
-                            "Your account is successfully connected. You can create nodes for your Basecamp now.",
-                        )
-
-                        return redirect("console:setup:integration_open", integration_code="basecamp")
-                    else:
-                        messages.add_message(
-                            request,
-                            messages.ERROR,
-                            "Unable to connect your Basecamp account. Please contact support at " "support@backupsheep.com",
-                        )
-                else:
-                    messages.add_message(
-                        request,
-                        messages.ERROR,
-                        "Unable to connect your Basecamp account. Please contact support at " "support@backupsheep.com",
-                    )
-                    return redirect("console:setup:integration_open", integration_code="basecamp")
+            auth.connection.status = CoreConnection.Status.ACTIVE
+            auth.connection.save()
+            messages.add_message(
+                request,
+                messages.SUCCESS,
+                "Your account is successfully connected. You can create nodes for your Basecamp now.",
+            )
+            return redirect(
+                "console:setup:integration_open", integration_code="basecamp"
+            )
         except Exception as e:
             capture_exception(e)
             messages.add_message(
@@ -506,7 +658,9 @@ class APICallbackBasecamp(APIView):
                 messages.ERROR,
                 "Unable to connect your Basecamp account. Please contact support at " "support@backupsheep.com",
             )
-            return redirect("console:setup:integration_open", integration_code="basecamp")
+            return redirect(
+                "console:setup:integration_open", integration_code="basecamp"
+            )
 
 
 class APICallbackDigitalOcean(APIView):
@@ -514,106 +668,110 @@ class APICallbackDigitalOcean(APIView):
 
     def get(self, request):
         data = self.request.query_params
-        error = data.get("error", None)
-        error_description = data.get("error_description", None)
-
-        if error:
-            messages.add_message(request, messages.ERROR, error_description)
-            return redirect("console:setup:integration_open", integration_code="digitalocean")
-        else:
-            state = data.get("state", None)
-            code = data.get("code", None)
-
-            token_request_url = (
-                f"{settings.DIGITALOCEAN_TOKEN_URL}?"
-                f"grant_type=authorization_code"
-                f"&code={code}"
-                f"&client_id={settings.DIGITALOCEAN_APP_CLIENT_ID}"
-                f"&client_secret={settings.DIGITALOCEAN_APP_CLIENT_SECRET}"
-                f"&redirect_uri={settings.APP_URL + '/api/v1/callback/digitalocean/'}"
+        member = request.user.member
+        account = member.get_current_account()
+        state_record = consume_oauth_state(
+            request,
+            provider="digitalocean",
+            received_state=data.get("state"),
+            member=member,
+            account=account,
+        )
+        if not member_has_perm(request, "integration_changes") or state_record is None:
+            messages.add_message(
+                request,
+                messages.ERROR,
+                "The DigitalOcean connection request expired or could not be verified. Please try again.",
             )
+            return redirect("console:setup:integration_open", integration_code="digitalocean")
+        if data.get("error"):
+            messages.add_message(
+                request,
+                messages.ERROR,
+                data.get("error_description")
+                or "DigitalOcean did not authorize the connection.",
+            )
+            return redirect("console:setup:integration_open", integration_code="digitalocean")
+        code = data.get("code")
+        if not code:
+            messages.add_message(
+                request, messages.ERROR, "The DigitalOcean callback was invalid."
+            )
+            return redirect("console:setup:integration_open", integration_code="digitalocean")
 
-            result = requests.post(token_request_url)
+        result = _post_oauth_token(
+            settings.DIGITALOCEAN_TOKEN_URL,
+            allowed_hostnames={"cloud.digitalocean.com"},
+            allowed_paths={"/v1/oauth/token"},
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": settings.DIGITALOCEAN_APP_CLIENT_ID,
+                "client_secret": settings.DIGITALOCEAN_APP_CLIENT_SECRET,
+                "redirect_uri": f"{settings.APP_URL}/api/v1/callback/digitalocean/",
+            },
+        )
+        if result is None or result.status_code != 200:
+            messages.add_message(
+                request,
+                messages.ERROR,
+                "Unable to connect account. Please contact support.",
+            )
+            return redirect("console:setup:integration_open", integration_code="digitalocean")
 
-            if result.status_code == 200:
-                do_tokens = result.json()
-
-                # """
-                # Fetch account detail so we can identofy for which account this token belongs to.
-                # Otherwise it will replace existing token. So if you are a user who's in different DigitalOcean teams then
-                # this will create huge problem and invalidate all existing integrations.
-                # """
-                # client = {
-                #     "content-type": "application/json",
-                #     "Authorization": "%s %s"
-                #                      % (do_tokens["bearer"], do_tokens["access_token"]),
-                # }
-                # account_req = requests.get(
-                #     f"{settings.DIGITALOCEAN_API}/v2/account",
-                #     headers=client,
-                #     verify=True,
-                # )
-                # if account_req.status_code == 200:
-                #     do_account = account_req.json()
-
-                # The OAuth `state` is attacker-controllable, so never trust it to select
-                # the member/account the new credentials are attached to. Bind the result
-                # to the authenticated session and reject a state that doesn't match it.
-                member = request.user.member
-                if state and str(state) != str(member.id):
-                    messages.add_message(
-                        request,
-                        messages.ERROR,
-                        "Unable to connect account due to a verification mismatch. Please try again.",
-                    )
-                    return redirect("console:setup:integration_open", integration_code="digitalocean")
-                account = member.get_current_account()
-                encryption_key = account.get_encryption_key()
-
-                if CoreAuthDigitalOcean.objects.filter(
-                    connection__account=account, info_uuid=do_tokens["info"]["uuid"]
-                ).exists():
-                    auth = CoreAuthDigitalOcean.objects.get(
-                        connection__account=account, info_uuid=do_tokens["info"]["uuid"]
-                    )
-                else:
-                    connection = CoreConnection()
-                    connection.integration = CoreIntegration.objects.get(code="digitalocean")
-                    connection.name = do_tokens["info"]["name"]
-                    connection.account = account
-                    connection.location = connection.integration.locations.all().order_by("?")[0]
-                    connection.save()
-                    auth = CoreAuthDigitalOcean(connection=connection)
-
-                auth.access_token = bs_encrypt(do_tokens["access_token"], encryption_key)
-                auth.refresh_token = bs_encrypt(do_tokens["refresh_token"], encryption_key)
-                auth.expiry = datetime.fromtimestamp((int(time.time()) + int(do_tokens["expires_in"])))
-                auth.scope = do_tokens["scope"]
-                auth.token_type = do_tokens["bearer"]
-                auth.info_name = do_tokens["info"]["name"]
-                auth.info_email = do_tokens["info"]["email"]
-                auth.info_uuid = do_tokens["info"]["uuid"]
-                auth.save()
-
-                # set connection status to active
-                auth.connection.status = CoreConnection.Status.ACTIVE
-                auth.connection.save()
-
-                messages.add_message(
-                    request,
-                    messages.SUCCESS,
-                    "Your account is successfully connected. You can add schedules for this server.",
+        try:
+            do_tokens = result.json()
+            info = do_tokens["info"]
+            info_uuid = info["uuid"]
+            encryption_key = account.get_encryption_key()
+            if CoreAuthDigitalOcean.objects.filter(
+                connection__account=account, info_uuid=info_uuid
+            ).exists():
+                auth = CoreAuthDigitalOcean.objects.get(
+                    connection__account=account, info_uuid=info_uuid
                 )
-
-                result.close()
-                return redirect("console:setup:integration_open", integration_code="digitalocean")
             else:
-                messages.add_message(
-                    request,
-                    messages.ERROR,
-                    "Unable to connect account. Please contact support.",
+                connection = CoreConnection()
+                connection.integration = CoreIntegration.objects.get(
+                    code="digitalocean"
                 )
-                return redirect("console:setup:integration_open", integration_code="digitalocean")
+                connection.name = info["name"]
+                connection.account = account
+                connection.location = connection.integration.locations.all().order_by(
+                    "?"
+                )[0]
+                connection.save()
+                auth = CoreAuthDigitalOcean(connection=connection)
+
+            auth.access_token = bs_encrypt(do_tokens["access_token"], encryption_key)
+            auth.refresh_token = bs_encrypt(do_tokens["refresh_token"], encryption_key)
+            auth.expiry = datetime.fromtimestamp(
+                int(time.time()) + int(do_tokens["expires_in"])
+            )
+            auth.scope = do_tokens["scope"]
+            auth.token_type = do_tokens.get("bearer") or do_tokens.get("token_type")
+            auth.info_name = info["name"]
+            auth.info_email = info["email"]
+            auth.info_uuid = info_uuid
+            auth.save()
+            auth.connection.status = CoreConnection.Status.ACTIVE
+            auth.connection.save()
+        except (KeyError, TypeError, ValueError) as error:
+            capture_exception(error)
+            messages.add_message(
+                request,
+                messages.ERROR,
+                "DigitalOcean returned an invalid authorization response.",
+            )
+            return redirect("console:setup:integration_open", integration_code="digitalocean")
+
+        messages.add_message(
+            request,
+            messages.SUCCESS,
+            "Your account is successfully connected. You can add schedules for this server.",
+        )
+        result.close()
+        return redirect("console:setup:integration_open", integration_code="digitalocean")
 
 
 class APICallbackOVHCA(APIView):
@@ -803,25 +961,59 @@ class APICallbackOVHEU(APIView):
 
 
 class APICallbackDropbox(APIView):
+    permission_classes = (IsAuthenticated,)
+
     def get(self, request):
+        member = self.request.user.member
+        account = member.get_current_account()
+        state_record = consume_oauth_state(
+            request,
+            provider="dropbox",
+            received_state=self.request.query_params.get("state"),
+            member=member,
+            account=account,
+        )
+        if not member_has_perm(request, "storage_changes") or state_record is None:
+            messages.add_message(
+                request,
+                messages.ERROR,
+                "The Dropbox connection request expired or could not be verified. Please try again.",
+            )
+            return redirect(
+                "console:setup:integration_storage_open", integration_code="dropbox"
+            )
+        if self.request.query_params.get("error"):
+            messages.add_message(
+                request,
+                messages.ERROR,
+                self.request.query_params.get("error_description")
+                or "Dropbox did not authorize the connection.",
+            )
+            return redirect(
+                "console:setup:integration_storage_open", integration_code="dropbox"
+            )
+        code = self.request.query_params.get("code")
+        if not code or not state_record.get("code_verifier"):
+            messages.add_message(request, messages.ERROR, "The Dropbox callback was invalid.")
+            return redirect(
+                "console:setup:integration_storage_open", integration_code="dropbox"
+            )
         try:
-            member = self.request.user.member
-            account = member.get_current_account()
             encryption_key = account.get_encryption_key()
-
-            dropbox_url = "https://api.dropboxapi.com/oauth2/token"
-
-            params = dict()
-
-            params["code"] = self.request.query_params.get("code", None)
-            params["grant_type"] = "authorization_code"
-            params["client_id"] = settings.DROPBOX_APP_KEY
-            params["client_secret"] = settings.DROPBOX_APP_SECRET
-            params["redirect_uri"] = f"{settings.APP_URL}/api/v1/callback/dropbox"
-
-            r = requests.post(dropbox_url, params=params)
-
-            if r.status_code == 200:
+            r = _post_oauth_token(
+                "https://api.dropboxapi.com/oauth2/token",
+                allowed_hostnames={"api.dropboxapi.com"},
+                allowed_paths={"/oauth2/token"},
+                data={
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "client_id": settings.DROPBOX_APP_KEY,
+                    "client_secret": settings.DROPBOX_APP_SECRET,
+                    "redirect_uri": f"{settings.APP_URL}/api/v1/callback/dropbox",
+                    "code_verifier": state_record["code_verifier"],
+                },
+            )
+            if r is not None and r.status_code == 200:
                 is_new = True
                 result = r.json()
                 storage = CoreStorage()
@@ -890,43 +1082,94 @@ class APICallbackDropbox(APIView):
 
 
 class APICallbackGoogleDrive(APIView):
+    permission_classes = (IsAuthenticated,)
+
     def get(self, request):
-
-        try:
-            member = self.request.user.member
-            account = member.get_current_account()
-            encryption_key = account.get_encryption_key()
-            code = self.request.query_params.get("code", None)
-
-            scope = ["https://www.googleapis.com/auth/drive.file"]
-            oauth = OAuth2Session(
-                settings.GOOGLE_CLIENT_ID,
-                redirect_uri=f"{settings.APP_URL}/api/v1/callback/google_drive/",
-                scope=scope,
+        member = self.request.user.member
+        account = member.get_current_account()
+        state_record = consume_oauth_state(
+            request,
+            provider="google_drive",
+            received_state=self.request.query_params.get("state"),
+            member=member,
+            account=account,
+        )
+        if not member_has_perm(request, "storage_changes") or state_record is None:
+            messages.add_message(
+                request,
+                messages.ERROR,
+                "The Google Drive connection request expired or could not be verified. Please try again.",
             )
-            response = oauth.fetch_token(
+            return redirect(
+                "console:setup:integration_storage_open",
+                integration_code="google_drive",
+            )
+        if self.request.query_params.get("error"):
+            messages.add_message(
+                request,
+                messages.ERROR,
+                self.request.query_params.get("error_description")
+                or "Google did not authorize the connection.",
+            )
+            return redirect(
+                "console:setup:integration_storage_open",
+                integration_code="google_drive",
+            )
+        code = self.request.query_params.get("code")
+        if not code or not state_record.get("code_verifier"):
+            messages.add_message(
+                request, messages.ERROR, "The Google Drive callback was invalid."
+            )
+            return redirect(
+                "console:setup:integration_storage_open",
+                integration_code="google_drive",
+            )
+        try:
+            encryption_key = account.get_encryption_key()
+            scope = ["https://www.googleapis.com/auth/drive.file"]
+            token_request = _post_oauth_token(
                 "https://oauth2.googleapis.com/token",
-                code=code,
-                authorization_response=f"{settings.APP_URL}{self.request.get_full_path()}",
-                client_secret=settings.GOOGLE_CLIENT_SECRET,
+                allowed_hostnames={"oauth2.googleapis.com"},
+                allowed_paths={"/token"},
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": settings.GOOGLE_CLIENT_ID,
+                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                    "redirect_uri": f"{settings.APP_URL}/api/v1/callback/google_drive/",
+                    "code_verifier": state_record["code_verifier"],
+                },
                 timeout=request_timeout(),
             )
+            if token_request is None or token_request.status_code != 200:
+                raise ValueError("Google Drive token exchange failed")
+            response = token_request.json()
 
             if response:
                 is_new = True
                 storage = CoreStorage()
                 storage_google_drive = CoreStorageGoogleDrive()
+                token_expiry = datetime.fromtimestamp(
+                    int(time.time()) + int(response["expires_in"]),
+                    tz=timezone.utc,
+                )
                 credentials = google.oauth2.credentials.Credentials(
                     response["access_token"],
                     token_uri="https://oauth2.googleapis.com/token",
                     client_id=settings.GOOGLE_CLIENT_ID,
                     client_secret=settings.GOOGLE_CLIENT_SECRET,
                     refresh_token=response["refresh_token"],
+                    scopes=scope,
+                    # google-auth currently compares against a naive UTC clock.
+                    # Keep the model value timezone-aware below.
+                    expiry=token_expiry.replace(tzinfo=None),
                 )
                 client = _BoundedGoogleAuthorizedSession(credentials)
+                client.max_redirects = 0
                 about_response = client.get(
                     "https://www.googleapis.com/drive/v3/about",
                     params={"fields": "appInstalled,user"},
+                    allow_redirects=False,
                 )
                 if about_response.status_code != 200:
                     raise ValueError(
@@ -962,7 +1205,7 @@ class APICallbackGoogleDrive(APIView):
                 storage_google_drive.storage = storage
                 storage_google_drive.access_token = bs_encrypt(credentials.token, encryption_key)
                 storage_google_drive.refresh_token = bs_encrypt(credentials.refresh_token, encryption_key)
-                storage_google_drive.expiry = credentials.expiry
+                storage_google_drive.expiry = token_expiry
                 storage_google_drive.email_address = about["user"]["emailAddress"]
                 storage_google_drive.display_name = about["user"]["displayName"]
                 storage_google_drive.save()
@@ -986,102 +1229,17 @@ class APICallbackGoogleDrive(APIView):
             return redirect("console:setup:integration_storage_open", integration_code="google_drive")
 
 
-# Todo: Need to delete this because we are using service accounts.
 class APIGoogleCloud(APIView):
+    """Reject the retired user-OAuth flow; Google Cloud uses service accounts."""
+
+    permission_classes = (IsAuthenticated,)
+
     def get(self, request):
-
-        try:
-            data = self.request.query_params
-            error = data.get("error", None)
-            error_description = data.get("error_description", None)
-            member = self.request.user.member
-            account = member.get_current_account()
-            encryption_key = account.get_encryption_key()
-
-            if error:
-                messages.add_message(request, messages.ERROR, error_description)
-                return redirect("console:setup:integration_open", integration_code="google_cloud")
-            else:
-                code = data.get("code", None)
-
-                params = {
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "client_id": settings.GOOGLE_CLIENT_ID,
-                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
-                    "redirect_uri": f"{settings.APP_URL + settings.GOOGLE_REDIRECT_URL}",
-                }
-
-                token_request = requests.post(settings.GOOGLE_OAUTH_TOKEN_URL, data=params)
-
-                if token_request.status_code == 200:
-                    token_data = token_request.json()
-
-                    url = f"https://openidconnect.googleapis.com/v1/userinfo"
-
-                    headers = {
-                        "Authorization": f"{token_data['token_type']} {token_data['access_token']}",
-                        "content-type": f"application/json"
-                    }
-
-                    profile_request = requests.get(url, headers=headers)
-
-                    if profile_request.status_code == 200:
-                        profile_data = profile_request.json()
-
-                        # Check if already exists or not.
-                        if CoreAuthGoogleCloud.objects.filter(
-                                connection__account=account,
-                                sub=profile_data["sub"]
-                        ).exists():
-                            google_cloud = CoreAuthGoogleCloud.objects.get(
-                                connection__account=account,
-                                sub=profile_data["sub"])
-                            connection = google_cloud.connection
-                        else:
-                            connection = CoreConnection()
-                            connection.name = f"{profile_data.get('name')} - {profile_data.get('email')}"
-                            connection.account = account
-                            connection.integration = CoreIntegration.objects.get(code="google_cloud")
-                            connection.location = CoreConnectionLocation.objects.filter(
-                                integrations__code="google_cloud"
-                            ).first()
-                            connection.added_by = member
-                            connection.save()
-
-                            google_cloud = CoreAuthGoogleCloud()
-                            google_cloud.connection = connection
-                            google_cloud.sub = profile_data["sub"]
-
-                        # Update this on every connect
-                        connection.status = CoreConnection.Status.ACTIVE
-                        connection.save()
-                        google_cloud.access_token = bs_encrypt(token_data['access_token'], encryption_key)
-                        google_cloud.refresh_token = bs_encrypt(token_data['refresh_token'], encryption_key)
-                        google_cloud.scope = token_data['scope']
-                        google_cloud.token_type = token_data['token_type']
-                        google_cloud.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])))
-                        google_cloud.metadata = profile_data
-                        google_cloud.save()
-                        messages.add_message(request, messages.SUCCESS, "Your integration is successfully connected.")
-
-                    return redirect("console:setup:integration_open", integration_code="google_cloud")
-                else:
-                    messages.add_message(
-                        request,
-                        messages.ERROR,
-                        "Unable to connect Google Cloud. Check if the domain administrators "
-                        "have disabled Google Cloud on your account.",
-                    )
-
-                    return redirect("console:setup:integration_open", integration_code="google_cloud")
-        except Exception as e:
-            capture_exception(e)
-            messages.add_message(
-                request,
-                messages.ERROR,
-                "Unable to connect Google Cloud storage. Check if the domain administrators "
-                "have disabled Google Cloud on your account.",
-            )
-
-            return redirect("console:setup:integration_open", integration_code="google_cloud")
+        messages.add_message(
+            request,
+            messages.ERROR,
+            "Google Cloud user OAuth is retired. Connect Google Cloud with a service account.",
+        )
+        return redirect(
+            "console:setup:integration_open", integration_code="google_cloud"
+        )

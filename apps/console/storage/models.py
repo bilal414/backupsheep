@@ -4,7 +4,7 @@ import uuid
 from datetime import timedelta
 from decimal import Decimal
 
-from apps.api.v1.utils.http import requests
+from apps.api.v1.utils.http import request_timeout, requests
 from apps.api.v1.utils.boto import (
     bounded_boto3_client,
     bounded_ibm_boto3_client,
@@ -158,7 +158,14 @@ class CoreStorageDropbox(TimeStampedModel):
             "client_secret": settings.DROPBOX_APP_SECRET,
         }
 
-        token_request = requests.post(dropbox_url, data=params)
+        token_request = requests.post(
+            dropbox_url,
+            data=params,
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if token_request.status_code == 200:
             token_data = token_request.json()
@@ -295,6 +302,7 @@ class CoreStorageOneDrive(TimeStampedModel):
         from django.conf import settings
         from datetime import datetime
         import time
+        from apps.api.v1.utils.oauth_security import validated_https_endpoint
 
         encryption_key = self.storage.account.get_encryption_key()
 
@@ -307,7 +315,22 @@ class CoreStorageOneDrive(TimeStampedModel):
             "client_secret": settings.MS_CLIENT_SECRET_VALUE,
         }
 
-        token_request = requests.post(settings.MS_OAUTH_TOKEN_URL, data=params)
+        token_endpoint = validated_https_endpoint(
+            settings.MS_OAUTH_TOKEN_URL,
+            allowed_hostnames={"login.microsoftonline.com"},
+            allowed_path_suffixes={"/oauth2/v2.0/token"},
+        )
+        if token_endpoint is None:
+            return False
+
+        token_request = requests.post(
+            token_endpoint,
+            data=params,
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if token_request.status_code == 200:
             token_data = token_request.json()
@@ -316,8 +339,9 @@ class CoreStorageOneDrive(TimeStampedModel):
             self.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])))
             self.scope = token_data["scope"]
             self.save()
+            return True
         else:
-            print(token_request.json())
+            return False
 
     def validate(self, data=None, raise_exp=None):
         from django.conf import settings
@@ -407,7 +431,9 @@ class CoreStorageGoogleDrive(TimeStampedModel):
         # Token exchange is a provider POST. It gets the same finite timeout as
         # every other provider request and the shared session does not retry POST,
         # so a lost token response cannot be replayed by the HTTP adapter.
-        request = Request(session=requests.Session())
+        refresh_session = requests.Session()
+        refresh_session.max_redirects = 0
+        request = Request(session=refresh_session)
 
         def bounded_request(**kwargs):
             kwargs["timeout"] = _provider_sdk_timeout()

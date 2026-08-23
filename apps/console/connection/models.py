@@ -119,6 +119,7 @@ class _BoundedGoogleAuthorizedSession(AuthorizedSession):
         # token.  Use a private session with zero adapter retries; this does not
         # alter requests or Google SDK process globals.
         auth_session = requests.Session()
+        auth_session.max_redirects = 0
         no_retry_adapter = requests.adapters.HTTPAdapter(max_retries=0)
         auth_session.mount("http://", no_retry_adapter)
         auth_session.mount("https://", no_retry_adapter)
@@ -128,6 +129,7 @@ class _BoundedGoogleAuthorizedSession(AuthorizedSession):
             auth_request=Request(auth_session),
             refresh_timeout=self._backupsheep_timeout[1],
         )
+        self.max_redirects = 0
 
         # AuthorizedSession inherits requests.Session.  Make the no-retry policy
         # explicit for all methods; task-level recovery and provider idempotency
@@ -340,10 +342,10 @@ class CoreAuthDigitalOcean(TimeStampedModel):
 
     def refresh_auth_token(self):
         from datetime import datetime, timezone
-        from urllib.parse import urlsplit
 
         from ..node.models import CoreNode
         from apps.api.v1.connection.digitalocean.client import DigitalOceanAPIError
+        from apps.api.v1.utils.oauth_security import validated_https_endpoint
 
         # Personal access-token connections do not use OAuth refresh tokens.
         if self.api_key:
@@ -356,21 +358,12 @@ class CoreAuthDigitalOcean(TimeStampedModel):
         if not refresh_token_decrypted:
             return False
 
-        token_url = str(settings.DIGITALOCEAN_TOKEN_URL or "").strip()
-        try:
-            parsed = urlsplit(token_url)
-            has_port = parsed.port is not None
-        except ValueError as error:
-            raise DigitalOceanAPIError("PROVIDER_REQUEST_FAILED") from error
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or has_port
-            or parsed.query
-            or parsed.fragment
-        ):
+        token_url = validated_https_endpoint(
+            settings.DIGITALOCEAN_TOKEN_URL,
+            allowed_hostnames={"cloud.digitalocean.com"},
+            allowed_paths={"/v1/oauth/token"},
+        )
+        if token_url is None:
             raise DigitalOceanAPIError("PROVIDER_REQUEST_FAILED")
 
         form = {
@@ -388,6 +381,7 @@ class CoreAuthDigitalOcean(TimeStampedModel):
                 token_url,
                 data=form,
                 headers={"Accept": "application/json"},
+                allow_redirects=False,
                 verify=True,
                 timeout=request_timeout(),
             )
@@ -3649,6 +3643,7 @@ class CoreAuthBasecamp(TimeStampedModel):
     def get_refresh_token(self):
         from django.conf import settings
         from datetime import datetime
+        from apps.api.v1.utils.oauth_security import validated_https_endpoint
 
         encryption_key = self.connection.account.get_encryption_key()
 
@@ -3662,7 +3657,22 @@ class CoreAuthBasecamp(TimeStampedModel):
             # "redirect_uri": f"{settings.APP_URL + settings.BASECAMP_REDIRECT_URL}",
         }
 
-        token_request = requests.post(settings.BASECAMP_TOKEN_ENDPOINT, data=params)
+        token_endpoint = validated_https_endpoint(
+            settings.BASECAMP_TOKEN_ENDPOINT,
+            allowed_hostnames={"launchpad.37signals.com"},
+            allowed_paths={"/authorization/token"},
+        )
+        if token_endpoint is None:
+            return False
+
+        token_request = requests.post(
+            token_endpoint,
+            data=params,
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if token_request.status_code == 200:
             token_data = token_request.json()
@@ -3671,13 +3681,23 @@ class CoreAuthBasecamp(TimeStampedModel):
                 self.refresh_token = bs_encrypt(token_data["refresh_token"], encryption_key)
             self.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])), tz=timezone.utc)
             self.save()
+            return True
+        return False
 
     def validate(self, data=None, check_errors=None, raise_exp=None):
         url = "https://launchpad.37signals.com/authorization.json"
 
         headers = self.get_client()
 
-        response = requests.request("GET", url, headers=headers, data={})
+        response = requests.request(
+            "GET",
+            url,
+            headers=headers,
+            data={},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if response.status_code == 200:
             return True

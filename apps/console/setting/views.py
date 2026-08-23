@@ -1,4 +1,6 @@
 import pytz
+from urllib.parse import urlencode
+
 from django.conf import settings
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.shortcuts import redirect
@@ -8,6 +10,8 @@ from twilio.rest.verify.v2.service.entity.new_factor import NewFactorInstance
 
 from apps.console.account.models import CoreAccountGroup
 from apps.console.notification.models import CoreNotificationSlack, CoreNotificationTelegram
+from apps.api.v1.utils.api_permissions import current_account_is_primary
+from apps.api.v1.utils.oauth_security import issue_oauth_state
 
 
 class AccountView(LoginRequiredMixin, TemplateView):
@@ -116,7 +120,27 @@ class NotificationView(LoginRequiredMixin, TemplateView):
         context["notifications_telegram"] = CoreNotificationTelegram.objects.filter(
             account=self.request.user.member.get_current_account()
         )
-        context[
-            "slack_oauth_url"
-        ] = f"https://slack.com/oauth/v2/authorize?client_id=2942549037255.2957176196498&scope=incoming-webhook&redirect_uri={settings.APP_URL}/api/v1/callback/slack/"
+        if (
+            current_account_is_primary(request)
+            and settings.SLACK_CLIENT_ID
+            and settings.SLACK_CLIENT_SECRET
+            and settings.SLACK_TOKEN_URL
+        ):
+            oauth_state = issue_oauth_state(
+                request,
+                provider="slack",
+                member=request.user.member,
+                account=context["account"],
+            )
+            context["slack_oauth_url"] = (
+                "https://slack.com/oauth/v2/authorize?"
+                + urlencode(
+                    {
+                        "client_id": settings.SLACK_CLIENT_ID,
+                        "scope": "incoming-webhook",
+                        "redirect_uri": f"{settings.APP_URL}/api/v1/callback/slack/",
+                        "state": oauth_state["state"],
+                    }
+                )
+            )
         return self.render_to_response(context)

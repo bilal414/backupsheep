@@ -23,8 +23,10 @@ from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects, Integrati
     IntegrationValidationError
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
+from ...utils.api_permissions import member_has_perm
+from ...utils.oauth_security import issue_oauth_state
 from ..view_helpers import safe_connection_action
-from requests.utils import requote_uri
+from urllib.parse import urlencode
 
 
 class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
@@ -80,18 +82,32 @@ class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def oauth_url(self, request):
+        if not member_has_perm(request, "integration_changes"):
+            return Response(
+                {"detail": "You do not have permission to connect integrations."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         name = self.request.query_params.get("name")
         if not name:
             return Response({"detail": "Name parameter is required to setup DigitalOcean integration."}, status=status.HTTP_400_BAD_REQUEST)
-        oauth_url = (
-                f"https://cloud.digitalocean.com/v1/oauth/authorize?"
-                f"response_type=code"
-                f"&client_id={settings.DIGITALOCEAN_APP_CLIENT_ID}"
-                f"&redirect_uri={settings.APP_URL + '/api/v1/callback/digitalocean/'}"
-                f"&scope=read write"
-                f"&state={name}"
+        member = request.user.member
+        oauth_state = issue_oauth_state(
+            request,
+            provider="digitalocean",
+            member=member,
+            account=member.get_current_account(),
         )
-        return Response({"oauth_url": requote_uri(oauth_url)})
+        oauth_url = "https://cloud.digitalocean.com/v1/oauth/authorize?" + urlencode(
+            {
+                "response_type": "code",
+                "client_id": settings.DIGITALOCEAN_APP_CLIENT_ID,
+                "redirect_uri": settings.APP_URL
+                + "/api/v1/callback/digitalocean/",
+                "scope": "read write",
+                "state": oauth_state["state"],
+            }
+        )
+        return Response({"oauth_url": oauth_url})
 
     @action(detail=True, methods=["get"])
     @safe_connection_action(stage="validation")
