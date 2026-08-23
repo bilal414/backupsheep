@@ -373,14 +373,20 @@ class CoreMember(TimeStampedModel):
         email_notification.email = self.user.email
         email_notification.template = "password_reset"
         email_notification.context = {
-            "action_url": f"{settings.APP_URL}/reset/{reset_token}/",
+            "action_url": "[redacted password reset link]",
             "help_url": f"{settings.APP_URL}",
             "sender_name": f"{settings.APP_NAME} - Notification Bot",
         }
         email_notification.save()
 
-        # Now Send email
-        email_notification.send()
+        # The bearer link exists only in memory for this delivery. Keeping it in
+        # the log row would defeat the database-side token digest.
+        email_notification.send(
+            delivery_context={
+                "action_url": f"{settings.APP_URL}/reset/{reset_token}/"
+            },
+            persist_rendered=False,
+        )
 
 
 class CoreMemberAccount(TimeStampedModel):
