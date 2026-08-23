@@ -1,7 +1,10 @@
 from django.http import HttpResponse
 from django.test import RequestFactory, SimpleTestCase
 
-from utils.middleware import BrowserSecurityHeadersMiddleware
+from utils.middleware import (
+    AllowedHttpMethodsMiddleware,
+    BrowserSecurityHeadersMiddleware,
+)
 
 
 class BrowserSecurityHeadersTests(SimpleTestCase):
@@ -27,3 +30,28 @@ class BrowserSecurityHeadersTests(SimpleTestCase):
                 self.assertNotIn("Cache-Control", response)
                 self.assertIn("Content-Security-Policy", response)
                 self.assertIn("Permissions-Policy", response)
+
+
+class AllowedHttpMethodsTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.middleware = AllowedHttpMethodsMiddleware(
+            lambda request: HttpResponse("ok")
+        )
+
+    def test_standard_application_methods_are_allowed(self):
+        for method in AllowedHttpMethodsMiddleware.ALLOWED_METHODS:
+            with self.subTest(method=method):
+                response = self.middleware(
+                    self.factory.generic(method, "/healthz/")
+                )
+                self.assertEqual(response.status_code, 200)
+
+    def test_trace_tunnelling_and_extension_methods_are_rejected(self):
+        for method in ("TRACE", "TRACK", "CONNECT", "PROPFIND"):
+            with self.subTest(method=method):
+                response = self.middleware(
+                    self.factory.generic(method, "/healthz/")
+                )
+                self.assertEqual(response.status_code, 405)
+                self.assertNotIn(method, response["Allow"])

@@ -4,13 +4,32 @@ from time import time as wall_time
 import pytz
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
-from django.http import HttpResponseRedirect, HttpResponsePermanentRedirect
+from django.http import (
+    HttpResponseNotAllowed,
+    HttpResponsePermanentRedirect,
+    HttpResponseRedirect,
+)
 from django.utils import timezone
 from django.utils.deprecation import MiddlewareMixin
 
 
 AUTH_SESSION_VERSION_KEY = "_backupsheep_auth_session_version"
 AUTH_SESSION_STARTED_AT_KEY = "_backupsheep_auth_session_started_at"
+
+
+class AllowedHttpMethodsMiddleware:
+    """Reject extension and tunnelling verbs before they reach application views."""
+
+    ALLOWED_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+    _ALLOWED_METHOD_SET = frozenset(ALLOWED_METHODS)
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.method.upper() not in self._ALLOWED_METHOD_SET:
+            return HttpResponseNotAllowed(self.ALLOWED_METHODS)
+        return self.get_response(request)
 
 
 class AuthenticationVersionMiddleware:
