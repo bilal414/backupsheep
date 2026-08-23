@@ -71,7 +71,7 @@
 
         <nav class="overflow-x-auto rounded-lg border border-rule-200 bg-paper" aria-label="Filter sources by type">
             <div class="flex min-w-max divide-x divide-rule-100">
-                <a href="?{{ all_types_query }}#source-inventory" class="inline-flex min-h-12 items-center gap-2 border-b-2 px-4 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 {% if not filters.type %}border-evidence-600 bg-evidence-50 text-evidence-700{% else %}border-transparent text-ink-650 hover:bg-wool-50 hover:text-ink-950{% endif %}" {% if not filters.type %}aria-current="page"{% endif %}>
+                <a href="{% url 'console:node:index' %}{% if all_types_query %}?{{ all_types_query }}{% endif %}#source-inventory" class="inline-flex min-h-12 items-center gap-2 border-b-2 px-4 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600 {% if not filters.type %}border-evidence-600 bg-evidence-50 text-evidence-700{% else %}border-transparent text-ink-650 hover:bg-wool-50 hover:text-ink-950{% endif %}" {% if not filters.type %}aria-current="page"{% endif %}>
                     All
                     <span class="font-mono text-xs tabular-nums">{{ summary.total }}</span>
                 </a>
@@ -221,7 +221,7 @@
                                         <div class="min-w-0">
                                             <a href="{% url 'console:node:detail' node.id %}" class="line-clamp-2 text-sm font-semibold text-ink-950 transition hover:text-evidence-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-evidence-600">{{ node.name }}</a>
                                             <p class="mt-1 truncate text-xs text-ink-650">{{ node.get_type_display }} · {{ node.connection.integration.name }}</p>
-                                            <p class="mt-1 line-clamp-2 text-xs text-ink-650"><span class="font-medium text-ink-800">{{ node.connection.name }}</span>{% if node.connection.location %} · {{ node.connection.location.location }}{% endif %}</p>
+                                            <p class="mt-1 line-clamp-2 text-xs text-ink-650"><span class="font-medium text-ink-800">{{ node.connection.name }}</span>{% if node.connection.location.location %} · {{ node.connection.location.location }}{% endif %}</p>
                                         </div>
                                     </div>
                                 </div>
