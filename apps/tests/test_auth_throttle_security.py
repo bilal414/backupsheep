@@ -92,6 +92,19 @@ class AuthenticationThrottleSecurityTests(BaseTestCase):
             ]
         self.assertEqual([response.status_code for response in results], [400, 400, 429])
 
+    def test_non_object_json_is_bucketed_instead_of_raising_a_server_error(self):
+        with mock.patch.object(LoginIdentityRateThrottle, "rate", "2/minute"):
+            results = [
+                Client().post(
+                    "/api/v1/auth/login/",
+                    ["not", "an", "object"],
+                    content_type="application/json",
+                    REMOTE_ADDR="198.51.100.23",
+                )
+                for _ in range(3)
+            ]
+        self.assertEqual([response.status_code for response in results], [400, 400, 429])
+
     def test_authenticated_reset_post_and_token_patch_are_both_limited(self):
         client = Client()
         client.force_login(self.user)

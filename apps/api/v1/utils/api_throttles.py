@@ -46,6 +46,14 @@ def _server_observed_peer(request):
         return value[:256].casefold() or "<missing>"
 
 
+def _submitted_value(request, name):
+    """Read one field without assuming the JSON root is an object."""
+
+    data = request.data
+    getter = getattr(data, "get", None)
+    return getter(name) if callable(getter) else None
+
+
 class _ServerPeerThrottle(SimpleRateThrottle):
     """Apply a throttle to every request from the direct server-observed peer."""
 
@@ -80,7 +88,7 @@ class LoginIdentityRateThrottle(_SubmittedIdentityThrottle):
     rate = "5/minute"
 
     def identity(self, request):
-        return "login-email", request.data.get("email")
+        return "login-email", _submitted_value(request, "email")
 
 
 class PasswordResetRateThrottle(_ServerPeerThrottle):
@@ -98,8 +106,8 @@ class PasswordResetIdentityRateThrottle(_SubmittedIdentityThrottle):
 
     def identity(self, request):
         if request.method.upper() == "PATCH":
-            return "reset-token", request.data.get("password_token")
-        return "reset-email", request.data.get("email")
+            return "reset-token", _submitted_value(request, "password_token")
+        return "reset-email", _submitted_value(request, "email")
 
 
 class MFARateThrottle(_ServerPeerThrottle):
