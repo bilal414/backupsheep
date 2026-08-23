@@ -21,8 +21,24 @@ class NotificationVerificationSecurityTests(BaseTestCase):
         )
         row.send_verification_email()
         row.refresh_from_db()
-        token = row.verify_code
+        delivery = send.call_args.kwargs["delivery_context"]["action_url"]
+        token = delivery.rstrip("/").rsplit("/", 1)[-1]
         self.assertGreaterEqual(len(token), 40)
+        self.assertNotEqual(row.verify_code, token)
+        self.assertEqual(
+            row.verify_code,
+            CoreNotificationEmail.verification_token_digest(token),
+        )
+        log = CoreNotificationLogEmail.objects.get(template="verify_email")
+        persisted = " ".join(
+            [
+                str(log.context or ""),
+                str(log.html_body or ""),
+                str(log.text_body or ""),
+            ]
+        )
+        self.assertNotIn(token, persisted)
+        self.assertFalse(send.call_args.kwargs["persist_rendered"])
 
         client = Client()
         client.force_login(self.user)
@@ -38,13 +54,15 @@ class NotificationVerificationSecurityTests(BaseTestCase):
         self.assertEqual(replay.status_code, 302)
         row.refresh_from_db()
         self.assertEqual(row.status, CoreNotificationEmail.Status.VERIFIED)
-        send.assert_called_once_with()
+        self.assertEqual(send.call_count, 1)
 
     def test_expired_or_other_member_token_cannot_verify(self):
         row = CoreNotificationEmail.objects.create(
             member=self.member,
             email="alerts@example.com",
-            verify_code="expired-verification-token",
+            verify_code=CoreNotificationEmail.verification_token_digest(
+                "expired-verification-token"
+            ),
         )
         CoreNotificationEmail.objects.filter(pk=row.pk).update(
             created=timezone.now()
@@ -60,4 +78,9 @@ class NotificationVerificationSecurityTests(BaseTestCase):
         self.assertEqual(response.status_code, 302)
         row.refresh_from_db()
         self.assertEqual(row.status, CoreNotificationEmail.Status.UN_VERIFIED)
-        self.assertEqual(row.verify_code, "expired-verification-token")
+        self.assertEqual(
+            row.verify_code,
+            CoreNotificationEmail.verification_token_digest(
+                "expired-verification-token"
+            ),
+        )

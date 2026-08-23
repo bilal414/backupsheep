@@ -15,6 +15,7 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
         context = self.get_context_data(**kwargs)
 
         verify_code = self.kwargs.get("verify_code")
+        verify_digest = CoreNotificationEmail.verification_token_digest(verify_code)
 
         cutoff = timezone.now() - timedelta(
             hours=CoreNotificationEmail.VERIFY_TOKEN_TTL_HOURS
@@ -23,7 +24,7 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
             notification_email = (
                 CoreNotificationEmail.objects.select_for_update()
                 .filter(
-                    verify_code=verify_code,
+                    verify_code=verify_digest,
                     member=request.user.member,
                     status=CoreNotificationEmail.Status.UN_VERIFIED,
                     created__gte=cutoff,

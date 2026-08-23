@@ -8,6 +8,7 @@ from django.db.models import UniqueConstraint
 from django.utils import timezone
 from model_utils.models import TimeStampedModel
 import secrets
+from django.utils.crypto import salted_hmac
 
 from sentry_sdk import capture_exception
 
@@ -45,6 +46,13 @@ def sanitize_slack_oauth_metadata(payload):
 class CoreNotificationEmail(TimeStampedModel):
     VERIFY_TOKEN_TTL_HOURS = 24
 
+    @staticmethod
+    def verification_token_digest(token):
+        return salted_hmac(
+            "backupsheep.notification-email-verification",
+            str(token or ""),
+        ).hexdigest()
+
     class Status(models.IntegerChoices):
         UN_VERIFIED = 0, "Un-Verified"
         VERIFIED = 1, "Verified"
@@ -70,7 +78,7 @@ class CoreNotificationEmail(TimeStampedModel):
         # delivered by email, so give it full token entropy and expire it at use.
         verify_code = secrets.token_urlsafe(32)
 
-        self.verify_code = verify_code
+        self.verify_code = self.verification_token_digest(verify_code)
         self.status = self.Status.UN_VERIFIED
         self.save()
 
@@ -79,14 +87,21 @@ class CoreNotificationEmail(TimeStampedModel):
         email_notification.email = self.email
         email_notification.template = "verify_email"
         email_notification.context = {
-            "action_url": f"{settings.APP_URL}/console/notification/email/verify/{self.verify_code}/",
+            "action_url": "[redacted email verification link]",
             "help_url": f"{settings.APP_URL}",
             "sender_name": f"{settings.APP_NAME} - Notification Bot",
         }
         email_notification.save()
 
-        # Now Send email
-        email_notification.send()
+        email_notification.send(
+            delivery_context={
+                "action_url": (
+                    f"{settings.APP_URL}/console/notification/email/verify/"
+                    f"{verify_code}/"
+                )
+            },
+            persist_rendered=False,
+        )
 
 
 class CoreNotificationLogEmail(TimeStampedModel):
