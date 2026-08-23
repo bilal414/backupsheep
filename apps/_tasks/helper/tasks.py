@@ -1583,23 +1583,6 @@ def terminate_backup(self, data):
         raise self.retry()
 
 
-@current_app.task(name="send_to_firebase", track_started=True, bind=True)
-def send_to_firebase(self, data):
-    try:
-        if data.get("notes") == "completed" or data.get("notes") == "failed":
-            time.sleep(5)
-        ref = db.reference(f"nodes/{data.get('node_id')}/logs")
-        ref.set(
-            {
-                "timestamp": int(time.time()),
-                "notes": data.get("notes"),
-                "report": data.get("report", None),
-            }
-        )
-    except Exception as e:
-        raise self.retry()
-
-
 @current_app.task(
     name="send_log_to_db",
     bind=True,

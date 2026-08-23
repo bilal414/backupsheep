@@ -1027,7 +1027,7 @@ CELERY_BEAT_SCHEDULE = {
 #   files ..... website / wordpress / basecamp dumps (heavy CPU/disk); isolated
 #   storage ... uploads each dump to the storage backends + local cleanup; scalable pool
 #               (worker-storage) sharing the _storage volume with the dump workers
-#   logs ...... DB log entries, Slack/Telegram/Firebase notifications, and on-disk
+#   logs ...... DB log entries, Slack/Telegram notifications, and on-disk
 #               run-log retention (worker-logs)
 #
 # storage_upload/finalize_backup/delete_from_disk go to "storage" so they always run on a
@@ -1085,12 +1085,11 @@ CELERY_TASK_ROUTES = {
     "resume_in_progress_backups": {"queue": "default"},
     "resume_in_progress_restores": {"queue": "default"},
     "resume_pending_backup_requests": {"queue": "default"},
-    # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram/Firebase
+    # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram
     # fan-out, and on-disk run-log retention.
     "send_log_to_db": {"queue": "logs"},
     "send_log_to_slack": {"queue": "logs"},
     "send_log_to_telegram": {"queue": "logs"},
-    "send_to_firebase": {"queue": "logs"},
     "delete_old_logs": {"queue": "logs"},
     "delete_old_db_logs": {"queue": "logs"},
 }

@@ -62,7 +62,6 @@ python-dotenv==1.2.2
 # oci 2.184.2 supports cryptography<51; 50.0.0 includes the current security fixes.
 cryptography==50.0.0
 sentry-sdk==2.60.0
-firebase-admin==7.4.0
 
 # Utilities & Helpers
 humanfriendly==10.0

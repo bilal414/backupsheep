@@ -598,6 +598,7 @@ class CeleryRoutingTests(TestCase):
                      "delete_from_disk", "poll_cloud_backup", "delete_old_logs",
                      "run_scheduled_backup", "resume_in_progress_backups"]:
             self.assertIn(name, app.tasks)
+        self.assertNotIn("send_to_firebase", app.tasks)
 
 
 class DiskCleanupTests(TestCase):
