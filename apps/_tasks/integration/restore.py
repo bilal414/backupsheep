@@ -100,6 +100,15 @@ def _restore_error_outcome(error):
                 "or choose an explicit in-place restore target. No target was changed.",
                 False,
             )
+        if declared_code == "DATABASE_RESTORE_SYSTEM_DEFINER_REQUIRED":
+            return (
+                "DATABASE_RESTORE_SYSTEM_DEFINER_REQUIRED",
+                "The stored MySQL dump contains an object owned by a protected "
+                "SYSTEM_USER definer. Grant SYSTEM_USER to a dedicated MySQL "
+                "8.4 restore account, then resume verification. The source "
+                "database was not changed.",
+                False,
+            )
         if declared_code in {"PROVIDER_NOT_FOUND", "STORAGE_DESTINATION_NOT_FOUND"}:
             return (
                 "RESTORE_SOURCE_UNAVAILABLE",

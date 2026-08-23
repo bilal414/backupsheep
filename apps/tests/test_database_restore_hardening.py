@@ -839,6 +839,16 @@ class DatabaseRestorePermissionPreflightTests(BaseTestCase):
         self.assertEqual(backup_serializers._safe_error_code(code), code)
         self.assertIn("in-place", backup_serializers._safe_error_message(code))
 
+    def test_system_definer_error_classification_is_actionable_and_public_safe(self):
+        error = RD._database_restore_system_definer_error()
+        code, message, retryable = restore_tasks._restore_error_outcome(error)
+        self.assertEqual(code, RD.DATABASE_RESTORE_SYSTEM_DEFINER_ERROR_CODE)
+        self.assertFalse(retryable)
+        self.assertIn("SYSTEM_USER", message)
+        self.assertNotIn("root@localhost", message)
+        self.assertEqual(backup_serializers._safe_error_code(code), code)
+        self.assertIn("SYSTEM_USER", backup_serializers._safe_error_message(code))
+
 
 class DatabaseRestoreEngineHardeningTests(BaseTestCase):
     def setUp(self):
@@ -2228,6 +2238,10 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
             digests["source_db"][0]["sha256"], hashlib.sha256(payload).hexdigest()
         )
         self.assertTrue(requirements["mysql_explicit_definer"])
+        self.assertEqual(
+            requirements["mysql_explicit_definer_lines"],
+            {"source_db.sql": [3]},
+        )
         self.assertFalse(requirements["mysql_binlog_restricted_object"])
 
     def test_mysql_archive_reports_binlog_restricted_trigger_requirement(self):
@@ -2348,6 +2362,126 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
                 )
         self.assertNotIn("TOP-SECRET", str(context.exception))
         self.assertNotIn("TOP-SECRET", " ".join(str(call) for call in log.call_args_list))
+
+    def test_mysql_84_error_1227_is_specific_only_at_a_validated_definer_line(self):
+        auth = _fake_auth(CoreAuthDatabase.DatabaseType.MYSQL)
+        auth.version = CoreAuthDatabase.DatabaseVersion.MYSQL_8_4
+        requirements = {
+            "mysql_explicit_definer": True,
+            "mysql_explicit_definer_lines": {"source_db.sql": [17]},
+        }
+        raw_error = (
+            b"ERROR 1227 (42000) at line 17: Access denied; "
+            b"password=TOP-SECRET"
+        )
+
+        error = RD._mysql_system_definer_rejection(
+            raw_error,
+            auth,
+            "source_db.sql",
+            requirements,
+        )
+
+        self.assertEqual(
+            error.code,
+            RD.DATABASE_RESTORE_SYSTEM_DEFINER_ERROR_CODE,
+        )
+        self.assertNotIn("TOP-SECRET", str(error))
+        self.assertIsNone(
+            RD._mysql_system_definer_rejection(
+                raw_error.replace(b"line 17", b"line 18"),
+                auth,
+                "source_db.sql",
+                requirements,
+            )
+        )
+        auth.version = CoreAuthDatabase.DatabaseVersion.MYSQL_8_0
+        self.assertIsNone(
+            RD._mysql_system_definer_rejection(
+                raw_error,
+                auth,
+                "source_db.sql",
+                requirements,
+            )
+        )
+
+    def test_direct_and_ssh_runners_raise_classified_error_without_stderr(self):
+        backup = _fake_backup()
+        classified = RD._database_restore_system_definer_error()
+        raw_error = b"ERROR 1227 at line 17: password=TOP-SECRET"
+        classifier = mock.Mock(return_value=classified)
+        node = SimpleNamespace(
+            id=1,
+            name="db-node",
+            connection=SimpleNamespace(
+                id=1,
+                name="db-connection",
+                account=SimpleNamespace(create_log=lambda data: None),
+            ),
+        )
+        with mock.patch.object(
+            RD.subprocess,
+            "run",
+            return_value=SimpleNamespace(
+                returncode=1,
+                stdout=b"",
+                stderr=raw_error,
+            ),
+        ), mock.patch.object(RD, "_write_log") as direct_log:
+            with self.assertRaises(RestoreError) as direct_raised:
+                RD._run_direct(
+                    node,
+                    backup,
+                    ["mysql", "source_db"],
+                    "dbuser",
+                    "TOP-SECRET",
+                    "MYSQL",
+                    "import source database source_db",
+                    rejection_classifier=classifier,
+                )
+
+        self.assertEqual(
+            direct_raised.exception.code,
+            RD.DATABASE_RESTORE_SYSTEM_DEFINER_ERROR_CODE,
+        )
+        classifier.assert_called_with(raw_error)
+        self.assertNotIn(
+            "TOP-SECRET",
+            " ".join(str(call) for call in direct_log.call_args_list),
+        )
+
+        channel = mock.Mock()
+        channel.recv_exit_status.return_value = 1
+        stdout = mock.Mock(channel=channel)
+        stdout.read.return_value = b""
+        stderr = mock.Mock()
+        stderr.read.return_value = raw_error
+        ssh = mock.Mock()
+        ssh.exec_command.return_value = (None, stdout, stderr)
+        classifier.reset_mock()
+        with mock.patch.object(RD, "_write_log") as ssh_log:
+            with self.assertRaises(RestoreError) as ssh_raised:
+                RD._ssh_run(
+                    node,
+                    backup,
+                    ssh,
+                    "mysql source_db",
+                    "dbuser",
+                    "TOP-SECRET",
+                    "MYSQL",
+                    "import source database source_db",
+                    rejection_classifier=classifier,
+                )
+
+        self.assertEqual(
+            ssh_raised.exception.code,
+            RD.DATABASE_RESTORE_SYSTEM_DEFINER_ERROR_CODE,
+        )
+        classifier.assert_called_with(raw_error)
+        self.assertNotIn(
+            "TOP-SECRET",
+            " ".join(str(call) for call in ssh_log.call_args_list),
+        )
 
     def test_remote_temporary_files_are_mode_0600_and_ssh_is_bounded(self):
         class Channel:

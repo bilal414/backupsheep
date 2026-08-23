@@ -73,6 +73,10 @@ POSTGRES_MARKER_TABLE = "marker"
 POSTGRES_MARKER_RELATION_SENTINEL = "__BACKUPSHEEP_MARKER_RELATION_PRESENT__"
 MAX_DATABASE_IDENTIFIER_LENGTH = 63
 DATABASE_RESTORE_PERMISSION_ERROR_CODE = "DATABASE_RESTORE_PERMISSION_DENIED"
+DATABASE_RESTORE_SYSTEM_DEFINER_ERROR_CODE = (
+    "DATABASE_RESTORE_SYSTEM_DEFINER_REQUIRED"
+)
+MAX_MYSQL_DEFINER_LINE_WITNESSES = 4096
 SFTP_OPEN_TIMEOUT = 30
 REMOTE_RESTORE_PREFIX = ".backupsheep_restore_"
 REMOTE_RESTORE_CORRELATION_RE = r"(?:[0-9a-f]{32}|[0-9a-f]{64})"
@@ -211,6 +215,19 @@ def _database_restore_definer_permission_error(database_type):
         "by this verification attempt."
     )
     error.code = DATABASE_RESTORE_PERMISSION_ERROR_CODE
+    error.retryable = False
+    return error
+
+
+def _database_restore_system_definer_error():
+    """Return safe MySQL 8.4 guidance for a SYSTEM_USER-owned object."""
+    error = RestoreError(
+        "The stored MySQL dump recreates an object whose definer is a protected "
+        "SYSTEM_USER account. Grant SYSTEM_USER to a dedicated restore account, "
+        "then resume verification. The source database was not changed, and the "
+        "exact-owned restore fork was retained for safe reconciliation."
+    )
+    error.code = DATABASE_RESTORE_SYSTEM_DEFINER_ERROR_CODE
     error.retryable = False
     return error
 
@@ -786,6 +803,10 @@ _MYSQL_EXPLICIT_DEFINER_RE = re.compile(rb"(?i)\bDEFINER\s*=")
 _MYSQL_BINLOG_RESTRICTED_OBJECT_RE = re.compile(
     rb"(?i)\bCREATE\b[^\r\n]*\b(?:FUNCTION|TRIGGER)\b"
 )
+_MYSQL_CLIENT_ERROR_AT_LINE_RE = re.compile(
+    rb"(?im)\bERROR\s+(?P<code>\d{3,5})\s+\([^\r\n)]*\)\s+"
+    rb"at\s+line\s+(?P<line>\d+)\s*:"
+)
 
 
 def _mysql_line_has_explicit_definer(line):
@@ -873,6 +894,7 @@ def _validate_extracted_archive(
     source_digests = {}
     requirements = {
         "mysql_explicit_definer": False,
+        "mysql_explicit_definer_lines": {},
         "mysql_binlog_restricted_object": False,
     }
     targets = OrderedDict()
@@ -905,7 +927,7 @@ def _validate_extracted_archive(
         # extract_backup_zip; this second pass validates the actual restore
         # input and gives the marker an immutable content identity.
         with open(path, "rb") as sql_file:
-            for line in sql_file:
+            for line_number, line in enumerate(sql_file, start=1):
                 if (
                     mysql_fork_scaffolding
                     and _MYSQL_DUMP_AUTOCOMMIT_OFF_RE.fullmatch(line)
@@ -969,6 +991,17 @@ def _validate_extracted_archive(
                     and _mysql_line_has_explicit_definer(line)
                 ):
                     requirements["mysql_explicit_definer"] = True
+                    witnesses = requirements["mysql_explicit_definer_lines"].setdefault(
+                        filename, []
+                    )
+                    if witnesses is not None:
+                        if len(witnesses) < MAX_MYSQL_DEFINER_LINE_WITNESSES:
+                            witnesses.append(line_number)
+                        else:
+                            # Keep memory bounded. An unindexed excess witness
+                            # remains protected by the existing generic target
+                            # rejection and same-row reconciliation path.
+                            requirements["mysql_explicit_definer_lines"][filename] = None
                 if (
                     auth.type == CoreAuthDatabase.DatabaseType.MYSQL
                     and _mysql_line_has_binlog_restricted_object(line)
@@ -1089,6 +1122,45 @@ def _classify_dumps(backup, auth, tree_root):
     return _validate_extracted_archive(backup, auth, tree_root)[0]
 
 
+def _mysql_system_definer_rejection(stderr, auth, filename, requirements):
+    """Classify only error 1227 at a validated MySQL 8.4 DEFINER line.
+
+    Client stderr remains ephemeral. The validator's bounded line witnesses
+    prevent an unrelated access-denied error elsewhere in a dump from being
+    presented as a SYSTEM_USER definer failure.
+    """
+    if (
+        auth.type != CoreAuthDatabase.DatabaseType.MYSQL
+        or getattr(auth, "version", None)
+        != CoreAuthDatabase.DatabaseVersion.MYSQL_8_4
+    ):
+        return None
+    raw_witnesses = (requirements or {}).get("mysql_explicit_definer_lines")
+    if not isinstance(raw_witnesses, dict):
+        return None
+    witnesses = raw_witnesses.get(filename)
+    if not isinstance(witnesses, list) or not witnesses:
+        return None
+    witness_lines = {
+        int(value)
+        for value in witnesses
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    }
+    if not witness_lines:
+        return None
+    if isinstance(stderr, str):
+        stderr = stderr.encode("utf-8", "replace")
+    elif not isinstance(stderr, bytes):
+        try:
+            stderr = bytes(stderr or b"")
+        except (TypeError, ValueError):
+            return None
+    for match in _MYSQL_CLIENT_ERROR_AT_LINE_RE.finditer(stderr):
+        if int(match.group("code")) == 1227 and int(match.group("line")) in witness_lines:
+            return _database_restore_system_definer_error()
+    return None
+
+
 def _run_direct(
     node,
     backup,
@@ -1101,6 +1173,7 @@ def _run_direct(
     stdin_path=None,
     env=None,
     restore=None,
+    rejection_classifier=None,
 ):
     """Run an argv-list client with a hard timeout and safe failure output."""
     # argv can contain SQL and database names but never credentials.  Do not
@@ -1131,13 +1204,32 @@ def _run_direct(
     if restore is not None:
         _ensure_restore_fence(restore)
     if proc.returncode != 0:
+        if rejection_classifier is not None:
+            classified = rejection_classifier(proc.stderr)
+            if classified is not None:
+                code = str(getattr(classified, "code", "") or "CLIENT_REJECTED")
+                _capture_safe(code)
+                _write_log(backup, f"{what}: {code}\n")
+                raise classified
         error = _safe_failure(node, backup, what, "CLIENT_REJECTED")
         _capture_safe("CLIENT_REJECTED")
         raise error
     return _decode(proc.stdout)
 
 
-def _ssh_run(node, backup, ssh, command, username, password, label, what, *, restore=None):
+def _ssh_run(
+    node,
+    backup,
+    ssh,
+    command,
+    username,
+    password,
+    label,
+    what,
+    *,
+    restore=None,
+    rejection_classifier=None,
+):
     """Run one bounded SSH command without persisting stdout/stderr bodies."""
     if restore is not None:
         _ensure_restore_fence(restore)
@@ -1150,7 +1242,7 @@ def _ssh_run(node, backup, ssh, command, username, password, label, what, *, res
         out_text = _decode(stdout.read())
         # Read stderr to prevent a full remote stderr pipe from blocking, but
         # never return or persist its body.
-        stderr.read()
+        stderr_body = stderr.read()
         exit_status = channel.recv_exit_status() if channel is not None else 0
     except Exception as error:
         _capture_safe("SSH_COMMAND_FAILED")
@@ -1158,6 +1250,13 @@ def _ssh_run(node, backup, ssh, command, username, password, label, what, *, res
     if restore is not None:
         _ensure_restore_fence(restore)
     if exit_status != 0:
+        if rejection_classifier is not None:
+            classified = rejection_classifier(stderr_body)
+            if classified is not None:
+                code = str(getattr(classified, "code", "") or "SSH_COMMAND_REJECTED")
+                _capture_safe(code)
+                _write_log(backup, f"{what}: {code}\n")
+                raise classified
         error = _safe_failure(node, backup, what, "SSH_COMMAND_REJECTED")
         _capture_safe("SSH_COMMAND_REJECTED")
         raise error
@@ -2223,7 +2322,19 @@ def _reset_mysql_fork_checkpoint(
     )
 
 
-def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_digests, username, password):
+def _restore_mysql_family(
+    node,
+    backup,
+    restore,
+    auth,
+    targets,
+    mapping,
+    source_digests,
+    username,
+    password,
+    *,
+    archive_requirements=None,
+):
     """Restore MySQL/MariaDB sources into owned forks or explicit targets."""
     client = _mysql_family_client(auth)
     label = client.upper()
@@ -2429,6 +2540,15 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
             )
             for sql_path in sql_paths:
                 filename = os.path.basename(sql_path)
+
+                def classify_import_rejection(stderr, _filename=filename):
+                    return _mysql_system_definer_rejection(
+                        stderr,
+                        auth,
+                        _filename,
+                        archive_requirements,
+                    )
+
                 file_state = (
                     _metadata(restore).get("target_checkpoints", {})
                     .get(target, {})
@@ -2476,6 +2596,7 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                         f"import source database {source}",
                         stdin_path=sql_path,
                         restore=restore,
+                        rejection_classifier=classify_import_rejection,
                     )
                 else:
                     remote_sql = _remote_restore_temp_name(
@@ -2502,6 +2623,7 @@ def _restore_mysql_family(node, backup, restore, auth, targets, mapping, source_
                             label,
                             f"import source database {source}",
                             restore=restore,
+                            rejection_classifier=classify_import_rejection,
                         )
                     finally:
                         if remote_sql:
@@ -3816,7 +3938,7 @@ def restore_database(backup, restore):
         ):
             _restore_mysql_family(
                 node, backup, restore, auth, targets, mapping, source_digests,
-                username, password,
+                username, password, archive_requirements=archive_requirements,
             )
         elif auth.type == CoreAuthDatabase.DatabaseType.POSTGRESQL:
             _restore_postgresql(

@@ -290,6 +290,23 @@ class ExecutionStatusApiTests(BaseTestCase):
         self.assertIsNone(second["last_error_code"])
         self.assertIsNone(second["next_retry_at"])
 
+    def test_backup_payload_exposes_only_live_node_summary_labels(self):
+        backup = self._backup(status=UtilBackup.Status.COMPLETE)
+        backup.size = 1234
+        backup.total_files = 17
+        backup.save(update_fields=["size", "total_files", "modified"])
+
+        payload = CoreWebsiteBackupSerializer(backup).data
+
+        self.assertEqual(payload["node_summary"]["total_backups"], 1)
+        self.assertTrue(payload["node_summary"]["total_storage"])
+        self.assertTrue(payload["node_summary"]["last_backup_date"])
+        self.assertEqual(set(payload["node_summary"]), {
+            "total_backups",
+            "total_storage",
+            "last_backup_date",
+        })
+
     def test_source_artifact_row_is_used_when_execution_rollup_is_empty(self):
         backup = self._backup(status=UtilBackup.Status.COMPLETE)
         content_type = ContentType.objects.get_for_model(
@@ -392,6 +409,7 @@ class ExecutionStatusApiTests(BaseTestCase):
             with self.subTest(serializer=class_name):
                 serializer = getattr(import_module(f"{module_name}.serializers"), class_name)()
                 self.assertIn("execution_status", serializer.fields)
+                self.assertIn("node_summary", serializer.fields)
 
     def test_restore_status_redacts_coordination_metadata_params_and_errors(self):
         node = factories.make_website_node(self.account, self.member)

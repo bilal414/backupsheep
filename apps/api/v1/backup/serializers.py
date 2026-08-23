@@ -273,6 +273,7 @@ _PUBLIC_ERROR_CODES = set(UtilBackup.EXECUTION_ERROR_MESSAGES) | {
     "DATABASE_COMMAND_TIMEOUT",
     "DATABASE_CONNECT_TIMEOUT",
     "DATABASE_RESTORE_PERMISSION_DENIED",
+    "DATABASE_RESTORE_SYSTEM_DEFINER_REQUIRED",
     "DATABASE_VALIDATION_COMMAND_TIMEOUT",
     "DNS_FAILURE",
     "DROPBOX_API_TIMEOUT",
@@ -371,6 +372,11 @@ _PUBLIC_ERROR_MESSAGES = {
         "restore. Grant PostgreSQL CREATEDB or MySQL/MariaDB CREATE and DROP globally "
         "or with a matching target/database grant, "
         "or choose an explicit in-place restore target. No target was changed."
+    ),
+    "DATABASE_RESTORE_SYSTEM_DEFINER_REQUIRED": (
+        "The stored MySQL dump contains an object owned by a protected SYSTEM_USER "
+        "definer. Grant SYSTEM_USER to a dedicated MySQL 8.4 restore account, then "
+        "resume verification. The source database was not changed."
     ),
     "RESTORE_RECONCILIATION_REQUIRED": (
         "The restore state is ambiguous, so automatic destination writes were "
@@ -930,10 +936,37 @@ class BackupExecutionStatusMixin(SafeProviderMetadataMixin):
             field = serializers.SerializerMethodField(read_only=True)
             field.bind("execution_status", self)
             fields["execution_status"] = field
+        if "node_summary" not in fields:
+            field = serializers.SerializerMethodField(read_only=True)
+            field.bind("node_summary", self)
+            fields["node_summary"] = field
         return fields
 
     def get_execution_status(self, obj):
         return _backup_execution_status(obj)
+
+    def get_node_summary(self, obj):
+        """Return only the three aggregate labels refreshed by the node UI."""
+        node = getattr(obj, "node", None)
+        if node is None:
+            return None
+        cache = getattr(self, "_node_summary_cache", None)
+        if cache is None:
+            cache = {}
+            self._node_summary_cache = cache
+        cache_key = (node._meta.label_lower, node.pk)
+        if cache_key not in cache:
+            total_backups = max(0, int(node.total_backups() or 0))
+            total_storage = str(node.total_storage() or "0 bytes")
+            last_backup_date = node.last_backup_date()
+            cache[cache_key] = {
+                "total_backups": total_backups,
+                "total_storage": total_storage[:64],
+                "last_backup_date": str(last_backup_date)[:64]
+                if last_backup_date
+                else None,
+            }
+        return cache[cache_key]
 
 
 class RestoreExecutionStatusMixin(SafeProviderMetadataMixin):

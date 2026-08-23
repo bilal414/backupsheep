@@ -8,7 +8,9 @@
 {% load humanize %}
 
 {% block content %}
-    <div class="space-y-6" x-data="nodeDetails('{{ object.notify_on_success|yesno:"true,false" }}', '{{ object.notify_on_fail|yesno:"true,false" }}')">
+    <div class="space-y-6"
+         x-data="nodeDetails('{{ object.notify_on_success|yesno:"true,false" }}', '{{ object.notify_on_fail|yesno:"true,false" }}')"
+         @backupsheep-node-summary.window="applyNodeSummary($event.detail)">
         <!-- Page header -->
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div class="min-w-0">
@@ -204,7 +206,9 @@
                             {% if object.type == 3 or object.type == 4 or object.type == 5 %}Backups{% if object.type == 3 %}{% if object.website.incremental %} (<button type="button" class="font-medium text-indigo-600 transition hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600" @click="openIncrementalResetModal()">reset</button>){% endif %}{% endif %}{% else %}Snapshots{% endif %}
                         </dt>
                         <dd class="mt-1 text-sm text-slate-900">
-                            {{ object.total_backups|default:0 }} {% if object.type == 3 %}({{ object.website.get_backup_type_display }}){% endif %}
+                            <span x-show="nodeTotalBackupsLabel === null">{{ object.total_backups|default:0 }}</span>
+                            <span x-show="nodeTotalBackupsLabel !== null" x-cloak x-text="nodeTotalBackupsLabel"></span>
+                            {% if object.type == 3 %}({{ object.website.get_backup_type_display }}){% endif %}
                         </dd>
                     </div>
                     <div>
@@ -212,7 +216,8 @@
                             Storage{% if object.type == 3 or object.type == 4 or object.type == 5 %}{% else %} ({{ object.connection.integration.name }}){% endif %}
                         </dt>
                         <dd class="mt-1 text-sm text-slate-900">
-                            {{ object.total_storage|default:"n/a" }}
+                            <span x-show="nodeTotalStorageLabel === null">{{ object.total_storage|default:"n/a" }}</span>
+                            <span x-show="nodeTotalStorageLabel !== null" x-cloak x-text="nodeTotalStorageLabel"></span>
                         </dd>
                     </div>
                     <div>
@@ -220,7 +225,8 @@
                             Last {% if object.type == 3 or object.type == 4 or object.type == 5 %}Backup{% else %}Snapshot{% endif %}
                         </dt>
                         <dd class="mt-1 text-sm text-slate-900">
-                            {{ object.last_backup_date|default:"n/a" }}
+                            <span x-show="nodeLastBackupLabel === null">{{ object.last_backup_date|default:"n/a" }}</span>
+                            <span x-show="nodeLastBackupLabel !== null" x-cloak x-text="nodeLastBackupLabel"></span>
                         </dd>
                     </div>
                     <div>
@@ -474,7 +480,9 @@
                                     data-execution-status-card
                                     data-backup-id="{{ backup.id }}"
                                     data-integration-code="{% if is_vultr_managed_database %}vultr_database{% else %}{{ object.connection.integration.code|lower }}{% endif %}"
-                                    data-fallback-status="{{ backup.get_status_display }}">
+                                    data-fallback-status="{{ backup.get_status_display }}"
+                                    data-fallback-size="{{ backup.size|default_if_none:0 }}"
+                                    data-fallback-files="{{ backup.total_files|default_if_none:0 }}">
                                     <td class="whitespace-nowrap px-4 py-3">
                                         <div class="flex items-center gap-2">
                                             <button type="button" @click="$clipboard('{{ backup.uuid }}')"
@@ -569,8 +577,22 @@
                                             <span class="text-xs text-slate-400">({{ backup.schedule.name|default:"n/a"|truncatechars:16 }})</span>{% endif %}
                                     </td>
                                     <td class="whitespace-nowrap px-4 py-3 text-slate-700">
-                                        {% if backup.status == 2 or backup.status == 6 or backup.status == 5 or backup.status == 9 or backup.status == 10 or backup.status == 17 or backup.status == 18 %}
-                                            <svg class="animate-spin h-5 w-5 text-indigo-600"
+                                        <div x-show="!loaded">
+                                            {% if backup.status == 2 or backup.status == 6 or backup.status == 5 or backup.status == 9 or backup.status == 10 or backup.status == 17 or backup.status == 18 %}
+                                                <svg class="animate-spin h-5 w-5 text-indigo-600"
+                                                     xmlns="http://www.w3.org/2000/svg" fill="none"
+                                                     viewBox="0 0 24 24" aria-hidden="true">
+                                                    <circle class="opacity-25" cx="12" cy="12" r="10"
+                                                            stroke="currentColor" stroke-width="4"></circle>
+                                                    <path class="opacity-75" fill="currentColor"
+                                                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                </svg>
+                                            {% else %}
+                                                {{ backup.size_display }}
+                                            {% endif %}
+                                        </div>
+                                        <div x-show="loaded" x-cloak>
+                                            <svg x-show="view && view.shouldPoll" class="animate-spin h-5 w-5 text-indigo-600"
                                                  xmlns="http://www.w3.org/2000/svg" fill="none"
                                                  viewBox="0 0 24 24" aria-hidden="true">
                                                 <circle class="opacity-25" cx="12" cy="12" r="10"
@@ -578,13 +600,15 @@
                                                 <path class="opacity-75" fill="currentColor"
                                                       d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                             </svg>
-                                        {% else %}
-                                            {{ backup.size_display }}
-                                        {% endif %}
+                                            <span x-show="!view || !view.shouldPoll"
+                                                  x-text="sizeLabel || fallbackSizeLabel"></span>
+                                        </div>
                                     </td>
                                     {% if object.type == 3 %}
                                         <td class="whitespace-nowrap px-4 py-3 text-slate-700">
-                                            {{ backup.total_files|default:0|intcomma }}
+                                            <span x-show="!loaded">{{ backup.total_files|default:0|intcomma }}</span>
+                                            <span x-show="loaded" x-cloak
+                                                  x-text="fileCountLabel || fallbackFileCountLabel"></span>
                                         </td>
                                     {% endif %}
                                     <td class="whitespace-nowrap px-4 py-3 text-right">
@@ -2463,6 +2487,7 @@
                 RESTORE_INTEGRITY_FAILED: 'The restore failed an integrity check.',
                 RESTORE_ARCHIVE_NOT_READY: 'The storage provider is restoring this archive; the restore will resume automatically when it is ready.',
                 RESTORE_RECONCILIATION_REQUIRED: 'The restore state is ambiguous, so automatic destination writes were stopped. Review the exact ownership and checkpoint evidence before retrying.',
+                DATABASE_RESTORE_SYSTEM_DEFINER_REQUIRED: 'The stored MySQL dump contains an object owned by a protected SYSTEM_USER definer. Grant SYSTEM_USER to a dedicated MySQL 8.4 restore account, then resume verification. The source database was not changed.',
             };
 
             function safeToken(value) {
@@ -2513,6 +2538,58 @@
                     unit,
                     determinate: total !== null,
                     label: `${completed}${total === null ? '' : ` / ${total}`}${unit ? ` ${unit}` : ''}`,
+                };
+            }
+
+            function safeMetricNumber(value) {
+                if (value === null || value === undefined || value === '') return null;
+                const number = Number(value);
+                if (!Number.isSafeInteger(number) || number < 0) return null;
+                return number;
+            }
+
+            function sizeLabel(value) {
+                const bytes = safeMetricNumber(value);
+                if (bytes === null) return null;
+                if (bytes === 0) return '0 bytes';
+                const units = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+                let amount = bytes;
+                let unitIndex = 0;
+                while (amount >= 1000 && unitIndex < units.length - 1) {
+                    amount /= 1000;
+                    unitIndex += 1;
+                }
+                if (unitIndex === 0) return `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
+                const rounded = amount.toFixed(2).replace(/\.?0+$/, '');
+                return `${rounded} ${units[unitIndex]}`;
+            }
+
+            function countLabel(value) {
+                const count = safeMetricNumber(value);
+                if (count === null) return null;
+                try {
+                    return new Intl.NumberFormat().format(count);
+                } catch (_) {
+                    return String(count);
+                }
+            }
+
+            function nodeSummary(raw) {
+                if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+                const totalBackups = safeMetricNumber(raw.total_backups);
+                const totalStorage = typeof raw.total_storage === 'string'
+                    ? raw.total_storage.trim()
+                    : '';
+                const lastBackup = raw.last_backup_date === null
+                    ? 'n/a'
+                    : (typeof raw.last_backup_date === 'string' ? raw.last_backup_date.trim() : '');
+                const safeStorage = /^(?:\d+(?:\.\d+)? (?:bytes?|KB|MB|GB|TB|PB|EB|ZB|YB)|n\/a)$/.test(totalStorage);
+                const safeLastBackup = lastBackup.length > 0 && lastBackup.length <= 64 && !/[\u0000-\u001f\u007f]/.test(lastBackup);
+                if (totalBackups === null || !safeStorage || !safeLastBackup) return null;
+                return {
+                    totalBackupsLabel: String(totalBackups),
+                    totalStorageLabel: totalStorage,
+                    lastBackupLabel: lastBackup,
                 };
             }
 
@@ -2656,7 +2733,7 @@
                 };
             }
 
-            return {normalize, safeErrorMessage, humanize, dateTimeLabel};
+            return {normalize, safeErrorMessage, humanize, dateTimeLabel, sizeLabel, countLabel, nodeSummary};
         })();
 
         document.addEventListener('alpine:init', () => {
@@ -2678,11 +2755,17 @@
                 backupId: null,
                 integrationCode: null,
                 fallbackStatus: null,
+                sizeLabel: null,
+                fileCountLabel: null,
+                fallbackSizeLabel: '0 bytes',
+                fallbackFileCountLabel: '0',
                 init() {
                     const dataset = this.$el && this.$el.dataset ? this.$el.dataset : {};
                     this.backupId = dataset.backupId || null;
                     this.integrationCode = dataset.integrationCode || null;
                     this.fallbackStatus = dataset.fallbackStatus || null;
+                    this.fallbackSizeLabel = window.BackupSheepExecutionStatus.sizeLabel(dataset.fallbackSize) || '0 bytes';
+                    this.fallbackFileCountLabel = window.BackupSheepExecutionStatus.countLabel(dataset.fallbackFiles) || '0';
                     this.load();
                 },
                 clearTimer() {
@@ -2715,6 +2798,12 @@
                         const raw = payload && typeof payload === 'object' && !Array.isArray(payload)
                             ? payload.execution_status
                             : null;
+                        const nextSizeLabel = window.BackupSheepExecutionStatus.sizeLabel(payload && payload.size);
+                        const nextFileCountLabel = window.BackupSheepExecutionStatus.countLabel(payload && payload.total_files);
+                        const nextNodeSummary = window.BackupSheepExecutionStatus.nodeSummary(payload && payload.node_summary);
+                        if (nextSizeLabel !== null) this.sizeLabel = nextSizeLabel;
+                        if (nextFileCountLabel !== null) this.fileCountLabel = nextFileCountLabel;
+                        if (nextNodeSummary !== null) this.$dispatch('backupsheep-node-summary', nextNodeSummary);
                         const nextView = window.BackupSheepExecutionStatus.normalize(raw);
                         if (!nextView) {
                             // Legacy or partial API responses leave the safe
@@ -2743,6 +2832,9 @@
                 list_all_backups: false,
                 notify_on_success: (notifyOnSuccess === 'true'),
                 notify_on_fail: (notifyOnFail === 'true'),
+                nodeTotalBackupsLabel: null,
+                nodeTotalStorageLabel: null,
+                nodeLastBackupLabel: null,
                 node_id: document.getElementById('node-id').text,
                 location_id: document.getElementById('location-id').text,
                 node: {},
@@ -2851,6 +2943,12 @@
                     {% if object.type == 1 or object.type == 2 or is_vultr_managed_database %}
                         this.validateNode();
                     {% endif %}
+                },
+                applyNodeSummary(summary) {
+                    if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return;
+                    this.nodeTotalBackupsLabel = summary.totalBackupsLabel;
+                    this.nodeTotalStorageLabel = summary.totalStorageLabel;
+                    this.nodeLastBackupLabel = summary.lastBackupLabel;
                 },
                 executionStatusView(item) {
                     if (!item || typeof item !== 'object' || Array.isArray(item)) return null;

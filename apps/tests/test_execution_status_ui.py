@@ -152,6 +152,26 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
             self.source,
         )
 
+    def test_polled_terminal_backup_refreshes_size_and_file_count(self):
+        for marker in (
+            'data-fallback-size="{{ backup.size|default_if_none:0 }}"',
+            'data-fallback-files="{{ backup.total_files|default_if_none:0 }}"',
+            'x-text="sizeLabel || fallbackSizeLabel"',
+            'x-text="fileCountLabel || fallbackFileCountLabel"',
+            "sizeLabel(payload && payload.size)",
+            "countLabel(payload && payload.total_files)",
+            "if (nextSizeLabel !== null) this.sizeLabel = nextSizeLabel;",
+            "if (nextFileCountLabel !== null) this.fileCountLabel = nextFileCountLabel;",
+            "nodeSummary(payload && payload.node_summary)",
+            "this.$dispatch('backupsheep-node-summary', nextNodeSummary)",
+            '@backupsheep-node-summary.window="applyNodeSummary($event.detail)"',
+            'x-text="nodeTotalBackupsLabel"',
+            'x-text="nodeTotalStorageLabel"',
+            'x-text="nodeLastBackupLabel"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.source)
+
     def test_recent_restore_history_exposes_phase_and_safe_diagnostics(self):
         for marker in (
             'x-show="restoreExecutionSummary(restoreItem)"',
@@ -168,6 +188,13 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
         self.assertIn("RESTORE_ARCHIVE_NOT_READY", self.source)
         self.assertIn(
             "The storage provider is restoring this archive; the restore will resume automatically when it is ready.",
+            self.source,
+        )
+
+    def test_mysql_system_definer_failure_has_specific_safe_guidance(self):
+        self.assertIn("DATABASE_RESTORE_SYSTEM_DEFINER_REQUIRED", self.source)
+        self.assertIn(
+            "Grant SYSTEM_USER to a dedicated MySQL 8.4 restore account, then resume verification.",
             self.source,
         )
 
