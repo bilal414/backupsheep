@@ -9,6 +9,7 @@ from rest_framework import serializers
 from apps.console.account.models import CoreAccount
 from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.console.member.models import CoreMember, CoreMemberAccount
+from utils.middleware import AUTH_SESSION_VERSION_KEY
 
 
 class CoreMemberAccountSerializer(serializers.ModelSerializer):
@@ -230,6 +231,7 @@ class CoreMemberSerializer(serializers.ModelSerializer):
             "auth_multi_factor_secret",
             "auth_multi_factor_pending_created",
             "auth_multi_factor_last_counter",
+            "auth_session_version",
         )
         datatables_always_serialize = (
             "id",
@@ -283,9 +285,13 @@ class CoreMemberWriteSerializer(serializers.ModelSerializer):
             django_user.set_password(password)
             django_user.save(update_fields=["password"])
             Token.objects.filter(user=django_user).delete()
+            instance.rotate_auth_session_version()
             request = self.context.get("request")
             if request is not None:
                 update_session_auth_hash(request, django_user)
+                request.session[AUTH_SESSION_VERSION_KEY] = (
+                    instance.auth_session_version
+                )
         for membership in memberships:
             super().update(instance.memberships.get(current=True), membership)
             super().update(instance.memberships.get(current=True).account, membership)

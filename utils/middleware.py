@@ -1,8 +1,38 @@
 from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
 from django.http import HttpResponseRedirect, HttpResponsePermanentRedirect
 import pytz
 from django.utils import timezone
 from django.utils.deprecation import MiddlewareMixin
+
+
+AUTH_SESSION_VERSION_KEY = "_backupsheep_auth_session_version"
+
+
+class AuthenticationVersionMiddleware:
+    """Reject browser sessions issued before a security-sensitive identity change."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        user = getattr(request, "user", None)
+        if user is not None and user.is_authenticated:
+            try:
+                member = user.member
+            except (AttributeError, ObjectDoesNotExist):
+                # A separately-created Django superuser may not have a BackupSheep
+                # member row. The admin route is disabled by default in production.
+                member = None
+
+            if member is not None:
+                bound_version = request.session.get(AUTH_SESSION_VERSION_KEY)
+                if str(bound_version) != str(member.auth_session_version):
+                    from django.contrib.auth import logout
+
+                    logout(request)
+
+        return self.get_response(request)
 
 
 class BrowserSecurityHeadersMiddleware:

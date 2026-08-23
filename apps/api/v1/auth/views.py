@@ -129,6 +129,7 @@ class APIAuthReset(APIView):
                 member.auth_multi_factor_pending_created = None
                 member.auth_multi_factor_enabled_at = None
                 member.auth_multi_factor_last_counter = None
+                member.auth_session_version += 1
                 member.save(
                     update_fields=[
                         "password_reset_token",
@@ -138,6 +139,7 @@ class APIAuthReset(APIView):
                         "auth_multi_factor_pending_created",
                         "auth_multi_factor_enabled_at",
                         "auth_multi_factor_last_counter",
+                        "auth_session_version",
                         "modified",
                     ]
                 )

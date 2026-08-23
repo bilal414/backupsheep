@@ -23,6 +23,7 @@ from ..utils.api_serializers import ReadWriteSerializerMixin
 from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
 from apps.console.member.totp import generate_totp_secret, provisioning_uri
+from utils.middleware import AUTH_SESSION_VERSION_KEY
 
 
 def _record_member_log(account, data):
@@ -234,6 +235,8 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         Token.objects.filter(user=member.user).delete()
+        member.rotate_auth_session_version()
+        request.session[AUTH_SESSION_VERSION_KEY] = member.auth_session_version
         return Response(
             {"detail": "Authenticator verification successful."},
             status=status.HTTP_200_OK,
@@ -255,6 +258,8 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             )
         member.clear_mfa()
         Token.objects.filter(user=member.user).delete()
+        member.rotate_auth_session_version()
+        request.session[AUTH_SESSION_VERSION_KEY] = member.auth_session_version
 
         return Response(
             {

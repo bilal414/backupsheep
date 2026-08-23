@@ -7,7 +7,7 @@ from rest_framework.authtoken.models import Token
 from apps.console.member.totp import totp_for_counter
 from apps.console.setting.models import CoreSiteSettings
 from apps.tests.base import BaseTestCase
-from utils.middleware import OnboardingMiddleware
+from utils.middleware import AUTH_SESSION_VERSION_KEY, OnboardingMiddleware
 
 
 def _mark_configured():
@@ -131,6 +131,41 @@ class MFASecurityTests(BaseTestCase):
 
         page = browser.get("/console/settings/multifactor/")
         self.assertNotIn("cdn.rawgit.com", page.content.decode())
+
+    def test_enabling_mfa_revokes_other_browser_sessions(self):
+        primary_browser = Client()
+        secondary_browser = Client()
+        primary_browser.force_login(self.user)
+        secondary_browser.force_login(self.user)
+
+        setup_url = f"/api/v1/members/{self.member.pk}/auth_multi_factor_token_setup/"
+        created = primary_browser.post(
+            setup_url,
+            {
+                "display_name": "Primary authenticator",
+                "current_password": "x-Secret-123",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(created.status_code, 200, created.content)
+        secret = created.json()["binding"]["secret"]
+        counter = self.FIXED_TIME // 30
+        verify_url = f"/api/v1/members/{self.member.pk}/auth_multi_factor_token_verify/"
+        with mock.patch("apps.console.member.totp.time.time", return_value=self.FIXED_TIME):
+            verified = primary_browser.post(
+                verify_url,
+                {"auth_multi_factor_token": totp_for_counter(secret, counter)},
+                content_type="application/json",
+            )
+        self.assertEqual(verified.status_code, 200, verified.content)
+
+        self.member.refresh_from_db()
+        self.assertEqual(
+            primary_browser.session[AUTH_SESSION_VERSION_KEY],
+            self.member.auth_session_version,
+        )
+        self.assertTrue(primary_browser.get("/api/v1/check/login/").json()["login"])
+        self.assertFalse(secondary_browser.get("/api/v1/check/login/").json()["login"])
 
     def test_revoke_requires_password_and_fresh_totp(self):
         secret, counter = self._enable_mfa()

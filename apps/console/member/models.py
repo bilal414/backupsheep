@@ -19,6 +19,7 @@ class CoreMember(TimeStampedModel):
     auth_multi_factor_pending_created = models.DateTimeField(null=True, editable=False)
     auth_multi_factor_enabled_at = models.DateTimeField(null=True, editable=False)
     auth_multi_factor_last_counter = models.BigIntegerField(null=True, editable=False)
+    auth_session_version = models.PositiveBigIntegerField(default=1, editable=False)
 
     class Meta:
         db_table = 'core_member'
@@ -219,6 +220,16 @@ class CoreMember(TimeStampedModel):
                 "modified",
             ]
         )
+
+    def rotate_auth_session_version(self):
+        """Atomically revoke every previously issued browser session."""
+        from django.db.models import F
+
+        CoreMember.objects.filter(pk=self.pk).update(
+            auth_session_version=F("auth_session_version") + 1
+        )
+        self.refresh_from_db(fields=["auth_session_version"])
+        return self.auth_session_version
 
     def invites_received(self):
         from ..invite.models import CoreInvite
