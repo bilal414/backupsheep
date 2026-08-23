@@ -75,11 +75,18 @@ currently checked-out branch:
 ```bash
 git fetch origin
 git pull --ff-only
-git rev-parse HEAD
+target_revision="$(git rev-parse HEAD)"
+export BACKUPSHEEP_IMAGE="backupsheep:${target_revision}"
 docker compose config --quiet
 docker compose build app
 docker compose up --detach --remove-orphans
 ```
+
+Persist that exact `BACKUPSHEEP_IMAGE` value in the mode-`0600` deployment `.env` before
+the final Compose rollout. The `migrate`, web, worker and Beat roles all resolve the same
+image reference; do not use `backupsheep:latest` or change the tag between migration and
+application startup. Record the resulting local image ID or registry digest in the
+deployment receipt.
 
 Do not use an unpinned remote branch when your change process requires reproducibility.
 Fetch and check out an reviewed release tag or commit instead.

@@ -69,6 +69,14 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertNotIn('entrypoint: ["celery"', self.compose)
         self.assertNotIn('entrypoint: ["python", "manage.py", "migrate"', self.compose)
 
+    def test_every_application_role_uses_one_explicit_image_reference(self):
+        image_reference = 'image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"'
+        self.assertEqual(self.compose.count(image_reference), 8)
+        self.assertNotIn("backupsheep:latest", self.compose)
+
+        env_sample = (ROOT / ".env_sample").read_text(encoding="utf-8")
+        self.assertIn("BACKUPSHEEP_IMAGE=backupsheep:local", env_sample)
+
     def test_existing_volume_non_root_migration_is_operator_gated(self):
         guide = (ROOT / "docs" / "guides" / "upgrades.md").read_text(
             encoding="utf-8"

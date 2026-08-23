@@ -9,6 +9,8 @@ monitoring and recovery.
 Before making an instance reachable from the internet:
 
 - [ ] use a reviewed release branch/tag or pinned commit;
+- [ ] set `BACKUPSHEEP_IMAGE` to the exact reviewed release/revision tag so migration,
+      web, workers and Beat cannot drift;
 - [ ] replace the sample `DJANGO_SECRET_KEY` and keep the new value stable;
 - [ ] set a strong PostgreSQL password before initializing the database volume;
 - [ ] keep `DJANGO_DEBUG=false`;
