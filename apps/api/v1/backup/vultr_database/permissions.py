@@ -5,6 +5,8 @@ class CoreVultrDatabaseBackupViewPermissions(MemberGroupPermissions):
     action_permissions = {
         "create": "backup_create",
         "destroy": "backup_delete",
+        "cancel": "backup_delete",
+        "restore": "backup_create",
     }
 
     def has_object_permission(self, request, view, obj):

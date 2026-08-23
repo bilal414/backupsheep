@@ -169,7 +169,9 @@ class CoreMemberSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CoreMember
-        fields = "__all__"
+        # Password reset capability is a bearer secret. It must never appear in
+        # the team-member API, even to another member of the same account.
+        exclude = ("password_reset_token", "password_reset_token_created")
         datatables_always_serialize = (
             "id",
             "user",

@@ -137,6 +137,7 @@
             </section>
         {% endif %}
     </div>
+    {{ account.name|json_script:"account-name-data" }}
     <script>
         document.addEventListener('alpine:init', () => {
             Alpine.data('settingsAccount', () => ({
@@ -146,9 +147,7 @@
                 },
                 account: {
                     id: {{ account.id }},
-                    {% autoescape off %}
-                        name: "{{ account.name }}",
-                    {% endautoescape %}
+                    name: JSON.parse(document.getElementById('account-name-data').textContent),
                     notify_on_success: {% if account.notify_on_success %}true{% else %}false{% endif %},
                     notify_on_fail: {% if account.notify_on_fail %}true{% else %}false{% endif %}
                 },

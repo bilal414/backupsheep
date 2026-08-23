@@ -58,6 +58,13 @@ class CoreInviteWriteSerializer(serializers.ModelSerializer):
         # /invite/<uuid>/ page lets them sign up while accepting. What is not
         # allowed is stacking duplicate pending invites for the same email+account.
         account = data.get("account") or (self.instance.account if self.instance else None)
+        groups = data.get("groups")
+        if account and groups is not None:
+            foreign_groups = [group.pk for group in groups if group.account_id != account.pk]
+            if foreign_groups:
+                raise serializers.ValidationError(
+                    {"groups": "Groups must belong to the invite's account."}
+                )
         email = data.get("email") or (self.instance.email if self.instance else None)
         if account and email:
             query = CoreInvite.objects.filter(

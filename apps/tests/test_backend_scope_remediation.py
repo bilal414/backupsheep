@@ -109,11 +109,11 @@ class RestrictedBackendScopeTests(BaseTestCase):
         )
         self.assertEqual(
             self.client.post(f"{hidden_url}/restore/", {"confirm": True}, format="json").status_code,
-            status.HTTP_404_NOT_FOUND,
+            status.HTTP_403_FORBIDDEN,
         )
         self.assertEqual(
             self.client.post(f"{hidden_url}/retry/").status_code,
-            status.HTTP_404_NOT_FOUND,
+            status.HTTP_403_FORBIDDEN,
         )
         self.assertEqual(
             self.client.post(f"{hidden_url}/cancel/").status_code,

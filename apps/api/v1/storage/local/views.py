@@ -5,6 +5,7 @@ from django.http import FileResponse, Http404
 from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
@@ -18,6 +19,8 @@ from .permissions import CoreStorageLocalPermissions
 from .serializers import CoreStorageReadSerializer, CoreStorageWriteSerializer
 from apps._tasks.exceptions import StorageValidationFailed
 from ...utils.api_filters import DateRangeFilter
+from ...utils.api_helpers import visible_nodes
+from ...utils.api_permissions import member_has_perm
 from ...utils.api_serializers import ReadWriteSerializerMixin
 
 
@@ -88,13 +91,17 @@ class LocalStorageFileDownloadView(APIView):
         )
 
         account = request.user.member.get_current_account()
+        if not member_has_perm(request, "backup_download"):
+            raise PermissionDenied("You do not have permission to download backups.")
+
+        allowed_nodes = visible_nodes(request.user.member)
 
         stored_backup = None
-        for model in (
-                CoreWebsiteBackupStoragePoints,
-                CoreDatabaseBackupStoragePoints,
-                CoreWordPressBackupStoragePoints,
-                CoreBasecampBackupStoragePoints,
+        for model, node_lookup in (
+                (CoreWebsiteBackupStoragePoints, "backup__website__node"),
+                (CoreDatabaseBackupStoragePoints, "backup__database__node"),
+                (CoreWordPressBackupStoragePoints, "backup__wordpress__node"),
+                (CoreBasecampBackupStoragePoints, "backup__basecamp__node"),
         ):
             stored_backup = model.objects.filter(
                 id=stored_backup_id,
@@ -102,6 +109,7 @@ class LocalStorageFileDownloadView(APIView):
                 storage__type__code="local",
                 status=model.Status.UPLOAD_COMPLETE,
                 storage_file_id__isnull=False,
+                **{f"{node_lookup}__in": allowed_nodes},
             ).first()
             if stored_backup:
                 break

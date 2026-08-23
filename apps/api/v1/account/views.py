@@ -120,9 +120,17 @@ class CoreAccountView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
         membership_id = self.request.data.get("membership_id")
 
-        if request.user.member.memberships.filter(id=membership_id, primary=False).exists():
+        if request.user.member.memberships.filter(
+            id=membership_id,
+            account=account,
+            primary=False,
+        ).exists():
 
-            membership = request.user.member.memberships.get(id=membership_id, primary=False)
+            membership = request.user.member.memberships.get(
+                id=membership_id,
+                account=account,
+                primary=False,
+            )
 
             # Remove from groups
             for enrollment in membership.account.enrollments.filter():

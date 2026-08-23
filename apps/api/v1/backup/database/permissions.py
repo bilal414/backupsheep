@@ -8,6 +8,9 @@ class CoreDatabaseBackupViewPermissions(MemberGroupPermissions):
         "download_transfer_log": "backup_download",
         "download_dir_tree": "backup_download",
         "destroy": "backup_delete",
+        "cancel": "backup_delete",
+        "retry": "backup_create",
+        "restore": "backup_create",
         "resume_restore": "backup_create",
     }
 

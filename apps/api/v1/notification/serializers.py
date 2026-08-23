@@ -28,7 +28,24 @@ class CoreNotificationSlackSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CoreNotificationSlack
-        fields = "__all__"
+        # OAuth tokens, webhook/configuration URLs and the provider's raw token
+        # response are credentials, not API representation fields.
+        fields = (
+            "id",
+            "created",
+            "modified",
+            "created_display",
+            "modified_display",
+            "account",
+            "added_by",
+            "app_id",
+            "token_type",
+            "bot_user_id",
+            "expiry",
+            "channel",
+            "channel_id",
+        )
+        read_only_fields = fields
 
     @staticmethod
     def get_created_display(obj):

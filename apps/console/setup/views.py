@@ -1,4 +1,7 @@
 import os
+import secrets
+import time
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth.mixins import LoginRequiredMixin
@@ -10,6 +13,10 @@ from django.core.paginator import Paginator
 from apps.console.connection.models import CoreConnection, CoreIntegration
 from apps.console.storage.models import CoreStorage, CoreStorageType
 from requests_oauthlib import OAuth2Session
+from apps.api.v1.utils.api_permissions import member_has_perm
+
+
+PCLOUD_OAUTH_STATE_SESSION_KEY = "pcloud_oauth_state"
 
 
 class IntegrationSelectView(LoginRequiredMixin, TemplateView):
@@ -176,12 +183,25 @@ class StorageOpenView(LoginRequiredMixin, TemplateView):
                 )
                 context["connect_url"] = authorization_url
             elif storage_type.code == "pcloud":
-                context[
-                    "connect_url"
-                ] = f"{settings.PCLOUD_AUTH_URL}?" \
-                    f"client_id={settings.PCLOUD_CLIENT_ID}" \
-                    f"&response_type={settings.PCLOUD_RESPONSE_TYPE}" \
-                    f"&redirect_uri={settings.APP_URL}{settings.PCLOUD_REDIRECT_URL}"
+                if member_has_perm(request, "storage_changes"):
+                    state = secrets.token_urlsafe(32)
+                    request.session[PCLOUD_OAUTH_STATE_SESSION_KEY] = {
+                        "state": state,
+                        "member_id": member.pk,
+                        "account_id": member.get_current_account().pk,
+                        "issued_at": time.time(),
+                    }
+                    context["connect_url"] = (
+                        f"{settings.PCLOUD_AUTH_URL}?"
+                        + urlencode(
+                            {
+                                "client_id": settings.PCLOUD_CLIENT_ID,
+                                "response_type": settings.PCLOUD_RESPONSE_TYPE,
+                                "redirect_uri": settings.APP_URL + settings.PCLOUD_REDIRECT_URL,
+                                "state": state,
+                            }
+                        )
+                    )
             elif storage_type.code == "onedrive":
                 context[
                     "connect_url"

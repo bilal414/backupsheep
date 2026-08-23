@@ -42,6 +42,54 @@ import google.oauth2.credentials
 from datetime import datetime
 from slack_sdk import WebClient, WebhookClient
 from slack_sdk.errors import SlackApiError
+import secrets
+from urllib.parse import urlsplit
+
+from apps.api.v1.utils.api_permissions import member_has_perm
+
+
+PCLOUD_OAUTH_STATE_SESSION_KEY = "pcloud_oauth_state"
+PCLOUD_ALLOWED_HOSTNAMES = frozenset({"api.pcloud.com", "eapi.pcloud.com"})
+PCLOUD_OAUTH_STATE_TTL_SECONDS = 10 * 60
+
+
+def _validated_pcloud_hostname(value=None):
+    """Return an exact official pCloud API hostname, or None.
+
+    pCloud returns the API hostname in the callback. It is untrusted input and
+    must not be allowed to turn the token or userinfo exchange into SSRF.
+    """
+    if value is None:
+        configured = urlsplit(settings.PCLOUD_OAUTH_TOKEN_URL)
+        value = configured.hostname
+    if not isinstance(value, str):
+        return None
+    hostname = value.strip().lower().rstrip(".")
+    if hostname not in PCLOUD_ALLOWED_HOSTNAMES:
+        return None
+    # Exact comparison above deliberately rejects schemes, ports, credentials,
+    # paths, encoded delimiters and suffix-confusion hostnames.
+    return hostname
+
+
+def _consume_pcloud_oauth_state(request, received_state, member, account):
+    expected = request.session.pop(PCLOUD_OAUTH_STATE_SESSION_KEY, None)
+    if not isinstance(expected, dict) or not isinstance(received_state, str):
+        return False
+    expected_state = expected.get("state")
+    if not isinstance(expected_state, str):
+        return False
+    try:
+        issued_at = float(expected.get("issued_at"))
+    except (TypeError, ValueError):
+        return False
+    age = time.time() - issued_at
+    return (
+        0 <= age <= PCLOUD_OAUTH_STATE_TTL_SECONDS
+        and secrets.compare_digest(expected_state, received_state)
+        and str(expected.get("member_id")) == str(member.pk)
+        and str(expected.get("account_id")) == str(account.pk)
+    )
 
 
 class APICallbackSlack(APIView):
@@ -139,25 +187,48 @@ class APICallbackPCloud(APIView):
         encryption_key = account.get_encryption_key()
 
         try:
+            state = data.get("state", None)
+            if not member_has_perm(request, "storage_changes"):
+                messages.add_message(
+                    request,
+                    messages.ERROR,
+                    "You do not have permission to connect storage accounts.",
+                )
+                return redirect("console:setup:integration_storage_open", integration_code="pcloud")
+            if not _consume_pcloud_oauth_state(request, state, member, account):
+                messages.add_message(
+                    request,
+                    messages.ERROR,
+                    "The pCloud connection request expired or could not be verified. Please try again.",
+                )
+                return redirect("console:setup:integration_storage_open", integration_code="pcloud")
             if error:
                 messages.add_message(request, messages.ERROR, error_description)
                 return redirect("console:setup:integration_storage_open", integration_code="pcloud")
             else:
-                state = data.get("state", None)
                 code = data.get("code", None)
                 location = data.get("locationid", None)
-                hostname = data.get("hostname", settings.PCLOUD_OAUTH_TOKEN_URL)
+                hostname = _validated_pcloud_hostname(data.get("hostname"))
+                if hostname is None or not code:
+                    messages.add_message(
+                        request,
+                        messages.ERROR,
+                        "The pCloud callback was invalid. Please try again.",
+                    )
+                    return redirect("console:setup:integration_storage_open", integration_code="pcloud")
 
-                token_request_url = (
-                    f"https://{hostname}/oauth2_token?"
-                    f"grant_type=authorization_code"
-                    f"&code={code}"
-                    f"&client_id={settings.PCLOUD_CLIENT_ID}"
-                    f"&client_secret={settings.PCLOUD_CLIENT_SECRET}"
-                    f"&redirect_uri={settings.APP_URL + settings.PCLOUD_REDIRECT_URL}"
+                token_request_url = f"https://{hostname}/oauth2_token"
+                r = requests.post(
+                    token_request_url,
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "client_id": settings.PCLOUD_CLIENT_ID,
+                        "client_secret": settings.PCLOUD_CLIENT_SECRET,
+                        "redirect_uri": settings.APP_URL + settings.PCLOUD_REDIRECT_URL,
+                    },
+                    verify=True,
                 )
-
-                r = requests.post(token_request_url)
 
                 if r.status_code == 200:
                     is_new = True
