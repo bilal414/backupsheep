@@ -5,6 +5,48 @@ from django.utils import timezone
 from django.utils.deprecation import MiddlewareMixin
 
 
+class BrowserSecurityHeadersMiddleware:
+    """Apply conservative browser and cache policy to every application response.
+
+    BackupSheep intentionally still has legacy inline JavaScript, so a strict
+    ``script-src`` policy needs a separate nonce migration. These directives are
+    compatible today and still prevent plugin content, base-tag rewriting,
+    framing, and cross-origin form submission.
+    """
+
+    CONTENT_SECURITY_POLICY = (
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'"
+    )
+    PERMISSIONS_POLICY = (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=(), "
+        "browsing-topics=()"
+    )
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        response.headers.setdefault(
+            "Content-Security-Policy", self.CONTENT_SECURITY_POLICY
+        )
+        response.headers.setdefault("Permissions-Policy", self.PERMISSIONS_POLICY)
+
+        # Authentication, tenant metadata, provider inventory and backup state
+        # must not be retained by shared proxies or browser disk caches. Static
+        # assets keep WhiteNoise's content-addressed caching policy.
+        if (
+            not request.path.startswith(settings.STATIC_URL)
+            and request.path != "/healthz/"
+        ):
+            response.headers["Cache-Control"] = "no-store, private, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+
 class OnboardingMiddleware(object):
     """First-run gate.
 

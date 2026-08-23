@@ -144,6 +144,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "utils.middleware.BrowserSecurityHeadersMiddleware",
     # Serve static files directly from gunicorn (no nginx in the container).
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
