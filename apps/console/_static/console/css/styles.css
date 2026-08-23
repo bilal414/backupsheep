@@ -7,6 +7,32 @@
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --default-font-family: var(--font-sans);
 
+  /* Recovery Ledger — quiet, evidence-led console surfaces */
+  --color-wool-50: #f4f7f6;
+  --color-paper: #ffffff;
+  --color-ink-950: #17201f;
+  --color-ink-800: #2c3937;
+  --color-ink-650: #53615f;
+  --color-ink-500: #707d7b;
+  --color-rule-100: #e8eeec;
+  --color-rule-200: #d7dfdd;
+  --color-evidence-50: #f1f7fa;
+  --color-evidence-200: #c9dce8;
+  --color-evidence-600: #245f88;
+  --color-evidence-700: #1d4f72;
+  --color-verified-50: #eef8f5;
+  --color-verified-200: #bde2d8;
+  --color-verified-600: #0f6b58;
+  --color-verified-700: #0b594a;
+  --color-attention-50: #fff8ed;
+  --color-attention-200: #efd5aa;
+  --color-attention-600: #92520a;
+  --color-attention-700: #7a4308;
+  --color-incident-50: #fff4f3;
+  --color-incident-200: #efc9c6;
+  --color-incident-600: #a43a3a;
+  --color-incident-700: #8b3030;
+
   /* Slate palette (modern neutral) */
   --color-slate-50: #f8fafc;
   --color-slate-100: #f1f5f9;
@@ -102,4 +128,12 @@
 /* Alpine.js cloak — hides x-cloak elements until Alpine has initialised */
 [x-cloak] {
   display: none !important;
+}
+
+body.dashboard-page {
+  background: var(--color-wool-50);
+}
+
+body.dashboard-page #main-content > div {
+  max-width: 92rem;
 }

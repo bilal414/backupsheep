@@ -6,10 +6,43 @@ from django.views.generic import TemplateView
 from croniter import croniter
 
 from apps.api.v1.utils.api_helpers import visible_nodes
-from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreSchedule
-from apps.console.storage.models import CoreStorage
 from apps.console.utils.models import UtilBackup
+
+
+DASHBOARD_REVIEW_STATUSES = (
+    UtilBackup.Status.FAILED,
+    UtilBackup.Status.MAX_RETRY_FAILED,
+    UtilBackup.Status.PARTIAL,
+    UtilBackup.Status.UPLOAD_FAILED,
+    UtilBackup.Status.DELETE_FAILED,
+    UtilBackup.Status.DELETE_FAILED_NOT_FOUND,
+    UtilBackup.Status.DELETE_MAX_RETRY_FAILED,
+    UtilBackup.Status.TIMEOUT,
+    UtilBackup.Status.STORAGE_VALIDATION_FAILED,
+)
+
+DASHBOARD_INCIDENT_STATUSES = frozenset(
+    (
+        UtilBackup.Status.FAILED,
+        UtilBackup.Status.MAX_RETRY_FAILED,
+        UtilBackup.Status.UPLOAD_FAILED,
+        UtilBackup.Status.DELETE_FAILED,
+        UtilBackup.Status.DELETE_FAILED_NOT_FOUND,
+        UtilBackup.Status.DELETE_MAX_RETRY_FAILED,
+        UtilBackup.Status.TIMEOUT,
+        UtilBackup.Status.STORAGE_VALIDATION_FAILED,
+    )
+)
+
+DASHBOARD_ATTENTION_STATUSES = frozenset(
+    (
+        UtilBackup.Status.PARTIAL,
+        UtilBackup.Status.RETRYING,
+        UtilBackup.Status.DELETE_REQUESTED,
+        UtilBackup.Status.DELETE_IN_PROGRESS,
+    )
+)
 
 
 def _next_run(schedule, now):
@@ -50,13 +83,23 @@ def _next_run(schedule, now):
 
 
 def _set_backup_node(backups):
-    """Attach a presentation-only node attribute to each polymorphic backup."""
+    """Attach presentation-only dashboard attributes to polymorphic backups."""
     from apps.console.account.models import get_backup_models
 
     node_attr_by_model = dict(get_backup_models())
     for backup in backups:
         node_attr = node_attr_by_model.get(type(backup))
         backup.dashboard_node = getattr(backup, node_attr).node if node_attr else None
+        if backup.status == UtilBackup.Status.COMPLETE:
+            backup.dashboard_status_tone = "verified"
+        elif backup.status in DASHBOARD_INCIDENT_STATUSES:
+            backup.dashboard_status_tone = "incident"
+        elif backup.status in DASHBOARD_ATTENTION_STATUSES:
+            backup.dashboard_status_tone = "attention"
+        elif backup.status in UtilBackup.ACTIVE_STATUSES:
+            backup.dashboard_status_tone = "active"
+        else:
+            backup.dashboard_status_tone = "neutral"
     return backups
 
 
@@ -69,10 +112,6 @@ class IndexView(LoginRequiredMixin, TemplateView):
         account = member.get_current_account()
         nodes = visible_nodes(member)
         node_ids = list(nodes.values_list("id", flat=True))
-        dashboard_nodes = list(
-            nodes.select_related("connection__integration")
-            .order_by("-created")[:8]
-        )
         now = timezone.now()
 
         recent_backups = _set_backup_node(
@@ -80,14 +119,7 @@ class IndexView(LoginRequiredMixin, TemplateView):
         )
         failed_backups = _set_backup_node(
             account.get_all_backups(
-                status=(
-                    UtilBackup.Status.FAILED,
-                    UtilBackup.Status.MAX_RETRY_FAILED,
-                    UtilBackup.Status.PARTIAL,
-                    UtilBackup.Status.UPLOAD_FAILED,
-                    UtilBackup.Status.STORAGE_VALIDATION_FAILED,
-                    UtilBackup.Status.TIMEOUT,
-                ),
+                status=DASHBOARD_REVIEW_STATUSES,
                 limit=4,
                 node_ids=node_ids,
             )
@@ -105,25 +137,14 @@ class IndexView(LoginRequiredMixin, TemplateView):
                 upcoming_schedules.append(schedule)
         upcoming_schedules.sort(key=lambda schedule: schedule.next_run)
 
-        activity = CoreLog.objects.filter(account=account)
-        if not member.is_primary_account:
-            activity = activity.filter(data__node_id__in=node_ids)
-
         context["member"] = member
         context["account"] = account
         context["visible_node_count"] = len(node_ids)
-        context["dashboard_nodes"] = dashboard_nodes
         context["active_schedule_count"] = schedules.count()
         context["recent_backups"] = recent_backups
         context["failed_backups"] = failed_backups
         context["upcoming_schedules"] = upcoming_schedules[:5]
-        context["recent_activity"] = activity.order_by("-created")[:6]
         context["storage_used"] = account.storage_used() if member.is_primary_account else None
-        context["storage_cost_summary"] = (
-            CoreStorage.cost_summary_for_account(account)
-            if member.is_primary_account
-            else None
-        )
         context["heading"] = "Dashboard"
         context["active_url"] = "dashboard"
         return self.render_to_response(context)
