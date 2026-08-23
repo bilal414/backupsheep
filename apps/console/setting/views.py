@@ -6,8 +6,6 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.shortcuts import redirect
 from django.urls import reverse
 from django.views.generic import TemplateView
-from twilio.rest.verify.v2.service.entity.new_factor import NewFactorInstance
-
 from apps.console.account.models import CoreAccountGroup
 from apps.console.notification.models import CoreNotificationSlack, CoreNotificationTelegram
 from apps.api.v1.utils.api_permissions import current_account_is_primary
