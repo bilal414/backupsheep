@@ -14,7 +14,12 @@ from apps.console.member.models import CoreMember
 from .serializers import *
 from ..utils.api_authentication import token_is_expired
 from ..utils.api_exceptions import ExceptionDefault
-from ..utils.api_throttles import LoginRateThrottle, PasswordResetRateThrottle
+from ..utils.api_throttles import (
+    LoginIdentityRateThrottle,
+    LoginRateThrottle,
+    PasswordResetIdentityRateThrottle,
+    PasswordResetRateThrottle,
+)
 
 
 BROWSER_SESSION_LOGIN_HEADER = "X-BackupSheep-Session-Login"
@@ -78,7 +83,7 @@ def _browser_session_login_requested(request):
 
 class APIAuthLogin(APIView):
     permission_classes = ()
-    throttle_classes = [LoginRateThrottle]
+    throttle_classes = [LoginRateThrottle, LoginIdentityRateThrottle]
 
     def post(self, request):
         browser_session_login = _browser_session_login_requested(request)
@@ -157,7 +162,10 @@ class APIAuthLogout(APIView):
 
 class APIAuthReset(APIView):
     permission_classes = ()
-    throttle_classes = [PasswordResetRateThrottle]
+    throttle_classes = [
+        PasswordResetRateThrottle,
+        PasswordResetIdentityRateThrottle,
+    ]
 
     def post(self, request):
         serializer = APIAuthResetSerializer(data=self.request.data, context={"request": request})

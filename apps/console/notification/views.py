@@ -27,15 +27,21 @@ class IntegrationOpenView(LoginRequiredMixin, TemplateView):
                     verify_code=verify_digest,
                     member=request.user.member,
                     status=CoreNotificationEmail.Status.UN_VERIFIED,
-                    created__gte=cutoff,
+                    verify_code_created__gte=cutoff,
                 )
                 .first()
             )
             if notification_email is not None:
                 notification_email.status = CoreNotificationEmail.Status.VERIFIED
                 notification_email.verify_code = None
+                notification_email.verify_code_created = None
                 notification_email.save(
-                    update_fields=["status", "verify_code", "modified"]
+                    update_fields=[
+                        "status",
+                        "verify_code",
+                        "verify_code_created",
+                        "modified",
+                    ]
                 )
 
         if notification_email is not None:

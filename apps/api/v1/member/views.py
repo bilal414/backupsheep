@@ -24,6 +24,7 @@ from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
 from apps.console.member.totp import generate_totp_secret, provisioning_uri
 from utils.middleware import AUTH_SESSION_VERSION_KEY
+from ..utils.api_throttles import MFARateThrottle, MFAIdentityRateThrottle
 
 
 def _record_member_log(account, data):
@@ -185,7 +186,11 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-    @action(detail=True, methods=["post"])
+    @action(
+        detail=True,
+        methods=["post"],
+        throttle_classes=[MFARateThrottle, MFAIdentityRateThrottle],
+    )
     def auth_multi_factor_token_setup(self, request, pk=None):
         member = self.get_object()
 
@@ -210,7 +215,11 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
-    @action(detail=True, methods=["post"])
+    @action(
+        detail=True,
+        methods=["post"],
+        throttle_classes=[MFARateThrottle, MFAIdentityRateThrottle],
+    )
     def auth_multi_factor_token_verify(self, request, pk=None):
         member = self.get_object()
 
@@ -231,7 +240,11 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
-    @action(detail=True, methods=["post"])
+    @action(
+        detail=True,
+        methods=["post"],
+        throttle_classes=[MFARateThrottle, MFAIdentityRateThrottle],
+    )
     def auth_multi_factor_token_revoke(self, request, pk=None):
         member = self.get_object()
         serializer = MemberTokenRevokeAuthSerializer(

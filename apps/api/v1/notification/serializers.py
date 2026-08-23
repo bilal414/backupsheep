@@ -65,16 +65,39 @@ class CoreNotificationSlackSerializer(serializers.ModelSerializer):
 class CoreNotificationTelegramSerializer(serializers.ModelSerializer):
     created_display = serializers.SerializerMethodField()
     modified_display = serializers.SerializerMethodField()
-    account = serializers.HiddenField(default=CurrentAccountDefault(), write_only=True)
-    added_by = serializers.HiddenField(default=CurrentMemberDefault())
+    account = serializers.HiddenField(
+        default=serializers.CreateOnlyDefault(CurrentAccountDefault())
+    )
+    added_by = serializers.HiddenField(
+        default=serializers.CreateOnlyDefault(CurrentMemberDefault())
+    )
     channel_name = serializers.CharField(
         required=True, allow_null=False, allow_blank=False
     )
-    chat_id = serializers.CharField(required=True, allow_null=False, allow_blank=False)
+    chat_id = serializers.CharField(
+        required=True, allow_null=False, allow_blank=False, write_only=True
+    )
 
     class Meta:
         model = CoreNotificationTelegram
-        fields = "__all__"
+        fields = (
+            "id",
+            "created",
+            "modified",
+            "created_display",
+            "modified_display",
+            "account",
+            "added_by",
+            "channel_name",
+            "chat_id",
+        )
+        read_only_fields = (
+            "id",
+            "created",
+            "modified",
+            "created_display",
+            "modified_display",
+        )
 
     def validate(self, data):
         chat_id = data.get("chat_id")
@@ -111,12 +134,33 @@ class CoreNotificationEmailSerializer(serializers.ModelSerializer):
     # the member who registered it. Verification is a separate explicit step via
     # the view's send_verification_email action + the emailed verify link, so the
     # serializer intentionally does NOT call out to any external service here.
-    member = serializers.HiddenField(default=CurrentMemberDefault())
+    member = serializers.HiddenField(
+        default=serializers.CreateOnlyDefault(CurrentMemberDefault())
+    )
     email = serializers.EmailField(required=True, allow_null=False, allow_blank=False)
 
     class Meta:
         model = CoreNotificationEmail
-        fields = "__all__"
+        # The verification digest is internal capability state. Status can only
+        # transition through the email-verification flow, never an API PATCH.
+        fields = (
+            "id",
+            "created",
+            "modified",
+            "created_display",
+            "modified_display",
+            "member",
+            "email",
+            "status",
+        )
+        read_only_fields = (
+            "id",
+            "created",
+            "modified",
+            "created_display",
+            "modified_display",
+            "status",
+        )
 
     @staticmethod
     def get_created_display(obj):

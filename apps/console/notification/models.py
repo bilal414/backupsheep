@@ -63,6 +63,7 @@ class CoreNotificationEmail(TimeStampedModel):
     email = models.EmailField(max_length=256)
     status = models.IntegerField(choices=Status.choices, default=Status.UN_VERIFIED)
     verify_code = models.CharField(max_length=256, null=True)
+    verify_code_created = models.DateTimeField(null=True, editable=False)
 
     class Meta:
         db_table = "core_notification_email"
@@ -79,6 +80,7 @@ class CoreNotificationEmail(TimeStampedModel):
         verify_code = secrets.token_urlsafe(32)
 
         self.verify_code = self.verification_token_digest(verify_code)
+        self.verify_code_created = timezone.now()
         self.status = self.Status.UN_VERIFIED
         self.save()
 

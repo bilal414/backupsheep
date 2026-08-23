@@ -76,7 +76,6 @@ class CoreNotificationTelegramView(viewsets.ModelViewSet):
         CoreNotificationTelegramViewPermissions,
     )
     serializer_class = CoreNotificationTelegramSerializer
-    all_fields = [f.name for f in CoreNotificationTelegram._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
         DatatablesFilterBackend,
@@ -84,7 +83,9 @@ class CoreNotificationTelegramView(viewsets.ModelViewSet):
         DateRangeFilter,
     ]
     filterset_class = CoreNotificationTelegramFilter
-    search_fields = all_fields
+    # Chat IDs are provider identifiers and should not be exposed through broad
+    # search expressions. Channel display names are sufficient for the console.
+    search_fields = ["channel_name"]
 
     def get_queryset(self):
         member = self.request.user.member
@@ -121,7 +122,6 @@ class CoreNotificationEmailView(viewsets.ModelViewSet):
         CoreNotificationEmailViewPermissions,
     )
     serializer_class = CoreNotificationEmailSerializer
-    all_fields = [f.name for f in CoreNotificationEmail._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
         DatatablesFilterBackend,
@@ -129,7 +129,8 @@ class CoreNotificationEmailView(viewsets.ModelViewSet):
         DateRangeFilter,
     ]
     filterset_class = CoreNotificationEmailFilter
-    search_fields = all_fields
+    # Verification digests and internal ownership fields are not searchable.
+    search_fields = ["email"]
 
     def get_queryset(self):
         member = self.request.user.member
