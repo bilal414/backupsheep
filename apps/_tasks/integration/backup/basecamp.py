@@ -709,10 +709,16 @@ def snapshot_basecamp(backup):
 
         # Generate Report
         try:
-            execstr = f"sudo tree -a -f -h -F -v -i -N -n -o {tree_log_path}"
-
             subprocess.run(
-                execstr, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, timeout=900, cwd=local_dir
+                [
+                    "tree", "-a", "-f", "-h", "-F", "-v", "-i", "-N", "-n",
+                    "-o", tree_log_path,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=900,
+                cwd=local_dir,
             )
             log_file.write(f"---Directory Tree--- \n")
 

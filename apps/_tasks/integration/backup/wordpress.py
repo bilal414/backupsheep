@@ -315,15 +315,16 @@ def snapshot_wordpress(backup):
 
         # Generate Report
         try:
-            execstr = f"sudo tree -a -f -h -F -v -i -N -n -o {tree_log_path}"
-
             subprocess.run(
-                execstr,
+                [
+                    "tree", "-a", "-f", "-h", "-F", "-v", "-i", "-N", "-n",
+                    "-o", tree_log_path,
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                shell=True,
+                check=False,
                 timeout=900,
-                cwd=local_dir
+                cwd=local_dir,
             )
             log_file.write(f"---Directory Tree--- \n")
 
