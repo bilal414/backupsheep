@@ -7,7 +7,7 @@ from django.db import models
 from django.db.models import UniqueConstraint
 from django.utils import timezone
 from model_utils.models import TimeStampedModel
-import uuid
+import secrets
 
 from sentry_sdk import capture_exception
 
@@ -43,6 +43,8 @@ def sanitize_slack_oauth_metadata(payload):
 
 
 class CoreNotificationEmail(TimeStampedModel):
+    VERIFY_TOKEN_TTL_HOURS = 24
+
     class Status(models.IntegerChoices):
         UN_VERIFIED = 0, "Un-Verified"
         VERIFIED = 1, "Verified"
@@ -64,7 +66,9 @@ class CoreNotificationEmail(TimeStampedModel):
         ]
 
     def send_verification_email(self):
-        verify_code = str(uuid.uuid4()).split("-")[0]
+        # A short UUID prefix provided only 32 bits of entropy. This bearer is
+        # delivered by email, so give it full token entropy and expire it at use.
+        verify_code = secrets.token_urlsafe(32)
 
         self.verify_code = verify_code
         self.status = self.Status.UN_VERIFIED
