@@ -4,6 +4,7 @@ from datetime import timezone as datetime_timezone
 
 from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
 
 from apps.console.backup.models import CoreBackupArtifact, CoreBackupExecution
@@ -47,6 +48,51 @@ _PUBLIC_BACKUP_STAGES = {
     "website_archiving",
     "website_archive_publishing",
 }
+_PUBLIC_ATTEMPT_STAGES = _PUBLIC_PHASES | _PUBLIC_BACKUP_STAGES | {
+    "archive_validated",
+    "create",
+    "database_adopted",
+    "database_complete",
+    "database_importing",
+    "database_importing_file",
+    "database_permissions_verified",
+    "database_ready",
+    "database_replaying",
+    "database_restore",
+    "database_restore_complete",
+    "poll",
+    "provider_create",
+    "provider_create_unknown",
+    "provider_poll",
+    "provider_poll_retry",
+    "provider_polling",
+    "provider_reconciling",
+    "recovery",
+    "source_dispatch",
+    "storage_uploading",
+    "validating_source",
+    "website_archive",
+    "website_cleanup_pending",
+    "website_complete",
+    "website_manifest",
+    "website_mirror",
+    "website_publishing",
+    "website_restore",
+    "website_staged",
+    "website_staging",
+    "website_transferring",
+}
+_PUBLIC_RETRY_DECISIONS = {
+    "running",
+    "scheduled_retry",
+    "retry_not_scheduled",
+    "complete",
+    "terminal_failure",
+    "manual_review",
+    "cancelled",
+    "lease_lost",
+}
+_PUBLIC_ATTEMPT_HISTORY_LIMIT = 20
 
 # Legacy backup/restore rows pre-date the durable execution ledger. Their parent
 # status is still authoritative for terminal outcomes, and a few intermediate
@@ -506,6 +552,86 @@ def _safe_error_message(code):
     )
 
 
+def _safe_attempt_timestamp(value):
+    if not isinstance(value, str) or not value or len(value) > 64:
+        return None
+    parsed = parse_datetime(value)
+    if parsed is None or timezone.is_naive(parsed):
+        return None
+    return _isoformat(parsed)
+
+
+def _safe_attempt_history(raw, *, expected_correlation):
+    """Return only bounded ledger fields tied to this exact execution."""
+    if not isinstance(raw, list):
+        return []
+    try:
+        expected_correlation = str(uuid.UUID(str(expected_correlation)))
+    except (AttributeError, TypeError, ValueError):
+        return []
+
+    history = []
+    for item in raw[-_PUBLIC_ATTEMPT_HISTORY_LIMIT:]:
+        if not isinstance(item, dict):
+            continue
+        attempt = item.get("attempt")
+        if isinstance(attempt, bool):
+            continue
+        try:
+            attempt = int(attempt)
+        except (TypeError, ValueError):
+            continue
+        if not 0 < attempt <= 1_000_000:
+            continue
+
+        started_at = _safe_attempt_timestamp(item.get("started_at"))
+        finished_value = item.get("finished_at")
+        finished_at = (
+            _safe_attempt_timestamp(finished_value)
+            if finished_value not in (None, "")
+            else None
+        )
+        if not started_at or (
+            finished_value not in (None, "") and not finished_at
+        ):
+            continue
+        if finished_at and parse_datetime(finished_at) < parse_datetime(started_at):
+            continue
+
+        stage = item.get("stage")
+        if not isinstance(stage, str) or stage not in _PUBLIC_ATTEMPT_STAGES:
+            continue
+        retry_decision = item.get("retry_decision")
+        if retry_decision not in _PUBLIC_RETRY_DECISIONS:
+            continue
+
+        code = item.get("code")
+        if code in (None, ""):
+            code = None
+        elif not isinstance(code, str) or code not in _PUBLIC_ERROR_CODES:
+            continue
+
+        try:
+            correlation_id = str(uuid.UUID(str(item.get("correlation_id"))))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if correlation_id != expected_correlation:
+            continue
+
+        history.append(
+            {
+                "attempt": attempt,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "stage": stage,
+                "code": code,
+                "retry_decision": retry_decision,
+                "correlation_id": correlation_id,
+            }
+        )
+    return history
+
+
 def _safe_provider_status(value):
     token = _safe_token(value)
     if token is None:
@@ -737,6 +863,12 @@ def _backup_execution_status(obj, state=None, artifact=None):
     return {
         "durable": bool(state),
         "correlation_id": str(state.correlation_id) if state else None,
+        "attempt_history": _safe_attempt_history(
+            execution_metadata.get("public_attempt_history")
+            if isinstance(execution_metadata, dict)
+            else None,
+            expected_correlation=state.correlation_id if state else None,
+        ),
         "status": legacy_status,
         "phase": _execution_phase(
             legacy_status,
@@ -829,6 +961,14 @@ def _restore_execution_status(obj):
         "durable": bool(getattr(obj, "pk", None)),
         "correlation_id": (
             str(obj.correlation_id) if getattr(obj, "correlation_id", None) else None
+        ),
+        "attempt_history": _safe_attempt_history(
+            (getattr(obj, "execution_metadata", None) or {}).get(
+                "public_attempt_history"
+            )
+            if isinstance(getattr(obj, "execution_metadata", None), dict)
+            else None,
+            expected_correlation=getattr(obj, "correlation_id", None),
         ),
         "recovery_id": _restore_recovery_id(obj),
         "status": legacy_status,

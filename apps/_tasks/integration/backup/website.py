@@ -54,8 +54,12 @@ import paramiko
 from cryptography.hazmat.primitives import serialization
 from django.conf import settings
 from django.utils import timezone
-from sentry_sdk import capture_exception
-from apps._tasks.integration.backup.errors import safe_backup_failure
+from apps._tasks.diagnostics import capture_backup_diagnostic
+from apps._tasks.integration.backup.errors import (
+    BackupStageError,
+    SafeBackupFailure,
+    safe_backup_failure,
+)
 
 from apps._tasks.exceptions import NodeBackupFailedError, NodeBackupTimeoutError
 from apps._tasks.integration.backup._archive import (
@@ -224,6 +228,12 @@ def _check_lftp_result(node, backup, proc, username, password, what="lftp"):
             f"{what} reported failed transfers (exit code {proc.returncode}). "
             "Fix the permissions of the files below or add excludes for them "
             f"(full output in the run log):\n{_redact(tail, username, password)}"
+        ),
+        public_failure=SafeBackupFailure(
+            "WEBSITE_MIRROR_FAILED",
+            "The website source could not be mirrored completely. Check source "
+            "access and file permissions, then retry.",
+            True,
         ),
     )
 
@@ -741,6 +751,10 @@ def _enumerate_website_mirror(backup, local_dir):
             "manifest_path": manifest_path,
             "members_path": members_path,
         }
+    except (ArchiveSourcePolicyError, BackupExecutionLeaseLostError):
+        raise
+    except Exception as error:
+        raise BackupStageError("website_manifest", error) from error
     finally:
         for path in (staged_manifest, staged_members):
             try:
@@ -810,7 +824,15 @@ def _finalize_zip(
             "",
             backup=backup,
         )
-    enumeration = enumeration or _enumerate_website_mirror(backup, local_dir)
+    if enumeration is None:
+        try:
+            enumeration = _enumerate_website_mirror(backup, local_dir)
+        except (ArchiveSourcePolicyError, BackupExecutionLeaseLostError, BackupStageError):
+            raise
+        except Exception as error:
+            # Include workspace/temp-file setup failures in the same stable
+            # manifest-stage contract as errors raised during enumeration.
+            raise BackupStageError("website_manifest", error) from error
     identity = enumeration["identity"]
 
     _persist_mirror_checkpoint(
@@ -842,19 +864,24 @@ def _finalize_zip(
         identity,
         phase="archive_building",
     )
-    create_zip(
-        local_dir,
-        local_zip,
-        timeout=COMMAND_TIMEOUT,
-        before_publish=backup.ensure_execution_fence,
-        member_list_path=enumeration["members_path"],
-        expected_member_count=(
-            int(identity["file_count"]) + int(identity["directory_count"])
-        ),
-        expected_member_list_sha256=identity["members_sha256"],
-        expected_source_bytes=identity["logical_bytes"],
-        during_write=backup.ensure_execution_fence,
-    )
+    try:
+        create_zip(
+            local_dir,
+            local_zip,
+            timeout=COMMAND_TIMEOUT,
+            before_publish=backup.ensure_execution_fence,
+            member_list_path=enumeration["members_path"],
+            expected_member_count=(
+                int(identity["file_count"]) + int(identity["directory_count"])
+            ),
+            expected_member_list_sha256=identity["members_sha256"],
+            expected_source_bytes=identity["logical_bytes"],
+            during_write=backup.ensure_execution_fence,
+        )
+    except BackupExecutionLeaseLostError:
+        raise
+    except Exception as error:
+        raise BackupStageError("website_archive", error) from error
     _report_website_progress(
         backup,
         "website_archive_publishing",
@@ -1101,6 +1128,12 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
                         raise NodeBackupFailedError(
                             node, backup.uuid_str, backup.attempt_no, backup.type,
                             "lftp is not installed in the worker image.",
+                            public_failure=SafeBackupFailure(
+                                "WEBSITE_MIRROR_FAILED",
+                                "The website mirror client is unavailable on the "
+                                "backup worker. Contact support before retrying.",
+                                False,
+                            ),
                         )
 
                 def record_lftp_output(current_proc):
@@ -1176,8 +1209,13 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
         # committed files.
         raise
     except Exception as e:
-        capture_exception(e)
         failure = safe_backup_failure(e, stage="website_backup")
+        capture_backup_diagnostic(
+            e,
+            backup,
+            stage=getattr(e, "stage", ""),
+            code=failure.code,
+        )
         _write_log(backup, f"Error [{failure.code}]: {failure.detail}\n")
         cleanup_kind = (
             "zip" if website_mirror_checkpoint_candidate(backup) else "both"
@@ -1185,7 +1223,7 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
         delete_from_disk.apply_async(args=[backup.uuid_str, cleanup_kind])
         if failure.code == "BACKUP_TIMEOUT":
             raise NodeBackupTimeoutError(node, backup.uuid_str, backup.attempt_no, backup.type)
-        raise NodeBackupFailedError(
+        wrapped = NodeBackupFailedError(
             node,
             backup.uuid_str,
             backup.attempt_no,
@@ -1193,6 +1231,8 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
             failure.detail,
             public_failure=failure,
         )
+        wrapped.diagnostic_captured = True
+        raise wrapped
     finally:
         if temporary_ssh_key and ssh_key_path and os.path.exists(ssh_key_path):
             os.remove(ssh_key_path)
@@ -1219,6 +1259,7 @@ def _snapshot_tar(backup):
     sftp = None
     ssh = None
 
+    stage = "website_mirror"
     try:
         # Disk-space preflight before the tar is pulled down (~2x the last
         # snapshot: downloaded tar plus the final zip).
@@ -1292,6 +1333,7 @@ def _snapshot_tar(backup):
         backup.total_files = 0
 
         execstr = ["tar", "-list", "--file", f"{backup.uuid}.tar"]
+        stage = "website_manifest"
         process = subprocess.run(
             execstr,
             stdout=subprocess.PIPE,
@@ -1315,6 +1357,7 @@ def _snapshot_tar(backup):
         """
         Create final backup zip folder
         """
+        stage = "website_archive"
         create_zip(
             local_dir,
             local_zip,
@@ -1336,8 +1379,14 @@ def _snapshot_tar(backup):
     except BackupExecutionLeaseLostError:
         raise
     except Exception as e:
-        capture_exception(e)
-        failure = safe_backup_failure(e, stage="website_backup")
+        staged_error = BackupStageError(stage, e)
+        failure = safe_backup_failure(staged_error, stage="website_backup")
+        capture_backup_diagnostic(
+            e,
+            backup,
+            stage=stage,
+            code=failure.code,
+        )
         _write_log(backup, f"Error [{failure.code}]: {failure.detail}\n")
 
         """
@@ -1350,7 +1399,7 @@ def _snapshot_tar(backup):
         if failure.code == "BACKUP_TIMEOUT":
             raise NodeBackupTimeoutError(node, backup.uuid_str, backup.attempt_no, backup.type)
         else:
-            raise NodeBackupFailedError(
+            wrapped = NodeBackupFailedError(
                 node,
                 backup.uuid_str,
                 backup.attempt_no,
@@ -1358,6 +1407,8 @@ def _snapshot_tar(backup):
                 failure.detail,
                 public_failure=failure,
             )
+            wrapped.diagnostic_captured = True
+            raise wrapped
     finally:
         """
         Delete temp SSH Key

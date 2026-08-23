@@ -32,7 +32,7 @@ from apps._tasks.integration.backup import _mysql_schema as MYSQL_SCHEMA
 from apps._tasks.integration.backup import postgresql as PG_ENGINE
 from apps._tasks.integration.backup import website as W
 from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
-from apps._tasks.integration.backup.errors import safe_backup_failure
+from apps._tasks.integration.backup.errors import BackupStageError, safe_backup_failure
 from apps._tasks.integration.database import backup_database
 from apps._tasks.integration.website import backup_website
 from apps.api.v1.backup.website.serializers import CoreWebsiteBackupSerializer
@@ -3033,13 +3033,20 @@ class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
         )
 
         with mock.patch.object(W, "create_zip", side_effect=RuntimeError("zip stopped")):
-            with self.assertRaisesRegex(RuntimeError, "zip stopped"):
+            with self.assertRaises(BackupStageError) as raised:
                 W._finalize_zip(
                     backup,
                     directory,
                     keep_dir=True,
                     configuration_sha256=fingerprint,
                 )
+        self.assertEqual(raised.exception.stage, "website_archive")
+        self.assertEqual(str(raised.exception), "website backup stage failed")
+        self.assertEqual(str(raised.exception.error), "zip stopped")
+        self.assertEqual(
+            safe_backup_failure(raised.exception).code,
+            "ARCHIVE_CREATION_FAILED",
+        )
 
         backup.refresh_from_db()
         checkpoint = backup.metadata[W._WEBSITE_CHECKPOINT_KEY]

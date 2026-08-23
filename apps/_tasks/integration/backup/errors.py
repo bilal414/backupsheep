@@ -10,7 +10,10 @@ from dataclasses import dataclass
 
 from celery.exceptions import SoftTimeLimitExceeded
 
-from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
+from apps._tasks.integration.backup._archive import (
+    ArchiveSourcePolicyError,
+    ArchiveValidationError,
+)
 from apps.console.connection.reliability import (
     DATABASE_EVENT_PRIVILEGE_DETAIL,
     classify_connection_error,
@@ -24,9 +27,41 @@ class SafeBackupFailure:
     retryable: bool
 
 
+class BackupStageError(RuntimeError):
+    """Attach a stable website stage without exposing the underlying exception."""
+
+    def __init__(self, stage, error):
+        self.stage = str(stage or "website_backup")[:64]
+        self.error = error
+        super().__init__("website backup stage failed")
+
+
+_WEBSITE_STAGE_FAILURES = {
+    "website_mirror": SafeBackupFailure(
+        "WEBSITE_MIRROR_FAILED",
+        "The website source could not be mirrored completely. Check source access "
+        "and file permissions, then retry.",
+        True,
+    ),
+    "website_manifest": SafeBackupFailure(
+        "WEBSITE_MANIFEST_FAILED",
+        "BackupSheep could not build a stable manifest of the mirrored website. "
+        "Retry after checking worker capacity and source stability.",
+        True,
+    ),
+    "website_archive": SafeBackupFailure(
+        "ARCHIVE_CREATION_FAILED",
+        "BackupSheep could not create the website archive from its verified mirror. "
+        "Retry after checking worker capacity.",
+        True,
+    ),
+}
+
+
 def safe_backup_failure(error, *, stage="backup"):
     """Classify an exception without returning its provider or command text."""
-    if isinstance(error, ArchiveSourcePolicyError):
+    underlying = error.error if isinstance(error, BackupStageError) else error
+    if isinstance(underlying, ArchiveSourcePolicyError):
         return SafeBackupFailure(
             "SOURCE_SPECIAL_FILE_UNSUPPORTED",
             "Website backups support regular files and directories only. "
@@ -35,15 +70,22 @@ def safe_backup_failure(error, *, stage="backup"):
             False,
         )
     if isinstance(
-        error,
+        underlying,
         (SoftTimeLimitExceeded, TimeoutError, subprocess.TimeoutExpired),
-    ) or getattr(error, "errno", None) == errno.ETIMEDOUT:
+    ) or getattr(underlying, "errno", None) == errno.ETIMEDOUT:
         return SafeBackupFailure(
             "BACKUP_TIMEOUT",
             "The source did not finish the backup operation before its timeout.",
             True,
         )
-    if isinstance(error, zipfile.BadZipFile):
+    if getattr(underlying, "errno", None) == errno.ENAMETOOLONG:
+        return SafeBackupFailure(
+            "SOURCE_PATH_LIMIT_EXCEEDED",
+            "A website source path exceeds the worker filesystem limit. Shorten "
+            "that path or exclude it, then run a new backup.",
+            False,
+        )
+    if isinstance(underlying, (ArchiveValidationError, zipfile.BadZipFile)):
         return SafeBackupFailure(
             "ARCHIVE_VALIDATION_FAILED",
             "The generated backup archive failed integrity validation.",
@@ -52,7 +94,7 @@ def safe_backup_failure(error, *, stage="backup"):
 
     # Inspect only for classification. The source string is never returned,
     # persisted, logged, or placed in notifications.
-    message = str(error).lower()
+    message = str(underlying).lower()
     event_privilege_denied = (
         DATABASE_EVENT_PRIVILEGE_DETAIL.lower() in message
         or (
@@ -93,6 +135,21 @@ def safe_backup_failure(error, *, stage="backup"):
             f"have ~{available} GB free.",
             True,
         )
+    inode_match = re.search(
+        r"not enough free inodes for [a-z0-9 _-]{1,64}: "
+        r"need ~[0-9]+, have ~[0-9]+ free",
+        message,
+    )
+    if inode_match or (
+        getattr(underlying, "errno", None) == errno.ENOSPC
+        and "inode" in message
+    ):
+        return SafeBackupFailure(
+            "WORKER_INODE_EXHAUSTED",
+            "The backup worker does not have enough free filesystem entries for "
+            "this website backup.",
+            True,
+        )
     if "no space left" in message or "disk full" in message:
         return SafeBackupFailure(
             "WORKER_DISK_FULL",
@@ -114,6 +171,11 @@ def safe_backup_failure(error, *, stage="backup"):
             "The generated backup archive failed integrity validation.",
             True,
         )
+
+    if isinstance(error, BackupStageError):
+        failure = _WEBSITE_STAGE_FAILURES.get(error.stage)
+        if failure is not None:
+            return failure
 
     connection = classify_connection_error(error, stage=stage)
     if connection.code != "CONNECTION_VALIDATION_FAILED":

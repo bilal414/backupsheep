@@ -6,6 +6,7 @@ from celery.exceptions import MaxRetriesExceededError
 from django.db.models import Q
 from sentry_sdk import capture_exception, capture_message
 
+from apps._tasks.diagnostics import capture_backup_diagnostic
 from apps.console.account.models import CoreAccount
 from apps._tasks.exceptions import (
     NodeNotReadyForBackupError,
@@ -128,7 +129,23 @@ def backup_website(
                     args=[backup.uuid_str, "zip"],
                 )
         except NodeBackupFailedError as error:
-            capture_exception(error)
+            error_code = str(getattr(error, "error_code", "") or "")[:64]
+            failure_stage = {
+                "WEBSITE_MIRROR_FAILED": "website_mirror",
+                "WEBSITE_MANIFEST_FAILED": "website_manifest",
+                "ARCHIVE_CREATION_FAILED": "website_archive",
+                "ARCHIVE_VALIDATION_FAILED": "website_archive",
+                "SOURCE_PATH_LIMIT_EXCEEDED": "website_manifest",
+                "SOURCE_SPECIAL_FILE_UNSUPPORTED": "website_manifest",
+                "WORKER_INODE_EXHAUSTED": "website_manifest",
+            }.get(error_code, "source_dispatch")
+            if not getattr(error, "diagnostic_captured", False):
+                capture_backup_diagnostic(
+                    error,
+                    backup,
+                    stage=failure_stage,
+                    code=error_code or "BACKUP_FAILED",
+                )
             node.notify_backup_fail(error, backup_type)
             if not getattr(error, "retryable", True):
                 node.backup_max_retries_reached(self.request.id)

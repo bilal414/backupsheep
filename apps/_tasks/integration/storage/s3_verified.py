@@ -180,6 +180,13 @@ class S3UploadOutcomePending(S3UploadReconciliationRequired):
         self.retry_after = retry_after or _outcome_reconciliation_retry_after()
 
 
+class S3UploadStalled(S3UploadOutcomePending):
+    """The exact multipart upload made no provider-visible progress in time."""
+
+    error_code = "STORAGE_STALLED"
+    code = error_code
+
+
 # A descriptive compatibility alias for callers that use reconciliation wording.
 S3UploadReconciliationPending = S3UploadOutcomePending
 
@@ -1607,7 +1614,7 @@ def _maybe_pause_stalled_multipart(
     multipart["progress"] = progress
     state.update({"phase": "multipart_no_progress", "multipart": multipart})
     _save_state(stored_backup, metadata_key, state)
-    raise S3UploadOutcomePending(
+    raise S3UploadStalled(
         "Multipart upload made no provider-visible progress within the bounded window.",
         retry_after=_multipart_no_progress_retry_after(),
     )

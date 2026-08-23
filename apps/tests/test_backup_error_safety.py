@@ -1,9 +1,13 @@
+import errno
 import subprocess
 from unittest import mock
 
 from django.test import SimpleTestCase
 
-from apps._tasks.integration.backup.errors import safe_backup_failure
+from apps._tasks.integration.backup.errors import (
+    BackupStageError,
+    safe_backup_failure,
+)
 from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps.api.v1.utils.api_helpers import get_error
@@ -68,6 +72,44 @@ class BackupErrorSafetyTests(SimpleTestCase):
         self.assertEqual(disk.code, "WORKER_DISK_FULL")
         self.assertTrue(disk.retryable)
         self.assertNotIn("/private/path", disk.detail)
+
+    def test_website_stage_failures_have_stable_actionable_codes(self):
+        canary = "password=stage-secret /srv/customer/private"
+        cases = {
+            "website_mirror": "WEBSITE_MIRROR_FAILED",
+            "website_manifest": "WEBSITE_MANIFEST_FAILED",
+            "website_archive": "ARCHIVE_CREATION_FAILED",
+        }
+
+        for stage, code in cases.items():
+            with self.subTest(stage=stage):
+                failure = safe_backup_failure(
+                    BackupStageError(stage, RuntimeError(canary)),
+                    stage="website_backup",
+                )
+                self.assertEqual(failure.code, code)
+                self.assertTrue(failure.retryable)
+                self.assertNotIn("stage-secret", failure.detail)
+                self.assertNotIn("/srv/customer/private", failure.detail)
+
+    def test_path_and_inode_capacity_failures_are_distinguishable(self):
+        path = safe_backup_failure(
+            OSError(errno.ENAMETOOLONG, "secret path is too long"),
+            stage="website_manifest",
+        )
+        inode = safe_backup_failure(
+            RuntimeError(
+                "Not enough free inodes for website archive: need ~8, "
+                "have ~1 free /srv/private"
+            ),
+            stage="website_manifest",
+        )
+
+        self.assertEqual(path.code, "SOURCE_PATH_LIMIT_EXCEEDED")
+        self.assertFalse(path.retryable)
+        self.assertEqual(inode.code, "WORKER_INODE_EXHAUSTED")
+        self.assertTrue(inode.retryable)
+        self.assertNotIn("/srv/private", inode.detail)
 
     def test_archive_subprocess_timeout_is_classified_as_timeout(self):
         failure = safe_backup_failure(

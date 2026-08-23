@@ -10,6 +10,10 @@ from django.utils import timezone
 from model_utils.models import TimeStampedModel
 
 from apps.console.account.models import CoreAccount
+from apps.console.utils.execution_history import (
+    begin_public_attempt,
+    update_public_attempt,
+)
 from django.utils.dateparse import parse_datetime
 
 
@@ -204,6 +208,36 @@ class UtilBackup(TimeStampedModel):
         "SOURCE_ARTIFACT_INVALID": (
             "The local backup artifact failed integrity validation."
         ),
+        "BACKUP_TIMEOUT": (
+            "The source did not finish the backup operation before its timeout."
+        ),
+        "WEBSITE_MIRROR_FAILED": (
+            "The website source could not be mirrored completely. Check source "
+            "access and file permissions, then retry."
+        ),
+        "WEBSITE_MANIFEST_FAILED": (
+            "BackupSheep could not build a stable manifest of the mirrored website. "
+            "Retry after checking worker capacity and source stability."
+        ),
+        "ARCHIVE_CREATION_FAILED": (
+            "BackupSheep could not create the website archive from its verified "
+            "mirror. Retry after checking worker capacity."
+        ),
+        "ARCHIVE_VALIDATION_FAILED": (
+            "The generated backup archive failed integrity validation."
+        ),
+        "SOURCE_PATH_LIMIT_EXCEEDED": (
+            "A website source path exceeds the worker filesystem limit. Shorten "
+            "that path or exclude it, then run a new backup."
+        ),
+        "SOURCE_SPECIAL_FILE_UNSUPPORTED": (
+            "The website source contains a member that cannot be represented safely "
+            "in a restorable backup."
+        ),
+        "WORKER_INODE_EXHAUSTED": (
+            "The backup worker does not have enough free filesystem entries for "
+            "this website backup."
+        ),
         "STORAGE_UPLOAD_FAILED": "The storage upload could not be completed.",
         "STORAGE_AUTH_FAILED": (
             "The storage destination rejected the configured credentials or permissions."
@@ -222,6 +256,10 @@ class UtilBackup(TimeStampedModel):
         ),
         "STORAGE_TRANSIENT_FAILURE": (
             "The storage provider is temporarily unavailable; processing will resume later."
+        ),
+        "STORAGE_STALLED": (
+            "The storage upload made no provider-visible progress and will resume "
+            "automatically from its durable checkpoint."
         ),
         "STORAGE_RETRIES_EXHAUSTED": (
             "Automatic storage retries were exhausted. Review the failed destination "
@@ -441,6 +479,14 @@ class UtilBackup(TimeStampedModel):
                     pass
             if state.started_at is None:
                 state.started_at = now
+            if state.attempt_count:
+                state.metadata = begin_public_attempt(
+                    state.metadata,
+                    attempt_no=state.attempt_count,
+                    correlation_id=state.correlation_id,
+                    stage=state.phase or "preparing",
+                    now=now,
+                )
             state.save(
                 update_fields=[
                     "delivery_count",
@@ -449,6 +495,7 @@ class UtilBackup(TimeStampedModel):
                     "worker_name",
                     "attempt_count",
                     "started_at",
+                    "metadata",
                     "modified",
                 ]
             )
@@ -506,6 +553,16 @@ class UtilBackup(TimeStampedModel):
                 or state.lease_expires_at
             )
             if stale_lease:
+                if state.attempt_count:
+                    state.metadata = update_public_attempt(
+                        state.metadata,
+                        attempt_no=state.attempt_count,
+                        correlation_id=state.correlation_id,
+                        stage=state.phase or "preparing",
+                        retry_decision="lease_lost",
+                        now=now,
+                        finished=True,
+                    )
                 metadata = dict(state.reconciliation_metadata or {})
                 history = list(metadata.get("stale_lease_takeovers") or [])
                 history.append(
@@ -538,6 +595,14 @@ class UtilBackup(TimeStampedModel):
             state.claim_count += 1
             if increment_attempt:
                 state.attempt_count += 1
+            if state.attempt_count:
+                state.metadata = begin_public_attempt(
+                    state.metadata,
+                    attempt_no=state.attempt_count,
+                    correlation_id=state.correlation_id,
+                    stage=phase,
+                    now=now,
+                )
             if state.started_at is None:
                 state.started_at = now
             state.finished_at = None
@@ -610,6 +675,15 @@ class UtilBackup(TimeStampedModel):
                         metadata[key] = value
                 state.metadata = metadata
                 metadata_changed = True
+                public_stage = metadata_updates.get("public_stage")
+                if public_stage and state.attempt_count:
+                    state.metadata = update_public_attempt(
+                        state.metadata,
+                        attempt_no=state.attempt_count,
+                        correlation_id=state.correlation_id,
+                        stage=public_stage,
+                        now=now,
+                    )
             state.heartbeat_at = now
             state.lease_expires_at = now + timedelta(seconds=lease_seconds)
             update_fields = [
@@ -732,6 +806,23 @@ class UtilBackup(TimeStampedModel):
                 update_fields.extend(["reconciliation_state", "reconciliation_reason"])
 
             if update_fields:
+                if state.attempt_count:
+                    state.metadata = update_public_attempt(
+                        state.metadata,
+                        attempt_no=state.attempt_count,
+                        correlation_id=state.correlation_id,
+                        stage=terminal_phase,
+                        retry_decision=(
+                            "complete"
+                            if terminal_phase == "complete"
+                            else "cancelled"
+                            if terminal_phase == "cancelled"
+                            else "terminal_failure"
+                        ),
+                        now=now,
+                        finished=True,
+                    )
+                    update_fields.append("metadata")
                 state.save(update_fields=list(dict.fromkeys(update_fields + ["modified"])))
             return state
 
@@ -744,6 +835,7 @@ class UtilBackup(TimeStampedModel):
         retry_at=None,
         reconciliation_reason="",
         reconciliation_metadata=None,
+        stage=None,
         lease_owner=None,
         lease_token=None,
         require_live=False,
@@ -776,6 +868,30 @@ class UtilBackup(TimeStampedModel):
                 execution_metadata = dict(state.metadata or {})
                 execution_metadata["retryable"] = bool(retryable)
                 state.metadata = execution_metadata
+            if state.attempt_count:
+                public_stage = (
+                    stage
+                    or (state.metadata or {}).get("public_stage")
+                    or state.phase
+                    or "preparing"
+                )
+                decision = (
+                    "scheduled_retry"
+                    if retryable is True or retry_at is not None
+                    else "terminal_failure"
+                    if retryable is False
+                    else "retry_not_scheduled"
+                )
+                state.metadata = update_public_attempt(
+                    state.metadata,
+                    attempt_no=state.attempt_count,
+                    correlation_id=state.correlation_id,
+                    stage=public_stage,
+                    code=safe_code,
+                    retry_decision=decision,
+                    now=now,
+                    finished=retryable is not None or retry_at is not None,
+                )
             if not reconciliation_reason:
                 reconciliation_reason = self.RECONCILIATION_ERROR_REASONS.get(
                     safe_code, ""

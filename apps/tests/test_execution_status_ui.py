@@ -184,6 +184,20 @@ class ExecutionStatusUiTemplateTests(SimpleTestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.source)
 
+    def test_technical_details_render_bounded_attempt_history(self):
+        for marker in (
+            "Attempt history",
+            "view.attemptHistory",
+            "restoreExecutionAttemptHistory(restoreItem)",
+            "attempt.startedAtLabel",
+            "attempt.finishedAtLabel",
+            "attempt.stageLabel",
+            "attempt.code",
+            "attempt.retryDecisionLabel",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.source)
+
     def test_archive_rehydration_has_specific_safe_guidance(self):
         self.assertIn("RESTORE_ARCHIVE_NOT_READY", self.source)
         self.assertIn(

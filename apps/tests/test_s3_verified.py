@@ -19,6 +19,7 @@ from apps._tasks.integration.storage.s3_verified import (
     S3ObjectIntegrityError,
     S3UploadInventoryFailure,
     S3UploadOutcomePending,
+    S3UploadStalled,
     S3UploadReconciliationRequired,
     _list_parts,
     _multipart_part_size,
@@ -1298,10 +1299,24 @@ class VerifiedS3ReconciliationTests(SimpleTestCase):
         client.head_object.side_effect = _not_found()
         client.list_parts.return_value = part_one
 
-        with self.assertRaises(S3UploadOutcomePending) as raised:
+        with self.assertRaises(S3UploadStalled) as raised:
             self._upload(client, key=key)
 
         self.assertEqual(raised.exception.retry_after, 17)
+        from apps._tasks.integration.storage.tasks import _storage_error_outcome
+        status_point = SimpleNamespace(
+            Status=SimpleNamespace(
+                UPLOAD_RETRY="upload_retry",
+                STORAGE_VALIDATION_FAILED="storage_validation_failed",
+            )
+        )
+        code, _message, status, retryable = _storage_error_outcome(
+            raised.exception,
+            status_point,
+        )
+        self.assertEqual(code, "STORAGE_STALLED")
+        self.assertEqual(status, status_point.Status.UPLOAD_RETRY)
+        self.assertTrue(retryable)
         stalled = self.point.metadata["s3_object"]
         self.assertEqual(stalled["phase"], "multipart_no_progress")
         self.assertEqual(

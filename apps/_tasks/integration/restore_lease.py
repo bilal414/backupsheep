@@ -14,6 +14,11 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from sentry_sdk import capture_exception
 
+from apps.console.utils.execution_history import (
+    begin_public_attempt,
+    update_public_attempt,
+)
+
 
 class RestoreAlreadyTerminal(RuntimeError):
     pass
@@ -116,6 +121,16 @@ class DurableRestoreLease:
             # reclaim after the bounded reservation expires.
             metadata.pop(SCHEDULED_RETRY_RESERVED_UNTIL, None)
             if restore.lease_owner or restore.lease_token:
+                if restore.attempt_count:
+                    metadata = update_public_attempt(
+                        metadata,
+                        attempt_no=restore.attempt_count,
+                        correlation_id=restore.correlation_id,
+                        stage=restore.execution_phase or self.phase,
+                        retry_decision="lease_lost",
+                        now=now,
+                        finished=True,
+                    )
                 takeovers = list(metadata.get("stale_lease_takeovers") or [])
                 previous_owner = str(restore.lease_owner or "")
                 previous_token = str(restore.lease_token or "")
@@ -148,6 +163,13 @@ class DurableRestoreLease:
             restore.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
             restore.heartbeat_at = now
             restore.attempt_count += 1
+            restore.execution_metadata = begin_public_attempt(
+                restore.execution_metadata,
+                attempt_no=restore.attempt_count,
+                correlation_id=restore.correlation_id,
+                stage=self.phase,
+                now=now,
+            )
             # The root restore task id is the durable request identity. Poll and
             # recovery deliveries have their own lease owner and must not replace
             # that identity; it is used for correlation and idempotent adoption.
@@ -222,6 +244,13 @@ class DurableRestoreLease:
         values = dict(self.restore.execution_metadata or {})
         if metadata:
             values.update(dict(metadata))
+        values = update_public_attempt(
+            values,
+            attempt_no=self.restore.attempt_count,
+            correlation_id=self.restore.correlation_id,
+            stage=self.restore.execution_phase,
+            now=timezone.now(),
+        )
         self.restore.execution_metadata = values
         if progress_completed is not None:
             self.restore.progress_completed = max(

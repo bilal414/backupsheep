@@ -44,6 +44,10 @@ class ArchiveSourcePolicyError(Exception):
         super().__init__("website archive source contains an unsupported member")
 
 
+class ArchiveValidationError(ValueError):
+    """A generated archive failed the bounded structural/integrity gate."""
+
+
 class ZipMember(NamedTuple):
     """Bounded central-directory metadata for one ZIP member."""
 
@@ -575,13 +579,23 @@ def _publish_archive(
     required_suffix=None,
     before_publish=None,
 ):
-    validate_zip_archive(staged_path, required_suffix=required_suffix)
+    try:
+        validate_zip_archive(staged_path, required_suffix=required_suffix)
+    except Exception as error:
+        raise ArchiveValidationError(
+            "Generated backup archive failed validation before publication."
+        ) from error
     _fsync_file(staged_path)
     if before_publish is not None:
         before_publish()
     os.replace(staged_path, archive_path)
     _fsync_parent(archive_path)
-    return validate_zip_archive(archive_path, required_suffix=required_suffix)
+    try:
+        return validate_zip_archive(archive_path, required_suffix=required_suffix)
+    except Exception as error:
+        raise ArchiveValidationError(
+            "Published backup archive failed validation."
+        ) from error
 
 
 def _run_zip_writer(command, *, source_dir, timeout, stderr_dir, stdin=None):

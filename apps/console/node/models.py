@@ -106,7 +106,21 @@ _BACKUP_NOTIFICATION_MESSAGES = {
     "PERMISSION_DENIED": "The destination account lacks the required backup permission.",
     "TLS_REQUIRED": "The destination requires an SSL/TLS connection.",
     "WORKER_DISK_FULL": "The backup worker does not have enough free disk space.",
+    "WORKER_INODE_EXHAUSTED": (
+        "The backup worker does not have enough free filesystem entries for this "
+        "website backup."
+    ),
+    "WEBSITE_MIRROR_FAILED": "The website source could not be mirrored completely.",
+    "WEBSITE_MANIFEST_FAILED": (
+        "BackupSheep could not build a stable manifest of the mirrored website."
+    ),
+    "ARCHIVE_CREATION_FAILED": (
+        "BackupSheep could not create the website archive from its verified mirror."
+    ),
     "ARCHIVE_VALIDATION_FAILED": "The generated backup archive failed integrity validation.",
+    "SOURCE_PATH_LIMIT_EXCEEDED": (
+        "A website source path exceeds the backup worker filesystem limit."
+    ),
     "SOURCE_EXPORT_FAILED": "The source export failed.",
     "SOURCE_SPECIAL_FILE_UNSUPPORTED": (
         "The website source contains a member that cannot be represented safely "
@@ -133,6 +147,7 @@ _BACKUP_NOTIFICATION_MESSAGES = {
     "STORAGE_RATE_LIMITED": "The storage provider rate limit was reached.",
     "STORAGE_TIMEOUT": "The storage operation timed out.",
     "STORAGE_TRANSIENT_FAILURE": "The storage provider is temporarily unavailable.",
+    "STORAGE_STALLED": "The storage upload made no provider-visible progress.",
     "STORAGE_INTEGRITY_FAILED": "The uploaded object failed integrity verification.",
     "SOURCE_ARTIFACT_INVALID": "The local backup artifact failed integrity validation.",
     "SOURCE_ARTIFACT_MISSING": "The committed local backup artifact is no longer available.",
@@ -158,7 +173,24 @@ _BACKUP_NOTIFICATION_REMEDIATIONS = {
     "PERMISSION_DENIED": "Grant the minimum read/export permissions required for this backup and validate again.",
     "TLS_REQUIRED": "Enable SSL/TLS for this connection and validate again.",
     "WORKER_DISK_FULL": "Free worker disk space or move the workload to a worker with sufficient capacity.",
+    "WORKER_INODE_EXHAUSTED": (
+        "Free filesystem entries on the backup worker or move the workload to a "
+        "worker with sufficient inode capacity."
+    ),
+    "WEBSITE_MIRROR_FAILED": (
+        "Check website source access and file permissions, then retry."
+    ),
+    "WEBSITE_MANIFEST_FAILED": (
+        "Check worker capacity and source stability, then retry."
+    ),
+    "ARCHIVE_CREATION_FAILED": (
+        "Check worker capacity and retry the verified website mirror."
+    ),
     "ARCHIVE_VALIDATION_FAILED": "Retry the export and inspect the durable execution using the correlation ID.",
+    "SOURCE_PATH_LIMIT_EXCEEDED": (
+        "Shorten or exclude the path that exceeds the worker filesystem limit, "
+        "then run a new backup."
+    ),
     "SOURCE_EXPORT_FAILED": "Review secured diagnostics using the correlation ID and retry the source export.",
     "SOURCE_SPECIAL_FILE_UNSUPPORTED": (
         "Remove or exclude symbolic links, special files, and invalid paths, then "
@@ -184,6 +216,9 @@ _BACKUP_NOTIFICATION_REMEDIATIONS = {
     "STORAGE_RATE_LIMITED": "Wait for the storage provider retry window and allow the task to resume.",
     "STORAGE_TIMEOUT": "Wait for storage provider recovery and reconcile the upload before retrying.",
     "STORAGE_TRANSIENT_FAILURE": "Wait for storage provider recovery and retry the upload.",
+    "STORAGE_STALLED": (
+        "Allow the durable multipart upload to resume from its last verified part."
+    ),
     "STORAGE_INTEGRITY_FAILED": "Do not restore this copy; retry the upload and verify its checksum.",
     "SOURCE_ARTIFACT_INVALID": "Retry the source export and verify its integrity before upload.",
     "SOURCE_ARTIFACT_MISSING": "Recreate the source artifact and retry the backup.",
@@ -192,6 +227,19 @@ _BACKUP_NOTIFICATION_REMEDIATIONS = {
 }
 
 _BACKUP_NOTIFICATION_SAFE_CODES = frozenset(_BACKUP_NOTIFICATION_MESSAGES)
+
+_BACKUP_NOTIFICATION_EXECUTION_STAGES = {
+    "BACKUP_TIMEOUT": "source_dispatch",
+    "WORKER_DISK_FULL": "source_dispatch",
+    "WORKER_INODE_EXHAUSTED": "website_manifest",
+    "WEBSITE_MIRROR_FAILED": "website_mirror",
+    "WEBSITE_MANIFEST_FAILED": "website_manifest",
+    "ARCHIVE_CREATION_FAILED": "website_archive",
+    "ARCHIVE_VALIDATION_FAILED": "website_archive",
+    "SOURCE_PATH_LIMIT_EXCEEDED": "website_manifest",
+    "SOURCE_SPECIAL_FILE_UNSUPPORTED": "website_manifest",
+    "SOURCE_EXPORT_FAILED": "source_dispatch",
+}
 
 
 def _restore_status(name):
@@ -13366,6 +13414,10 @@ class CoreNode(TimeStampedModel):
             "DNS_FAILURE",
             "TCP_TIMEOUT",
             "WORKER_DISK_FULL",
+            "WORKER_INODE_EXHAUSTED",
+            "WEBSITE_MIRROR_FAILED",
+            "WEBSITE_MANIFEST_FAILED",
+            "ARCHIVE_CREATION_FAILED",
             "ARCHIVE_VALIDATION_FAILED",
             "SOURCE_EXPORT_FAILED",
             "PROVIDER_RATE_LIMIT",
@@ -13374,6 +13426,7 @@ class CoreNode(TimeStampedModel):
             "STORAGE_RATE_LIMITED",
             "STORAGE_TIMEOUT",
             "STORAGE_TRANSIENT_FAILURE",
+            "STORAGE_STALLED",
             "WORKER_LEASE_LOST",
             "BACKUP_TIMEOUT",
             "BACKUP_STATUS_TIMEOUT",
@@ -13426,7 +13479,14 @@ class CoreNode(TimeStampedModel):
                 )
         return f"https://backupsheep.com/console/nodes/{node_id}/"
 
-    def _backup_notification_correlation(self, error, code, backup_type):
+    def _backup_notification_correlation(
+        self,
+        error,
+        code,
+        backup_type,
+        *,
+        retryable,
+    ):
         """Return a durable execution correlation ID or a deterministic fallback."""
         backup_key = None
         for attribute in ("backup_uuid", "backup_name"):
@@ -13455,6 +13515,15 @@ class CoreNode(TimeStampedModel):
                     # its reconciliation evidence.
                     state = backup.get_execution_state(create=False)
                     if state and getattr(state, "correlation_id", None):
+                        stage = _BACKUP_NOTIFICATION_EXECUTION_STAGES.get(code)
+                        if stage:
+                            recorded = backup.record_execution_error(
+                                code=code,
+                                retryable=retryable,
+                                stage=stage,
+                            )
+                            if recorded and getattr(recorded, "correlation_id", None):
+                                return str(recorded.correlation_id)
                         return str(state.correlation_id)
 
                     # Rows created before the durable execution ledger existed still
@@ -13462,9 +13531,19 @@ class CoreNode(TimeStampedModel):
                     # legacy error in that case; provider-specific state must have
                     # already been persisted by the provider flow above.
                     if state is None:
+                        safe_code = (
+                            code
+                            if code in _BACKUP_NOTIFICATION_EXECUTION_STAGES
+                            else "BACKUP_FAILED"
+                        )
                         state = backup.record_execution_error(
-                            code="BACKUP_FAILED",
-                            message=_BACKUP_NOTIFICATION_MESSAGES["BACKUP_FAILED"],
+                            code=safe_code,
+                            message=_BACKUP_NOTIFICATION_MESSAGES[safe_code],
+                            retryable=retryable,
+                            stage=_BACKUP_NOTIFICATION_EXECUTION_STAGES.get(
+                                safe_code,
+                                "source_dispatch",
+                            ),
                         )
                         if state and getattr(state, "correlation_id", None):
                             return str(state.correlation_id)
@@ -13493,12 +13572,15 @@ class CoreNode(TimeStampedModel):
         from datetime import datetime
 
         class_name = error.__class__.__name__
-        if class_name in {
-            "ConnectionNotReadyForBackupError",
-            "NodeNotReadyForBackupError",
-            "NodeBackupFailedError",
-        } and getattr(error, "attempt_no", None) != 1:
-            return
+        send_notification = not (
+            class_name
+            in {
+                "ConnectionNotReadyForBackupError",
+                "NodeNotReadyForBackupError",
+                "NodeBackupFailedError",
+            }
+            and getattr(error, "attempt_no", None) != 1
+        )
 
         contract = self._backup_notification_contract(error)
         if not contract:
@@ -13517,7 +13599,10 @@ class CoreNode(TimeStampedModel):
                 error,
                 contract["code"],
                 backup_type_label,
+                retryable=contract["retryable"],
             )
+            if not send_notification:
+                return
             account = self.connection.account
             if not self.notify_on_fail or not account.notify_on_fail:
                 return

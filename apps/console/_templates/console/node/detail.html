@@ -566,6 +566,20 @@
                                                         </div>
                                                         <code class="block break-all font-mono text-[11px] text-slate-700" x-text="view ? view.correlationId : ''"></code>
                                                         <p x-show="view && view.errorCode" class="break-words">Error code: <span class="font-mono text-slate-700" x-text="view ? view.errorCode : ''"></span></p>
+                                                        <div x-show="view && view.attemptHistory.length" class="pt-1">
+                                                            <p class="font-semibold text-slate-600">Attempt history</p>
+                                                            <ol class="mt-1 space-y-1.5">
+                                                                <template x-for="(attempt, index) in (view ? view.attemptHistory : [])" :key="`${attempt.correlationId}-${attempt.attempt}-${index}`">
+                                                                    <li class="rounded border border-slate-200 bg-white px-2 py-1.5">
+                                                                        <p class="font-medium text-slate-700">Attempt <span x-text="attempt.attempt"></span> · <span x-text="attempt.stageLabel"></span></p>
+                                                                        <p>Started: <span x-text="attempt.startedAtLabel"></span></p>
+                                                                        <p x-show="attempt.finishedAtLabel">Finished: <span x-text="attempt.finishedAtLabel"></span></p>
+                                                                        <p>Decision: <span x-text="attempt.retryDecisionLabel"></span></p>
+                                                                        <p x-show="attempt.code">Code: <span class="font-mono text-slate-700" x-text="attempt.code"></span></p>
+                                                                    </li>
+                                                                </template>
+                                                            </ol>
+                                                        </div>
                                                     </div>
                                                 </details>
                                             </div>
@@ -1292,6 +1306,20 @@
                                             </div>
                                             <code class="block break-all font-mono text-[11px] text-slate-700" x-text="restoreExecutionStatus ? restoreExecutionStatus.correlationId : ''"></code>
                                             <p x-show="restoreExecutionStatus && restoreExecutionStatus.errorCode" class="break-words">Error code: <span class="font-mono text-slate-700" x-text="restoreExecutionStatus ? restoreExecutionStatus.errorCode : ''"></span></p>
+                                            <div x-show="restoreExecutionStatus && restoreExecutionStatus.attemptHistory.length" class="pt-1">
+                                                <p class="font-semibold text-slate-600">Attempt history</p>
+                                                <ol class="mt-1 space-y-1.5">
+                                                    <template x-for="(attempt, index) in (restoreExecutionStatus ? restoreExecutionStatus.attemptHistory : [])" :key="`${attempt.correlationId}-${attempt.attempt}-${index}`">
+                                                        <li class="rounded border border-slate-200 bg-white px-2 py-1.5">
+                                                            <p class="font-medium text-slate-700">Attempt <span x-text="attempt.attempt"></span> · <span x-text="attempt.stageLabel"></span></p>
+                                                            <p>Started: <span x-text="attempt.startedAtLabel"></span></p>
+                                                            <p x-show="attempt.finishedAtLabel">Finished: <span x-text="attempt.finishedAtLabel"></span></p>
+                                                            <p>Decision: <span x-text="attempt.retryDecisionLabel"></span></p>
+                                                            <p x-show="attempt.code">Code: <span class="font-mono text-slate-700" x-text="attempt.code"></span></p>
+                                                        </li>
+                                                    </template>
+                                                </ol>
+                                            </div>
                                         </div>
                                     </details>
                                 </div>
@@ -1333,6 +1361,20 @@
                                                         Error code: <span class="font-mono text-slate-700"
                                                                           x-text="restoreExecutionErrorCode(restoreItem)"></span>
                                                     </p>
+                                                    <div x-show="restoreExecutionAttemptHistory(restoreItem).length" class="pt-1">
+                                                        <p class="font-semibold text-slate-600">Attempt history</p>
+                                                        <ol class="mt-1 space-y-1.5">
+                                                            <template x-for="(attempt, index) in restoreExecutionAttemptHistory(restoreItem)" :key="`${attempt.correlationId}-${attempt.attempt}-${index}`">
+                                                                <li class="rounded border border-slate-200 bg-white px-2 py-1.5">
+                                                                    <p class="font-medium text-slate-700">Attempt <span x-text="attempt.attempt"></span> · <span x-text="attempt.stageLabel"></span></p>
+                                                                    <p>Started: <span x-text="attempt.startedAtLabel"></span></p>
+                                                                    <p x-show="attempt.finishedAtLabel">Finished: <span x-text="attempt.finishedAtLabel"></span></p>
+                                                                    <p>Decision: <span x-text="attempt.retryDecisionLabel"></span></p>
+                                                                    <p x-show="attempt.code">Code: <span class="font-mono text-slate-700" x-text="attempt.code"></span></p>
+                                                                </li>
+                                                            </template>
+                                                        </ol>
+                                                    </div>
                                                 </div>
                                             </details>
                                             {% if object.type == 4 and not is_vultr_managed_database %}
@@ -1577,6 +1619,20 @@
                                         </div>
                                         <code class="block break-all font-mono text-[11px] text-slate-700" x-text="nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.correlation_id : ''"></code>
                                         <p x-show="nativeRestoreStatus && nativeRestoreStatus.execution_status && nativeRestoreStatus.execution_status.last_error_code">Error code: <span class="font-mono text-slate-700" x-text="nativeRestoreStatus && nativeRestoreStatus.execution_status ? nativeRestoreStatus.execution_status.last_error_code : ''"></span></p>
+                                        <div x-show="restoreExecutionAttemptHistory(nativeRestoreStatus).length" class="pt-1">
+                                            <p class="font-semibold text-slate-600">Attempt history</p>
+                                            <ol class="mt-1 space-y-1.5">
+                                                <template x-for="(attempt, index) in restoreExecutionAttemptHistory(nativeRestoreStatus)" :key="`${attempt.correlationId}-${attempt.attempt}-${index}`">
+                                                    <li class="rounded border border-slate-200 bg-slate-50 px-2 py-1.5">
+                                                        <p class="font-medium text-slate-700">Attempt <span x-text="attempt.attempt"></span> · <span x-text="attempt.stageLabel"></span></p>
+                                                        <p>Started: <span x-text="attempt.startedAtLabel"></span></p>
+                                                        <p x-show="attempt.finishedAtLabel">Finished: <span x-text="attempt.finishedAtLabel"></span></p>
+                                                        <p>Decision: <span x-text="attempt.retryDecisionLabel"></span></p>
+                                                        <p x-show="attempt.code">Code: <span class="font-mono text-slate-700" x-text="attempt.code"></span></p>
+                                                    </li>
+                                                </template>
+                                            </ol>
+                                        </div>
                                     </div>
                                 </details>
                             </div>
@@ -2480,6 +2536,7 @@
                 STORAGE_RATE_LIMITED: 'The storage provider rate limit was reached; processing will resume later.',
                 STORAGE_TIMEOUT: 'The storage operation timed out; processing will resume later.',
                 STORAGE_TRANSIENT_FAILURE: 'The storage provider is temporarily unavailable; processing will resume later.',
+                STORAGE_STALLED: 'The storage upload made no provider-visible progress and will resume automatically from its durable checkpoint.',
                 STORAGE_RETRIES_EXHAUSTED: 'Automatic storage retries were exhausted. Review the failed destination before starting another upload.',
                 STORAGE_DESTINATION_NOT_FOUND: 'The configured storage destination was not found.',
                 STORAGE_AUTH_FAILED: 'The storage destination rejected the configured credentials or permissions.',
@@ -2488,6 +2545,13 @@
                 RESTORE_ARCHIVE_NOT_READY: 'The storage provider is restoring this archive; the restore will resume automatically when it is ready.',
                 RESTORE_RECONCILIATION_REQUIRED: 'The restore state is ambiguous, so automatic destination writes were stopped. Review the exact ownership and checkpoint evidence before retrying.',
                 DATABASE_RESTORE_SYSTEM_DEFINER_REQUIRED: 'The stored MySQL dump contains an object owned by a protected SYSTEM_USER definer. Grant SYSTEM_USER to a dedicated MySQL 8.4 restore account, then resume verification. The source database was not changed.',
+                WEBSITE_MIRROR_FAILED: 'The website source could not be mirrored completely. Check source access and file permissions, then retry.',
+                WEBSITE_MANIFEST_FAILED: 'BackupSheep could not build a stable manifest of the mirrored website. Retry after checking worker capacity and source stability.',
+                ARCHIVE_CREATION_FAILED: 'BackupSheep could not create the website archive from its verified mirror. Retry after checking worker capacity.',
+                ARCHIVE_VALIDATION_FAILED: 'The generated backup archive failed integrity validation.',
+                SOURCE_PATH_LIMIT_EXCEEDED: 'A website source path exceeds the worker filesystem limit. Shorten that path or exclude it, then run a new backup.',
+                SOURCE_SPECIAL_FILE_UNSUPPORTED: 'The website source contains a member that cannot be represented safely in a restorable backup.',
+                WORKER_INODE_EXHAUSTED: 'The backup worker does not have enough free filesystem entries for this website backup.',
             };
 
             function safeToken(value) {
@@ -2539,6 +2603,47 @@
                     determinate: total !== null,
                     label: `${completed}${total === null ? '' : ` / ${total}`}${unit ? ` ${unit}` : ''}`,
                 };
+            }
+
+            function safeAttemptHistory(raw, expectedCorrelation) {
+                if (!Array.isArray(raw) || !expectedCorrelation) return [];
+                const retryDecisions = new Set([
+                    'running', 'scheduled_retry', 'retry_not_scheduled', 'complete',
+                    'terminal_failure', 'manual_review', 'cancelled', 'lease_lost',
+                ]);
+                return raw.slice(-20).flatMap(item => {
+                    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+                    const attemptNumber = Number(item.attempt);
+                    const attempt = Number.isSafeInteger(attemptNumber) && attemptNumber > 0 && attemptNumber <= 1000000
+                        ? attemptNumber
+                        : null;
+                    const correlationId = safeCorrelation(item.correlation_id);
+                    const stage = typeof item.stage === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(item.stage)
+                        ? item.stage
+                        : null;
+                    const retryDecision = typeof item.retry_decision === 'string' && retryDecisions.has(item.retry_decision)
+                        ? item.retry_decision
+                        : null;
+                    const startedAt = safeDate(item.started_at);
+                    const finishedAt = item.finished_at === null || item.finished_at === undefined || item.finished_at === ''
+                        ? null
+                        : safeDate(item.finished_at);
+                    if (!attempt || correlationId !== expectedCorrelation || !stage || !retryDecision || !startedAt) return [];
+                    if (item.finished_at && !finishedAt) return [];
+                    if (finishedAt && finishedAt.getTime() < startedAt.getTime()) return [];
+                    const code = item.code === null || item.code === undefined || item.code === ''
+                        ? null
+                        : safeErrorCode(item.code);
+                    return [{
+                        attempt,
+                        startedAtLabel: dateTimeLabel(startedAt),
+                        finishedAtLabel: dateTimeLabel(finishedAt),
+                        stageLabel: humanize(stage),
+                        code,
+                        retryDecisionLabel: humanize(retryDecision),
+                        correlationId,
+                    }];
+                });
             }
 
             function safeMetricNumber(value) {
@@ -2691,10 +2796,11 @@
                     ? parsedProgress
                     : null;
                 const correlationId = safeCorrelation(raw.correlation_id);
+                const attemptHistory = safeAttemptHistory(raw.attempt_history, correlationId);
 
                 // An empty/malformed execution_status must not replace the
                 // server-rendered legacy status badge.
-                if (!status && !phase && !providerStatus && !errorCode && !retryAt && !progress && !correlationId) return null;
+                if (!status && !phase && !providerStatus && !errorCode && !retryAt && !progress && !correlationId && !attemptHistory.length) return null;
 
                 const category = categoryFor({
                     status,
@@ -2728,12 +2834,13 @@
                     errorCode,
                     errorMessage: safeErrorMessage(raw),
                     correlationId,
+                    attemptHistory,
                     durable: raw.durable === true,
                     shouldPoll,
                 };
             }
 
-            return {normalize, safeErrorMessage, humanize, dateTimeLabel, sizeLabel, countLabel, nodeSummary};
+            return {normalize, safeAttemptHistory, safeErrorMessage, humanize, dateTimeLabel, sizeLabel, countLabel, nodeSummary};
         })();
 
         document.addEventListener('alpine:init', () => {
@@ -2979,6 +3086,10 @@
                 restoreExecutionErrorCode(item) {
                     const view = this.executionStatusView(item);
                     return view && view.errorCode ? view.errorCode : '';
+                },
+                restoreExecutionAttemptHistory(item) {
+                    const view = this.executionStatusView(item);
+                    return view ? view.attemptHistory : [];
                 },
                 restoreCreatedLabel(item) {
                     const createdLabel = item && typeof item === 'object' && !Array.isArray(item)

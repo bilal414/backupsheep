@@ -675,3 +675,32 @@ class NonVultrRestoreReliabilityTests(BaseTestCase):
         self.assertIsNotNone(state)
         self.assertEqual(state.last_error_code, "BACKUP_FAILED")
         self.assertEqual(str(state.correlation_id), logged_data["correlation_id"])
+
+    def test_suppressed_retry_notification_still_records_safe_attempt_failure(self):
+        node, backup = self._digitalocean()
+        state = backup.initialize_execution(attempt_no=2)
+        sensitive_error = type("NodeBackupFailedError", (Exception,), {})(
+            "stderr password=secret-canary /srv/customer/private"
+        )
+        sensitive_error.attempt_no = 2
+        sensitive_error.backup_uuid = backup.uuid_str
+        sensitive_error.error_code = "WEBSITE_MANIFEST_FAILED"
+
+        with mock.patch.object(
+            self.account.__class__, "create_log"
+        ) as create_log, mock.patch(
+            "apps._tasks.helper.tasks.send_postmark_email.delay"
+        ) as send_email:
+            node.notify_backup_fail(sensitive_error, UtilBackup.Type.ON_DEMAND)
+
+        create_log.assert_not_called()
+        send_email.assert_not_called()
+        state.refresh_from_db()
+        self.assertEqual(state.last_error_code, "WEBSITE_MANIFEST_FAILED")
+        history = state.metadata["public_attempt_history"]
+        self.assertEqual(history[-1]["attempt"], 2)
+        self.assertEqual(history[-1]["stage"], "website_manifest")
+        self.assertEqual(history[-1]["code"], "WEBSITE_MANIFEST_FAILED")
+        self.assertEqual(history[-1]["retry_decision"], "scheduled_retry")
+        self.assertNotIn("secret-canary", repr(state.metadata))
+        self.assertNotIn("/srv/customer/private", repr(state.metadata))

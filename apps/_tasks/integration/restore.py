@@ -9,6 +9,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from sentry_sdk import capture_exception
 
+from apps._tasks.diagnostics import capture_execution_diagnostic
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.restore_lease import (
     DurableRestoreLease,
@@ -32,6 +33,7 @@ from apps.console.backup.models import (
 )
 from apps.console.connection.reliability import classify_connection_error
 from apps.console.node.models import CoreNode
+from apps.console.utils.execution_history import update_public_attempt
 
 
 def _restore_error_outcome(error):
@@ -283,6 +285,15 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
         restore.error = None
         restore.last_error_code = ""
         restore.next_retry_at = None
+        restore.execution_metadata = update_public_attempt(
+            restore.execution_metadata,
+            attempt_no=restore.attempt_count,
+            correlation_id=restore.correlation_id,
+            stage="complete",
+            retry_decision="complete",
+            now=timezone.now(),
+            finished=True,
+        )
         # The lease heartbeat is renewed by a separate thread while the engine can
         # spend hours transferring data.  A full model save here would write the
         # task's stale in-memory heartbeat/expiry back over that newer lease and can
@@ -295,6 +306,7 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
                 "error",
                 "last_error_code",
                 "next_retry_at",
+                "execution_metadata",
                 "modified",
             ]
         )
@@ -307,7 +319,6 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
         capture_exception(error)
         raise task.retry(countdown=30, max_retries=2880)
     except Exception as error:
-        capture_exception(error)
         code, message, retryable = _restore_error_outcome(error)
         retry_delay = _restore_retry_delay(error) if retryable else None
         retry_due_at = (
@@ -322,7 +333,25 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
             )
         else:
             metadata.pop(SCHEDULED_RETRY_RESERVED_UNTIL, None)
-        restore.execution_metadata = metadata
+        restore.execution_metadata = update_public_attempt(
+            metadata,
+            attempt_no=restore.attempt_count,
+            correlation_id=restore.correlation_id,
+            stage=restore.execution_phase or phase,
+            code=code,
+            retry_decision=(
+                "scheduled_retry" if retryable else "terminal_failure"
+            ),
+            now=timezone.now(),
+            finished=True,
+        )
+        capture_execution_diagnostic(
+            error,
+            correlation_id=restore.correlation_id,
+            attempt_no=restore.attempt_count,
+            stage=restore.execution_phase or phase,
+            code=code,
+        )
         restore.last_error_code = code
         restore.error = message
         restore.execution_phase = "retrying" if retryable else "failed"
@@ -355,6 +384,16 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
                 restore.last_error_code = "RESTORE_RETRIES_EXHAUSTED"
                 restore.error = "The restore exhausted its automatic retry budget."
                 restore.next_retry_at = None
+                restore.execution_metadata = update_public_attempt(
+                    restore.execution_metadata,
+                    attempt_no=restore.attempt_count,
+                    correlation_id=restore.correlation_id,
+                    stage="failed",
+                    code="RESTORE_RETRIES_EXHAUSTED",
+                    retry_decision="terminal_failure",
+                    now=timezone.now(),
+                    finished=True,
+                )
                 restore.save(
                     update_fields=[
                         "execution_metadata",

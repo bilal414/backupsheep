@@ -12,6 +12,8 @@ from django.db.models import Q
 from django.utils import timezone
 from sentry_sdk import capture_exception, capture_message
 
+from apps._tasks.diagnostics import capture_backup_diagnostic
+
 from apps._tasks.exceptions import (
     TaskParamsNotProvided,
     NodeGoogleDriveNotEnoughStorageError,
@@ -81,6 +83,7 @@ from apps._tasks.integration.storage.s3_verified import (
     S3UploadInventoryFailure,
     S3UploadOutcomePending,
     S3UploadReconciliationRequired,
+    S3UploadStalled,
     cleanup_owned_multipart_upload,
 )
 from apps._tasks.integration.storage.s3_cleanup import (
@@ -328,6 +331,14 @@ def _storage_error_outcome(error, point):
             point.Status.STORAGE_VALIDATION_FAILED,
             False,
         )
+    if _caused_by(error, (S3UploadStalled,)):
+        return (
+            "STORAGE_STALLED",
+            "The storage upload made no provider-visible progress and will resume "
+            "automatically from its durable checkpoint.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        )
     if _caused_by(error, (S3UploadOutcomePending,)):
         return (
             "STORAGE_RECONCILIATION_PENDING",
@@ -386,6 +397,13 @@ def _storage_error_outcome(error, point):
         "STORAGE_TIMEOUT": (
             "STORAGE_TIMEOUT",
             "The storage operation timed out and will resume automatically.",
+            point.Status.UPLOAD_RETRY,
+            True,
+        ),
+        "STORAGE_STALLED": (
+            "STORAGE_STALLED",
+            "The storage upload made no provider-visible progress and will resume "
+            "automatically from its durable checkpoint.",
             point.Status.UPLOAD_RETRY,
             True,
         ),
@@ -610,9 +628,14 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
         capture_exception(error)
         raise self.retry(countdown=30, max_retries=2880)
     except Exception as error:
-        capture_exception(error)
         code, message, status, retryable = _storage_error_outcome(
             error, stored_backup
+        )
+        capture_backup_diagnostic(
+            error,
+            backup,
+            stage="storage_uploading",
+            code=code,
         )
         stored_backup.last_error_code = code
         stored_backup.last_error_message = message
@@ -639,6 +662,7 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
             message=message,
             retryable=retryable,
             retry_at=retry_at,
+            stage="storage_uploading",
         )
         if attempt_no <= 3:
             node.notify_upload_fail(

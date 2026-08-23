@@ -218,6 +218,54 @@ class ExecutionStatusApiTests(BaseTestCase):
         self.assertNotIn("provider-secret-canary", json.dumps(redacted))
         self.assertNotIn("reconciliation-secret-canary", json.dumps(redacted))
 
+    def test_backup_attempt_history_survives_refresh_and_is_strictly_redacted(self):
+        backup = self._backup()
+        correlation_id = uuid.UUID("8f841859-63e0-4b78-bb0b-d35043ce4418")
+        state = self._execution(
+            backup,
+            correlation_id=correlation_id,
+            metadata={
+                "public_attempt_history": [
+                    {
+                        "attempt": 2,
+                        "started_at": "2026-08-23T12:00:00+00:00",
+                        "finished_at": "2026-08-23T12:02:00+00:00",
+                        "stage": "website_manifest",
+                        "code": "WEBSITE_MANIFEST_FAILED",
+                        "retry_decision": "scheduled_retry",
+                        "correlation_id": "8f841859-63e0-4b78-bb0b-d35043ce4418",
+                        "private_path": "/srv/secret-canary",
+                    },
+                    {
+                        "attempt": 3,
+                        "started_at": "not-a-date-secret-canary",
+                        "stage": "private-secret-stage",
+                        "code": "PRIVATE_SECRET_CODE",
+                        "retry_decision": "private-secret-decision",
+                        "correlation_id": "not-a-uuid-secret-canary",
+                    },
+                ],
+                "internal_path": "/srv/secret-canary",
+            },
+        )
+
+        payload = CoreWebsiteBackupSerializer(
+            CoreWebsiteBackup.objects.get(pk=backup.pk)
+        ).data
+        history = payload["execution_status"]["attempt_history"]
+
+        self.assertEqual(history, [{
+            "attempt": 2,
+            "started_at": "2026-08-23T12:00:00+00:00",
+            "finished_at": "2026-08-23T12:02:00+00:00",
+            "stage": "website_manifest",
+            "code": "WEBSITE_MANIFEST_FAILED",
+            "retry_decision": "scheduled_retry",
+            "correlation_id": "8f841859-63e0-4b78-bb0b-d35043ce4418",
+        }])
+        self.assertNotIn("secret-canary", json.dumps(payload))
+        self.assertEqual(str(state.correlation_id), payload["execution_status"]["correlation_id"])
+
     def test_local_storage_point_state_drives_source_upload_and_retry_phases(self):
         cases = (
             (CoreWebsiteBackupStoragePoints.Status.UPLOAD_READY, "source_ready"),
@@ -477,3 +525,41 @@ class ExecutionStatusApiTests(BaseTestCase):
         ):
             self.assertNotIn(field, data)
         self.assertNotIn("secret-canary", json.dumps(data))
+
+    def test_restore_attempt_history_uses_the_same_safe_contract(self):
+        node = factories.make_website_node(self.account, self.member)
+        backup = CoreWebsiteBackup.objects.create(
+            website=node.website,
+            name="restore-history-source",
+            uuid=f"source-{uuid.uuid4().hex}",
+            status=UtilBackup.Status.COMPLETE,
+            type=UtilBackup.Type.ON_DEMAND,
+        )
+        correlation_id = uuid.uuid4()
+        restore = CoreWebsiteRestore.objects.create(
+            backup=backup,
+            name="restore-history",
+            params={},
+            correlation_id=correlation_id,
+            attempt_count=2,
+            execution_metadata={
+                "public_attempt_history": [{
+                    "attempt": 2,
+                    "started_at": "2026-08-23T12:00:00+00:00",
+                    "finished_at": "2026-08-23T12:05:00+00:00",
+                    "stage": "website_transferring",
+                    "code": "RESTORE_TRANSIENT_FAILURE",
+                    "retry_decision": "scheduled_retry",
+                    "correlation_id": str(correlation_id),
+                    "provider_body": "secret-canary",
+                }],
+            },
+            status=CoreWebsiteRestore.Status.IN_PROGRESS,
+        )
+
+        payload = CoreWebsiteRestoreSerializer(restore).data
+        history = payload["execution_status"]["attempt_history"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["attempt"], 2)
+        self.assertEqual(history[0]["stage"], "website_transferring")
+        self.assertNotIn("secret-canary", json.dumps(payload))
