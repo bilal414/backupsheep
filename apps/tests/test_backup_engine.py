@@ -980,9 +980,14 @@ class WebsiteEngineBase(BaseTestCase):
 
     def _make_backup(self, *, incremental=False, backup_type=None,
                      use_private_key=False, use_public_key=False):
-        """A real website node (FTP password auth, all_paths) + CoreWebsiteBackup row."""
+        """A real website node (SFTP password auth, all_paths) + backup row."""
         node = factories.make_website_node(self.account, self.member)
         auth = node.connection.auth_website
+        # Generic engine tests exercise backup behavior, not the explicit legacy
+        # FTP opt-in. Keep their fixture on the secure production default so a
+        # plaintext-FTP regression cannot be hidden by the test setup.
+        auth.protocol = CoreAuthWebsite.Protocol.SFTP
+        auth.port = 22
         auth.use_private_key = use_private_key
         auth.use_public_key = use_public_key
         auth.save()
