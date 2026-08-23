@@ -61,8 +61,9 @@ class SetNewPasswordView(TemplateView):
         context = self.get_context_data(**kwargs)
         password_reset_token = self.kwargs.get("password_reset_token")
 
+        digest = CoreMember.password_reset_token_digest(password_reset_token)
         member = CoreMember.objects.filter(
-            password_reset_token=password_reset_token
+            password_reset_token=digest
         ).first()
         if member and member.password_reset_token_is_valid(password_reset_token):
             context["password_reset_token"] = password_reset_token

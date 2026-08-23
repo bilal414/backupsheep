@@ -243,49 +243,74 @@ class CoreMember(TimeStampedModel):
 
         return secrets.token_urlsafe(32)
 
+    @staticmethod
+    def password_reset_token_digest(token):
+        """Return the site-keyed digest persisted for a reset bearer token."""
+        from django.utils.crypto import salted_hmac
+
+        if not token:
+            return None
+        return salted_hmac(
+            "backupsheep.password-reset-token.v1",
+            str(token),
+        ).hexdigest()
+
+    def issue_password_reset_token(self):
+        """Create a reset token while persisting only its keyed digest."""
+        from django.utils import timezone
+
+        token = self.generate_password_reset_token()
+        self.password_reset_token = self.password_reset_token_digest(token)
+        self.password_reset_token_created = timezone.now()
+        self.save(
+            update_fields=[
+                "password_reset_token",
+                "password_reset_token_created",
+                "modified",
+            ]
+        )
+        return token
+
     def password_reset_token_is_valid(self, token):
         """A token matches only if it is non-empty, equal (constant-time) and unexpired."""
-        import secrets
-        from django.utils import timezone
         from datetime import timedelta
+        from django.utils import timezone
+        from django.utils.crypto import constant_time_compare
 
         if not token or not self.password_reset_token:
             return False
-        if not secrets.compare_digest(str(self.password_reset_token), str(token)):
+
+        expected_digest = self.password_reset_token_digest(token)
+        if not constant_time_compare(
+            str(self.password_reset_token), str(expected_digest)
+        ):
             return False
         if not self.password_reset_token_created:
             return False
-        expires_at = self.password_reset_token_created + timedelta(hours=self.PASSWORD_RESET_TOKEN_TTL_HOURS)
+        expires_at = self.password_reset_token_created + timedelta(
+            hours=self.PASSWORD_RESET_TOKEN_TTL_HOURS
+        )
         return timezone.now() <= expires_at
 
     @property
     def get_password_reset_link(self):
-        from django.utils import timezone
-
-        if not self.password_reset_token:
-            self.password_reset_token = self.generate_password_reset_token()
-            self.password_reset_token_created = timezone.now()
-            self.save()
-
-        return f"{settings.APP_URL}/reset/{self.password_reset_token}/"
+        token = self.issue_password_reset_token()
+        return f"{settings.APP_URL}/reset/{token}/"
 
     def send_verification_email(self):
         self.notification_email.get().send_verification_email()
 
     def send_password_reset(self, next_url=None):
         from apps.console.notification.models import CoreNotificationLogEmail
-        from django.utils import timezone
 
-        self.password_reset_token = self.generate_password_reset_token()
-        self.password_reset_token_created = timezone.now()
-        self.save()
+        reset_token = self.issue_password_reset_token()
 
         email_notification = CoreNotificationLogEmail()
         email_notification.member = self
         email_notification.email = self.user.email
         email_notification.template = "password_reset"
         email_notification.context = {
-            "action_url": self.get_password_reset_link,
+            "action_url": f"{settings.APP_URL}/reset/{reset_token}/",
             "help_url": f"{settings.APP_URL}",
             "sender_name": f"{settings.APP_NAME} - Notification Bot",
         }

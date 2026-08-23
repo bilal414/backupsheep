@@ -65,10 +65,13 @@ class AuthTokenSecurityTests(BaseTestCase):
                 "auth_multi_factor_pending_created",
             ]
         )
-        self.member.password_reset_token = self.member.generate_password_reset_token()
-        self.member.password_reset_token_created = timezone.now()
-        self.member.save()
-        reset_token = self.member.password_reset_token
+        reset_token = self.member.issue_password_reset_token()
+        self.member.refresh_from_db()
+        self.assertNotEqual(self.member.password_reset_token, reset_token)
+        self.assertEqual(
+            self.member.password_reset_token,
+            self.member.password_reset_token_digest(reset_token),
+        )
 
         response = self.client.patch(
             "/api/v1/auth/reset/",
@@ -106,6 +109,19 @@ class AuthTokenSecurityTests(BaseTestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 400, response.content)
+
+    def test_password_reset_page_resolves_only_the_digest_of_the_bearer_value(self):
+        reset_token = self.member.issue_password_reset_token()
+        self.member.refresh_from_db()
+
+        self.assertNotEqual(self.member.password_reset_token, reset_token)
+        response = self.client.get(f"/reset/{reset_token}/")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertContains(response, reset_token)
+        self.assertNotContains(
+            self.client.get("/reset/not-a-valid-reset-token/"),
+            'name="password"',
+        )
 
     def test_password_change_requires_current_password_and_revokes_token(self):
         token = Token.objects.create(user=self.user)

@@ -104,7 +104,8 @@ class APIAuthResetPatchSerializer(serializers.Serializer):
     def validate_password_token(self, value):
         # Resolve the token without leaking which tokens exist, then enforce
         # constant-time match + expiry via the model helper.
-        for member in CoreMember.objects.filter(password_reset_token=value):
+        digest = CoreMember.password_reset_token_digest(value)
+        for member in CoreMember.objects.filter(password_reset_token=digest):
             if member.password_reset_token_is_valid(value):
                 self.member = member
                 return value
