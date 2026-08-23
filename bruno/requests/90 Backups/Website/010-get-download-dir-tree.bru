@@ -1,0 +1,30 @@
+meta {
+  name: GET /api/v1/backups/website/{{resourceId}}/download_dir_tree/
+  type: http
+  seq: 10
+}
+
+get {
+  url: {{baseUrl}}/api/v1/backups/website/{{resourceId}}/download_dir_tree/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-backups-website-resourceid-download-dir-tree`
+
+  Requires `Authorization: Token <key>`. Read-only download or signed-download-URL request.
+
+  Django action: `apps.api.v1.backup.website.views.CoreWebsiteBackupView.download_dir_tree`
+  Source: `apps/api/v1/backup/website/views.py`
+}

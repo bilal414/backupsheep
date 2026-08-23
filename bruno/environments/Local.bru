@@ -1,0 +1,44 @@
+vars {
+  baseUrl: http://localhost:8000
+  email: user@example.com
+  password: replace-with-your-password
+  apiToken:
+  allowMutations: false
+  resourceId: 1
+  memberId: 1
+  membershipId: 1
+  accountId: 1
+  groupId: 1
+  connectionId: 1
+  nodeId: 1
+  storageId: 1
+  storagePointId: 1
+  backupId: 1
+  restoreId: 1
+  scheduleId: 1
+  inviteId: 1
+  runId: 1
+  storedBackupId: 1
+  locationId: 1
+  idempotencyKey: bruno-example-request-001
+  requestId: 00000000-0000-4000-8000-000000000001
+  sshHost: backup-host.example.com
+  sshPort: 22
+  sshFingerprint: SHA256:replace-with-reviewed-fingerprint
+  sshApprovalToken: replace-with-preview-response-token
+  oauthCode: replace-with-provider-code
+  oauthState: replace-with-provider-state
+  passwordResetToken: replace-with-password-reset-token
+  providerCredential: replace-with-provider-credential
+  providerPrivateKey: replace-with-provider-private-key
+}
+
+vars:secret [
+  password,
+  apiToken,
+  oauthCode,
+  passwordResetToken,
+  providerCredential,
+  providerPrivateKey,
+  sshApprovalToken
+]

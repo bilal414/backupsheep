@@ -1,0 +1,45 @@
+meta {
+  name: POST /api/v1/members/{{resourceId}}/auth_multi_factor_token_verify/
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{baseUrl}}/api/v1/members/{{resourceId}}/auth_multi_factor_token_verify/
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "auth_multi_factor_id": "replace-with-factor-id",
+    "auth_multi_factor_token": "replace-with-factor-token",
+    "display_name": "BackupSheep Bruno"
+  }
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `post-api-v1-members-resourceid-auth-multi-factor-token-verify`
+
+  Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.member.views.CoreMemberView.auth_multi_factor_token_verify`
+  Source: `apps/api/v1/member/views.py`
+}

@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "name": "BackupSheep API",
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ]
+}

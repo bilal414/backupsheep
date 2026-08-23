@@ -1,0 +1,50 @@
+meta {
+  name: PUT /api/v1/clouds/ovh_ca/{{resourceId}}/
+  type: http
+  seq: 8
+}
+
+put {
+  url: {{baseUrl}}/api/v1/clouds/ovh_ca/{{resourceId}}/
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "node": {
+      "connection": "{{connectionId}}",
+      "name": "Example resource"
+    },
+    "name": "Example resource",
+    "unique_id": "replace-with-unique-id",
+    "project_id": "replace-with-project-id",
+    "notes": "Created from the BackupSheep Bruno collection"
+  }
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `put-api-v1-clouds-ovh-ca-resourceid`
+
+  Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.cloud.ovh_ca.views.CoreCloudOVHCAView.update`
+  Source: `apps/api/v1/cloud/ovh_ca/views.py`
+}

@@ -1,0 +1,42 @@
+meta {
+  name: POST /api/v1/auth/reset/
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/api/v1/auth/reset/
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "email": "{{email}}"
+  }
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `post-api-v1-auth-reset`
+
+  No authentication required. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.auth.views.APIAuthReset.post`
+  Source: `apps/api/v1/auth/views.py`
+}

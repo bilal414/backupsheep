@@ -1,0 +1,36 @@
+meta {
+  name: DELETE /api/v1/clouds/lightsail_bucket_replications/{{resourceId}}/
+  type: http
+  seq: 3
+}
+
+delete {
+  url: {{baseUrl}}/api/v1/clouds/lightsail_bucket_replications/{{resourceId}}/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `delete-api-v1-clouds-lightsail-bucket-replications-resourceid`
+
+  Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.cloud.lightsail_bucket_replication.views.CoreLightsailBucketReplicationView.destroy`
+  Source: `apps/api/v1/cloud/lightsail_bucket_replication/views.py`
+}

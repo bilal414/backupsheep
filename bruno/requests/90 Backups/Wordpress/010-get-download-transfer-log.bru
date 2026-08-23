@@ -1,0 +1,30 @@
+meta {
+  name: GET /api/v1/backups/wordpress/{{resourceId}}/download_transfer_log/
+  type: http
+  seq: 10
+}
+
+get {
+  url: {{baseUrl}}/api/v1/backups/wordpress/{{resourceId}}/download_transfer_log/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-backups-wordpress-resourceid-download-transfer-log`
+
+  Requires `Authorization: Token <key>`. Read-only download or signed-download-URL request.
+
+  Django action: `apps.api.v1.backup.wordpress.views.CoreWordPressBackupView.download_transfer_log`
+  Source: `apps/api/v1/backup/wordpress/views.py`
+}

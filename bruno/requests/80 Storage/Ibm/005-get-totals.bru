@@ -1,0 +1,30 @@
+meta {
+  name: GET /api/v1/storage/ibm/totals/
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/api/v1/storage/ibm/totals/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-storage-ibm-totals`
+
+  Requires `Authorization: Token <key>`. Read-only request.
+
+  Django action: `apps.api.v1.storage.ibm.views.CoreStorageIBMView.totals`
+  Source: `apps/api/v1/storage/ibm/views.py`
+}

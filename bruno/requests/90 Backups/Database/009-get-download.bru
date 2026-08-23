@@ -1,0 +1,34 @@
+meta {
+  name: GET /api/v1/backups/database/{{resourceId}}/download/
+  type: http
+  seq: 9
+}
+
+get {
+  url: {{baseUrl}}/api/v1/backups/database/{{resourceId}}/download/
+  body: none
+  auth: none
+}
+
+params:query {
+  storage_point_id: {{storagePointId}}
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-backups-database-resourceid-download`
+
+  Requires `Authorization: Token <key>`. Read-only download or signed-download-URL request.
+
+  Django action: `apps.api.v1.backup.database.views.CoreDatabaseBackupView.download`
+  Source: `apps/api/v1/backup/database/views.py`
+}

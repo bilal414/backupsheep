@@ -124,7 +124,7 @@ curl -fsSL https://raw.githubusercontent.com/bilal414/backupsheep/main/install.s
 
 The initial install serves plain HTTP on port 8000. Allow that port through your firewall
 if needed, and put the app behind HTTPS before exposing it publicly. See
-[Production deployment](docs/deployment.md).
+[Production deployment](docs/guides/production.md).
 
 ### DigitalOcean Droplet
 
@@ -191,7 +191,7 @@ admin account, email, storage, and your first source.
 
 > The app serves plain HTTP on port 8000 and is meant to sit behind your own
 > TLS-terminating reverse proxy in production. Before exposing it, read
-> **[docs/deployment.md](docs/deployment.md)**.
+> **[Production deployment guide](docs/guides/production.md)**.
 
 ---
 
@@ -238,22 +238,19 @@ Celery, Alpine.js + Tailwind CSS. See [docs/scaling.md](docs/scaling.md).
 
 ## Documentation
 
-| Guide | What's in it |
-|-------|--------------|
-| [Installation](docs/installation.md) | Prerequisites, Docker Compose setup, the `.env` you must edit |
-| [DigitalOcean Droplet](docs/digitalocean-droplet.md) | Deploy the complete Docker stack with the one-command installer |
-| [Cloud VMs](docs/cloud-vms.md) | One-command/cloud-init deployments on AWS, Azure, Google Cloud, and VM providers |
-| [Render](docs/render.md) | Deploy the web, worker, scheduler, PostgreSQL, and private RabbitMQ stack |
-| [Heroku](docs/heroku.md) | Deploy via Heroku Button with PostgreSQL and managed RabbitMQ |
-| [Railway](docs/railway.md) | Publish the ready-to-configure multi-service Railway deployment template |
-| [Configuration](docs/configuration.md) | Environment-variable reference, incl. `BS_LOCAL_STORAGE_PATH` |
-| [Immutable backups & lifecycle](docs/immutable-backups-and-lifecycle.md) | S3 Object Lock, air-gapped copy policy, lifecycle tiering, and cost projections |
-| [First-run wizard](docs/first-run.md) | The 5 setup steps; admin accounts & `/django-admin` |
-| [Usage](docs/usage.md) | Sources, storage, schedules, backup modes, retention, **restores**, dashboard, teams & permissions, notifications, activity log |
-| [Providers](docs/providers.md) | Every backup source & storage destination, and what each needs |
-| [Production deployment](docs/deployment.md) | HTTPS/reverse proxy, hardening, storage volumes, secrets |
-| [Scaling & operations](docs/scaling.md) | Worker queues, scaling uploads, the beat singleton, multi-host |
-| [Troubleshooting](docs/troubleshooting.md) | Common failures, FAQ, known limitations |
+The [documentation hub](docs/README.md) is the best starting point. It separates
+current user and operator guidance from dated engineering test reports.
+
+| Area | Start here |
+|-------|------------|
+| Install and configure | [Installation](docs/guides/installation.md) · [Configuration](docs/guides/configuration.md) · [First run](docs/guides/first-run.md) |
+| Learn the product | [Feature guide](docs/features/README.md) · [Core concepts](docs/features/core-concepts.md) · [Console workflows](docs/features/console-workflows.md) |
+| Sources and destinations | [Backup sources](docs/features/backup-sources.md) · [Storage destinations](docs/features/storage-destinations.md) · [Provider matrix](docs/reference/provider-matrix.md) |
+| Backups and recovery | [Schedules and policies](docs/features/schedules-and-policies.md) · [Executions and history](docs/features/executions-and-history.md) · [Restores](docs/features/restores.md) |
+| Teams and alerts | [Teams, tenancy, and API access](docs/features/teams-tenancy-and-api-access.md) · [Notifications](docs/features/notifications.md) |
+| Automate | [REST API](docs/api/README.md) · [Endpoint reference](docs/api/reference.md) · [Bruno collection](bruno/README.md) |
+| Operate safely | [Production](docs/guides/production.md) · [Operations](docs/guides/operations.md) · [Upgrades](docs/guides/upgrades.md) · [Disaster recovery](docs/guides/disaster-recovery.md) · [Troubleshooting](docs/guides/troubleshooting.md) |
+| Technical reference | [Architecture](docs/reference/architecture.md) · [Environment variables](docs/reference/environment-variables.md) |
 
 Also: [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md)
 

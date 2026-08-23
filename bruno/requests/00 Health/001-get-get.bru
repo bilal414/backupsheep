@@ -1,0 +1,29 @@
+meta {
+  name: GET /healthz/
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/healthz/
+  body: none
+  auth: none
+}
+
+headers {
+}
+
+tests {
+  test("health endpoint returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Operation ID: `get-healthz`
+
+  No authentication required. Read-only request.
+
+  Django action: `backupsheep.urls.healthz.get`
+  Source: `backupsheep/urls.py`
+}

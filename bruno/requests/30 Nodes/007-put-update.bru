@@ -1,0 +1,45 @@
+meta {
+  name: PUT /api/v1/nodes/{{resourceId}}/
+  type: http
+  seq: 7
+}
+
+put {
+  url: {{baseUrl}}/api/v1/nodes/{{resourceId}}/
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "type": 1,
+    "name": "Example resource",
+    "connection": "{{connectionId}}"
+  }
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `put-api-v1-nodes-resourceid`
+
+  Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.node.views.CoreNodeView.update`
+  Source: `apps/api/v1/node/views.py`
+}

@@ -1,0 +1,36 @@
+meta {
+  name: GET /api/v1/invites/{{resourceId}}/accept/
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{baseUrl}}/api/v1/invites/{{resourceId}}/accept/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-invites-resourceid-accept`
+
+  Requires `Authorization: Token <key>`. Legacy/stateful GET; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.invite.views.CoreInviteView.accept`
+  Source: `apps/api/v1/invite/views.py`
+}

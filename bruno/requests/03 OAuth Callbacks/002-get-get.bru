@@ -1,0 +1,41 @@
+meta {
+  name: GET /api/v1/callback/digitalocean/
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/v1/callback/digitalocean/
+  body: none
+  auth: none
+}
+
+params:query {
+  code: {{oauthCode}}
+  state: {{oauthState}}
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-callback-digitalocean`
+
+  Requires `Authorization: Token <key>`. Legacy/stateful GET; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.callback.views.APICallbackDigitalOcean.get`
+  Source: `apps/api/v1/callback/views.py`
+}

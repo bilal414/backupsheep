@@ -1,0 +1,6 @@
+# Never commit environments populated with real credentials.
+environments/*-private.bru
+environments/*.private.bru
+*.private.bru
+__pycache__/
+*.py[cod]

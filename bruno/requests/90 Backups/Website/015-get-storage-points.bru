@@ -1,0 +1,30 @@
+meta {
+  name: GET /api/v1/backups/website/{{resourceId}}/storage_points/
+  type: http
+  seq: 15
+}
+
+get {
+  url: {{baseUrl}}/api/v1/backups/website/{{resourceId}}/storage_points/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-backups-website-resourceid-storage-points`
+
+  Requires `Authorization: Token <key>`. Read-only request.
+
+  Django action: `apps.api.v1.backup.website.views.CoreWebsiteBackupView.storage_points`
+  Source: `apps/api/v1/backup/website/views.py`
+}

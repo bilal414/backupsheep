@@ -67,7 +67,7 @@ independent review.
 Credential files known to exist locally, without recording their values:
 
 - `_docs/aws.txt`
-- `_docs/hetnzer.txt` (the filename is intentionally misspelled)
+- `_docs/hetzner.txt` (the filename is intentionally misspelled)
 - `_docs/vultr.txt`
 - `_docs/demo.txt`
 - `_docs/s3_bucket.txt`

@@ -1,0 +1,18 @@
+headers {
+  Accept: application/json
+}
+
+auth {
+  mode: none
+}
+
+docs {
+  # BackupSheep API
+
+  Requests use Django REST Framework token authentication through the explicit
+  `Authorization: Token {{apiToken}}` header on protected operations.
+
+  Run `01 Authentication/Login` first or provide `apiToken` at runtime. The login
+  request stores the returned token in Bruno's in-memory runtime variables; it does
+  not persist the credential to this repository.
+}

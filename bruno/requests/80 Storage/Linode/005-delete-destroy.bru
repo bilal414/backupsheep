@@ -1,0 +1,36 @@
+meta {
+  name: DELETE /api/v1/storage/linode/{{resourceId}}/
+  type: http
+  seq: 5
+}
+
+delete {
+  url: {{baseUrl}}/api/v1/storage/linode/{{resourceId}}/
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `delete-api-v1-storage-linode-resourceid`
+
+  Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.storage.linode.views.CoreStorageLinodeView.destroy`
+  Source: `apps/api/v1/storage/linode/views.py`
+}
