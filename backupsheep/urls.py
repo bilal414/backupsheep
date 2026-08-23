@@ -28,9 +28,21 @@ def healthz(_request):
 
 
 urlpatterns = [
-                  path("healthz/", healthz, name="healthz"),
-                  path("django-admin/", admin.site.urls),
-                  path("api-auth/", include("rest_framework.urls", namespace="rest_framework")),
-                  path("", include("apps.console.urls")),
-                  path("", include("apps.api.urls")),
-              ] + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
+    path("healthz/", healthz, name="healthz"),
+    path("", include("apps.console.urls")),
+    path("", include("apps.api.urls")),
+]
+
+if settings.DJANGO_ADMIN_ENABLED:
+    urlpatterns.insert(1, path("django-admin/", admin.site.urls))
+
+# DRF's session-login helper is useful with the browsable API in development,
+# but it is unnecessary public authentication surface when JSON-only production
+# rendering is enabled.
+if settings.DEBUG:
+    urlpatterns.insert(
+        1,
+        path("api-auth/", include("rest_framework.urls", namespace="rest_framework")),
+    )
+
+urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

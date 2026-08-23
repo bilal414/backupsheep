@@ -59,6 +59,14 @@ def _as_bool(value, default=False):
 SECRET_KEY = config["DJANGO_SECRET_KEY"]
 DEBUG = _as_bool(config.get("DJANGO_DEBUG", "false"))
 DJANGO_SERVER = config["DJANGO_SERVER"]
+# The Django admin has its own password-only login and does not inherit the
+# console's authenticator-MFA challenge. Keep the route absent in production
+# unless an operator explicitly enables it behind an administrative access
+# boundary. Development installs retain the historical default.
+DJANGO_ADMIN_ENABLED = _as_bool(
+    config.get("DJANGO_ADMIN_ENABLED"),
+    default=DEBUG,
+)
 
 
 def _bounded_positive_int(name, default, maximum):
