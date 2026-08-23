@@ -17,6 +17,10 @@ from apps.api.v1.callback.views import (
     PCLOUD_OAUTH_STATE_TTL_SECONDS,
     _validated_pcloud_hostname,
 )
+from apps.api.v1.connection.google_cloud.views import CoreGoogleCloudView
+from apps.api.v1.connection.ovh_ca.views import CoreOVHCAView
+from apps.api.v1.connection.ovh_eu.views import CoreOVHEUView
+from apps.api.v1.connection.ovh_us.views import CoreOVHUSView
 from apps.api.v1.utils.api_permissions import MemberGroupPermissions, member_has_perm
 from apps.console.account.models import CoreAccountGroup
 from apps.console.backup.models import (
@@ -120,6 +124,36 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
         request.user = self.team_user
         view = SimpleNamespace(action="future_mutation", action_permissions={})
         self.assertFalse(MemberGroupPermissions().has_permission(request, view))
+
+    def test_all_cloud_connection_management_requires_current_account_permission(self):
+        permission = MemberGroupPermissions()
+        for view_class in (CoreOVHCAView, CoreOVHEUView, CoreOVHUSView, CoreGoogleCloudView):
+            for method, action in (
+                ("post", "create"),
+                ("patch", "partial_update"),
+                ("get", "validate"),
+                ("get", "objects"),
+            ):
+                request = getattr(RequestFactory(), method)(f"/{action}/")
+                request.user = self.team_user
+                view = SimpleNamespace(
+                    action=action,
+                    action_permissions=view_class.action_permissions,
+                )
+                self.assertFalse(
+                    permission.has_permission(request, view),
+                    f"{view_class.__name__}.{action} unexpectedly allowed",
+                )
+
+        # Granting node management in this account authorizes the same actions.
+        self.current_group.group.permissions.add(_permission("node_changes"))
+        request = RequestFactory().get("/validate/")
+        request.user = self.team_user
+        view = SimpleNamespace(
+            action="validate",
+            action_permissions=CoreGoogleCloudView.action_permissions,
+        )
+        self.assertTrue(permission.has_permission(request, view))
 
     def test_team_member_cannot_escalate_or_administer_account(self):
         group_response = self.team_client.post(
