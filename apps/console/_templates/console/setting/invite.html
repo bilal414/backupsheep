@@ -346,7 +346,7 @@
                     Alpine.store('showLoading').toggle("Accepting invite.");
 
                     let url = "/api/v1/invites/" + invite_id + "/accept/";
-                    let method = "GET";
+                    let method = "POST";
 
                     let response = await fetch(url, {
                         headers: {

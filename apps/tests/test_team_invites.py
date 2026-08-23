@@ -9,6 +9,7 @@ from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import Group, User
+from django.test import Client
 from django.utils import timezone
 from django.utils.text import slugify
 from rest_framework.authtoken.models import Token
@@ -166,7 +167,7 @@ class InviteApiTests(BaseTestCase):
 
         client2 = APIClient()
         client2.credentials(HTTP_AUTHORIZATION=f"Token {Token.objects.create(user=user2).key}")
-        r = client2.get(f"/api/v1/invites/{invite.id}/accept/")
+        r = client2.post(f"/api/v1/invites/{invite.id}/accept/", format="json")
         self.assertEqual(r.status_code, 400, r.content)
         self.assertIn("expired", r.json()["detail"].lower())
         invite.refresh_from_db()
@@ -190,7 +191,10 @@ class InviteApiTests(BaseTestCase):
 
         client2 = APIClient()
         client2.credentials(HTTP_AUTHORIZATION=f"Token {Token.objects.create(user=user2).key}")
-        r = client2.get(f"/api/v1/invites/{invite.id}/accept/")
+        get_response = client2.get(f"/api/v1/invites/{invite.id}/accept/")
+        self.assertEqual(get_response.status_code, 405, get_response.content)
+
+        r = client2.post(f"/api/v1/invites/{invite.id}/accept/", format="json")
         self.assertEqual(r.status_code, 200, r.content)
 
         invite.refresh_from_db()
@@ -203,6 +207,25 @@ class InviteApiTests(BaseTestCase):
         )
         self.assertTrue(log.exists())
         self.assertIn("accepted", log.first().data["message"].lower())
+
+    def test_session_accept_requires_csrf(self):
+        _account2, _member2, user2 = factories.make_account(
+            email="invitee4@example.com"
+        )
+        invite = _make_invite(
+            self.account,
+            self.member,
+            email="invitee4@example.com",
+            groups=[self.group],
+        )
+        browser = Client(enforce_csrf_checks=True)
+        browser.force_login(user2)
+
+        response = browser.post(f"/api/v1/invites/{invite.id}/accept/")
+
+        self.assertEqual(response.status_code, 403, response.content)
+        invite.refresh_from_db()
+        self.assertEqual(invite.status, CoreInvite.Status.PENDING)
 
 
 class InvitePublicPageTests(BaseTestCase):
