@@ -6216,37 +6216,27 @@ class CoreWordPressBackup(UtilBackup):
         """
         Delete files from wordpress
         """
-        client = self.wordpress.node.connection.auth_wordpress.get_client()
-        auth = self.wordpress.node.connection.auth_wordpress.get_auth()
+        auth_wordpress = self.wordpress.node.connection.auth_wordpress
         try:
-            result = requests.get(
-                f"{self.wordpress.node.connection.auth_wordpress.url}"
-                f"/?rest_route=/backupsheep/updraftplus/files&backup_uuid={self.uuid_str}"
-                f"&key={self.wordpress.node.connection.auth_wordpress.key}"
-                f"&t={time.time()}",
-                auth=auth,
-                headers=client,
-                verify=True,
+            result = auth_wordpress.request(
+                "files",
+                params={"backup_uuid": self.uuid_str, "t": time.time()},
                 timeout=180,
             )
             if result.status_code == 200:
                 try:
                     backup_files = result.json().get("files", [])
                     for backup_file in backup_files:
+                        if not isinstance(backup_file, str) or not backup_file:
+                            continue
                         # delete the downloaded file from WordPress
-                        r_delete = requests.get(
-                            f"{self.wordpress.node.connection.auth_wordpress.url}"
-                            f"/?rest_route=/backupsheep/updraftplus/delete&backup_file={backup_file}"
-                            f"&backup_uuid={self.uuid_str}"
-                            f"&key={self.wordpress.node.connection.auth_wordpress.key}"
-                            f"&t={time.time()}",
-                            # The WordPress URL is user-controlled and this
-                            # request carries both HTTP auth and a query key.
-                            # Never replay them to a redirect destination.
-                            allow_redirects=False,
-                            auth=auth,
-                            headers=client,
-                            verify=True
+                        r_delete = auth_wordpress.request(
+                            "delete",
+                            params={
+                                "backup_file": backup_file,
+                                "backup_uuid": self.uuid_str,
+                                "t": time.time(),
+                            },
                         )
                         if r_delete.status_code == 200:
                             if r_delete.json().get("deleted"):

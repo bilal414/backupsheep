@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import tempfile
 import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 from apps.api.v1.utils.http import request_timeout, requests
 from apps.api.v1.utils.boto import bounded_boto3_client
@@ -63,6 +64,19 @@ _PROVIDER_SDK_TIMEOUT_FLOOR = 0.1
 _PROVIDER_SDK_TIMEOUT_MAX_DEFAULT = 300.0
 _GOOGLE_TIMEOUT_UNSET = object()
 _GOOGLE_REFRESH_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+WORDPRESS_SECRET_PREFIX = "bs-wordpress-fernet-v1:"
+WORDPRESS_KEY_HEADER = "X-BackupSheep-Key"
+_WORDPRESS_ROUTES = frozenset(
+    {
+        "backup",
+        "delete",
+        "download",
+        "files",
+        "rebuild_history",
+        "status",
+        "validate",
+    }
+)
 
 
 def _provider_sdk_timeout():
@@ -3440,39 +3454,200 @@ class CoreAuthDatabase(TimeStampedModel):
 class CoreAuthWordPress(TimeStampedModel):
     connection = models.OneToOneField("CoreConnection", related_name="auth_wordpress", on_delete=models.CASCADE)
     url = models.URLField()
-    key = models.CharField(max_length=255)
-    http_user = models.CharField(max_length=255, null=True, blank=True)
-    http_pass = models.CharField(max_length=255, null=True, blank=True)
+    key = models.TextField(editable=False)
+    http_user = models.TextField(null=True, blank=True, editable=False)
+    http_pass = models.TextField(null=True, blank=True, editable=False)
 
     class Meta:
         db_table = "core_auth_wordpress"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(key__startswith=WORDPRESS_SECRET_PREFIX),
+                name="wordpress_key_ciphertext_v1",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(http_user__isnull=True)
+                | models.Q(http_user__startswith=WORDPRESS_SECRET_PREFIX),
+                name="wordpress_http_user_ciphertext_v1",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(http_pass__isnull=True)
+                | models.Q(http_pass__startswith=WORDPRESS_SECRET_PREFIX),
+                name="wordpress_http_pass_ciphertext_v1",
+            ),
+        ]
+
+    _SECRET_FIELDS = ("key", "http_user", "http_pass")
+
+    @staticmethod
+    def _normalize_secret_value(value):
+        if isinstance(value, memoryview):
+            value = value.tobytes()
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return bytes(value).decode("ascii")
+            except UnicodeDecodeError:
+                return value
+        return value
+
+    def _account_encryption_key(self):
+        if not self.connection_id:
+            raise ValueError("A saved WordPress connection is required")
+        try:
+            key = self.connection.account.get_encryption_key()
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(
+                "The WordPress connection account has no usable encryption key"
+            ) from error
+        if not key:
+            raise ValueError(
+                "The WordPress connection account has no usable encryption key"
+            )
+        return key
+
+    def _encrypt_secret(self, value):
+        if value in (None, "", b""):
+            return None
+        if not isinstance(value, str):
+            raise ValueError("WordPress credentials must be plaintext strings")
+        ciphertext = bs_encrypt(value, self._account_encryption_key())
+        if not ciphertext:
+            raise ValueError("Unable to encrypt WordPress credential")
+        return WORDPRESS_SECRET_PREFIX + bytes(ciphertext).decode("ascii")
+
+    def _decrypt_secret(self, field_name):
+        if field_name not in self._SECRET_FIELDS:
+            raise ValueError("Unknown WordPress credential field")
+        value = self._normalize_secret_value(getattr(self, field_name, None))
+        if not isinstance(value, str) or not value.startswith(WORDPRESS_SECRET_PREFIX):
+            return None
+        return bs_decrypt(
+            value[len(WORDPRESS_SECRET_PREFIX) :].encode("ascii"),
+            self._account_encryption_key(),
+        )
+
+    def get_key(self):
+        return self._decrypt_secret("key")
+
+    def get_http_user(self):
+        return self._decrypt_secret("http_user")
+
+    def get_http_pass(self):
+        return self._decrypt_secret("http_pass")
+
+    def save(self, *args, **kwargs):
+        changed_secret_fields = set()
+        for field_name in self._SECRET_FIELDS:
+            value = self._normalize_secret_value(getattr(self, field_name, None))
+            if value in (None, "", b""):
+                if field_name == "key":
+                    raise ValueError("A WordPress integration key is required")
+                normalized = None
+            elif isinstance(value, str):
+                normalized = value
+                if not normalized.startswith(WORDPRESS_SECRET_PREFIX):
+                    normalized = self._encrypt_secret(normalized)
+                setattr(self, field_name, normalized)
+                if self._decrypt_secret(field_name) is None:
+                    raise ValueError(
+                        f"{field_name} ciphertext could not be decrypted for this account"
+                    )
+            else:
+                raise ValueError(f"{field_name} is not versioned ciphertext")
+            if normalized != value:
+                changed_secret_fields.add(field_name)
+            setattr(self, field_name, normalized)
+
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and changed_secret_fields:
+            kwargs["update_fields"] = set(update_fields) | changed_secret_fields
+        return super().save(*args, **kwargs)
+
+    @staticmethod
+    def _normalized_base_url(value):
+        """Return an origin-bound WordPress base URL without ambient URL data."""
+
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("A WordPress URL is required")
+        parts = urlsplit(value.strip())
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            raise ValueError("WordPress URL must use HTTP or HTTPS")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("WordPress URL must not contain credentials")
+        if parts.query or parts.fragment:
+            raise ValueError("WordPress URL must not contain a query or fragment")
+
+        host = parts.hostname.rstrip(".").lower()
+        try:
+            host = host.encode("idna").decode("ascii")
+            port = parts.port
+        except (UnicodeError, ValueError) as error:
+            raise ValueError("WordPress URL has an invalid host or port") from error
+        if not host or any(ord(character) < 32 for character in parts.path):
+            raise ValueError("WordPress URL is invalid")
+        rendered_host = f"[{host}]" if ":" in host else host
+        if port is not None:
+            rendered_host = f"{rendered_host}:{port}"
+        path = (parts.path or "").rstrip("/")
+        return urlunsplit((parts.scheme.lower(), rendered_host, path, "", ""))
+
+    def request(self, route, *, params=None, data=None, stream=False, timeout=None):
+        """Call one exact WordPress origin without placing credentials in its URL."""
+
+        if route not in _WORDPRESS_ROUTES:
+            raise ValueError("Unsupported WordPress API route")
+        supplied = data or {}
+        base_url = self._normalized_base_url(supplied.get("url", self.url))
+
+        from apps.api.v1.utils.api_helpers import assert_url_not_metadata
+
+        assert_url_not_metadata(base_url, "WordPress url")
+        key = supplied.get("key") if data is not None else self.get_key()
+        http_user = (
+            supplied.get("http_user") if data is not None else self.get_http_user()
+        )
+        http_pass = (
+            supplied.get("http_pass") if data is not None else self.get_http_pass()
+        )
+        if not isinstance(key, str) or not key:
+            raise ValueError("WordPress integration key is unavailable")
+        if bool(http_user) != bool(http_pass):
+            raise ValueError(
+                "WordPress HTTP username and password must be configured together"
+            )
+
+        headers = self.get_client()
+        headers[WORDPRESS_KEY_HEADER] = key
+        query = {"rest_route": f"/backupsheep/updraftplus/{route}"}
+        for name, value in (params or {}).items():
+            if str(name).lower() in {"key", "x-backupsheep-key", "authorization"}:
+                raise ValueError("WordPress credentials must not be query parameters")
+            query[name] = value
+        request_kwargs = {
+            "params": query,
+            "headers": headers,
+            "auth": (http_user, http_pass) if http_user and http_pass else None,
+            "allow_redirects": False,
+            "verify": True,
+            "stream": stream,
+        }
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+        return requests.get(f"{base_url}/", **request_kwargs)
 
     def get_client(self):
-        user_agent = (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.75.14"
-            " (KHTML, like Gecko) Version/7.0.3 Safari/7046A194A"
-        )
-        try:
-            from fake_useragent import UserAgent
-
-            ua = UserAgent(use_cache_server=False)
-            user_agent = ua.random
-        except Exception as e:
-            pass
-
-        client = {
-            "User-Agent": user_agent,
+        return {
+            "User-Agent": "BackupSheep-WordPress/1",
             "content-type": "application/json",
         }
-        return client
 
     def get_auth(self, data=None):
         if data:
             http_user = data.get("http_user")
             http_pass = data.get("http_pass")
         else:
-            http_user = self.http_user
-            http_pass = self.http_pass
+            http_user = self.get_http_user()
+            http_pass = self.get_http_pass()
         auth = None
         if http_user and http_pass:
             auth = (http_user, http_pass)
@@ -3480,44 +3655,20 @@ class CoreAuthWordPress(TimeStampedModel):
 
     def validate(self, data=None, check_errors=None, raise_exp=None):
         from bs4 import BeautifulSoup
-        from requests.adapters import HTTPAdapter
-        from urllib3 import Retry
-        import ssl
         import time
 
         if data:
             url = data["url"]
-            key = data["key"]
         else:
             url = self.url
-            key = self.key
-
-        # Block SSRF to cloud metadata / loopback / link-local before any request is made.
-        from apps.api.v1.utils.api_helpers import assert_url_not_metadata
-
-        assert_url_not_metadata(url, "WordPress url")
-
-        client = self.get_client()
-        safe_url = url
-
-        # adapter = SSLAdapter(ssl.PROTOCOL_TLSv1_2)
-        # s = requests.Session()
-        # s.mount('https://', adapter)
+        safe_url = self._normalized_base_url(url)
         try:
-            session = requests.Session()
-            session.auth = self.get_auth(data)
-            retry_strategy = Retry(
-                total=3,
-                backoff_factor=5,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["HEAD", "GET", "OPTIONS"],
+            result = self.request(
+                "validate",
+                params={"t": time.time()},
+                data=data,
+                timeout=60,
             )
-            adapter = HTTPAdapter(max_retries=retry_strategy)
-            session.mount("http://", adapter)
-            session.mount("https://", adapter)
-            url = f"{url}/?rest_route=/backupsheep/updraftplus/validate&key={key}&t={time.time()}"
-            safe_url = url.replace(f"key={key}", "key=[REDACTED]")
-            result = session.get(url, timeout=60, verify=True, headers=client)
         except Exception as e:
             if check_errors:
                 if "handshake failure" in e.__str__():
