@@ -153,7 +153,7 @@ class AbsoluteBrowserSessionTests(SimpleTestCase):
             session=session,
         )
 
-    @mock.patch("utils.middleware.time.time", return_value=1_000_000)
+    @mock.patch("utils.middleware.wall_time", return_value=1_000_000)
     @mock.patch("django.contrib.auth.logout")
     def test_expired_and_legacy_sessions_are_logged_out(self, logout, _clock):
         middleware = AuthenticationVersionMiddleware(lambda request: request)
@@ -163,7 +163,7 @@ class AbsoluteBrowserSessionTests(SimpleTestCase):
 
         self.assertEqual(logout.call_count, 2)
 
-    @mock.patch("utils.middleware.time.time", return_value=1_000_000)
+    @mock.patch("utils.middleware.wall_time", return_value=1_000_000)
     @mock.patch("django.contrib.auth.logout")
     def test_fresh_session_remains_authenticated(self, logout, _clock):
         middleware = AuthenticationVersionMiddleware(lambda request: request)
@@ -172,7 +172,7 @@ class AbsoluteBrowserSessionTests(SimpleTestCase):
 
         logout.assert_not_called()
 
-    @mock.patch("apps.signals.time.time", return_value=123_456)
+    @mock.patch("apps.signals.wall_time", return_value=123_456)
     def test_every_login_records_immutable_session_start(self, _clock):
         request = SimpleNamespace(session={})
 

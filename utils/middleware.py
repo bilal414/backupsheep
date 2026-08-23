@@ -1,5 +1,5 @@
 import math
-import time
+from time import time as wall_time
 
 import pytz
 from django.conf import settings
@@ -28,7 +28,7 @@ class AuthenticationVersionMiddleware:
                 )
             except (TypeError, ValueError):
                 started_at = float("nan")
-            now = time.time()
+            now = wall_time()
             absolute_expiry = int(settings.SESSION_COOKIE_AGE)
             session_expired = (
                 not math.isfinite(started_at)

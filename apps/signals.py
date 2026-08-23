@@ -1,4 +1,4 @@
-import time
+from time import time as wall_time
 
 from django.contrib.auth.signals import user_logged_in
 from django.core.exceptions import ObjectDoesNotExist
@@ -12,7 +12,7 @@ def bind_auth_session_version(sender, request, user, **kwargs):
     """Bind every new Django login, including test ``force_login``, to its version."""
     if request is None:
         return
-    request.session[AUTH_SESSION_STARTED_AT_KEY] = time.time()
+    request.session[AUTH_SESSION_STARTED_AT_KEY] = wall_time()
     try:
         member = user.member
     except (AttributeError, ObjectDoesNotExist):
