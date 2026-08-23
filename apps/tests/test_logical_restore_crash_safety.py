@@ -552,6 +552,16 @@ class LogicalRestoreCrashSafetyTests(RestoreBackendBase):
             )
 
         self.assertEqual(replay.call_count, 1)
+        self.assertIn(
+            os.path.join(
+                "_storage",
+                (
+                    f"restore_{backup.uuid_str}_"
+                    f"{RD._restore_work_suffix(replacement, backup)}.sql"
+                ),
+            ),
+            replay.call_args.args[2],
+        )
         restore.refresh_from_db()
         checkpoint = restore.execution_metadata["target_checkpoints"][target]
         self.assertEqual(checkpoint["status"], "complete")

@@ -1322,12 +1322,14 @@ def delete_from_disk(self, backup_uuid, path_type):
             except FileNotFoundError:
                 pass
 
-    def _remove_staged_files():
-        exact_patterns = (
+    def _remove_staged_files(*, include_restore=False):
+        exact_patterns = [
             (f".{backup_uuid}.zip.", ".partial.zip"),
             (f".{backup_uuid}.files.", ".partial"),
             (f".{backup_uuid}.members.", ".partial"),
-        )
+        ]
+        if include_restore:
+            exact_patterns.append((f".{backup_uuid}.sql.", ".partial"))
         try:
             with os.scandir(storage_dir) as entries:
                 for entry in entries:
@@ -1351,9 +1353,10 @@ def delete_from_disk(self, backup_uuid, path_type):
             _remove(f"{backup_uuid}.manifest.json", is_dir=False)
             _remove(f"{backup_uuid}.files", is_dir=False)
             _remove(f"{backup_uuid}.members", is_dir=False)
-            _remove_staged_files()
+            _remove_staged_files(include_restore=path_type == "restore")
 
         if path_type == "restore":
+            _remove(f"{backup_uuid}.sql", is_dir=False)
             _remove(f"my_{backup_uuid}.cnf", is_dir=False)
             _remove(f"ssh_{backup_uuid}", is_dir=False)
     except Exception as e:

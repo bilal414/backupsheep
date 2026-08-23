@@ -679,10 +679,14 @@ class DiskCleanupTests(TestCase):
         for name in (
             f"{prefix}.zip",
             f"{prefix}.manifest.json",
+            f"{prefix}.sql",
+            f".{prefix}.sql.0123456789abcdef0123456789abcdef.partial",
             f"my_{prefix}.cnf",
             f"ssh_{prefix}",
         ):
             open(os.path.join(st, name), "w").close()
+        foreign_sql = ".restore_backup-id_foreign.sql.0123456789abcdef.partial"
+        open(os.path.join(st, foreign_sql), "w").close()
         log_path = os.path.join(st, "restore_backup-id.log")
         open(log_path, "w").close()
 
@@ -694,8 +698,18 @@ class DiskCleanupTests(TestCase):
         self.assertFalse(
             os.path.exists(os.path.join(st, f"{prefix}.manifest.json"))
         )
+        self.assertFalse(os.path.exists(os.path.join(st, f"{prefix}.sql")))
+        self.assertFalse(
+            os.path.exists(
+                os.path.join(
+                    st,
+                    f".{prefix}.sql.0123456789abcdef0123456789abcdef.partial",
+                )
+            )
+        )
         self.assertFalse(os.path.exists(os.path.join(st, f"my_{prefix}.cnf")))
         self.assertFalse(os.path.exists(os.path.join(st, f"ssh_{prefix}")))
+        self.assertTrue(os.path.exists(os.path.join(st, foreign_sql)))
         self.assertTrue(os.path.exists(log_path))
 
     def test_delete_old_logs_prunes_by_age(self):

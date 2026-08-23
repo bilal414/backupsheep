@@ -1991,6 +1991,36 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertEqual(payload.count(b"SET state='complete'"), 1)
         self.assertEqual(stat.S_IMODE(os.stat(combined).st_mode), 0o600)
 
+    def test_postgresql_combined_import_uses_fenced_cleanup_namespace(self):
+        backup = _fake_backup()
+        restore = _FakeRestore()
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        with open(sql_path, "wb") as output:
+            output.write(b"SELECT 1;\n")
+        marker = RD._marker_values(
+            restore,
+            backup,
+            "source_db",
+            "bs_restore_owned",
+            "a" * 64,
+            "importing",
+        )
+        work_prefix = "restore_backup-id_0123456789abcdef"
+
+        combined = RD._build_combined_postgres_sql(
+            [sql_path], marker, work_prefix=work_prefix
+        )
+        self.addCleanup(lambda: os.path.exists(combined) and os.remove(combined))
+
+        self.assertEqual(combined, os.path.join("_storage", f"{work_prefix}.sql"))
+        self.assertEqual(stat.S_IMODE(os.stat(combined).st_mode), 0o600)
+        self.assertFalse(
+            any(
+                name.startswith(f".{work_prefix}.sql.")
+                for name in os.listdir("_storage")
+            )
+        )
+
     def test_postgresql_historical_clean_dump_is_repaired_before_strict_import(self):
         backup = _fake_backup(option_postgres="-w --clean")
         restore = _FakeRestore()

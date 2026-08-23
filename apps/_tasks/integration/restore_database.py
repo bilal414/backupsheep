@@ -3537,9 +3537,27 @@ def _copy_historical_postgres_dump(source_path, output):
 
 
 def _build_combined_postgres_sql(
-    sql_paths, marker, *, historical_clean_compatibility=False
+    sql_paths,
+    marker,
+    *,
+    historical_clean_compatibility=False,
+    work_prefix=None,
 ):
-    descriptor, path = tempfile.mkstemp(prefix="bs_restore_", suffix=".sql", dir="_storage")
+    final_path = None
+    if work_prefix is not None:
+        work_prefix = str(work_prefix)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,511}", work_prefix):
+            raise RestoreError("PostgreSQL restore work identity is invalid.")
+        descriptor, path = tempfile.mkstemp(
+            prefix=f".{work_prefix}.sql.",
+            suffix=".partial",
+            dir="_storage",
+        )
+        final_path = os.path.join("_storage", f"{work_prefix}.sql")
+    else:
+        descriptor, path = tempfile.mkstemp(
+            prefix="bs_restore_", suffix=".sql", dir="_storage"
+        )
     os.chmod(path, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as output:
@@ -3554,6 +3572,9 @@ def _build_combined_postgres_sql(
             output.write(b"\n")
             output.flush()
             os.fsync(output.fileno())
+        if final_path is not None:
+            os.replace(path, final_path)
+            return final_path
         return path
     except Exception:
         try:
@@ -3577,6 +3598,11 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
     remote_pgpass = None
     local_pgpass = None
     combined_sql_paths = set()
+    combined_work_prefix = f"restore_{backup.uuid_str}"
+    if _has_restore_fence(restore):
+        combined_work_prefix = (
+            f"{combined_work_prefix}_{_restore_work_suffix(restore, backup)}"
+        )
     try:
         mode, _params = _restore_mode(restore)
         in_place = mode == "in_place"
@@ -3637,6 +3663,7 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
                     sql_paths,
                     marker_for_update,
                     historical_clean_compatibility=True,
+                    work_prefix=combined_work_prefix,
                 )
                 combined_sql_paths.add(local_sql)
             marker = _ensure_postgres_target(
@@ -3767,7 +3794,9 @@ def _restore_postgresql(node, backup, restore, auth, targets, mapping, source_di
             _ensure_restore_fence(restore)
             if local_sql is None:
                 local_sql = _build_combined_postgres_sql(
-                    sql_paths, marker_for_update
+                    sql_paths,
+                    marker_for_update,
+                    work_prefix=combined_work_prefix,
                 )
                 combined_sql_paths.add(local_sql)
             remote_sql = None
@@ -4017,4 +4046,4 @@ def restore_database(backup, restore):
             for cleanup_prefix in dict.fromkeys(cleanup_prefixes):
                 delete_from_disk.apply_async(args=[cleanup_prefix, "restore"])
         else:
-            delete_from_disk.apply_async(args=[work_prefix, "both"])
+            delete_from_disk.apply_async(args=[work_prefix, "restore"])
