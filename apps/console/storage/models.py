@@ -175,6 +175,8 @@ class CoreStorageDropbox(TimeStampedModel):
 
 
 class CoreStoragePCloud(TimeStampedModel):
+    API_HOSTNAMES = frozenset({"api.pcloud.com", "eapi.pcloud.com"})
+
     class Location(models.IntegerChoices):
         US = 1, "US"
         EUROPE = 2, "EUROPE"
@@ -192,11 +194,10 @@ class CoreStoragePCloud(TimeStampedModel):
         db_table = "core_storage_pcloud"
 
     def get_client(self, file_upload=None, data=None):
-        encryption_key = self.storage.account.get_encryption_key()
-
         if data:
             access_token = data["access_token"]
         else:
+            encryption_key = self.storage.account.get_encryption_key()
             access_token = bs_decrypt(self.access_token, encryption_key)
 
         client = {
@@ -221,17 +222,23 @@ class CoreStoragePCloud(TimeStampedModel):
             no_delete = data.get("no_delete")
         else:
             hostname = self.hostname
-            no_delete = self.no_delete
+            no_delete = getattr(self, "no_delete", False)
+
+        hostname = str(hostname or "").strip().lower().rstrip(".")
+        if hostname not in self.API_HOSTNAMES:
+            return False
 
         local_txt_file = "_upload_test_files/backupsheep.txt"
         filename = f"backupsheep_{uuid.uuid4().hex}.txt"
         pcloud_path = f"/validate/{filename}"
-        token = self.get_access_token()
         headers = self.get_client(data=data)
         folder_response = requests.post(
-            f"https://{hostname}/createfolderifnotexists?path=/validate",
+            f"https://{hostname}/createfolderifnotexists",
+            params={"path": "/validate"},
             headers=headers,
             verify=True,
+            timeout=request_timeout(),
+            allow_redirects=False,
         )
         if int(getattr(folder_response, "status_code", 0) or 0) >= 400:
             return False
@@ -239,9 +246,12 @@ class CoreStoragePCloud(TimeStampedModel):
         with open(local_txt_file, "rb") as file_to_upload:
             upload_response = requests.post(
                 f"https://{hostname}/uploadfile",
-                params={"access_token": token, "path": "/validate", "renameifexists": 0},
+                data={"path": "/validate", "renameifexists": 0},
+                headers=headers,
                 files={"file": (filename, file_to_upload, "text/plain")},
                 verify=True,
+                timeout=request_timeout(),
+                allow_redirects=False,
             )
         if int(getattr(upload_response, "status_code", 0) or 0) >= 400:
             return False
@@ -254,12 +264,14 @@ class CoreStoragePCloud(TimeStampedModel):
             if not no_delete:
                 requests.post(
                     f"https://{hostname}/deletefile",
-                    params={
-                        "access_token": token,
+                    data={
                         "path": pcloud_path,
                         "fileid": metadata[0].get("fileid"),
                     },
+                    headers=headers,
                     verify=True,
+                    timeout=request_timeout(),
+                    allow_redirects=False,
                 )
             return True
 

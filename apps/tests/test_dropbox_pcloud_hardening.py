@@ -106,6 +106,7 @@ class _PCloudFake:
         self.upload_calls = 0
         self.lost_upload_response = False
         self.duplicate_entries = None
+        self.calls = []
 
     def _object(self, path, content, file_id=None, *, provider_hash="pc-hash"):
         return {
@@ -158,12 +159,13 @@ class _PCloudFake:
         raise AssertionError(f"unexpected pCloud operation: {operation}")
 
     def get(self, url, *, params=None, **kwargs):
+        self.calls.append(("GET", url, dict(params or {}), dict(kwargs)))
         operation = url.rsplit("/", 1)[-1]
         data = dict(params or {})
-        data.pop("access_token", None)
         return _Response(self._payload(operation, data))
 
     def post(self, url, *, data=None, files=None, **kwargs):
+        self.calls.append(("POST", url, dict(data or {}), dict(kwargs)))
         operation = url.rsplit("/", 1)[-1]
         if operation != "uploadfile":
             return _Response(self._payload(operation, data))
@@ -362,7 +364,34 @@ class DropboxPCloudHardeningTests(TestCase):
         self.assertEqual(state["size_bytes"], len(self.payload))
         self.assertEqual(state["provider_id"], state["fileid"])
         self.assertEqual(state["version_id"], "pc-hash")
+        for _method, url, parameters, kwargs in provider.calls:
+            self.assertNotIn("pcloud-access-token", url)
+            self.assertNotIn("access_token", parameters)
+            self.assertEqual(
+                kwargs["headers"]["Authorization"],
+                "Bearer pcloud-access-token",
+            )
+            self.assertFalse(kwargs["allow_redirects"])
         self._assert_artifact_before_complete(self, events)
+
+    def test_pcloud_endpoint_rejects_non_official_hosts_before_network(self):
+        for hostname in (
+            "api.pcloud.com.attacker.example",
+            "attacker.example",
+            "api.pcloud.com:443",
+            "api.pcloud.com:invalid",
+            "https://user@api.pcloud.com",
+            "https://api.pcloud.com/redirect",
+        ):
+            with self.subTest(hostname=hostname):
+                with self.assertRaises(pcloud_module.PCloudStorageAdapterError):
+                    pcloud_module._request_json(
+                        SimpleNamespace(hostname=hostname),
+                        "pcloud-access-token",
+                        "GET",
+                        "stat",
+                        data={"path": "/owned/file.zip"},
+                    )
 
     def test_pcloud_worker_crash_before_status_persistence_adopts_completed_object(self):
         point, _events = self._point("pcloud", lose_final_save=True)
