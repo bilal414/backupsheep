@@ -40,11 +40,24 @@ values are false. Defaults below are repository defaults for `develop`.
 | `SENTRY_PROFILES_SAMPLE_RATE` | `0` | Profile sampling rate from 0 to 1; disabled unless explicitly opted in |
 | `SESSION_COOKIE_AGE` | `43200` | Browser-session maximum in seconds; values above 12 hours are rejected |
 | `SESSION_EXPIRE_AT_BROWSER_CLOSE` | `true` | Remove the browser's session cookie when the browser closes |
+| `AUTH_THROTTLE_TRUSTED_PROXY_ENABLED` | `false` | Trust a dedicated, proxy-overwritten client-IP header for authentication rate-limit buckets |
+| `AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS` | blank | Exact comma-separated immediate proxy IPs/CIDRs; required when trusted-proxy mode is enabled |
 
 `APP_PROTOCOL`, `APP_DOMAIN`, proxy forwarding and `DJANGO_HTTPS` must describe the same
 public URL. Keep `DJANGO_SECRET_KEY` stable and backed up as a secret.
 Session cookies are always HttpOnly and SameSite=Lax. They become Secure when
 `DJANGO_HTTPS=true`; do not serve an authenticated production console over plain HTTP.
+
+Authentication throttles ignore `X-Forwarded-For` and use `REMOTE_ADDR` unless trusted-
+proxy mode is explicitly enabled. In trusted-proxy mode, the direct peer must match
+`AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS` and the proxy must overwrite
+`X-BackupSheep-Client-IP` with one client IP on every request. Do not append the header or
+trust client/public networks. Missing, malformed, multiple, or untrusted-peer values fall
+back to the direct peer. With Caddy, set this inside `reverse_proxy`:
+
+```caddyfile
+header_up X-BackupSheep-Client-IP {remote_host}
+```
 
 ## API tokens
 

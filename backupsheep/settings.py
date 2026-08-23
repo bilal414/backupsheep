@@ -124,6 +124,37 @@ def _private_network_allowlist(name):
     return tuple(networks)
 
 
+def _trusted_proxy_network_allowlist(name):
+    """Parse exact immediate-proxy addresses/CIDRs for auth throttling."""
+
+    raw_value = config.get(name, "")
+    values = (
+        raw_value
+        if isinstance(raw_value, (list, tuple))
+        else str(raw_value).split(",")
+    )
+    networks = []
+    for value in values:
+        value = str(value).strip()
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as error:
+            raise ImproperlyConfigured(
+                f"{name} must contain exact comma-separated IP addresses or CIDRs."
+            ) from error
+        if network.prefixlen == 0:
+            raise ImproperlyConfigured(
+                f"{name} cannot trust every address; configure only immediate proxies."
+            )
+        if network not in networks:
+            networks.append(network)
+    if len(networks) > 32:
+        raise ImproperlyConfigured(f"{name} may contain at most 32 networks.")
+    return tuple(networks)
+
+
 # DRF's built-in token model is otherwise permanent. Limit bearer-token lifetime
 # even when an operator forgets to configure it, and refuse values over 90 days.
 API_TOKEN_TTL_SECONDS = _bounded_positive_int(
@@ -143,6 +174,26 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = _as_bool(
     config.get("SESSION_EXPIRE_AT_BROWSER_CLOSE"),
     default=True,
 )
+
+# Authentication throttles use REMOTE_ADDR by default. A reverse proxy collapses
+# that into one shared bucket, so an operator may explicitly trust the immediate
+# proxy and have it overwrite X-BackupSheep-Client-IP. Never infer this trust from
+# X-Forwarded-For or from the presence of the dedicated header alone.
+AUTH_THROTTLE_TRUSTED_PROXY_ENABLED = _as_bool(
+    config.get("AUTH_THROTTLE_TRUSTED_PROXY_ENABLED"),
+    default=False,
+)
+AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS = _trusted_proxy_network_allowlist(
+    "AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS"
+)
+if (
+    AUTH_THROTTLE_TRUSTED_PROXY_ENABLED
+    and not AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS
+):
+    raise ImproperlyConfigured(
+        "AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS is required when trusted-proxy "
+        "authentication throttling is enabled."
+    )
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 SESSION_SAVE_EVERY_REQUEST = False

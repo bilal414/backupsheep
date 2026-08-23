@@ -28,10 +28,25 @@ the simplest rule remains: **copy `.env_sample` wholesale and don't delete lines
 | `API_TOKEN_TTL_SECONDS` | optional | `2592000` | Lifetime of newly issued personal API tokens in seconds (30 days). Values above the 90-day maximum are rejected. |
 | `SESSION_COOKIE_AGE` | optional | `43200` | Browser-session lifetime in seconds; 12 hours is the hard maximum. |
 | `SESSION_EXPIRE_AT_BROWSER_CLOSE` | optional | `true` | Also discard the browser session cookie when the browser closes. |
+| `AUTH_THROTTLE_TRUSTED_PROXY_ENABLED` | optional | `false` | Allow authentication throttles to use the dedicated proxy-overwritten client-IP header. |
+| `AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS` | required when enabled | empty | Exact comma-separated immediate proxy IPs/CIDRs as seen in `REMOTE_ADDR`. |
 | `SENTRY_DSN` | optional | empty | Sentry DSN for scrubbed error/performance monitoring. Leave blank to disable. |
 | `SENTRY_TRACES_SAMPLE_RATE` | optional | `0` | Transaction trace sampling rate from 0 to 1. Opt in only after a privacy/cost review. |
 | `SENTRY_PROFILES_SAMPLE_RATE` | optional | `0` | Profile sampling rate from 0 to 1. Opt in only after a privacy/cost review. |
 | `BACKUPSHEEP_SECRETS` | optional | unset | Advanced: if set, its JSON value is used as the entire config instead of `.env` (for secret-manager deployments). |
+
+Authentication rate limits use the direct server peer by default. If a reverse proxy
+causes every client to share that address, trusted-proxy mode is an explicit opt-in: the
+listed network must identify the immediate proxy, and that proxy must **overwrite** (not
+append) `X-BackupSheep-Client-IP` on every request. For Caddy's `reverse_proxy` handler:
+
+```caddyfile
+header_up X-BackupSheep-Client-IP {remote_host}
+```
+
+Never list public/client networks as trusted proxies. BackupSheep does not use
+`X-Forwarded-For` for these buckets; disabled mode, an untrusted direct peer, or a
+missing/malformed/multiple dedicated header safely falls back to `REMOTE_ADDR`.
 
 ## Database (PostgreSQL)
 
