@@ -107,28 +107,26 @@ class APIAuthLogin(APIView):
                     }
                 )
 
-            """
-            Login
-            """
-            login(request, member.user)
+            if browser_session_login:
+                # Only the explicit, same-origin, CSRF-validated browser flow may
+                # create or mutate a Django session. Native callers receive a
+                # bearer token and no session-side effects.
+                login(request, member.user)
+                if member.timezone:
+                    request.session["django_timezone"] = member.timezone
 
-            """
-            Setup Timezone
-            """
-            if member.timezone:
-                request.session["django_timezone"] = member.timezone
-
-            next_url = request.session.get("previous_url", None) or request.session.get("next", None)
-            request.session["previous_url"] = None
-            request.session["next"] = None
-
-            content = {"next": next_url}
-            if not browser_session_login:
+                next_url = request.session.get(
+                    "previous_url", None
+                ) or request.session.get("next", None)
+                request.session["previous_url"] = None
+                request.session["next"] = None
+                content = {"next": next_url}
+            else:
                 token, created = Token.objects.get_or_create(user=member.user)
                 if not created and token_is_expired(token):
                     token.delete()
                     token = Token.objects.create(user=member.user)
-                content["api_key"] = token.key
+                content = {"api_key": token.key}
         else:
             raise ExceptionDefault(detail=serializer.errors)
         return Response(content)

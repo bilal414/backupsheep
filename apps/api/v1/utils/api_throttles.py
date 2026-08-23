@@ -19,6 +19,7 @@ is not a safe assumption for a reusable self-hosted application.
 import ipaddress
 import unicodedata
 
+from django.conf import settings
 from django.utils.crypto import salted_hmac
 from rest_framework.throttling import SimpleRateThrottle
 
@@ -34,16 +35,64 @@ def _keyed_identifier(kind, value):
     ).hexdigest()
 
 
-def _server_observed_peer(request):
-    """Canonicalize the direct network peer, never a forwarded client header."""
+def _canonical_ip(value):
+    """Return an IP object for one unambiguous address, otherwise ``None``."""
 
-    value = str(request.META.get("REMOTE_ADDR") or "<missing>").strip()
+    if not isinstance(value, str) or "," in value or "%" in value:
+        return None
     try:
-        return ipaddress.ip_address(value).compressed
+        return ipaddress.ip_address(value.strip())
     except ValueError:
-        # WSGI servers should supply an IP address. Hashing the bounded raw value
-        # fails closed into a stable bucket if a non-standard server does not.
-        return value[:256].casefold() or "<missing>"
+        return None
+
+
+def _direct_peer(request):
+    value = str(request.META.get("REMOTE_ADDR") or "<missing>").strip()
+    address = _canonical_ip(value)
+    if address is not None:
+        return address, address.compressed
+    # WSGI servers should supply an IP address. Hashing the bounded raw value
+    # fails closed into a stable bucket if a non-standard server does not.
+    return None, value[:256].casefold() or "<missing>"
+
+
+def _configured_trusted_proxy_networks():
+    """Parse the already-validated setting, failing closed on any bad entry."""
+
+    networks = []
+    for value in getattr(settings, "AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS", ()):
+        try:
+            networks.append(ipaddress.ip_network(str(value), strict=False))
+        except ValueError:
+            return ()
+    return tuple(networks)
+
+
+def _server_observed_peer(request):
+    """Resolve the non-spoofable peer identity used by coarse auth buckets.
+
+    Direct ``REMOTE_ADDR`` is always the fallback. A deployment may explicitly
+    trust exact proxy networks and enable one dedicated client-IP header, but the
+    proxy must overwrite that header. Arbitrary forwarding headers are never
+    consulted.
+    """
+
+    direct_address, direct_value = _direct_peer(request)
+    if not getattr(settings, "AUTH_THROTTLE_TRUSTED_PROXY_ENABLED", False):
+        return direct_value
+    if direct_address is None:
+        return direct_value
+
+    networks = _configured_trusted_proxy_networks()
+    if not networks or not any(direct_address in network for network in networks):
+        return direct_value
+
+    forwarded_address = _canonical_ip(
+        request.META.get("HTTP_X_BACKUPSHEEP_CLIENT_IP")
+    )
+    if forwarded_address is None:
+        return direct_value
+    return forwarded_address.compressed
 
 
 def _submitted_value(request, name):

@@ -1,6 +1,7 @@
 import re
 from unittest import mock
 
+from django.conf import settings
 from django.http import HttpResponse
 from django.template.loader import render_to_string
 from django.test import Client
@@ -245,12 +246,50 @@ class BrowserSessionLoginTests(BaseTestCase):
 
     def test_unmarked_native_login_keeps_api_token_contract(self):
         native = Client()
-        response = native.post(
-            "/api/v1/auth/login/",
-            self._payload(),
-            content_type="application/json",
-            REMOTE_ADDR="192.0.2.204",
-        )
+        with mock.patch("apps.api.v1.auth.views.login") as session_login:
+            response = native.post(
+                "/api/v1/auth/login/",
+                self._payload(),
+                content_type="application/json",
+                REMOTE_ADDR="192.0.2.204",
+            )
 
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(response.json()["api_key"], Token.objects.get(user=self.user).key)
+        self.assertEqual(
+            response.json(),
+            {"api_key": Token.objects.get(user=self.user).key},
+        )
+        session_login.assert_not_called()
+        self.assertNotIn(settings.SESSION_COOKIE_NAME, response.cookies)
+        self.assertNotIn(settings.SESSION_COOKIE_NAME, native.cookies)
+
+    def test_unmarked_native_login_does_not_mutate_pre_authenticated_session(self):
+        native = Client()
+        native.force_login(self.user)
+        session = native.session
+        session["previous_url"] = "/console/private-origin/"
+        session["next"] = "/console/private-next/"
+        session["django_timezone"] = "America/Chicago"
+        session["native-session-canary"] = "unchanged"
+        session.save()
+        session_key = session.session_key
+        session_before = dict(session)
+
+        with mock.patch("apps.api.v1.auth.views.login") as session_login:
+            response = native.post(
+                "/api/v1/auth/login/",
+                self._payload(),
+                content_type="application/json",
+                REMOTE_ADDR="192.0.2.207",
+            )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(
+            response.json(),
+            {"api_key": Token.objects.get(user=self.user).key},
+        )
+        session_login.assert_not_called()
+        self.assertNotIn(settings.SESSION_COOKIE_NAME, response.cookies)
+        session_after = native.session
+        self.assertEqual(session_after.session_key, session_key)
+        self.assertEqual(dict(session_after), session_before)

@@ -1,7 +1,7 @@
 from unittest import mock
 
 from django.core.cache import cache
-from django.test import Client
+from django.test import Client, override_settings
 from rest_framework.authtoken.models import Token
 
 from apps.api.v1.utils.api_throttles import (
@@ -29,10 +29,20 @@ class AuthenticationThrottleSecurityTests(BaseTestCase):
         super().tearDown()
 
     @staticmethod
-    def _bad_login(client, email, *, peer="192.0.2.10", xff=None, token=None):
+    def _bad_login(
+        client,
+        email,
+        *,
+        peer="192.0.2.10",
+        xff=None,
+        trusted_client_ip=None,
+        token=None,
+    ):
         extra = {"REMOTE_ADDR": peer}
         if xff is not None:
             extra["HTTP_X_FORWARDED_FOR"] = xff
+        if trusted_client_ip is not None:
+            extra["HTTP_X_BACKUPSHEEP_CLIENT_IP"] = trusted_client_ip
         if token is not None:
             extra["HTTP_AUTHORIZATION"] = f"Token {token.key}"
         return client.post(
@@ -104,6 +114,81 @@ class AuthenticationThrottleSecurityTests(BaseTestCase):
                 for _ in range(3)
             ]
         self.assertEqual([response.status_code for response in results], [400, 400, 429])
+
+    @override_settings(
+        AUTH_THROTTLE_TRUSTED_PROXY_ENABLED=False,
+        AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS=("10.0.0.0/8",),
+    )
+    def test_dedicated_client_header_is_ignored_when_proxy_mode_is_disabled(self):
+        with mock.patch.object(LoginRateThrottle, "rate", "2/minute"):
+            results = [
+                self._bad_login(
+                    Client(),
+                    f"disabled-{index}@example.com",
+                    peer="10.1.2.3",
+                    trusted_client_ip=f"192.0.2.{index}",
+                )
+                for index in range(1, 4)
+            ]
+        self.assertEqual([response.status_code for response in results], [400, 400, 429])
+
+    @override_settings(
+        AUTH_THROTTLE_TRUSTED_PROXY_ENABLED=True,
+        AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS=("10.0.0.0/8",),
+    )
+    def test_trusted_proxy_overwritten_client_header_separates_client_buckets(self):
+        headers = ("192.0.2.50", "192.0.2.50", "192.0.2.51")
+        with mock.patch.object(LoginRateThrottle, "rate", "2/minute"):
+            results = [
+                self._bad_login(
+                    Client(),
+                    f"trusted-{index}@example.com",
+                    peer="10.1.2.3",
+                    trusted_client_ip=client_ip,
+                )
+                for index, client_ip in enumerate(headers)
+            ]
+        self.assertEqual([response.status_code for response in results], [400, 400, 400])
+
+    @override_settings(
+        AUTH_THROTTLE_TRUSTED_PROXY_ENABLED=True,
+        AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS=("10.0.0.0/8",),
+    )
+    def test_untrusted_direct_peer_cannot_spoof_dedicated_client_header(self):
+        with mock.patch.object(LoginRateThrottle, "rate", "2/minute"):
+            results = [
+                self._bad_login(
+                    Client(),
+                    f"untrusted-{index}@example.com",
+                    peer="198.51.100.60",
+                    trusted_client_ip=f"192.0.2.{index}",
+                )
+                for index in range(1, 4)
+            ]
+        self.assertEqual([response.status_code for response in results], [400, 400, 429])
+
+    @override_settings(
+        AUTH_THROTTLE_TRUSTED_PROXY_ENABLED=True,
+        AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS=("10.0.0.0/8",),
+    )
+    def test_malformed_or_multiple_dedicated_header_falls_back_to_direct_peer(self):
+        for header in ("not-an-ip", "192.0.2.70, 192.0.2.71"):
+            with self.subTest(header=header):
+                cache.clear()
+                with mock.patch.object(LoginRateThrottle, "rate", "2/minute"):
+                    results = [
+                        self._bad_login(
+                            Client(),
+                            f"malformed-{index}@example.com",
+                            peer="10.1.2.3",
+                            trusted_client_ip=header,
+                        )
+                        for index in range(1, 4)
+                    ]
+                self.assertEqual(
+                    [response.status_code for response in results],
+                    [400, 400, 429],
+                )
 
     def test_authenticated_reset_post_and_token_patch_are_both_limited(self):
         client = Client()
