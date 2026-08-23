@@ -6,7 +6,7 @@ from django.conf import settings
 from django.shortcuts import redirect
 from django.contrib import messages
 from sentry_sdk import capture_exception, capture_message
-from django.core.cache import cache
+from django.db import transaction
 from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.member.models import CoreMember
 from apps.console.connection.models import (
@@ -32,7 +32,6 @@ from apps.console.storage.models import (
 from apps.api.v1.utils.api_exceptions import ExceptionDefault
 from ..utils.api_authentication import CsrfExemptSessionAuthentication
 import time
-import ovh
 from apps.api.v1.utils.http import requests, request_timeout
 from rest_framework.parsers import FormParser
 import dropbox
@@ -50,6 +49,11 @@ from apps.api.v1.utils.api_permissions import (
 from apps.api.v1.utils.oauth_security import (
     consume_oauth_state,
     validated_https_endpoint,
+)
+from apps.api.v1.connection.ovh_oauth import (
+    build_ovh_client,
+    consume_ovh_transaction,
+    ovh_member_has_integration_permission,
 )
 
 
@@ -768,190 +772,164 @@ class APICallbackDigitalOcean(APIView):
         return redirect("console:setup:integration_open", integration_code="digitalocean")
 
 
-class APICallbackOVHCA(APIView):
-    def get(self, request):
-        member = self.request.user.member
+_OVH_CALLBACK_CONFIG = {
+    "ovh_ca": {
+        "auth_model": CoreAuthOVHCA,
+        "integration_code": "ovh_ca",
+    },
+    "ovh_eu": {
+        "auth_model": CoreAuthOVHEU,
+        "integration_code": "ovh_eu",
+    },
+    "ovh_us": {
+        "auth_model": CoreAuthOVHUS,
+        "integration_code": "ovh_us",
+    },
+}
+
+
+def _ovh_profile_text(value, *, maximum, required=False):
+    if value is None:
+        if required:
+            raise ValueError("OVH profile field is missing")
+        return None
+    value = str(value).strip()
+    if (
+        (required and not value)
+        or len(value) > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError("OVH profile field is invalid")
+    return value or None
+
+
+def _complete_ovh_callback(request, provider):
+    config = _OVH_CALLBACK_CONFIG[provider]
+    integration_code = config["integration_code"]
+    try:
+        member = request.user.member
         account = member.get_current_account()
-        encryption_key = account.get_encryption_key()
-
-        ovh_consumer_key_sig = f"ovh_ca__consumer_key__{account.id}__{member.id}"
-        ovh_consumer_key = cache.get(ovh_consumer_key_sig)
-
-        # create a client
-        client = ovh.Client(
-            endpoint="ovh-ca",
-            application_key=settings.OVH_CA_APP_KEY,
-            application_secret=settings.OVH_CA_APP_SECRET,
-            consumer_key=ovh_consumer_key,
+        consumer_key = consume_ovh_transaction(
+            request,
+            provider,
+            member=member,
+            account=account,
+            received_state=request.query_params.get("state"),
+        )
+        permitted = ovh_member_has_integration_permission(request, account)
+    except Exception:
+        consumer_key = None
+        permitted = False
+    if not permitted or consumer_key is None:
+        messages.add_message(
+            request,
+            messages.ERROR,
+            "The OVHcloud authorization request expired or could not be verified. Please try again.",
+        )
+        return redirect(
+            "console:setup:integration_open", integration_code=integration_code
         )
 
+    try:
+        client = build_ovh_client(provider, consumer_key=consumer_key)
         ovh_account = client.get("/me")
-
-        """
-        Update existing authentication
-        """
-        info_name = f"{ovh_account.get('firstname', None)} {ovh_account.get('name', None)}"
-
-        if CoreAuthOVHCA.objects.filter(
-            connection__account=account, info_customer_code=ovh_account["customerCode"]
-        ).exists():
-            auth = CoreAuthOVHCA.objects.get(
-                connection__account=account,
-                info_customer_code=ovh_account["customerCode"],
+        if not isinstance(ovh_account, dict):
+            raise ValueError("OVH returned an invalid account profile")
+        customer_code = _ovh_profile_text(
+            ovh_account.get("customerCode"), maximum=1024, required=True
+        )
+        first_name = _ovh_profile_text(
+            ovh_account.get("firstname"), maximum=512
+        )
+        last_name = _ovh_profile_text(ovh_account.get("name"), maximum=512)
+        info_name = " ".join(
+            part for part in (first_name, last_name) if part
+        ) or customer_code
+        info_email = _ovh_profile_text(ovh_account.get("email"), maximum=255)
+        info_organization = _ovh_profile_text(
+            ovh_account.get("organization") or "n/a", maximum=1024
+        )
+        encryption_key = account.get_encryption_key()
+        with transaction.atomic():
+            auth = (
+                config["auth_model"]
+                .objects.select_for_update()
+                .filter(
+                    connection__account=account,
+                    info_customer_code=customer_code,
+                )
+                .first()
             )
-            auth.info_name = info_name
-            auth.info_customer_code = ovh_account.get("customerCode")
-            auth.info_email = ovh_account.get("email")
-            auth.info_organization = ovh_account.get("organization", "n/a")
-            auth.consumer_key = bs_encrypt(ovh_consumer_key, encryption_key)
-            auth.save()
-            auth.connection.status = CoreConnection.Status.ACTIVE
-            auth.save()
-        else:
-            connection = CoreConnection(account=account)
-            connection.integration = CoreIntegration.objects.get(code="ovh_ca")
-            connection.name = connection.integration.name
-            connection.location = connection.integration.locations.all().order_by("?")[0]
-            connection.save()
+            if auth is None:
+                connection = CoreConnection(account=account, added_by=member)
+                connection.integration = CoreIntegration.objects.get(
+                    code=integration_code
+                )
+                connection.name = connection.integration.name
+                connection.location = connection.integration.locations.order_by(
+                    "pk"
+                ).first()
+                if connection.location is None:
+                    raise ValueError("OVH integration has no configured location")
+                connection.save()
+                auth = config["auth_model"](connection=connection)
+            else:
+                connection = CoreConnection.objects.select_for_update().get(
+                    pk=auth.connection_id,
+                    account=account,
+                )
 
-            auth = CoreAuthOVHCA(connection=connection)
             auth.info_name = info_name
-            auth.info_email = ovh_account.get("email", None)
-            auth.info_organization = ovh_account.get("organization", "n/a")
-            auth.info_customer_code = ovh_account.get("customerCode", None)
-            auth.consumer_key = bs_encrypt(ovh_consumer_key, encryption_key)
+            auth.info_customer_code = customer_code
+            auth.info_email = info_email
+            auth.info_organization = info_organization
+            auth.consumer_key = bs_encrypt(consumer_key, encryption_key)
+            if not auth.consumer_key:
+                raise ValueError("OVH consumer key encryption failed")
             auth.save()
+            connection.status = CoreConnection.Status.ACTIVE
+            connection.save(update_fields=["status", "modified"])
 
         messages.add_message(
             request,
             messages.SUCCESS,
-            "Your account is successfully connected. You can add schedules for this server.",
+            "Your OVHcloud account is successfully connected.",
         )
-        return redirect("console:setup:integration_open", integration_code="ovh_ca")
+    except Exception as error:
+        # Never send the exception or local consumer key to Sentry/logs.
+        capture_message(
+            f"{provider} callback failed ({type(error).__name__})",
+            level="error",
+        )
+        messages.add_message(
+            request,
+            messages.ERROR,
+            "Unable to connect the OVHcloud account. Please try again.",
+        )
+    return redirect(
+        "console:setup:integration_open", integration_code=integration_code
+    )
+
+
+class APICallbackOVHCA(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        return _complete_ovh_callback(request, "ovh_ca")
 
 
 class APICallbackOVHUS(APIView):
+    permission_classes = (IsAuthenticated,)
+
     def get(self, request):
-        member = self.request.user.member
-        account = member.get_current_account()
-        encryption_key = account.get_encryption_key()
-
-        ovh_consumer_key_sig = f"ovh_us__consumer_key__{account.id}__{member.id}"
-        ovh_consumer_key = cache.get(ovh_consumer_key_sig)
-
-        # create a client
-        client = ovh.Client(
-            endpoint="ovh-us",
-            application_key=settings.OVH_US_APP_KEY,
-            application_secret=settings.OVH_US_APP_SECRET,
-            consumer_key=ovh_consumer_key,
-        )
-
-        ovh_account = client.get("/me")
-
-        """
-        Update existing authentication
-        """
-        info_name = f"{ovh_account.get('firstname', None)} {ovh_account.get('name', None)}"
-
-        if CoreAuthOVHUS.objects.filter(
-            connection__account=account, info_customer_code=ovh_account["customerCode"]
-        ).exists():
-            auth = CoreAuthOVHUS.objects.get(
-                connection__account=account,
-                info_customer_code=ovh_account["customerCode"],
-            )
-            auth.info_name = info_name
-            auth.info_customer_code = ovh_account.get("customerCode")
-            auth.info_email = ovh_account.get("email")
-            auth.info_organization = ovh_account.get("organization", "n/a")
-            auth.consumer_key = bs_encrypt(ovh_consumer_key, encryption_key)
-            auth.save()
-            auth.connection.status = CoreConnection.Status.ACTIVE
-            auth.save()
-        else:
-            connection = CoreConnection(account=account)
-            connection.integration = CoreIntegration.objects.get(code="ovh_us")
-            connection.name = connection.integration.name
-            connection.location = connection.integration.locations.all().order_by("?")[0]
-            connection.save()
-
-            auth = CoreAuthOVHUS(connection=connection)
-            auth.info_name = info_name
-            auth.info_email = ovh_account.get("email", None)
-            auth.info_organization = ovh_account.get("organization", "n/a")
-            auth.info_customer_code = ovh_account.get("customerCode", None)
-            auth.consumer_key = bs_encrypt(ovh_consumer_key, encryption_key)
-            auth.save()
-
-        messages.add_message(
-            request,
-            messages.SUCCESS,
-            "Your account is successfully connected. You can add schedules for this server.",
-        )
-        return redirect("console:setup:integration_open", integration_code="ovh_us")
+        return _complete_ovh_callback(request, "ovh_us")
 
 
 class APICallbackOVHEU(APIView):
+    permission_classes = (IsAuthenticated,)
+
     def get(self, request):
-        member = self.request.user.member
-        account = member.get_current_account()
-        encryption_key = account.get_encryption_key()
-
-        ovh_consumer_key_sig = f"ovh_eu__consumer_key__{account.id}__{member.id}"
-        ovh_consumer_key = cache.get(ovh_consumer_key_sig)
-
-        # create a client
-        client = ovh.Client(
-            endpoint="ovh-eu",
-            application_key=settings.OVH_EU_APP_KEY,
-            application_secret=settings.OVH_EU_APP_SECRET,
-            consumer_key=ovh_consumer_key,
-        )
-
-        ovh_account = client.get("/me")
-
-        """
-        Update existing authentication
-        """
-        info_name = f"{ovh_account.get('firstname', None)} {ovh_account.get('name', None)}"
-
-        if CoreAuthOVHEU.objects.filter(
-            connection__account=account, info_customer_code=ovh_account["customerCode"]
-        ).exists():
-            auth = CoreAuthOVHEU.objects.get(
-                connection__account=account,
-                info_customer_code=ovh_account["customerCode"],
-            )
-            auth.info_name = info_name
-            auth.info_customer_code = ovh_account.get("customerCode")
-            auth.info_email = ovh_account.get("email")
-            auth.info_organization = ovh_account.get("organization", "n/a")
-            auth.consumer_key = bs_encrypt(ovh_consumer_key, encryption_key)
-            auth.save()
-            auth.connection.status = CoreConnection.Status.ACTIVE
-            auth.save()
-        else:
-            connection = CoreConnection(account=account)
-            connection.integration = CoreIntegration.objects.get(code="ovh_eu")
-            connection.name = connection.integration.name
-            connection.location = connection.integration.locations.all().order_by("?")[0]
-            connection.save()
-
-            auth = CoreAuthOVHEU(connection=connection)
-            auth.info_name = info_name
-            auth.info_email = ovh_account.get("email", None)
-            auth.info_organization = ovh_account.get("organization", "n/a")
-            auth.info_customer_code = ovh_account.get("customerCode", None)
-            auth.consumer_key = bs_encrypt(ovh_consumer_key, encryption_key)
-            auth.save()
-
-        messages.add_message(
-            request,
-            messages.SUCCESS,
-            "Your account is successfully connected. You can add schedules for this server.",
-        )
-        return redirect("console:setup:integration_open", integration_code="ovh_eu")
+        return _complete_ovh_callback(request, "ovh_eu")
 
 
 class APICallbackDropbox(APIView):

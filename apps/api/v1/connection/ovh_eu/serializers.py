@@ -1,5 +1,4 @@
 import pytz
-from django.conf import settings
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
 
@@ -17,6 +16,7 @@ from apps.console.connection.models import (
 from apps.console.node.models import CoreNode
 from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.api.v1.connection.serializers import CoreIntegrationSerializer, CoreConnectionLocationSerializer
+from ..ovh_oauth import build_ovh_client
 
 
 class CoreAuthOVHEUReadSerializer(serializers.ModelSerializer):
@@ -110,14 +110,9 @@ class CoreAuthOVHEUWriteSerializer(serializers.ModelSerializer):
     def validate(self, data):
         if data.get("consumer_key"):
             try:
-                import ovh
-
-                client = ovh.Client(
-                    endpoint="ovh-eu",
-                    application_key=settings.OVH_EU_APP_KEY,
-                    application_secret=settings.OVH_EU_APP_SECRET,
+                client = build_ovh_client(
+                    "ovh_eu",
                     consumer_key=data["consumer_key"],
-                    timeout=int(getattr(settings, "PROVIDER_HTTP_READ_TIMEOUT", 60)),
                 )
                 client.get("/cloud/project")
             except Exception:

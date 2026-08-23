@@ -1187,18 +1187,13 @@ class CoreAuthOVHCA(TimeStampedModel):
         db_table = "core_auth_ovh_ca"
 
     def get_client(self):
-        import ovh
+        from apps.api.v1.connection.ovh_oauth import build_ovh_client
 
         encryption_key = self.connection.account.get_encryption_key()
-
-        client = ovh.Client(
-            endpoint=str("ovh-ca"),
-            application_key=settings.OVH_CA_APP_KEY,
-            application_secret=settings.OVH_CA_APP_SECRET,
+        return build_ovh_client(
+            "ovh_ca",
             consumer_key=bs_decrypt(self.consumer_key, encryption_key),
-            timeout=_provider_sdk_timeout(),
         )
-        return client
 
     def get_eligible_objects(self, object_type="cloud"):
         eligible_objects = []
@@ -1258,18 +1253,13 @@ class CoreAuthOVHEU(TimeStampedModel):
         db_table = "core_auth_ovh_eu"
 
     def get_client(self):
-        import ovh
+        from apps.api.v1.connection.ovh_oauth import build_ovh_client
 
         encryption_key = self.connection.account.get_encryption_key()
-
-        client = ovh.Client(
-            endpoint=str("ovh-eu"),
-            application_key=settings.OVH_EU_APP_KEY,
-            application_secret=settings.OVH_EU_APP_SECRET,
+        return build_ovh_client(
+            "ovh_eu",
             consumer_key=bs_decrypt(self.consumer_key, encryption_key),
-            timeout=_provider_sdk_timeout(),
         )
-        return client
 
     def get_eligible_objects(self, object_type="cloud"):
         eligible_objects = []
@@ -1329,18 +1319,13 @@ class CoreAuthOVHUS(TimeStampedModel):
         db_table = "core_auth_ovh_us"
 
     def get_client(self):
-        import ovh
+        from apps.api.v1.connection.ovh_oauth import build_ovh_client
 
         encryption_key = self.connection.account.get_encryption_key()
-
-        client = ovh.Client(
-            endpoint=str("ovh-us"),
-            application_key=settings.OVH_US_APP_KEY,
-            application_secret=settings.OVH_US_APP_SECRET,
+        return build_ovh_client(
+            "ovh_us",
             consumer_key=bs_decrypt(self.consumer_key, encryption_key),
-            timeout=_provider_sdk_timeout(),
         )
-        return client
 
     def get_eligible_objects(self, object_type="cloud"):
         eligible_objects = []
