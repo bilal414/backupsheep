@@ -2332,6 +2332,86 @@ class AuthDatabaseCheckConnectionSshTests(BaseTestCase):
         self.assertTrue(ssh.closed)
         self.assertFalse(os.path.exists(key_path))
 
+    def test_postgresql_ssh_check_connection_does_not_build_mysql_tls_option(self):
+        node = make_database_node(
+            self.account,
+            self.member,
+            db_type=CoreAuthDatabase.DatabaseType.POSTGRESQL,
+            version="postgres_16",
+            use_private_key=True,
+        )
+        auth = node.connection.auth_database
+
+        def handler(command):
+            if command == "pg_dump --version":
+                return b"pg_dump (PostgreSQL) 16.10\n", b"", 0
+            if "SELECT version();" in command:
+                return (
+                    b"PostgreSQL 16.10 on x86_64, compiled by gcc, 64-bit\n",
+                    b"",
+                    0,
+                )
+            self.fail(f"unexpected PostgreSQL validation command: {command}")
+
+        ssh = _FakeSSH(handler)
+        fd, key_path = tempfile.mkstemp(dir="_storage", prefix="sshkey_")
+        os.write(fd, b"fake-key")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(key_path) and os.remove(key_path))
+
+        with mock.patch.object(
+            CoreAuthDatabase,
+            "get_ssh_client",
+            return_value=(ssh, key_path),
+        ), mock.patch.object(
+            CoreAuthDatabase,
+            "_mysql_family_ssl_option",
+            side_effect=AssertionError("MySQL TLS helper used for PostgreSQL"),
+        ):
+            auth.check_connection()
+
+        self.assertTrue(ssh.closed)
+        self.assertFalse(os.path.exists(key_path))
+
+    def test_postgresql_ssh_object_listing_does_not_build_mysql_tls_option(self):
+        node = make_database_node(
+            self.account,
+            self.member,
+            db_type=CoreAuthDatabase.DatabaseType.POSTGRESQL,
+            version="postgres_16",
+            use_private_key=True,
+        )
+        auth = node.connection.auth_database
+
+        def handler(command):
+            if "FROM pg_database" in command:
+                return b"postgres\nbs_remed_pg_lg10_0d08dcf\n", b"", 0
+            self.fail(f"unexpected PostgreSQL listing command: {command}")
+
+        ssh = _FakeSSH(handler)
+        fd, key_path = tempfile.mkstemp(dir="_storage", prefix="sshkey_")
+        os.write(fd, b"fake-key")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(key_path) and os.remove(key_path))
+
+        with mock.patch.object(auth, "check_connection"), mock.patch.object(
+            CoreAuthDatabase,
+            "get_ssh_client",
+            return_value=(ssh, key_path),
+        ), mock.patch.object(
+            CoreAuthDatabase,
+            "_mysql_family_ssl_option",
+            side_effect=AssertionError("MySQL TLS helper used for PostgreSQL"),
+        ):
+            objects = auth.get_eligible_objects()
+
+        self.assertEqual(
+            objects,
+            [{"name": "bs_remed_pg_lg10_0d08dcf"}, {"name": "postgres"}],
+        )
+        self.assertTrue(ssh.closed)
+        self.assertFalse(os.path.exists(key_path))
+
 
 class BackupTaskValidationOrderTests(BaseTestCase):
     """backup_initiate runs before connection validation: a validation failure

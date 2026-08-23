@@ -2949,12 +2949,11 @@ class CoreAuthDatabase(TimeStampedModel):
                     username=username,
                     password=password,
                 )
-                option_ssl_mode = self._mysql_family_ssl_option(type, use_ssl)
-
                 if type in (
                     self.DatabaseType.MYSQL,
                     self.DatabaseType.MARIADB,
                 ):
+                    option_ssl_mode = self._mysql_family_ssl_option(type, use_ssl)
                     self._validate_mysql_family_client_capability(
                         database_type=type,
                         version=(data or {}).get("version", self.version),
@@ -3292,14 +3291,13 @@ class CoreAuthDatabase(TimeStampedModel):
         password = bs_decrypt(self.password, encryption_key)
 
         try:
-            option_ssl_mode = self._mysql_family_ssl_option(
-                self.type, self.use_ssl
-            )
-
             if self.type in (
                 self.DatabaseType.MYSQL,
                 self.DatabaseType.MARIADB,
             ):
+                option_ssl_mode = self._mysql_family_ssl_option(
+                    self.type, self.use_ssl
+                )
                 if self.use_public_key or self.use_private_key:
                     ssh, ssh_key_path = self.get_ssh_client()
                     remote_credentials = None
