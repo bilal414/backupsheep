@@ -1,4 +1,3 @@
-from django.conf import settings
 from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, mixins
@@ -7,7 +6,6 @@ from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
-from twilio.rest.verify.v2.service.entity.new_factor import NewFactorInstance
 
 from apps.console.member.models import CoreMember, CoreMemberAccount
 from .filters import CoreMemberFilter
@@ -17,12 +15,14 @@ from .serializers import (
     CoreMemberWriteSerializer,
     CurrentAccountMembershipSerializer,
     MemberTokenAuthSerializer,
+    MemberTokenRevokeAuthSerializer,
     MemberTokenVerifyAuthSerializer,
 )
 from ..utils.api_filters import DateRangeFilter
 from ..utils.api_serializers import ReadWriteSerializerMixin
 from rest_framework.response import Response
-from twilio.rest import Client
+from rest_framework.authtoken.models import Token
+from apps.console.member.totp import generate_totp_secret, provisioning_uri
 
 
 def _record_member_log(account, data):
@@ -197,37 +197,22 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         member = self.get_object()
 
         serializer = MemberTokenAuthSerializer(
-            data=request.data, context={"auth_multi_factor_id": member.auth_multi_factor_id}
+            data=request.data, context={"member": member, "request": request}
         )
         serializer.is_valid(raise_exception=True)
 
-        display_name = serializer.data["display_name"]
-
-        client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
-
-        # factors = (
-        #     client.verify.v2.services(settings.TWILIO_VERIFY_SID).entities(member.user.username).factors.list(limit=20)
-        # )
-        #
-        # # Clear any previous factors
-        # for record in factors:
-        #     print(record.sid)
-        #     if record.factor_type == "totp" and record.status == "unverified":
-        #         client.verify.v2.services(settings.TWILIO_VERIFY_SID).entities(member.user.username).factors(
-        #             record.sid
-        #         ).delete()
-
-        new_factor = (
-            client.verify.v2.services(settings.TWILIO_VERIFY_SID)
-            .entities(self.request.user.username)
-            .new_factors.create(friendly_name=display_name, factor_type=NewFactorInstance.FactorTypes.TOTP)
-        )
+        display_name = serializer.validated_data["display_name"]
+        secret = generate_totp_secret()
+        member.set_pending_totp_secret(secret, display_name)
 
         return Response(
             {
-                "detail": f"Please scan QR code with Authy or Google Authenticator.",
-                "binding": new_factor.binding,
-                "auth_multi_factor_id": new_factor.sid,
+                "detail": "Add the secret to your authenticator app, then verify the six-digit code.",
+                "binding": {
+                    "secret": secret,
+                    "uri": provisioning_uri(secret, member.email),
+                },
+                "auth_multi_factor_id": "totp-pending",
             },
             status=status.HTTP_200_OK,
         )
@@ -239,65 +224,34 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         serializer = MemberTokenVerifyAuthSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        auth_multi_factor_token = serializer.data["auth_multi_factor_token"]
-        auth_multi_factor_id = serializer.data["auth_multi_factor_id"]
-        display_name = serializer.data["display_name"]
-
-        client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
-
-        try:
-            # challenge = (
-            #     client.verify.v2.services(settings.TWILIO_VERIFY_SID)
-            #     .entities(member.user.username)
-            #     .challenges.create(auth_payload=auth_multi_factor_token, factor_sid=member.auth_multi_factor_id)
-            # )
-            factor = (
-                client.verify.v2.services(settings.TWILIO_VERIFY_SID)
-                .entities(member.user.username)
-                .factors(auth_multi_factor_id)
-                .update(auth_payload=auth_multi_factor_token)
-            )
-
-            if factor.status == "verified":
-
-                member.auth_multi_factor_id = auth_multi_factor_id
-                member.auth_multi_factor_display_name = display_name
-                member.save()
-
-                return Response(
-                    {
-                        "detail": f"Token verification successful.",
-                    },
-                    status=status.HTTP_200_OK,
-                )
-            else:
-                return Response(
-                    {
-                        "detail": f"Token verification failed. Check your token.",
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        except Exception as e:
+        token = serializer.validated_data["auth_multi_factor_token"]
+        if not member.verify_pending_totp(token):
             return Response(
-                {
-                    "detail": f"Token verification failed. Check your token.",
-                },
+                {"detail": "Token verification failed or the setup expired."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        Token.objects.filter(user=member.user).delete()
+        return Response(
+            {"detail": "Authenticator verification successful."},
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["post"])
     def auth_multi_factor_token_revoke(self, request, pk=None):
         member = self.get_object()
-
-        client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
-
-        client.verify.v2.services(settings.TWILIO_VERIFY_SID).entities(member.user.username).factors(
-            member.auth_multi_factor_id
-        ).delete()
-
-        member.auth_multi_factor_id = None
-        member.auth_multi_factor_display_name = None
-        member.save()
+        serializer = MemberTokenRevokeAuthSerializer(
+            data=request.data, context={"member": member, "request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        if not member.consume_totp(
+            serializer.validated_data["auth_multi_factor_token"]
+        ):
+            return Response(
+                {"detail": "The authenticator code is invalid or was already used."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        member.clear_mfa()
+        Token.objects.filter(user=member.user).delete()
 
         return Response(
             {

@@ -2,6 +2,7 @@ import uuid
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import models
+from django.db import transaction
 from django.db.models import UniqueConstraint, Q
 from model_utils.models import TimeStampedModel
 from apps.console.account.models import CoreAccount
@@ -13,6 +14,11 @@ class CoreMember(TimeStampedModel):
     timezone = models.CharField(max_length=64, default="UTC")
     password_reset_token = models.CharField(null=True, max_length=255, blank=True)
     password_reset_token_created = models.DateTimeField(null=True, blank=True, editable=False)
+    auth_multi_factor_secret = models.BinaryField(null=True, editable=False)
+    auth_multi_factor_display_name = models.CharField(max_length=128, blank=True, default="")
+    auth_multi_factor_pending_created = models.DateTimeField(null=True, editable=False)
+    auth_multi_factor_enabled_at = models.DateTimeField(null=True, editable=False)
+    auth_multi_factor_last_counter = models.BigIntegerField(null=True, editable=False)
 
     class Meta:
         db_table = 'core_member'
@@ -92,6 +98,127 @@ class CoreMember(TimeStampedModel):
 
     def get_encryption_key(self):
         return bytes(self.get_current_account().encryption_key)
+
+    @property
+    def mfa_enabled(self):
+        return bool(self.auth_multi_factor_secret and self.auth_multi_factor_enabled_at)
+
+    @property
+    def auth_multi_factor_id(self):
+        """Compatibility value for the existing console template/API."""
+        return "totp" if self.mfa_enabled else None
+
+    def set_pending_totp_secret(self, secret, display_name):
+        from django.utils import timezone
+        from apps.console.setting.models import _site_fernet
+
+        # MFA belongs to the identity, not one of its possibly many accounts.
+        # Use the site key so switching the current account cannot lock the user out.
+        self.auth_multi_factor_secret = _site_fernet().encrypt(
+            str(secret).encode("utf-8")
+        )
+        self.auth_multi_factor_display_name = str(display_name or "")[:128]
+        self.auth_multi_factor_pending_created = timezone.now()
+        self.auth_multi_factor_enabled_at = None
+        self.auth_multi_factor_last_counter = None
+        self.save(
+            update_fields=[
+                "auth_multi_factor_secret",
+                "auth_multi_factor_display_name",
+                "auth_multi_factor_pending_created",
+                "auth_multi_factor_enabled_at",
+                "auth_multi_factor_last_counter",
+                "modified",
+            ]
+        )
+
+    def get_totp_secret(self):
+        if not self.auth_multi_factor_secret:
+            return None
+        from cryptography.fernet import InvalidToken
+        from apps.console.setting.models import _site_fernet
+
+        try:
+            return _site_fernet().decrypt(
+                bytes(self.auth_multi_factor_secret)
+            ).decode("utf-8")
+        except (InvalidToken, TypeError, ValueError):
+            return None
+
+    def verify_pending_totp(self, token, *, at_time=None, ttl_seconds=600):
+        from datetime import timedelta
+        from django.utils import timezone
+        from .totp import matching_totp_counter
+
+        with transaction.atomic():
+            locked = CoreMember.objects.select_for_update().get(pk=self.pk)
+            if (
+                not locked.auth_multi_factor_secret
+                or locked.auth_multi_factor_enabled_at
+                or not locked.auth_multi_factor_pending_created
+                or timezone.now()
+                > locked.auth_multi_factor_pending_created + timedelta(seconds=ttl_seconds)
+            ):
+                return False
+            secret = locked.get_totp_secret()
+            counter = matching_totp_counter(secret, token, at_time=at_time) if secret else None
+            if counter is None:
+                return False
+            locked.auth_multi_factor_enabled_at = timezone.now()
+            locked.auth_multi_factor_pending_created = None
+            # The enrollment token cannot be replayed immediately as a login token.
+            locked.auth_multi_factor_last_counter = counter
+            locked.save(
+                update_fields=[
+                    "auth_multi_factor_enabled_at",
+                    "auth_multi_factor_pending_created",
+                    "auth_multi_factor_last_counter",
+                    "modified",
+                ]
+            )
+            self.auth_multi_factor_enabled_at = locked.auth_multi_factor_enabled_at
+            self.auth_multi_factor_pending_created = None
+            self.auth_multi_factor_last_counter = counter
+            return True
+
+    def consume_totp(self, token, *, at_time=None):
+        """Validate and atomically burn a TOTP counter to prevent replay."""
+        from .totp import matching_totp_counter
+
+        with transaction.atomic():
+            locked = CoreMember.objects.select_for_update().get(pk=self.pk)
+            if not locked.mfa_enabled:
+                return False
+            secret = locked.get_totp_secret()
+            counter = matching_totp_counter(secret, token, at_time=at_time) if secret else None
+            if counter is None or (
+                locked.auth_multi_factor_last_counter is not None
+                and counter <= locked.auth_multi_factor_last_counter
+            ):
+                return False
+            locked.auth_multi_factor_last_counter = counter
+            locked.save(
+                update_fields=["auth_multi_factor_last_counter", "modified"]
+            )
+            self.auth_multi_factor_last_counter = counter
+            return True
+
+    def clear_mfa(self):
+        self.auth_multi_factor_secret = None
+        self.auth_multi_factor_display_name = ""
+        self.auth_multi_factor_pending_created = None
+        self.auth_multi_factor_enabled_at = None
+        self.auth_multi_factor_last_counter = None
+        self.save(
+            update_fields=[
+                "auth_multi_factor_secret",
+                "auth_multi_factor_display_name",
+                "auth_multi_factor_pending_created",
+                "auth_multi_factor_enabled_at",
+                "auth_multi_factor_last_counter",
+                "modified",
+            ]
+        )
 
     def invites_received(self):
         from ..invite.models import CoreInvite

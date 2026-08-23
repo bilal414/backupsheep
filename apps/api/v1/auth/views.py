@@ -20,6 +20,14 @@ class APIAuthLogin(APIView):
         if serializer.is_valid():
             member = serializer.member
 
+            if serializer.requires_mfa:
+                return Response(
+                    {
+                        "auth_multi_factor": True,
+                        "detail": "Enter the code from your authenticator app.",
+                    }
+                )
+
             """
             Login
             """
@@ -114,10 +122,22 @@ class APIAuthReset(APIView):
                 member.user.save(update_fields=["password"])
                 member.password_reset_token = None
                 member.password_reset_token_created = None
+                # The verified email reset link is the recovery path when the
+                # authenticator is lost. Clear MFA and force fresh enrollment.
+                member.auth_multi_factor_secret = None
+                member.auth_multi_factor_display_name = ""
+                member.auth_multi_factor_pending_created = None
+                member.auth_multi_factor_enabled_at = None
+                member.auth_multi_factor_last_counter = None
                 member.save(
                     update_fields=[
                         "password_reset_token",
                         "password_reset_token_created",
+                        "auth_multi_factor_secret",
+                        "auth_multi_factor_display_name",
+                        "auth_multi_factor_pending_created",
+                        "auth_multi_factor_enabled_at",
+                        "auth_multi_factor_last_counter",
                         "modified",
                     ]
                 )

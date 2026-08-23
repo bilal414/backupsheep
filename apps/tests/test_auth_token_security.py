@@ -54,6 +54,17 @@ class AuthTokenSecurityTests(BaseTestCase):
 
     def test_password_reset_consumes_link_and_revokes_bearer_token(self):
         token = Token.objects.create(user=self.user)
+        self.member.set_pending_totp_secret(
+            "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP", "Recovery test"
+        )
+        self.member.auth_multi_factor_enabled_at = timezone.now()
+        self.member.auth_multi_factor_pending_created = None
+        self.member.save(
+            update_fields=[
+                "auth_multi_factor_enabled_at",
+                "auth_multi_factor_pending_created",
+            ]
+        )
         self.member.password_reset_token = self.member.generate_password_reset_token()
         self.member.password_reset_token_created = timezone.now()
         self.member.save()
@@ -72,6 +83,8 @@ class AuthTokenSecurityTests(BaseTestCase):
         self.assertFalse(Token.objects.filter(pk=token.pk).exists())
         self.member.refresh_from_db()
         self.assertIsNone(self.member.password_reset_token)
+        self.assertFalse(self.member.mfa_enabled)
+        self.assertIsNone(self.member.auth_multi_factor_secret)
         replay = self.client.patch(
             "/api/v1/auth/reset/",
             {

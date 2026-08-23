@@ -179,19 +179,37 @@ class UserWriteSerializer(serializers.ModelSerializer):
 
 class MemberTokenAuthSerializer(serializers.Serializer):
     display_name = serializers.CharField(max_length=128, allow_null=False, allow_blank=False, min_length=6)
+    current_password = serializers.CharField(
+        max_length=128, allow_null=False, allow_blank=False, write_only=True
+    )
 
     def validate(self, data):
-        if self.context.get("auth_multi_factor_id"):
+        member = self.context["member"]
+        if member.mfa_enabled:
             raise serializers.ValidationError(
                 f"Two-Factor token authentication is already setup. Revoke auth token and try again."
+            )
+        if not member.user.check_password(data["current_password"]):
+            raise serializers.ValidationError(
+                {"current_password": "Current password is incorrect."}
             )
         return data
 
 
 class MemberTokenVerifyAuthSerializer(serializers.Serializer):
-    auth_multi_factor_id = serializers.CharField(max_length=128, allow_null=False, allow_blank=False, min_length=6)
-    auth_multi_factor_token = serializers.CharField(max_length=128, allow_null=False, allow_blank=False, min_length=6)
-    display_name = serializers.CharField(max_length=128, allow_null=False, allow_blank=False, min_length=6)
+    auth_multi_factor_token = serializers.RegexField(r"^\d{6}$")
+
+
+class MemberTokenRevokeAuthSerializer(serializers.Serializer):
+    current_password = serializers.CharField(
+        max_length=128, allow_null=False, allow_blank=False, write_only=True
+    )
+    auth_multi_factor_token = serializers.RegexField(r"^\d{6}$")
+
+    def validate_current_password(self, value):
+        if not self.context["member"].user.check_password(value):
+            raise serializers.ValidationError("Current password is incorrect.")
+        return value
 
 
 class CoreMemberSerializer(serializers.ModelSerializer):
@@ -206,7 +224,13 @@ class CoreMemberSerializer(serializers.ModelSerializer):
         model = CoreMember
         # Password reset capability is a bearer secret. It must never appear in
         # the team-member API, even to another member of the same account.
-        exclude = ("password_reset_token", "password_reset_token_created")
+        exclude = (
+            "password_reset_token",
+            "password_reset_token_created",
+            "auth_multi_factor_secret",
+            "auth_multi_factor_pending_created",
+            "auth_multi_factor_last_counter",
+        )
         datatables_always_serialize = (
             "id",
             "user",

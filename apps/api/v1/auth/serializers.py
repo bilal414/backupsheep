@@ -8,9 +8,13 @@ class APIAuthLoginSerializer(serializers.Serializer):
     def __init__(self, **kwargs):
         super(APIAuthLoginSerializer, self).__init__(**kwargs)
         self.member = None
+        self.requires_mfa = False
 
     email = serializers.EmailField(required=True, allow_blank=False)
     password = serializers.CharField(max_length=128, required=True)
+    auth_multi_factor_token = serializers.CharField(
+        max_length=8, required=False, allow_blank=True, write_only=True
+    )
 
     def validate_password(self, value):
         # Use a single generic error for both unknown-email and wrong-password so the
@@ -30,6 +34,20 @@ class APIAuthLoginSerializer(serializers.Serializer):
 
         self.member = user.member
         return value
+
+    def validate(self, attrs):
+        if self.member and self.member.mfa_enabled:
+            token = attrs.get("auth_multi_factor_token")
+            if not token:
+                # Password was valid, but do not create a session or bearer token.
+                # The browser uses this flag to reveal the authenticator-code field.
+                self.requires_mfa = True
+                return attrs
+            if not self.member.consume_totp(token):
+                raise serializers.ValidationError(
+                    {"auth_multi_factor_token": "Invalid or already-used authenticator code."}
+                )
+        return attrs
 
 
 class APIAuthResetSerializer(serializers.Serializer):
