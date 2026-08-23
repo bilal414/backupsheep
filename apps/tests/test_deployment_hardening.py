@@ -136,7 +136,12 @@ class DeploymentHardeningContractTests(TestCase):
     def test_remote_build_installers_are_integrity_checked(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn(
-            "7325ac7755809ca3312b446bd832542421699298f25b701f9a111bb42df0c7c1",
+            "0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76",
+            dockerfile,
+        )
+        self.assertIn("B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8", dockerfile)
+        self.assertIn(
+            "a4bcd9f16a53cc763f87b9955dbcdced33c7aa90296b157eb6ceef0f156f4327",
             dockerfile,
         )
         self.assertIn("BCA43417C3B485DD128EC6D4B7B3B788A8D3785C", dockerfile)

@@ -1,99 +1,209 @@
-# Self-hosted BackupSheep image, shared by the web, Celery worker, and beat services
-# (docker-compose runs each from this one image with a different command).
-# Built in one step by docker-compose; no separate base image to build first.
-#
-# The web service runs gunicorn on port 8000 (static files via WhiteNoise); run it
-# behind your own TLS-terminating reverse proxy for production HTTPS.
-#
-# System packages below provide the backup tooling the worker shells out to:
-#   - lftp .................. FTP/FTPS storage transfers
-#   - mariadb-client ........ mariadb-dump / mysqldump for MariaDB backups
-#   - mysql (8.4) ........... Oracle MySQL client in /opt/mysql/bin for MySQL backups
-#   - postgresql-client-14..18  version-matched pg_dump (CoreAuthDatabase.bin_path)
-#   - gunicorn .............. WSGI server for the web service
-FROM python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
+# syntax=docker/dockerfile:1.20.0@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d
 
-# set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# Self-hosted BackupSheep image, shared by the web, Celery worker, and beat
+# services. Native compilation, repository tooling, and archive verification stay
+# in disposable builder stages. The final stage starts from the digest-pinned slim
+# image and receives only offline wheels, authenticated runtime Debian packages,
+# and the two signature-verified Oracle MySQL client binaries.
+
+FROM python:3.14.7-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52 AS python-wheels
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
-    && apt-get -y install --no-install-recommends libpq-dev gcc software-properties-common gnupg2 python3-dev musl-dev git g++-11 postgresql-server-dev-all \
-    && apt-get -y install --no-install-recommends ca-certificates curl dirmngr \
-    && curl -fsSL https://r.mariadb.com/downloads/mariadb_repo_setup -o /tmp/mariadb_repo_setup \
-    && echo "7325ac7755809ca3312b446bd832542421699298f25b701f9a111bb42df0c7c1  /tmp/mariadb_repo_setup" | sha256sum -c - \
-    && bash /tmp/mariadb_repo_setup \
-    && rm -f /tmp/mariadb_repo_setup \
-    && apt-get update \
-    && apt-get -y install --no-install-recommends mariadb-client \
-    && apt-get -y install --no-install-recommends tree build-essential libffi-dev libpq-dev python3-dev libjpeg-dev zip unzip libmysqlclient-dev g++ libzmq3-dev gcc \
-    && apt-get -y install --no-install-recommends libssl-dev libxml2-dev libxslt1-dev libcurl4-openssl-dev unixodbc unixodbc-dev libsqlite3-dev ncurses-dev libexpat1-dev \
-    && apt-get -y install --no-install-recommends pkg-config libreadline6-dev zlib1g-dev autoconf automake libtool \
-    && apt-get -y install --no-install-recommends libncurses-dev libgnutls28-dev libreadline-dev libfreetype6-dev \
-    && apt-get -y install --no-install-recommends tzdata lftp \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        default-libmysqlclient-dev \
+        libcurl4-openssl-dev \
+        libffi-dev \
+        libfreetype-dev \
+        libgnutls28-dev \
+        libjpeg62-turbo-dev \
+        libncurses-dev \
+        libpq-dev \
+        libreadline-dev \
+        libsqlite3-dev \
+        libssl-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        libzmq3-dev \
+        pkg-config \
+        unixodbc-dev \
+        zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# PostgreSQL client tools (pg_dump / psql / pg_restore) for versions 14-18 from the
-# PGDG apt repo, installed side-by-side under /usr/lib/postgresql/<N>/bin. Database
-# backups select the exact pg_dump for the target server's version (CoreAuthDatabase.bin_path).
-# MariaDB clients (mariadb-dump / mysqldump) come from the mariadb-server install above.
-RUN install -d /usr/share/postgresql-common/pgdg \
-    && curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update \
-    && apt-get -y install --no-install-recommends postgresql-client-14 postgresql-client-15 postgresql-client-16 postgresql-client-17 postgresql-client-18 \
+WORKDIR /build
+COPY requirements.txt /build/requirements.txt
+RUN python -m pip wheel \
+        --wheel-dir=/wheels \
+        --requirement=/build/requirements.txt
+
+
+# Produce the PGDG keyring in an isolated stage. Both the downloaded key bytes
+# and its OpenPGP primary fingerprint are pinned before it is trusted by APT.
+FROM python:3.14.7-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52 AS repository-metadata
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# Oracle MySQL 8.4 LTS client tools (mysql / mysqldump) for MySQL targets, shipped in
-# /opt/mysql/bin (CoreAuthDatabase.bin_path prefers them there; the MariaDB client stays
-# untouched in /usr/bin for MariaDB targets). The MySQL apt repo (mysql-apt-config) only
-# ships x86 packages, so the official glibc2.28 "Linux - Generic" tarball is used instead
-# -- it covers both x86_64 and aarch64. Only the two binaries are kept; they run against
-# the stock bookworm system libraries, so /opt/mysql/bin is self-contained.
 RUN set -eux; \
-    case "$(uname -m)" in \
-        x86_64) mysql_arch="x86_64" ;; \
-        aarch64) mysql_arch="aarch64" ;; \
-        *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    install -d -m 0755 /repository; \
+    curl --fail --silent --show-error --location \
+        --proto '=https' --tlsv1.2 \
+        -o /tmp/pgdg.asc \
+        https://www.postgresql.org/media/keys/ACCC4CF8.asc; \
+    echo "0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76  /tmp/pgdg.asc" \
+        | sha256sum -c -; \
+    actual_fingerprint="$(gpg --batch --with-colons --import-options show-only \
+        --import /tmp/pgdg.asc | awk -F: '$1 == "fpr" { print $10; exit }')"; \
+    test "$actual_fingerprint" = "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8"; \
+    gpg --batch --yes --dearmor --output /repository/pgdg.gpg /tmp/pgdg.asc
+
+
+# Download the exact runtime package set and its dependency closure while APT
+# still has the signed Debian/PGDG indexes. The final stage installs these local
+# .deb files without repository metadata or network access.
+FROM python:3.14.7-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52 AS runtime-packages
+
+ARG TARGETARCH
+COPY --from=repository-metadata /repository/pgdg.gpg /usr/share/keyrings/pgdg.gpg
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        amd64) lftp_version="4.9.2-2+b1" ;; \
+        arm64) lftp_version="4.9.2-2" ;; \
+        *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    pkg="mysql-8.4.10-linux-glibc2.28-${mysql_arch}"; \
-    mysql_key_fingerprint="BCA43417C3B485DD128EC6D4B7B3B788A8D3785C"; \
+    echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && install -d -m 0755 /runtime-debs/partial \
+    && apt-get update \
+    && apt-get -y --no-install-recommends \
+        -o Dir::Cache::archives=/runtime-debs \
+        --download-only install \
+        "ca-certificates=20250419~deb12u1" \
+        "lftp=${lftp_version}" \
+        "libaio1=0.3.113-4" \
+        "libncurses6=6.4-4" \
+        "libnuma1=2.0.16-1" \
+        "mariadb-client=1:10.11.18-0+deb12u1" \
+        "openssh-client=1:9.2p1-2+deb12u10" \
+        "postgresql-client-14=14.24-1.pgdg12+2" \
+        "postgresql-client-15=15.19-1.pgdg12+2" \
+        "postgresql-client-16=16.15-1.pgdg12+2" \
+        "postgresql-client-17=17.11-1.pgdg12+2" \
+        "postgresql-client-18=18.6-1.pgdg12+2" \
+        "tree=2.1.0-1" \
+        "unzip=6.0-28+deb12u1" \
+        "zip=3.0-13" \
+    && find /runtime-debs -maxdepth 1 -type f -name '*.deb' -print -quit \
+        | grep -q . \
+    && rm -rf /runtime-debs/partial /runtime-debs/lock /var/lib/apt/lists/*
+
+
+# Oracle MySQL's APT repository does not publish arm64 clients. Extract the two
+# required tools from the versioned upstream generic bundle after validating the
+# signing key checksum, key fingerprint, and detached artifact signature.
+FROM python:3.14.7-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52 AS mysql-client
+
+ARG TARGETARCH
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg libaio1 libncurses6 libnuma1 xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        amd64) mysql_arch="x86_64" ;; \
+        arm64) mysql_arch="aarch64" ;; \
+        *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    mysql_version="8.4.10"; \
+    pkg="mysql-${mysql_version}-linux-glibc2.28-${mysql_arch}"; \
     export GNUPGHOME=/tmp/mysql-gnupg; \
     install -d -m 0700 "$GNUPGHOME"; \
-    curl -fsSL -o /tmp/mysql-build-key.asc "https://repo.mysql.com/RPM-GPG-KEY-mysql-2025"; \
-    actual_fingerprint="$(gpg --batch --with-colons --import-options show-only --import /tmp/mysql-build-key.asc | awk -F: '$1 == "fpr" { print $10; exit }')"; \
-    test "$actual_fingerprint" = "$mysql_key_fingerprint"; \
+    curl --fail --silent --show-error --location \
+        --proto '=https' --tlsv1.2 \
+        -o /tmp/mysql-build-key.asc \
+        https://repo.mysql.com/RPM-GPG-KEY-mysql-2025; \
+    echo "a4bcd9f16a53cc763f87b9955dbcdced33c7aa90296b157eb6ceef0f156f4327  /tmp/mysql-build-key.asc" \
+        | sha256sum -c -; \
+    actual_fingerprint="$(gpg --batch --with-colons --import-options show-only \
+        --import /tmp/mysql-build-key.asc | awk -F: '$1 == "fpr" { print $10; exit }')"; \
+    test "$actual_fingerprint" = "BCA43417C3B485DD128EC6D4B7B3B788A8D3785C"; \
     gpg --batch --import /tmp/mysql-build-key.asc; \
-    curl -fsSL -o /tmp/mysql-client.tar.xz "https://dev.mysql.com/get/Downloads/MySQL-8.4/${pkg}.tar.xz"; \
-    curl -fsSL -o /tmp/mysql-client.tar.xz.asc "https://cdn.mysql.com/Downloads/MySQL-8.4/${pkg}.tar.xz.asc"; \
+    curl --fail --silent --show-error --location \
+        --proto '=https' --tlsv1.2 \
+        -o /tmp/mysql-client.tar.xz \
+        "https://cdn.mysql.com/Downloads/MySQL-8.4/${pkg}.tar.xz"; \
+    curl --fail --silent --show-error --location \
+        --proto '=https' --tlsv1.2 \
+        -o /tmp/mysql-client.tar.xz.asc \
+        "https://cdn.mysql.com/Downloads/MySQL-8.4/${pkg}.tar.xz.asc"; \
     gpg --batch --verify /tmp/mysql-client.tar.xz.asc /tmp/mysql-client.tar.xz; \
-    mkdir -p /tmp/mysql-client; \
-    tar -xJf /tmp/mysql-client.tar.xz -C /tmp/mysql-client "${pkg}/bin/mysql" "${pkg}/bin/mysqldump"; \
-    install -d /opt/mysql/bin; \
-    mv "/tmp/mysql-client/${pkg}/bin/mysql" "/tmp/mysql-client/${pkg}/bin/mysqldump" /opt/mysql/bin/; \
-    rm -rf /tmp/mysql-client /tmp/mysql-client.tar.xz /tmp/mysql-client.tar.xz.asc /tmp/mysql-build-key.asc "$GNUPGHOME"; \
-    /opt/mysql/bin/mysqldump --version
+    install -d -m 0755 /mysql/bin /tmp/mysql-client; \
+    tar -xJf /tmp/mysql-client.tar.xz -C /tmp/mysql-client \
+        "${pkg}/bin/mysql" "${pkg}/bin/mysqldump"; \
+    install -m 0755 "/tmp/mysql-client/${pkg}/bin/mysql" /mysql/bin/mysql; \
+    install -m 0755 "/tmp/mysql-client/${pkg}/bin/mysqldump" /mysql/bin/mysqldump; \
+    /mysql/bin/mysql --version; \
+    /mysql/bin/mysqldump --version
+
+
+FROM python:3.14.7-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52 AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HOME=/home/backupsheep
+
+# Install the authenticated package closure offline. Unpack all packages before
+# configuration so dependency ordering cannot trigger a network repair attempt.
+RUN --mount=from=runtime-packages,source=/runtime-debs,target=/runtime-debs,ro \
+    set -eux; \
+    dpkg --unpack /runtime-debs/*.deb; \
+    dpkg --configure --pending; \
+    dpkg --audit; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/*; \
+    for version in 14 15 16 17 18; do \
+        "/usr/lib/postgresql/${version}/bin/pg_dump" --version; \
+        "/usr/lib/postgresql/${version}/bin/psql" --version; \
+    done; \
+    mariadb --version; \
+    mariadb-dump --version; \
+    lftp --version; \
+    ssh -V; \
+    tree --version; \
+    unzip -v >/dev/null; \
+    zip -v >/dev/null
+
+COPY --from=mysql-client /mysql /opt/mysql
+RUN /opt/mysql/bin/mysql --version \
+    && /opt/mysql/bin/mysqldump --version
+
+RUN --mount=from=python-wheels,source=/wheels,target=/wheels,ro \
+    --mount=type=bind,source=requirements.txt,target=/tmp/requirements.txt,ro \
+    python -m pip install \
+        --no-cache-dir \
+        --no-index \
+        --find-links=/wheels \
+        --requirement=/tmp/requirements.txt \
+    && python -m pip check
 
 WORKDIR /code
-
-# install python dependencies (kept before the source copy so code changes don't
-# invalidate the cached dependency layer)
-COPY requirements.txt requirements.txt
-RUN pip install --no-cache-dir --upgrade "pip==26.2.1" \
-    && pip install --no-cache-dir -r requirements.txt
-
-# copy project
 COPY . /code/
 
-EXPOSE 8000
-
-COPY init.sh /usr/local/bin/
+COPY init.sh /usr/local/bin/init.sh
 RUN groupadd --gid 10001 backupsheep \
-    && useradd --uid 10001 --gid 10001 --home-dir /home/backupsheep --create-home --shell /usr/sbin/nologin backupsheep \
-    && install -d -o backupsheep -g backupsheep -m 0700 /code/_storage /backups \
+    && useradd --uid 10001 --gid 10001 \
+        --home-dir /home/backupsheep --create-home \
+        --shell /usr/sbin/nologin backupsheep \
+    && install -d -o backupsheep -g backupsheep -m 0700 \
+        /code/_storage /backups \
     && install -d -o backupsheep -g backupsheep -m 0755 /code/static \
     && chmod 0755 /usr/local/bin/init.sh
 
-ENV HOME=/home/backupsheep
+EXPOSE 8000
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/init.sh"]
