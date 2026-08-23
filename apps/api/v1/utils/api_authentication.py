@@ -37,15 +37,22 @@ class CustomTokenAuthentication(TokenAuthentication):
         if not token.user.is_active:
             raise exceptions.AuthenticationFailed(_("User inactive or deleted."))
 
+        try:
+            member = token.user.member
+        except AttributeError:
+            raise exceptions.AuthenticationFailed(_("User inactive or deleted."))
+        if member.get_active_current_membership() is None:
+            # A previously-issued bearer token must stop authenticating as soon as
+            # the identity has no active workspace membership.
+            raise exceptions.AuthenticationFailed(_("User inactive or deleted."))
+
         if token_is_expired(token):
             # A captured bearer token must stop working after the configured TTL.
             # Delete it so a subsequent password login receives a fresh token.
             token.delete()
             raise exceptions.AuthenticationFailed(_("Token expired."))
 
-        member_timezone = (
-            model.objects.select_related("user").get(key=key).user.member.timezone
-        )
+        member_timezone = member.timezone
         if member_timezone:
             timezone.activate(pytz.timezone(member_timezone))
         return token.user, token

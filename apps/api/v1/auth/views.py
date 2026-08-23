@@ -20,6 +20,14 @@ class APIAuthLogin(APIView):
         if serializer.is_valid():
             member = serializer.member
 
+            # A correct password must not create a browser session or bearer token
+            # for an identity with no ACTIVE tenant membership.  Keep the error
+            # intentionally generic so membership status is not disclosed.
+            if member.get_active_current_membership() is None:
+                raise ExceptionDefault(
+                    detail={"password": ["wrong email & password combination"]}
+                )
+
             if serializer.requires_mfa:
                 return Response(
                     {

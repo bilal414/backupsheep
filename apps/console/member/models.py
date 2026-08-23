@@ -58,44 +58,95 @@ class CoreMember(TimeStampedModel):
 
     @property
     def account(self):
-        if self.accounts.filter().count() == 1:
-            return self.accounts.first()
+        active_memberships = self.memberships.filter(
+            status=CoreMemberAccount.Status.ACTIVE
+        ).select_related("account")
+        if active_memberships.count() == 1:
+            return active_memberships.first().account
+        return None
 
     @property
     def multiple_accounts(self):
-        if self.accounts.filter().count() > 1:
-            return True
+        return self.memberships.filter(status=CoreMemberAccount.Status.ACTIVE).count() > 1
 
     def set_current_account(self, account=None):
-        if not self.multiple_accounts:
-            membership = self.memberships.get()
-            membership.current = True
-            membership.save()
+        """Atomically select an ACTIVE membership as the current tenant.
 
-        if account:
-            if self.memberships.filter(account=account).exists():
-                membership = self.memberships.get(account=account)
-                membership.current = True
-                membership.save()
+        Membership state can change between an API pre-check and the write.  Re-read
+        every row under a lock so a stale suspended/pending/invited membership can
+        never be made current.  With no explicit account, prefer the active primary
+        membership and then the oldest active membership for deterministic recovery.
+        """
+        account_id = getattr(account, "pk", account) if account is not None else None
+
+        with transaction.atomic():
+            memberships = list(
+                self.memberships.select_for_update()
+                .select_related("account")
+                .order_by("-primary", "id")
+            )
+            active_memberships = [
+                membership
+                for membership in memberships
+                if membership.status == CoreMemberAccount.Status.ACTIVE
+            ]
+            if account_id is None:
+                target = next(
+                    (membership for membership in active_memberships if membership.current),
+                    active_memberships[0] if active_memberships else None,
+                )
+            else:
+                target = next(
+                    (
+                        membership
+                        for membership in active_memberships
+                        if str(membership.account_id) == str(account_id)
+                    ),
+                    None,
+                )
+
+            if target is None:
+                return None
+
+            # Clear the old selector before setting the replacement so the
+            # database's conditional unique constraint is satisfied even when
+            # the primary membership is the destination and sorts first.
+            for membership in memberships:
+                if membership.current and membership.pk != target.pk:
+                    membership.current = False
+                    membership.save(update_fields=["current", "modified"])
+            if not target.current:
+                target.current = True
+                target.save(update_fields=["current", "modified"])
+
+            return target
+
+    def get_active_current_membership(self):
+        """Return an active current membership, repairing a stale selector safely."""
+        membership = (
+            self.memberships.filter(
+                current=True,
+                status=CoreMemberAccount.Status.ACTIVE,
+            )
+            .select_related("account")
+            .first()
+        )
+        return membership or self.set_current_account()
 
     def get_current_account(self):
-        if self.memberships.filter(current=True).exists():
-            return self.memberships.get(current=True).account
-        elif self.memberships.filter().count() == 1:
-            membership = self.memberships.first()
-            membership.current = True
-            membership.save()
-            return membership.account
+        membership = self.get_active_current_membership()
+        return membership.account if membership else None
 
     def get_primary_account(self):
-        if self.memberships.filter(primary=True).exists():
-            return self.memberships.get(primary=True).account
-        elif self.memberships.filter().count() == 1:
-            membership = self.memberships.first()
-            membership.current = True
-            membership.primary = True
-            membership.save()
-            return membership.account
+        membership = (
+            self.memberships.filter(
+                primary=True,
+                status=CoreMemberAccount.Status.ACTIVE,
+            )
+            .select_related("account")
+            .first()
+        )
+        return membership.account if membership else None
 
     def get_encryption_key(self):
         return bytes(self.get_current_account().encryption_key)
@@ -241,7 +292,8 @@ class CoreMember(TimeStampedModel):
 
     @property
     def is_primary_account(self):
-        return self.memberships.filter(primary=True, account=self.get_current_account()).exists()
+        membership = self.get_active_current_membership()
+        return bool(membership and membership.primary)
 
     # Password reset tokens expire this many hours after they are issued.
     PASSWORD_RESET_TOKEN_TTL_HOURS = 1

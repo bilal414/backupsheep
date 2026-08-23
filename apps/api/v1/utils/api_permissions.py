@@ -2,30 +2,18 @@ from rest_framework import permissions
 
 
 def active_current_membership(member):
-    """Return the member's active current membership, or ``None``.
+    """Return or safely select the member's active current membership.
 
     Membership status is an authorization boundary. A stale ``current=True``
     flag on a suspended, pending, or invited row must not preserve tenant
-    access through otherwise account-scoped querysets.
+    access through otherwise account-scoped querysets.  If another ACTIVE
+    membership exists, the member model atomically selects it; otherwise this
+    returns ``None``.
     """
     try:
-        account = member.get_current_account()
+        return member.get_active_current_membership()
     except (AttributeError, TypeError):
         return None
-    if account is None:
-        return None
-
-    from apps.console.member.models import CoreMemberAccount
-
-    return (
-        member.memberships.filter(
-            account=account,
-            current=True,
-            status=CoreMemberAccount.Status.ACTIVE,
-        )
-        .select_related("account")
-        .first()
-    )
 
 
 def member_has_perm(request, codename):

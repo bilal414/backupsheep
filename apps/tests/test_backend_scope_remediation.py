@@ -250,11 +250,12 @@ class RestrictedBackendScopeTests(BaseTestCase):
             {self.allowed_node.connection_id},
         )
 
-    def test_suspended_current_membership_cannot_access_node_resources(self):
+    def test_suspended_current_membership_moves_to_active_fallback_without_old_resources(self):
         membership = self.client_member.memberships.get(account=self.account)
         membership.status = CoreMemberAccount.Status.SUSPENDED
         membership.save(update_fields=["status", "modified"])
 
+        responses = {}
         for url in (
             "/api/v1/websites/",
             "/api/v1/websites/totals/",
@@ -269,19 +270,30 @@ class RestrictedBackendScopeTests(BaseTestCase):
             "/api/v1/notifications-email/",
         ):
             response = self.client.get(url)
-            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN, url)
+            self.assertEqual(response.status_code, status.HTTP_200_OK, url)
+            responses[url] = response
 
         active_membership = self.client_member.memberships.exclude(
             account=self.account
         ).get(status=CoreMemberAccount.Status.ACTIVE)
+        membership.refresh_from_db()
+        active_membership.refresh_from_db()
+        self.assertFalse(membership.current)
+        self.assertTrue(active_membership.current)
+        self.assertEqual(responses["/api/v1/websites/"].json(), [])
+        self.assertEqual(responses["/api/v1/websites/connections/"].json(), [])
+        self.assertEqual(responses["/api/v1/websites/totals/"].json()["nodes"], 0)
+        self.assertNotIn(
+            self.account.id,
+            {item["id"] for item in responses["/api/v1/accounts/"].json()},
+        )
+
         switch_response = self.client.post(
             f"/api/v1/members/{self.client_member.id}/switch_current_account/",
             {"account_id": active_membership.account_id},
             format="json",
         )
         self.assertEqual(switch_response.status_code, status.HTTP_200_OK)
-        active_membership.refresh_from_db()
-        self.assertTrue(active_membership.current)
 
     def test_switch_current_account_rejects_suspended_destination(self):
         suspended_account, _suspended_owner, _suspended_user = factories.make_account(

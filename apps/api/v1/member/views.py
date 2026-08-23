@@ -173,19 +173,8 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
         account_id = self.request.data.get("account_id")
 
-        if member.memberships.filter(
-            account_id=account_id,
-            status=CoreMemberAccount.Status.ACTIVE,
-        ).exists():
-            current_membership = member.memberships.filter(current=True).first()
-            if current_membership:
-                current_membership.current = False
-                current_membership.save()
-
-            membership = member.memberships.get(account_id=account_id)
-            membership.current = True
-            membership.save()
-
+        membership = member.set_current_account(account_id)
+        if membership is not None:
             return Response(
                 {"detail": f"Current account switched to account {membership.account.name}."},
                 status=status.HTTP_200_OK,

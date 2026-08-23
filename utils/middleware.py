@@ -10,7 +10,7 @@ AUTH_SESSION_VERSION_KEY = "_backupsheep_auth_session_version"
 
 
 class AuthenticationVersionMiddleware:
-    """Reject browser sessions issued before a security-sensitive identity change."""
+    """Reject revoked sessions and sessions without an active tenant membership."""
 
     def __init__(self, get_response):
         self.get_response = get_response
@@ -28,6 +28,14 @@ class AuthenticationVersionMiddleware:
             if member is not None:
                 bound_version = request.session.get(AUTH_SESSION_VERSION_KEY)
                 if str(bound_version) != str(member.auth_session_version):
+                    from django.contrib.auth import logout
+
+                    logout(request)
+                elif member.get_active_current_membership() is None:
+                    # Membership suspension is an authentication boundary, not merely
+                    # a queryset filter.  End an existing browser session immediately
+                    # when no tenant remains active.  The model automatically selects
+                    # another active membership first, when one is available.
                     from django.contrib.auth import logout
 
                     logout(request)
