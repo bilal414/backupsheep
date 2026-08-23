@@ -41,7 +41,7 @@
                 </svg>
                 Sources
             </a>
-            <a
+            {% if can_manage_sources %}<a
                 href="{% url 'console:setup:integration_select' %}"
                 @click="sideBar = false"
                 class="group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition {% if active_url == 'setup' %}bg-indigo-50 text-indigo-700{% else %}text-slate-600 hover:bg-slate-50 hover:text-slate-900{% endif %}"
@@ -51,7 +51,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
                 </svg>
                 Add source
-            </a>
+            </a>{% endif %}
         </div>
     </section>
 
