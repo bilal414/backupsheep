@@ -86,6 +86,44 @@ def _bounded_positive_int(name, default, maximum):
     return value
 
 
+def _private_network_allowlist(name):
+    """Parse an explicit list of private networks; public catch-alls are invalid."""
+
+    private_supernets = tuple(
+        ipaddress.ip_network(value)
+        for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+    )
+    raw_value = config.get(name, "")
+    values = (
+        raw_value
+        if isinstance(raw_value, (list, tuple))
+        else str(raw_value).split(",")
+    )
+    networks = []
+    for value in values:
+        value = str(value).strip()
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as error:
+            raise ImproperlyConfigured(
+                f"{name} must contain exact comma-separated CIDR networks."
+            ) from error
+        if not any(
+            network.version == private_supernet.version
+            and network.subnet_of(private_supernet)
+            for private_supernet in private_supernets
+        ):
+            raise ImproperlyConfigured(
+                f"{name} may contain only RFC1918 IPv4 or ULA IPv6 networks."
+            )
+        networks.append(network)
+    if len(networks) > 32:
+        raise ImproperlyConfigured(f"{name} may contain at most 32 networks.")
+    return tuple(networks)
+
+
 # DRF's built-in token model is otherwise permanent. Limit bearer-token lifetime
 # even when an operator forgets to configure it, and refuse values over 90 days.
 API_TOKEN_TTL_SECONDS = _bounded_positive_int(
@@ -1024,6 +1062,13 @@ S3_DOWNLOAD_URL_EXPIRES = _bounded_positive_int(
     "S3_DOWNLOAD_URL_EXPIRES",
     5 * 60,
     60 * 60,
+)
+
+# WordPress targets are public HTTPS origins by default. Self-hosters that must
+# reach a private WordPress origin can enumerate only the required private CIDRs;
+# loopback, link-local, reserved and metadata targets remain forbidden regardless.
+WORDPRESS_PRIVATE_TARGET_CIDRS = _private_network_allowlist(
+    "WORDPRESS_PRIVATE_TARGET_CIDRS"
 )
 
 # Paramiko and the system SSH client both require a verified host key for SSH/SFTP

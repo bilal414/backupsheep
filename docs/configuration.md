@@ -72,11 +72,23 @@ fragments are present.
 | `RABBITMQ_CA_CERT` | optional | system roots | Private CA bundle for `amqps`; hostname verification is always enabled. |
 | `LOG_RETENTION_DAYS` | optional | `30` | Days to keep backup run logs on local disk *and* activity-log entries in the database before `delete_old_logs` (03:00) / `delete_old_db_logs` (03:30) prune them. |
 | `S3_DOWNLOAD_URL_EXPIRES` | optional | `300` | Seconds before a provider-signed backup URL expires; values above `3600` are rejected. |
+| `WORDPRESS_PRIVATE_TARGET_CIDRS` | optional | blank | Exact comma-separated RFC1918/ULA CIDRs allowed for HTTPS WordPress origins. Blank rejects all private targets; loopback, link-local, reserved and metadata addresses are always rejected. |
 | `SSH_KNOWN_HOSTS_PATH` | optional | `_storage/ssh_known_hosts` | Reviewed OpenSSH `known_hosts` file used for SSH/SFTP backup sources. Unknown host keys are rejected; mount/populate this file with keys verified out-of-band. |
 
 Production allows plaintext AMQP only on loopback or the exact stock `rabbitmq` Compose
 service. External and multi-host brokers must use `amqps`; certificate validation and
 hostname matching are mandatory. System trust roots are used unless a private CA is set.
+
+WordPress integration keys and optional HTTP Basic credentials are sent only over
+certificate-verified HTTPS. BackupSheep resolves each target once, rejects the entire DNS
+answer if any address violates the target policy, and connects to one approved IP while
+retaining TLS SNI and hostname verification. Private WordPress sites require an explicit
+`WORDPRESS_PRIVATE_TARGET_CIDRS` entry; do not use a broader network than the site needs.
+This application revision requires a BackupSheep WordPress plugin release that reads the
+integration key from `X-BackupSheep-Key`; the legacy query-only v1.8 plugin fails closed
+and must be upgraded before rolling this application change out to WordPress users.
+Pinned WordPress traffic also ignores ambient HTTP(S) proxy variables because a proxy
+would replace the verified connection peer.
 
 ## Transactional email
 

@@ -106,6 +106,7 @@ semicolon failover list whose members could cross transport trust boundaries.
 | `BS_LOCAL_STORAGE_PATH` | `/backups` | Root used by the Local Storage destination; mount identically in relevant roles |
 | `LOG_RETENTION_DAYS` | `30` | Days before local run logs and database activity are pruned |
 | `S3_DOWNLOAD_URL_EXPIRES` | `300` | Provider-signed archive URL seconds; hard maximum `3600` |
+| `WORDPRESS_PRIVATE_TARGET_CIDRS` | blank | Exact RFC1918/ULA CIDRs permitted for DNS-pinned, certificate-verified HTTPS WordPress targets; special/metadata ranges remain denied |
 | `SSH_KNOWN_HOSTS_PATH` | `_storage/ssh_known_hosts` | Reviewed OpenSSH known-hosts file; relative paths resolve under repository root |
 | `SSH_MANAGED_PRIVATE_KEY_PATH` | blank | Optional managed private key file; relative paths resolve under repository root |
 | `SSH_MANAGED_PUBLIC_KEY` | blank | Matching public key advertised by the console only when private key exists |
@@ -114,6 +115,10 @@ semicolon failover list whose members could cross transport trust boundaries.
 Tencent signatures that BackupSheep creates. Dropbox, OneDrive and similar APIs may issue
 their own temporary links without accepting a caller-selected lifetime; those remain
 bounded by the provider rather than this setting.
+
+WordPress credentials never use plaintext HTTP. Public HTTPS targets work by default.
+Private targets require the smallest practical comma-separated CIDR allowlist in
+`WORDPRESS_PRIVATE_TARGET_CIDRS`; DNS failures and mixed public/private answers fail closed.
 
 ## Durable execution and recovery
 

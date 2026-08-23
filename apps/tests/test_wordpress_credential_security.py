@@ -76,11 +76,18 @@ class WordPressCredentialModelTests(BaseTestCase):
             CoreAuthWordPress.objects.filter(connection=self.connection).exists()
         )
 
-    @mock.patch("apps.console.connection.models.requests.get")
+    @mock.patch(
+        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_get"
+    )
+    @mock.patch(
+        "apps.api.v1.utils.wordpress_transport.resolve_wordpress_target"
+    )
     def test_request_keeps_secrets_out_of_url_and_query_and_disables_redirects(
-        self, get
+        self, resolve_target, pinned_get
     ):
-        get.return_value = SimpleNamespace(status_code=302)
+        target = SimpleNamespace(pinned_url="https://8.8.8.8:443/subsite/")
+        resolve_target.return_value = target
+        pinned_get.return_value = SimpleNamespace(status_code=302)
         row = self.make_auth(url="https://WordPress.Example.Test:443/subsite/")
 
         response = row.request(
@@ -90,13 +97,13 @@ class WordPressCredentialModelTests(BaseTestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        get.assert_called_once()
-        self.assertEqual(
-            get.call_args.args[0],
-            "https://wordpress.example.test:443/subsite/",
+        resolve_target.assert_called_once_with(
+            "https://wordpress.example.test:443/subsite",
         )
+        pinned_get.assert_called_once()
+        self.assertIs(pinned_get.call_args.args[0], target)
         self.assertEqual(
-            get.call_args.kwargs["params"],
+            pinned_get.call_args.kwargs["params"],
             {
                 "rest_route": "/backupsheep/updraftplus/status",
                 "backup_uuid": "backup-123",
@@ -104,26 +111,32 @@ class WordPressCredentialModelTests(BaseTestCase):
             },
         )
         self.assertEqual(
-            get.call_args.kwargs["headers"][WORDPRESS_KEY_HEADER],
+            pinned_get.call_args.kwargs["headers"][WORDPRESS_KEY_HEADER],
             "wordpress-key-canary",
         )
         self.assertEqual(
-            get.call_args.kwargs["auth"],
+            pinned_get.call_args.kwargs["auth"],
             ("http-user-canary", "http-password-canary"),
         )
-        self.assertFalse(get.call_args.kwargs["allow_redirects"])
         rendered_url_data = repr(
-            (get.call_args.args[0], get.call_args.kwargs["params"])
+            (target.pinned_url, pinned_get.call_args.kwargs["params"])
         )
         self.assertNotIn("wordpress-key-canary", rendered_url_data)
         self.assertNotIn("http-password-canary", rendered_url_data)
 
-    @mock.patch("apps.console.connection.models.requests.get")
+    @mock.patch(
+        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_get"
+    )
+    @mock.patch(
+        "apps.api.v1.utils.wordpress_transport.resolve_wordpress_target"
+    )
     def test_untrusted_url_ambient_data_and_query_credentials_fail_before_network(
-        self, get
+        self, resolve_target, pinned_get
     ):
+        resolve_target.return_value = SimpleNamespace()
         row = self.make_auth()
         for invalid_url in (
+            "http://wordpress.example.test",
             "https://user:password@wordpress.example.test",
             "https://wordpress.example.test/?next=https://attacker.invalid",
             "https://wordpress.example.test/#fragment",
@@ -135,12 +148,18 @@ class WordPressCredentialModelTests(BaseTestCase):
         row.url = "https://wordpress.example.test"
         with self.assertRaises(ValueError):
             row.request("validate", params={"key": "query-secret"})
-        get.assert_not_called()
+        pinned_get.assert_not_called()
 
-    @mock.patch("apps.console.connection.models.requests.get")
+    @mock.patch(
+        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_get"
+    )
+    @mock.patch(
+        "apps.api.v1.utils.wordpress_transport.resolve_wordpress_target"
+    )
     def test_cross_account_ciphertext_transplant_fails_closed_before_network(
-        self, get
+        self, resolve_target, pinned_get
     ):
+        resolve_target.return_value = SimpleNamespace()
         source = self.make_auth()
         other_account, other_member, _ = factories.make_account()
         other_connection = factories.make_connection(
@@ -157,7 +176,7 @@ class WordPressCredentialModelTests(BaseTestCase):
         self.assertIsNone(target.get_key())
         with self.assertRaises(ValueError):
             target.request("validate")
-        get.assert_not_called()
+        pinned_get.assert_not_called()
 
     def test_serializer_rejects_versioned_ciphertext_as_user_input(self):
         serializer = CoreAuthWordPressWriteSerializer(

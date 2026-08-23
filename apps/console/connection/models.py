@@ -3570,8 +3570,8 @@ class CoreAuthWordPress(TimeStampedModel):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("A WordPress URL is required")
         parts = urlsplit(value.strip())
-        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
-            raise ValueError("WordPress URL must use HTTP or HTTPS")
+        if parts.scheme.lower() != "https" or not parts.hostname:
+            raise ValueError("WordPress credentials require an HTTPS URL")
         if parts.username is not None or parts.password is not None:
             raise ValueError("WordPress URL must not contain credentials")
         if parts.query or parts.fragment:
@@ -3599,9 +3599,14 @@ class CoreAuthWordPress(TimeStampedModel):
         supplied = data or {}
         base_url = self._normalized_base_url(supplied.get("url", self.url))
 
-        from apps.api.v1.utils.api_helpers import assert_url_not_metadata
+        from apps.api.v1.utils.wordpress_transport import (
+            pinned_wordpress_get,
+            resolve_wordpress_target,
+        )
 
-        assert_url_not_metadata(base_url, "WordPress url")
+        # Resolve and approve the target before decrypting any credential. The
+        # transport later connects to this exact IP and never resolves again.
+        target = resolve_wordpress_target(base_url)
         key = supplied.get("key") if data is not None else self.get_key()
         http_user = (
             supplied.get("http_user") if data is not None else self.get_http_user()
@@ -3627,13 +3632,18 @@ class CoreAuthWordPress(TimeStampedModel):
             "params": query,
             "headers": headers,
             "auth": (http_user, http_pass) if http_user and http_pass else None,
-            "allow_redirects": False,
-            "verify": True,
             "stream": stream,
         }
         if timeout is not None:
             request_kwargs["timeout"] = timeout
-        return requests.get(f"{base_url}/", **request_kwargs)
+        return pinned_wordpress_get(
+            target,
+            params=request_kwargs["params"],
+            headers=request_kwargs["headers"],
+            auth=request_kwargs["auth"],
+            stream=request_kwargs["stream"],
+            timeout=request_kwargs.get("timeout"),
+        )
 
     def get_client(self):
         return {
