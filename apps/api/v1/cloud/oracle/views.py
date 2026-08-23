@@ -13,7 +13,8 @@ from apps.api.v1.cloud.oracle.serializers import (
     CoreCloudOracleReadSerializer,
     CoreCloudOracleWriteSerializer,
 )
-from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_filters import DateRangeFilter, scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreOracleBackup
 from apps.console.connection.models import CoreConnection
@@ -53,7 +54,7 @@ class CoreCloudOracleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             account=member.get_current_account(), integration__code="oracle"
         ) & ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
         return Response(
-            CoreConnection.objects.filter(query).values(
+            visible_connections(member).filter(query).values(
                 "id",
                 "name",
                 "location_id",
@@ -64,7 +65,7 @@ class CoreCloudOracleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     @action(detail=False)
     def totals(self, request):
-        nodes = self.get_queryset()
+        nodes = scope_direct_node_queryset(request, self.get_queryset())
         return Response(
             {
                 "nodes": nodes.count(),

@@ -617,16 +617,51 @@ def visible_nodes(member):
     """
     from apps.console.account.models import CoreAccountGroup
     from apps.console.node.models import CoreNode
+    from apps.api.v1.utils.api_permissions import active_current_membership
 
-    account = member.get_current_account()
+    membership = active_current_membership(member)
+    if membership is None:
+        return CoreNode.objects.none()
+    account = membership.account
     nodes = CoreNode.objects.filter(connection__account=account)
-    if account is None or member.is_primary_account:
+    if membership.primary:
         return nodes
-    account_groups = CoreAccountGroup.objects.filter(account=account, group__user=member.user)
+    account_groups = CoreAccountGroup.objects.filter(
+        account=account,
+        group__user=member.user,
+    )
     if account_groups.filter(nodes__isnull=True).exists():
         # At least one unrestricted group: full account-wide visibility.
         return nodes
     return nodes.filter(enrollments__in=account_groups).distinct()
+
+
+def visible_connections(member):
+    """Connections usable without revealing nodes outside group assignments.
+
+    Owners and members of an unrestricted account group retain the full
+    account connection list, including empty connections used to create a new
+    node. Restricted members see only connections already associated with one
+    of their visible nodes.
+    """
+    from apps.api.v1.utils.api_permissions import active_current_membership
+    from apps.console.account.models import CoreAccountGroup
+    from apps.console.connection.models import CoreConnection
+
+    membership = active_current_membership(member)
+    if membership is None:
+        return CoreConnection.objects.none()
+    connections = CoreConnection.objects.filter(account=membership.account)
+    if membership.primary:
+        return connections
+
+    account_groups = CoreAccountGroup.objects.filter(
+        account=membership.account,
+        group__user=member.user,
+    )
+    if account_groups.filter(nodes__isnull=True).exists():
+        return connections
+    return connections.filter(nodes__in=visible_nodes(member)).distinct()
 
 
 class GenerateGroup:

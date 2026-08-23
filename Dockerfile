@@ -88,6 +88,12 @@ COPY . /code/
 EXPOSE 8000
 
 COPY init.sh /usr/local/bin/
-RUN chmod u+x /usr/local/bin/init.sh
+RUN groupadd --gid 10001 backupsheep \
+    && useradd --uid 10001 --gid 10001 --home-dir /home/backupsheep --create-home --shell /usr/sbin/nologin backupsheep \
+    && install -d -o backupsheep -g backupsheep -m 0700 /code/_storage /backups \
+    && install -d -o backupsheep -g backupsheep -m 0755 /code/static \
+    && chmod 0755 /usr/local/bin/init.sh
 
+ENV HOME=/home/backupsheep
+USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/init.sh"]

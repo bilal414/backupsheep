@@ -10,7 +10,8 @@ from rest_framework.response import Response
 from apps.api.v1.cloud.hetzner.filters import CoreCloudHetznerFilter
 from apps.api.v1.cloud.hetzner.permissions import CoreCloudHetznerViewPermissions
 from apps.api.v1.cloud.hetzner.serializers import CoreCloudHetznerReadSerializer, CoreCloudHetznerWriteSerializer
-from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_filters import DateRangeFilter, scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup, CoreHetznerBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
@@ -54,7 +55,7 @@ class CoreCloudHetznerView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query = Q(account=member.get_current_account(), integration__code="hetzner")
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
         query &= ~Q(status=CoreConnection.Status.TOKEN_REFRESH_FAIL)
-        regions = CoreConnection.objects.filter(query).values(
+        regions = visible_connections(member).filter(query).values(
             "id",
             "name",
             "location_id",
@@ -70,7 +71,7 @@ class CoreCloudHetznerView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query &= Q(node__connection__integration__code="hetzner")
         query &= Q(node__type=CoreNode.Type.CLOUD)
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-        nodes = CoreHetzner.objects.filter(query)
+        nodes = scope_direct_node_queryset(request, CoreHetzner.objects.filter(query))
         all_totals = {
             "nodes": nodes.count(),
             "backups": CoreHetznerBackup.objects.filter(hetzner__in=nodes, status=UtilBackup.Status.COMPLETE).count(),

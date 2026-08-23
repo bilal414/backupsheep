@@ -50,6 +50,35 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertIn("max-size: \"${DOCKER_LOG_MAX_SIZE:-10m}\"", self.compose)
         self.assertIn("backend:\n    internal: true", self.compose)
 
+    def test_application_image_and_compose_drop_runtime_privileges(self):
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        entrypoint = (ROOT / "init.sh").read_text(encoding="utf-8")
+        env_sample = (ROOT / ".env_sample").read_text(encoding="utf-8")
+
+        self.assertIn("useradd --uid 10001 --gid 10001", dockerfile)
+        self.assertIn("USER 10001:10001", dockerfile)
+        self.assertIn("/code/_storage /backups", dockerfile)
+        self.assertIn("/code/static", dockerfile)
+        self.assertIn("umask 077", entrypoint)
+        self.assertEqual(self.compose.count("<<: *app-runtime"), 8)
+        self.assertIn("pids_limit: \"${BACKUPSHEEP_PIDS_LIMIT:-512}\"", self.compose)
+        self.assertIn("cap_drop:\n    - ALL", self.compose)
+        self.assertIn("security_opt:\n    - no-new-privileges:true", self.compose)
+        self.assertIn("init: true", self.compose)
+        self.assertIn("BACKUPSHEEP_PIDS_LIMIT=512", env_sample)
+        self.assertNotIn('entrypoint: ["celery"', self.compose)
+        self.assertNotIn('entrypoint: ["python", "manage.py", "migrate"', self.compose)
+
+    def test_existing_volume_non_root_migration_is_operator_gated(self):
+        guide = (ROOT / "docs" / "guides" / "upgrades.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("One-time non-root volume migration", guide)
+        self.assertIn("--user 0:0", guide)
+        self.assertIn("chown -R 10001:10001 /code/_storage /backups", guide)
+        self.assertIn("10001:10001:600", guide)
+
     def test_all_supported_paas_manifests_use_crash_safe_scheduler(self):
         expected = "backupsheep.scheduler:BackupDatabaseScheduler"
         for relative in (

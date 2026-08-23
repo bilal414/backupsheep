@@ -10,7 +10,8 @@ from rest_framework.response import Response
 from apps.api.v1.cloud.aws.filters import CoreCloudAWSFilter
 from apps.api.v1.cloud.aws.permissions import CoreCloudAWSViewPermissions
 from apps.api.v1.cloud.aws.serializers import CoreCloudAWSReadSerializer, CoreCloudAWSWriteSerializer
-from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_filters import DateRangeFilter, scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup, CoreAWSBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
@@ -53,7 +54,7 @@ class CoreCloudAWSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         member = self.request.user.member
         query = Q(account=member.get_current_account(), integration__code="aws")
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
-        regions = CoreConnection.objects.filter(query).values(
+        regions = visible_connections(member).filter(query).values(
             "id",
             "name",
             "location_id",
@@ -71,7 +72,7 @@ class CoreCloudAWSView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query &= Q(node__connection__integration__code="aws")
         query &= Q(node__type=CoreNode.Type.CLOUD)
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-        nodes = CoreAWS.objects.filter(query)
+        nodes = scope_direct_node_queryset(request, CoreAWS.objects.filter(query))
         all_totals = {
             "nodes": nodes.count(),
             "backups": CoreAWSBackup.objects.filter(aws__in=nodes, status=UtilBackup.Status.COMPLETE).count(),

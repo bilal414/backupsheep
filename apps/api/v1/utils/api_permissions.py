@@ -1,6 +1,33 @@
 from rest_framework import permissions
 
 
+def active_current_membership(member):
+    """Return the member's active current membership, or ``None``.
+
+    Membership status is an authorization boundary. A stale ``current=True``
+    flag on a suspended, pending, or invited row must not preserve tenant
+    access through otherwise account-scoped querysets.
+    """
+    try:
+        account = member.get_current_account()
+    except (AttributeError, TypeError):
+        return None
+    if account is None:
+        return None
+
+    from apps.console.member.models import CoreMemberAccount
+
+    return (
+        member.memberships.filter(
+            account=account,
+            current=True,
+            status=CoreMemberAccount.Status.ACTIVE,
+        )
+        .select_related("account")
+        .first()
+    )
+
+
 def member_has_perm(request, codename):
     """Check one of the account-group (CoreAccountGroup) custom permissions.
 
@@ -13,20 +40,13 @@ def member_has_perm(request, codename):
         member = request.user.member
     except AttributeError:
         return False
-    account = member.get_current_account()
-    if account is None:
+    membership = active_current_membership(member)
+    if membership is None:
         return False
+    account = membership.account
 
     from apps.console.account.models import CoreAccountGroup
-    from apps.console.member.models import CoreMemberAccount
-
-    membership = member.memberships.filter(
-        account=account,
-        status=CoreMemberAccount.Status.ACTIVE,
-    )
-    if not membership.exists():
-        return False
-    if membership.filter(primary=True).exists():
+    if membership.primary:
         return True
 
     # Django's user.has_perm() returns the union of every auth Group attached to
@@ -46,27 +66,25 @@ def current_account_is_primary(request):
     """Return whether the authenticated member owns their current account."""
     try:
         member = request.user.member
-        account = member.get_current_account()
     except AttributeError:
         return False
-    if account is None:
+    membership = active_current_membership(member)
+    if membership is None:
         return False
-
-    from apps.console.member.models import CoreMemberAccount
-
-    return member.memberships.filter(
-        account=account,
-        primary=True,
-        status=CoreMemberAccount.Status.ACTIVE,
-    ).exists()
+    return membership.primary
 
 
 class MemberPermissions(permissions.BasePermission):
     def has_permission(self, request, view):
+        try:
+            member = request.user.member
+        except AttributeError:
+            return False
+        if active_current_membership(member) is None:
+            return False
         if request.method in permissions.SAFE_METHODS:
             return True
-        else:
-            return hasattr(request.user, "member")
+        return True
 
 
 class MemberGroupPermissions(permissions.BasePermission):
@@ -83,6 +101,13 @@ class MemberGroupPermissions(permissions.BasePermission):
     action_permissions = {}
 
     def has_permission(self, request, view):
+        try:
+            member = request.user.member
+        except AttributeError:
+            return False
+        if active_current_membership(member) is None:
+            return False
+
         # Most viewsets declare their map on the view, while provider-specific
         # permission subclasses declare it here. Honour both, preferring the
         # view's explicit map.

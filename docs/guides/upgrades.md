@@ -34,6 +34,39 @@ and Beat start.
 See [Disaster recovery](disaster-recovery.md#back-up-the-control-plane) for the backup
 commands.
 
+## One-time non-root volume migration
+
+The application image runs as UID/GID `10001:10001`. Fresh stock named volumes inherit
+that ownership from the image. Before the first upgrade from an older root-running image,
+stop every application writer, snapshot both application volumes, build the new image, and
+change the existing volume ownership once:
+
+```bash
+docker compose stop app worker-cloud worker-database worker-files worker-storage worker-logs beat
+docker compose build app
+docker compose run --rm --no-deps \
+  --user 0:0 \
+  --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
+  --entrypoint sh worker-database -ceu '
+    chown -R 10001:10001 /code/_storage /backups
+    find /code/_storage /backups -type d -exec chmod 0700 {} +
+    find /code/_storage /backups -type f -exec chmod 0600 {} +
+  '
+docker compose run --rm --no-deps worker-database sh -ceu '
+  for directory in /code/_storage /backups; do
+    probe="$directory/.backupsheep-nonroot-probe"
+    : > "$probe"
+    test "$(stat -c %u:%g:%a "$probe")" = "10001:10001:600"
+    rm -f "$probe"
+  done
+'
+```
+
+Run this only during the maintenance window and only against the two resolved BackupSheep
+volumes. For bind mounts, NFS, EFS or other shared filesystems, establish an equivalent
+UID/GID or ACL policy through that storage system instead; do not recursively `chown` an
+unverified shared path. Stop if ownership or volume identity is unclear.
+
 ## Upgrade the current branch
 
 The server installer uses a shallow clone. For an ordinary fast-forward upgrade of the

@@ -4,6 +4,10 @@
 # service; the Celery worker and beat run as their own services (see docker-compose.yml).
 set -e
 
+# Backup archives, database dumps, SSH material, and transient credentials are private.
+# Every image command passes through this entrypoint, including Compose workers/migrate.
+umask 077
+
 # Hosted platforms use this image for workers, Beat, and one-off migration commands.
 # Docker passes their configured command as arguments to ENTRYPOINT, so honor it before
 # running the web-server startup path below.

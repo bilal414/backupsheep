@@ -13,7 +13,8 @@ from apps.api.v1.database.serializers import (
     CoreDatabaseReadSerializer,
     CoreDatabaseWriteSerializer,
 )
-from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_filters import DateRangeFilter, scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
@@ -76,7 +77,7 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             query &= Q(auth_database__type=db_type)
 
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
-        regions = CoreConnection.objects.filter(query).values(
+        regions = visible_connections(member).filter(query).values(
             "id",
             "name",
             "auth_database__all_databases",
@@ -104,7 +105,10 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
                 node__connection__auth_database__type=db_type
             )
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-        databases = CoreDatabase.objects.filter(query)
+        databases = scope_direct_node_queryset(
+            request,
+            CoreDatabase.objects.filter(query),
+        )
         all_totals = {
             "nodes": databases.count(),
             "backups": CoreDatabaseBackup.objects.filter(

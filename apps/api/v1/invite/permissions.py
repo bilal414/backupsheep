@@ -1,5 +1,8 @@
 from rest_framework import permissions
 
+from apps.api.v1.utils.api_permissions import active_current_membership
+from apps.console.member.models import CoreMemberAccount
+
 
 class CoreInviteViewPermissions(permissions.BasePermission):
     def has_permission(self, request, view):
@@ -12,10 +15,17 @@ class CoreInviteViewPermissions(permissions.BasePermission):
         # available and independently binds the invite to request.user.email.
         if getattr(view, "action", None) == "accept":
             return True
-        return member.is_primary_account
+        membership = active_current_membership(member)
+        return membership is not None and membership.primary
 
     def has_object_permission(self, request, view, obj):
-        memberships = request.user.member.memberships.filter(account=obj.account)
+        member = request.user.member
+        if active_current_membership(member) is None:
+            return False
+        memberships = member.memberships.filter(
+            account=obj.account,
+            status=CoreMemberAccount.Status.ACTIVE,
+        )
         if not memberships.exists():
             return False
         return memberships.filter(primary=True).exists()

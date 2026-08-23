@@ -42,6 +42,16 @@ x-default-logging: &default-logging
     max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
     max-file: "${DOCKER_LOG_MAX_FILE:-5}"
 
+# Least-privilege defaults for services built from the BackupSheep application image.
+# Database and broker images retain their vendor-supported runtime requirements.
+x-app-runtime: &app-runtime
+  init: true
+  pids_limit: "${BACKUPSHEEP_PIDS_LIMIT:-512}"
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
 services:
   db:
     image: postgres:18.6-bookworm@sha256:7d2695c3aa88e792e8b3b233e7e4adb296a20412c6c0ca361e3edaaacfada108
@@ -100,9 +110,10 @@ services:
   # One-shot: apply DB migrations once, then exit. Every app-image service below waits
   # for this to complete successfully so nothing serves/works against an unmigrated DB.
   migrate:
+    <<: *app-runtime
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["python", "manage.py", "migrate", "--noinput"]
+    command: ["python", "manage.py", "migrate", "--noinput"]
     depends_on:
       db:
         condition: service_healthy
@@ -112,6 +123,7 @@ services:
     restart: "no"
 
   app:
+    <<: *app-runtime
     build:
       context: .
       dockerfile: Dockerfile
@@ -148,9 +160,10 @@ services:
   # volume), so this is the only worker safe to scale horizontally. Cloud tasks just
   # wait on provider HTTP, so concurrency can run high.
   worker-cloud:
+    <<: *app-runtime
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=${CELERY_CLOUD_CONCURRENCY:-4}", "--prefetch-multiplier=${CELERY_CLOUD_PREFETCH_MULTIPLIER:-1}"]
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=${CELERY_CLOUD_CONCURRENCY:-4}", "--prefetch-multiplier=${CELERY_CLOUD_PREFETCH_MULTIPLIER:-1}"]
     depends_on:
       db:
         condition: service_healthy
@@ -169,9 +182,10 @@ services:
   # Database dumps (pg_dump/mysqldump). Heavy CPU/disk, low concurrency. Writes the dump
   # to the shared backup_workdir volume; worker-storage handles the upload.
   worker-database:
+    <<: *app-runtime
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
     depends_on:
       db:
         condition: service_healthy
@@ -191,9 +205,10 @@ services:
   # Website / WordPress / Basecamp file dumps. Heavy CPU/disk, low concurrency. Writes the
   # dump to the shared backup_workdir volume; worker-storage handles the upload.
   worker-files:
+    <<: *app-runtime
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
     depends_on:
       db:
         condition: service_healthy
@@ -216,9 +231,10 @@ services:
   # out freely for more upload throughput:
   #     docker compose up -d --scale worker-storage=4
   worker-storage:
+    <<: *app-runtime
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=storage@%h", "-Q", "storage", "--concurrency=${CELERY_STORAGE_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_STORAGE_PREFETCH_MULTIPLIER:-1}"]
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=storage@%h", "-Q", "storage", "--concurrency=${CELERY_STORAGE_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_STORAGE_PREFETCH_MULTIPLIER:-1}"]
     depends_on:
       db:
         condition: service_healthy
@@ -240,9 +256,10 @@ services:
   # backup_workdir volume so it can see and prune the run logs the dump workers leave in
   # _storage. Stateless otherwise -> scale out if log/notification volume is high.
   worker-logs:
+    <<: *app-runtime
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=logs@%h", "-Q", "logs", "--concurrency=${CELERY_LOGS_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_LOGS_PREFETCH_MULTIPLIER:-1}"]
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=logs@%h", "-Q", "logs", "--concurrency=${CELERY_LOGS_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_LOGS_PREFETCH_MULTIPLIER:-1}"]
     depends_on:
       db:
         condition: service_healthy
@@ -259,9 +276,10 @@ services:
     restart: unless-stopped
 
   beat:
+    <<: *app-runtime
     image: backupsheep:latest
     env_file: .env
-    entrypoint: ["celery", "-A", "backupsheep", "beat", "--loglevel=info", "--scheduler", "backupsheep.scheduler:BackupDatabaseScheduler"]
+    command: ["celery", "-A", "backupsheep", "beat", "--loglevel=info", "--scheduler", "backupsheep.scheduler:BackupDatabaseScheduler"]
     depends_on:
       db:
         condition: service_healthy

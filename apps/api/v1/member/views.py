@@ -172,7 +172,10 @@ class CoreMemberView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
         account_id = self.request.data.get("account_id")
 
-        if member.memberships.filter(account_id=account_id).exists():
+        if member.memberships.filter(
+            account_id=account_id,
+            status=CoreMemberAccount.Status.ACTIVE,
+        ).exists():
             current_membership = member.memberships.filter(current=True).first()
             if current_membership:
                 current_membership.current = False

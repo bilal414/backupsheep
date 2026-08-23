@@ -119,6 +119,9 @@ fail because cookies are Secure and requests redirect to HTTPS.
 - Keep `.env` mode `0600`; do not commit it, bake it into an image or paste it into an
   issue. The repository's `.dockerignore` excludes `.env`, local environments, VCS data,
   `_storage` and other runtime material from the image build context.
+- Application roles run as fixed UID/GID `10001:10001`, drop all Linux capabilities,
+  set `no-new-privileges`, use Docker's init process, and default to 512 processes per
+  container. Keep bind mounts and shared filesystems writable by that identity.
 - Use narrowly scoped provider credentials. Separate source-discovery/snapshot permissions
   from unrelated account administration whenever the provider supports it.
 - Protect PostgreSQL backups and `DJANGO_SECRET_KEY` together. Provider credentials are
@@ -133,12 +136,15 @@ fail because cookies are Secure and requests redirect to HTTPS.
 ### Remaining image and bootstrap gates
 
 This release improves secure defaults but is not a claim of full build reproducibility or
-container isolation:
+complete container isolation:
 
-- The shared application image still runs as root. Moving it to a fixed non-root UID and a
-  read-only root filesystem is intentionally deferred until every database client, website
-  staging path, SSH trust file, Local Storage path and worker cleanup path passes backup,
-  restore, crash-recovery and permission tests under that UID.
+- The application image runs as non-root, but its root filesystem is not read-only.
+  Collectstatic, provider SDKs, database clients and large backup/restore tools have varied
+  temporary-file behavior; a read-only-root migration needs full provider and crash-path
+  acceptance with explicit writable mounts/tmpfs first.
+- Stock Compose bounds process counts but does not impose a universal memory or CPU quota.
+  Large database dumps, archive compression and restore verification legitimately vary by
+  workload; set measured per-role limits in a reviewed deployment override.
 - The generic cloud-init example still downloads the installer from mutable `main`, and the
   installer clones a branch/tag rather than verifying a signed release commit. Enterprise
   automation should mirror an approved installer, verify its SHA-256 or signature before
@@ -168,9 +174,9 @@ filesystem. Avoid `docker system prune --volumes`: named volumes contain product
 
 ## Worker sizing and scaling
 
-The default worker concurrency is cloud `8` and database/files/storage/logs `4`. Provider
-API work is primarily I/O-bound; database and file workers consume CPU, memory and disk.
-Start conservatively, observe real jobs, then adjust the Compose entrypoints.
+The default worker concurrency is cloud `4`, database/files `1`, and storage/logs `2`.
+Provider API work is primarily I/O-bound; database and file workers consume CPU, memory
+and disk. Start conservatively, observe real jobs, then adjust the Compose commands.
 
 On one host, disk-touching workers share `backup_workdir` and can be scaled with Compose.
 For example:

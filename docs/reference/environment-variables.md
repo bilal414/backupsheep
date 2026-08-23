@@ -84,6 +84,7 @@ not use RabbitMQ's well-known `guest` account.
 
 | Variable | Default | Unit / meaning |
 | --- | --- | --- |
+| `BACKUPSHEEP_PIDS_LIMIT` | `512` | Maximum processes per app/migrate/worker/Beat container in stock non-Swarm Compose |
 | `BS_LOCAL_STORAGE_PATH` | `/backups` | Root used by the Local Storage destination; mount identically in relevant roles |
 | `LOG_RETENTION_DAYS` | `30` | Days before local run logs and database activity are pruned |
 | `S3_DOWNLOAD_URL_EXPIRES` | `86400` | Seconds that generated archive download URLs remain valid |

@@ -17,7 +17,8 @@ from apps.api.v1.cloud.lightsail_database.serializers import (
     CoreCloudLightsailDatabaseReadSerializer,
     CoreCloudLightsailDatabaseWriteSerializer,
 )
-from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_filters import DateRangeFilter, scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreLightsailBackup
 from apps.console.connection.models import CoreConnection
@@ -64,7 +65,7 @@ class CoreCloudLightsailDatabaseView(ReadWriteSerializerMixin, viewsets.ModelVie
         )
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
         return Response(
-            CoreConnection.objects.filter(query).values(
+            visible_connections(member).filter(query).values(
                 "id",
                 "name",
                 "location_id",
@@ -83,7 +84,7 @@ class CoreCloudLightsailDatabaseView(ReadWriteSerializerMixin, viewsets.ModelVie
         query &= Q(node__type=CoreNode.Type.CLOUD)
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
         query &= Q(resource_type=CoreLightsail.ResourceType.DATABASE)
-        nodes = CoreLightsail.objects.filter(query)
+        nodes = scope_direct_node_queryset(request, CoreLightsail.objects.filter(query))
         return Response(
             {
                 "nodes": nodes.count(),
