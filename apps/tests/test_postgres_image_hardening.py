@@ -46,6 +46,7 @@ class PostgresImageHardeningContractTests(TestCase):
         self.assertIn("! grep -Fq gosu /usr/local/bin/docker-entrypoint.sh", self.dockerfile)
         self.assertIn("! command -v gosu", self.dockerfile)
         self.assertIn("test ! -e /usr/local/bin/gosu", self.dockerfile)
+        self.assertTrue(self.dockerfile.rstrip().endswith("USER 999:999"))
 
     def test_complete_installed_util_linux_family_is_exactly_security_pinned(self):
         self.assertIn('"util-linux=2.41.5-0+deb13u1"', self.dockerfile)
@@ -84,4 +85,6 @@ class PostgresImageHardeningContractTests(TestCase):
         )
         self.assertIn("pull_policy: never", block)
         self.assertIn("dockerfile: Dockerfile.postgres", block)
+        self.assertIn('user: "999:999"', block)
+        self.assertNotIn("cap_add:", block)
         self.assertIn("- pgdata:/var/lib/postgresql", block)

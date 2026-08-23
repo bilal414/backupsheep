@@ -56,7 +56,7 @@ security preflight and the web app. Every provider worker and Beat belongs to th
 
 | Component | Stock command or image | Responsibility | Scale notes |
 | --- | --- | --- | --- |
-| `db` | locally built `backupsheep-postgres:<commit>` rooted in digest-pinned `postgres:18.6-trixie` | Accounts, configuration, schedules, credentials, backup/restore records, leases and evidence | Verified vendor entrypoint repairs the data-volume owner, then Debian `setpriv` drops privilege and execs PostgreSQL as non-root PID 1; preserve the cluster's libc collation generation during image updates |
+| `db` | locally built `backupsheep-postgres:<commit>` rooted in digest-pinned `postgres:18.6-trixie` | Accounts, configuration, schedules, credentials, backup/restore records, leases and evidence | Image and Compose fix UID/GID `999:999`, drop every capability and exec PostgreSQL as non-root PID 1; fresh named volumes inherit ownership and imported drift fails closed; preserve the cluster's libc collation generation during updates |
 | `rabbitmq` | digest-pinned `rabbitmq:4.3.5-alpine` | Durable Celery queues and persistent message delivery | Vendor entrypoint repairs the data-volume owner, drops privilege and execs RabbitMQ as non-root PID 1; dedicated credentials/vhost; backend network only |
 | `migrate` | `python manage.py migrate --noinput` | Applies schema migrations before other application roles start | One-shot; must complete successfully |
 | `preflight` | `python manage.py docker_preflight` | Fails closed on unsafe identity/capability/rootfs/secret/runtime settings, pending migrations, and unavailable database/broker dependencies | One-shot; must complete successfully |
@@ -93,13 +93,14 @@ After Compose's one-shot deployment gate, the same entrypoint runs `docker_prefl
 again before every web, worker and Beat process. This catches weakened settings or runtime
 flags when Docker later auto-restarts a service without recreating the one-shot gate.
 
-PostgreSQL and RabbitMQ are deliberate bootstrap exceptions: their reviewed entrypoints
-begin with a narrow capability set to repair named-volume ownership, drop to the vendor
-UID, and exec the non-root server as PID 1. PostgreSQL's derived build verifies the exact
-official entrypoint bytes, replaces only its `gosu` transition with security-updated
-Debian `setpriv`, deletes `gosu`, and asserts the fixed util-linux package family. They do
-not use Docker's root-owned init shim. Verify the effective UID, capabilities and PID 1
-command whenever either pinned vendor image changes.
+PostgreSQL's derived build verifies the exact official entrypoint bytes, replaces its
+`gosu` transition with security-updated Debian `setpriv`, deletes `gosu`, asserts the
+fixed util-linux family, and declares UID/GID `999:999`. Stock Compose repeats that user,
+drops all capabilities, and starts PostgreSQL without a root ownership-repair phase.
+RabbitMQ remains the sole deliberate bootstrap exception: its reviewed entrypoint gets a
+narrow capability set to repair named-volume ownership, drops to the vendor UID, and
+execs the non-root server. Neither service uses Docker's root-owned init shim. Verify UID,
+capabilities and PID 1 whenever either pinned image changes.
 
 ## Persistence and filesystem topology
 

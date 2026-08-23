@@ -262,10 +262,15 @@ class DeploymentHardeningContractTests(TestCase):
         )[1].split("\nx-egress-network:", 1)[0]
         self.assertIn("read_only: true", stateful)
         self.assertIn("cap_drop:\n    - ALL", stateful)
+        self.assertNotIn("cap_add:", stateful)
+        database = self.service_block("db")
+        self.assertIn('user: "999:999"', database)
+        self.assertNotIn("cap_add:", database)
+        rabbitmq = self.service_block("rabbitmq")
         for capability in ("CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"):
-            self.assertIn(f"    - {capability}\n", stateful)
-        self.assertNotIn("SYS_ADMIN", stateful)
-        self.assertNotIn("NET_ADMIN", stateful)
+            self.assertIn(f"      - {capability}\n", rabbitmq)
+        self.assertNotIn("SYS_ADMIN", rabbitmq)
+        self.assertNotIn("NET_ADMIN", rabbitmq)
         self.assertNotIn("init: true", stateful)
 
     def test_role_networks_prevent_worker_to_worker_lateral_reachability(self):

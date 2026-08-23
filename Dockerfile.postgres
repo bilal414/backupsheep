@@ -2,8 +2,8 @@
 
 # Keep the database runtime on the exact PostgreSQL/glibc generation reviewed for
 # existing clusters. This derived image removes the downloaded gosu binary and uses
-# Debian's security-maintained setpriv implementation for the one root-to-postgres
-# transition performed by the official entrypoint.
+# Debian's security-maintained setpriv implementation if the reviewed entrypoint is
+# ever exercised as root. The shipped image and Compose model both start as postgres.
 FROM postgres:18.6-trixie@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
 
 RUN set -eux; \
@@ -37,3 +37,8 @@ RUN set -eux; \
     done; \
     test ! -e /var/lib/apt/lists/lock; \
     test -x /usr/bin/setpriv
+
+# A fresh Docker named volume inherits the image directory ownership, so PostgreSQL
+# can initialize and restart without a root bootstrap or Linux capabilities. An
+# incorrectly owned imported volume fails closed instead of being repaired silently.
+USER 999:999

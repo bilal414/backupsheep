@@ -327,7 +327,9 @@ and PostgreSQL roles use `pull_policy: never`, so both explicit builds above are
 and a missing local image cannot be replaced silently from a registry. The database build
 uses `Dockerfile.postgres`: it verifies the digest-pinned official 18.6 entrypoint before
 replacing its single `gosu` privilege drop with Debian's security-updated `setpriv`, then
-deletes `gosu` and verifies the fixed util-linux package versions.
+deletes `gosu`, verifies the fixed util-linux package versions, and declares UID/GID 999.
+Stock Compose starts PostgreSQL directly as that non-root identity with no capabilities;
+a wrongly owned imported volume fails closed instead of being repaired silently.
 
 Every application-image command still passes through the image entrypoint. It rejects a
 root or weakened runtime, neutralizes shell/Python/dynamic-loader startup hooks and runs

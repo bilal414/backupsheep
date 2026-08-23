@@ -135,10 +135,9 @@ x-app-secrets: &app-secrets
   - db_password
   - rabbitmq_password
 
-# PostgreSQL and RabbitMQ bootstrap as root solely to repair their named-volume
-# ownership before dropping to their vendor users. Retain only the capabilities that
-# their reviewed entrypoints need for that transition. Their application roots are
-# immutable and their writable runtime/data paths are explicit below.
+# Shared stateful-service controls. PostgreSQL starts directly as its fixed non-root
+# user with no capabilities. RabbitMQ retains a service-local bootstrap capability
+# list solely to repair its named-volume ownership before dropping privilege.
 x-stateful-runtime: &stateful-runtime
   labels: *installation-labels
   privileged: false
@@ -150,12 +149,6 @@ x-stateful-runtime: &stateful-runtime
   ipc: private
   cap_drop:
     - ALL
-  cap_add:
-    - CHOWN
-    - DAC_OVERRIDE
-    - FOWNER
-    - SETGID
-    - SETUID
   security_opt:
     - no-new-privileges:true
   ulimits:
@@ -184,6 +177,9 @@ x-internal-network: &internal-network
 services:
   db:
     <<: *stateful-runtime
+    # Defense in depth with the image USER declaration: never enter the vendor
+    # entrypoint's root ownership-repair branch for the stock named volume.
+    user: "999:999"
     # Keep the Debian generation aligned with the PostgreSQL 18 image used to
     # initialize existing volumes. Moving a cluster created with glibc 2.41 to
     # Bookworm's older glibc 2.36 produces a collation-version mismatch and can
@@ -237,6 +233,12 @@ services:
 
   rabbitmq:
     <<: *stateful-runtime
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
     image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
     # RabbitMQ derives its durable node database path from the node hostname.
     # Container IDs change on recreation, so keep the hostname stable or the same

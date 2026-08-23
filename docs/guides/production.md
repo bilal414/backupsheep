@@ -169,10 +169,11 @@ HTTPS tuple and review/resolve every deployment warning.
   argv without `eval`. It verifies the runtime boundary and runs `docker_preflight` before
   every web, worker and Beat process, including later automatic restarts. Do not override
   the entrypoint or treat Compose's earlier one-shot result as a permanent attestation.
-- PostgreSQL and RabbitMQ use reviewed vendor entrypoints with a narrow bootstrap
-  capability set to repair named-volume ownership. Each then drops privilege and execs
-  its non-root server as PID 1, without Docker's root-owned init shim. Verify effective
-  PID 1 identity and capabilities whenever a pinned vendor image changes.
+- PostgreSQL starts directly as fixed UID/GID `999:999`, with all capabilities dropped;
+  fresh stock named volumes inherit the required ownership and imported ownership drift
+  fails closed. RabbitMQ alone retains a narrow bootstrap capability set to repair its
+  named volume before dropping privilege. Both exec a non-root server as PID 1, without
+  Docker's root-owned init shim. Verify identity and capabilities after every image change.
 - Use narrowly scoped provider credentials. Separate source-discovery/snapshot permissions
   from unrelated account administration whenever the provider supports it.
 - Protect PostgreSQL backups and `.secrets/django_secret_key` together. Provider

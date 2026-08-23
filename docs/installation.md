@@ -43,8 +43,9 @@ preflight and web UI. The web listener stays on `127.0.0.1:8000`.
 Application and PostgreSQL roles use `pull_policy: never`; the installer explicitly builds
 both from the reviewed commit and will not substitute registry images if either local build
 is missing. The PostgreSQL build starts from the digest-pinned official image, verifies the
-official entrypoint, applies exact Debian security packages and replaces `gosu` with Debian's
-`setpriv` before deleting `gosu`.
+official entrypoint, applies exact Debian security packages, replaces and deletes `gosu`,
+and declares the fixed PostgreSQL UID/GID. Stock Compose starts it directly as that user
+with every Linux capability dropped.
 
 It also creates a stable random 64-hex installation ID and an empty labeled sentinel
 volume, then verifies Compose resource ownership before mutation. It enumerates every
