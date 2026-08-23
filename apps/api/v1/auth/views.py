@@ -1,14 +1,79 @@
+from urllib.parse import urlsplit, urlunsplit
+
+from django.contrib.auth import login, logout
+from django.db import transaction
 from rest_framework.authtoken.models import Token
+from rest_framework.authentication import CSRFCheck
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .serializers import *
-from django.contrib.auth import login, logout
-from django.db import transaction
+
 from apps.console.member.models import CoreMember
-from ..utils.api_exceptions import ExceptionDefault
+
+from .serializers import *
 from ..utils.api_authentication import token_is_expired
+from ..utils.api_exceptions import ExceptionDefault
 from ..utils.api_throttles import LoginRateThrottle, PasswordResetRateThrottle
+
+
+BROWSER_SESSION_LOGIN_HEADER = "X-BackupSheep-Session-Login"
+
+
+def _origin(value):
+    """Return a normalized HTTP(S) origin, rejecting credential-bearing URLs."""
+
+    parsed = urlsplit(str(value or ""))
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), "", "", ""))
+
+
+def _browser_session_login_requested(request):
+    """Validate the explicit browser-only session-login boundary.
+
+    A custom request header makes a cross-origin HTML form unable to opt into this
+    mode. Fetch Metadata (or an exact Origin/Referer fallback) and Django's CSRF
+    validation then fail closed before credentials are processed. Native clients
+    omit the marker and retain the bearer-token response contract.
+    """
+
+    marker = request.headers.get(BROWSER_SESSION_LOGIN_HEADER)
+    fetch_site = str(request.headers.get("Sec-Fetch-Site", "")).lower()
+    browser_evidence = bool(
+        fetch_site
+        or request.headers.get("Origin")
+        or request.headers.get("Referer")
+    )
+    if marker != "1":
+        if marker is not None or browser_evidence:
+            raise PermissionDenied(
+                "Browser login requires the explicit session-login request marker."
+            )
+        return False
+
+    if fetch_site:
+        same_origin = fetch_site == "same-origin"
+    else:
+        expected_origin = _origin(request.build_absolute_uri("/"))
+        supplied_origin = _origin(
+            request.headers.get("Origin") or request.headers.get("Referer")
+        )
+        same_origin = bool(expected_origin and supplied_origin == expected_origin)
+    if not same_origin:
+        raise PermissionDenied("Browser session login requires a same-origin request.")
+
+    csrf_check = CSRFCheck(lambda _request: None)
+    csrf_check.process_request(request._request)
+    csrf_reason = csrf_check.process_view(request._request, None, (), {})
+    if csrf_reason:
+        raise PermissionDenied("Browser session login failed CSRF validation.")
+    return True
 
 
 class APIAuthLogin(APIView):
@@ -16,6 +81,7 @@ class APIAuthLogin(APIView):
     throttle_classes = [LoginRateThrottle]
 
     def post(self, request):
+        browser_session_login = _browser_session_login_requested(request)
         serializer = APIAuthLoginSerializer(data=self.request.data, context={"request": request})
         if serializer.is_valid():
             member = serializer.member
@@ -51,15 +117,13 @@ class APIAuthLogin(APIView):
             request.session["previous_url"] = None
             request.session["next"] = None
 
-            token, created = Token.objects.get_or_create(user=member.user)
-            if not created and token_is_expired(token):
-                token.delete()
-                token = Token.objects.create(user=member.user)
-
-            content = {
-                "api_key": token.key,
-                "next": next_url,
-            }
+            content = {"next": next_url}
+            if not browser_session_login:
+                token, created = Token.objects.get_or_create(user=member.user)
+                if not created and token_is_expired(token):
+                    token.delete()
+                    token = Token.objects.create(user=member.user)
+                content["api_key"] = token.key
         else:
             raise ExceptionDefault(detail=serializer.errors)
         return Response(content)

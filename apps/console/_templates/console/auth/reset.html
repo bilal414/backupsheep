@@ -6,115 +6,43 @@
 {% block page_class %}page_login{% endblock %}
 
 {% block content %}
-    <div class="flex min-h-full flex-col justify-center px-4 py-12 sm:px-6 lg:px-8" x-data="passwordResetPage()">
-        <div class="sm:mx-auto sm:w-full sm:max-w-md">
-            <img class="mx-auto h-10 w-auto" src="{{ STATIC_URL }}console/images/logo.webp" alt="{{ site.app_name }}">
-            <h2 class="mt-8 text-center text-2xl font-semibold tracking-tight text-slate-900">Reset your password</h2>
-            <p class="mt-2 text-center text-sm text-slate-500">Enter your email and we will send a secure reset link.</p>
-        </div>
-
-        <div class="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-            <div class="rounded-xl border border-slate-200 bg-white px-5 py-8 shadow-sm sm:px-10">
-                <form class="space-y-6" action="javascript:void(0);" method="POST">
-                    <div>
-                        <label for="email" class="block text-sm font-medium text-slate-700">Email address</label>
-                        <input x-model="auth.email" id="email" name="email" type="email" autocomplete="email"
-                               required
-                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
-                        <p x-cloak x-show="resetErrors?.email" class="mt-1.5 text-xs font-medium text-red-600" x-text="resetErrors?.email"></p>
-                    </div>
-
-                    <div class="flex items-center justify-start">
-                        <a href="{% url 'console:auth:login' %}"
-                           class="text-sm font-medium text-indigo-600 transition hover:text-indigo-700">Back to login</a>
-                    </div>
-
-                    <template x-for="non_field_error in resetErrors.non_field_errors">
-                        <div class="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
-                            <svg class="mt-0.5 h-5 w-5 flex-none text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/></svg>
-                            <p class="min-w-0 flex-1 font-medium leading-6" x-text="non_field_error"></p>
-                        </div>
-                    </template>
-
-                    <div>
-                        <button type="button" @click="resetPassword()"
-                                class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
-                            Request Password Reset
-                        </button>
-                    </div>
-                </form>
-            </div>
-            <p class="mt-8 text-center text-xs text-slate-400">{{ site.app_name }} &mdash; automated backups for your infrastructure</p>
-        </div>
+<div class="flex min-h-full flex-col justify-center px-4 py-12 sm:px-6 lg:px-8">
+    <div class="sm:mx-auto sm:w-full sm:max-w-md">
+        <img class="mx-auto h-10 w-auto" src="{{ STATIC_URL }}console/images/logo.webp" alt="{{ site.app_name }}">
+        <h1 class="mt-8 text-center text-2xl font-semibold tracking-tight text-slate-900">Reset your password</h1>
+        <p class="mt-2 text-center text-sm text-slate-500">Enter your email and we will send a secure reset link.</p>
     </div>
-{% endblock %}
-{% block extra_scripts %}
-    <script>
-        document.addEventListener('alpine:init', () => {
-            Alpine.data('passwordResetPage', () => ({
-                loading: null,
-                resetType: null,
-                auth: {},
-                resetErrors: {},
-                init() {
-                    let url = new URL(window.location.href);
-                    let params = new URLSearchParams(url.search.slice(1));
-                    this.resetType = params.get('type');
-                },
-                async resetPassword() {
-                    this.loading = true;
-                    Alpine.store('showLoading').toggle("Requesting password reset link. Don't refresh page.");
 
-                    let url = "/api/v1/auth/reset/";
+    <div class="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+        <div class="rounded-xl border border-slate-200 bg-white px-5 py-8 shadow-sm sm:px-10">
+            <form data-auth-flow="request-reset" class="space-y-6" method="post" action="/api/v1/auth/reset/">
+                {% csrf_token %}
+                <div>
+                    <label for="email" class="block text-sm font-medium text-slate-700">Email address</label>
+                    <input id="email" name="email" type="email" autocomplete="email" required autofocus
+                           class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20"
+                           aria-describedby="email-error">
+                    <p id="email-error" data-error-for="email" hidden class="mt-1.5 text-xs font-medium text-red-600"></p>
+                </div>
 
-                    let data = {
-                        email: this.auth.email,
-                    };
+                <div class="flex items-center justify-start">
+                    <a href="{% url 'console:auth:login' %}" class="text-sm font-medium text-indigo-600 transition hover:text-indigo-700">Back to login</a>
+                </div>
 
-                    let response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        method: 'POST',
-                        body: JSON.stringify(data)
+                <div data-auth-error hidden tabindex="-1"
+                     class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium leading-6 text-red-800"
+                     role="alert"></div>
+                <div data-auth-status hidden tabindex="-1"
+                     class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium leading-6 text-emerald-800"
+                     role="status"></div>
 
-                    }).then(async (response) => {
-                        Alpine.store('showLoading').toggle();
-
-                        if (response.ok) {
-                            return response.json();
-                        } else {
-                            this.loading = false;
-                            let json;
-                            try {
-                                json = await response.json();
-                            } catch (exception_var) {
-                                json = {detail: response.status + " - " + response.statusText + ". Please contact support."};
-                            }
-                            this.resetErrors = json;
-                            throw new Error(json.detail);
-                        }
-
-                    }).then((json) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            success: true,
-                            heading: 'Success!',
-                            details: "Please check your email for password reset link."
-                        });
-                        this.loading = false;
-                    }).catch((error) => {
-                        Alpine.store('notifications').items.push({
-                            show: true,
-                            error: true,
-                            heading: 'Error!',
-                            details: error.message
-                        });
-                    });
-                },
-            }));
-        });
-
-    </script>
+                <button type="submit"
+                        class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+                    Request password reset
+                </button>
+            </form>
+        </div>
+        <p class="mt-8 text-center text-xs text-slate-400">{{ site.app_name }} &mdash; automated backups for your infrastructure</p>
+    </div>
+</div>
 {% endblock %}

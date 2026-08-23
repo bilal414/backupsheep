@@ -46,10 +46,10 @@ class AuthenticationVersionMiddleware:
 class BrowserSecurityHeadersMiddleware:
     """Apply conservative browser and cache policy to every application response.
 
-    BackupSheep intentionally still has legacy inline JavaScript, so a strict
-    ``script-src`` policy needs a separate nonce migration. These directives are
-    compatible today and still prevent plugin content, base-tag rewriting,
-    framing, and cross-origin form submission.
+    BackupSheep still has legacy inline JavaScript on the authenticated console,
+    so the general policy remains compatible with that surface. Public
+    authentication, reset, invite, and HTML error pages are dependency-isolated
+    and receive the strict allowlist below.
     """
 
     CONTENT_SECURITY_POLICY = (
@@ -57,6 +57,17 @@ class BrowserSecurityHeadersMiddleware:
         "base-uri 'self'; "
         "frame-ancestors 'none'; "
         "form-action 'self'"
+    )
+    AUTH_CONTENT_SECURITY_POLICY = (
+        "default-src 'none'; "
+        "script-src 'self'; "
+        "style-src 'self'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "font-src 'self'; "
+        "base-uri 'none'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'"
     )
     PERMISSIONS_POLICY = (
         "camera=(), microphone=(), geolocation=(), payment=(), usb=(), "
@@ -68,9 +79,24 @@ class BrowserSecurityHeadersMiddleware:
 
     def __call__(self, request):
         response = self.get_response(request)
-        response.headers.setdefault(
-            "Content-Security-Policy", self.CONTENT_SECURITY_POLICY
+        path = request.path
+        sensitive_auth_page = (
+            path in {"/login", "/reset"}
+            or path.startswith(("/login/", "/reset/", "/invite/", "/error/"))
         )
+        html_error_page = (
+            response.status_code >= 400
+            and response.headers.get("Content-Type", "").lower().startswith("text/html")
+        )
+        if sensitive_auth_page or html_error_page:
+            response.headers["Content-Security-Policy"] = (
+                self.AUTH_CONTENT_SECURITY_POLICY
+            )
+            response.headers["Referrer-Policy"] = "no-referrer"
+        else:
+            response.headers.setdefault(
+                "Content-Security-Policy", self.CONTENT_SECURITY_POLICY
+            )
         response.headers.setdefault("Permissions-Policy", self.PERMISSIONS_POLICY)
 
         # Authentication, tenant metadata, provider inventory and backup state
