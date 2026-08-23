@@ -14,6 +14,4 @@ class CoreDatabaseBackupViewPermissions(MemberGroupPermissions):
         "resume_restore": "backup_create",
     }
 
-    def has_object_permission(self, request, view, obj):
-        if request.user.member.memberships.filter(account=obj.database.node.connection.account).exists():
-            return True
+    object_node_path = "database.node"

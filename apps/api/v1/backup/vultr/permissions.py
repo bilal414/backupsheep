@@ -11,6 +11,4 @@ class CoreVultrBackupViewPermissions(MemberGroupPermissions):
         "cancel": "backup_delete",
     }
 
-    def has_object_permission(self, request, view, obj):
-        if request.user.member.memberships.filter(account=obj.vultr.node.connection.account).exists():
-            return True
+    object_node_path = "vultr.node"

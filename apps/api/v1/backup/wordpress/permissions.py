@@ -12,6 +12,4 @@ class CoreWordPressBackupViewPermissions(MemberGroupPermissions):
         "retry": "backup_create",
     }
 
-    def has_object_permission(self, request, view, obj):
-        if request.user.member.memberships.filter(account=obj.wordpress.node.connection.account).exists():
-            return True
+    object_node_path = "wordpress.node"

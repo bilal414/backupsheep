@@ -4,7 +4,4 @@ from apps.api.v1.utils.api_permissions import MemberGroupPermissions
 class CoreCloudOracleViewPermissions(MemberGroupPermissions):
     action_permissions = {"*": "node_changes"}
 
-    def has_object_permission(self, request, view, obj):
-        return request.user.member.memberships.filter(
-            account=obj.node.connection.account
-        ).exists()
+    object_node_path = "node"
