@@ -2384,8 +2384,8 @@ class AuthDatabaseCheckConnectionSshTests(BaseTestCase):
         auth = node.connection.auth_database
 
         def handler(command):
-            if "FROM pg_database" in command:
-                return b"postgres\nbs_remed_pg_lg10_0d08dcf\n", b"", 0
+            if "FROM pg_catalog.pg_tables" in command:
+                return b"fixture_meta\nbig\n", b"", 0
             self.fail(f"unexpected PostgreSQL listing command: {command}")
 
         ssh = _FakeSSH(handler)
@@ -2407,7 +2407,7 @@ class AuthDatabaseCheckConnectionSshTests(BaseTestCase):
 
         self.assertEqual(
             objects,
-            [{"name": "bs_remed_pg_lg10_0d08dcf"}, {"name": "postgres"}],
+            [{"name": "big"}, {"name": "fixture_meta"}],
         )
         self.assertTrue(ssh.closed)
         self.assertFalse(os.path.exists(key_path))
