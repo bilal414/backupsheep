@@ -1,3 +1,6 @@
+from datetime import timedelta
+
+from django.conf import settings
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework import exceptions
 import pytz
@@ -34,9 +37,20 @@ class CustomTokenAuthentication(TokenAuthentication):
         if not token.user.is_active:
             raise exceptions.AuthenticationFailed(_("User inactive or deleted."))
 
+        if token_is_expired(token):
+            # A captured bearer token must stop working after the configured TTL.
+            # Delete it so a subsequent password login receives a fresh token.
+            token.delete()
+            raise exceptions.AuthenticationFailed(_("Token expired."))
+
         member_timezone = (
             model.objects.select_related("user").get(key=key).user.member.timezone
         )
         if member_timezone:
             timezone.activate(pytz.timezone(member_timezone))
         return token.user, token
+
+
+def token_is_expired(token, now=None):
+    now = now or timezone.now()
+    return token.created <= now - timedelta(seconds=settings.API_TOKEN_TTL_SECONDS)

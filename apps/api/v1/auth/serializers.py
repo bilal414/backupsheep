@@ -68,11 +68,6 @@ class APIAuthResetPatchSerializer(serializers.Serializer):
         from django.contrib.auth.password_validation import validate_password
         from django.core.exceptions import ValidationError as DjangoValidationError
 
-        initial_values = self.get_initial()
-
-        if value != initial_values["password_confirm"]:
-            raise serializers.ValidationError("password do not match")
-
         # Apply Django's configured AUTH_PASSWORD_VALIDATORS (length, common, numeric, ...);
         # set_password() does not enforce these on its own.
         try:
@@ -81,13 +76,12 @@ class APIAuthResetPatchSerializer(serializers.Serializer):
             raise serializers.ValidationError(list(e.messages))
         return value
 
-    def validate_password_confirm(self, value):
-
-        initial_values = self.get_initial()
-
-        if value != initial_values["password"]:
-            raise serializers.ValidationError("password do not match")
-        return value
+    def validate(self, attrs):
+        if attrs.get("password") != attrs.get("password_confirm"):
+            raise serializers.ValidationError(
+                {"password_confirm": "Both password fields must match."}
+            )
+        return attrs
 
     def validate_password_token(self, value):
         # Resolve the token without leaking which tokens exist, then enforce

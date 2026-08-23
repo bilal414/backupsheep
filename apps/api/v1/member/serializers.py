@@ -1,9 +1,11 @@
 import pytz
 from django.contrib.auth.models import User
+from django.contrib.auth import update_session_auth_hash
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.timezone import get_current_timezone
-from firebase_admin.auth import UserNotFoundError
+from rest_framework.authtoken.models import Token
 from rest_framework import serializers
-from firebase_admin import auth
 from apps.console.account.models import CoreAccount
 from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.console.member.models import CoreMember, CoreMemberAccount
@@ -111,23 +113,56 @@ class UserSerializer(serializers.ModelSerializer):
 
 class UserWriteSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(read_only=True)
-    password = serializers.CharField(max_length=128, allow_null=True, allow_blank=False, write_only=True, min_length=6)
+    current_password = serializers.CharField(
+        max_length=128, required=False, allow_blank=False, write_only=True
+    )
+    password = serializers.CharField(
+        max_length=128, required=False, allow_blank=False, write_only=True, min_length=8
+    )
     password_confirm = serializers.CharField(
-        max_length=128, allow_null=True, allow_blank=False, write_only=True, min_length=6
+        max_length=128, required=False, allow_blank=False, write_only=True, min_length=8
     )
 
     class Meta:
         model = User
-        fields = ("id", "first_name", "last_name", "email", "password", "password_confirm")
+        fields = (
+            "id",
+            "first_name",
+            "last_name",
+            "email",
+            "current_password",
+            "password",
+            "password_confirm",
+        )
 
     def validate(self, data):
-        if data.get("password") != data.get("password_confirm"):
-            raise serializers.ValidationError(
-                {"password": "Both passwords fields should be same."},
-                {"password_confirm": "Both passwords fields should be same."},
-            )
-        else:
+        changing_password = any(
+            key in data for key in ("current_password", "password", "password_confirm")
+        )
+        if not changing_password:
             return data
+
+        if not all(
+            data.get(key) for key in ("current_password", "password", "password_confirm")
+        ):
+            raise serializers.ValidationError(
+                "Current password, new password, and confirmation are all required."
+            )
+        if data["password"] != data["password_confirm"]:
+            raise serializers.ValidationError(
+                {"password_confirm": "Both password fields must match."}
+            )
+
+        request = self.context.get("request")
+        if request is None or not request.user.check_password(data["current_password"]):
+            raise serializers.ValidationError(
+                {"current_password": "Current password is incorrect."}
+            )
+        try:
+            validate_password(data["password"], user=request.user)
+        except DjangoValidationError as error:
+            raise serializers.ValidationError({"password": list(error.messages)})
+        return data
 
     # def validate_email(self, data):
     #     if self.parent.instance.user.email != data:
@@ -208,25 +243,25 @@ class CoreMemberWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreMember
         fields = (
-            "notify_on_success",
-            "notify_on_fail",
             "timezone",
             "user",
             "memberships",
         )
 
     def update(self, instance, validated_data):
-        user = validated_data.pop("user", [])
+        user = validated_data.pop("user", {})
         memberships = validated_data.pop("memberships", [])
-        auth.update_user(
-            instance.user.username,
-            email=user.get("email"),
-            password=user.get("password"),
-            display_name=f"{user.get('first_name')} {user.get('last_name')} ",
-        )
-        user.pop("password", None)
+        password = user.pop("password", None)
+        user.pop("current_password", None)
         user.pop("password_confirm", None)
-        super().update(instance.user, user)
+        django_user = super().update(instance.user, user)
+        if password:
+            django_user.set_password(password)
+            django_user.save(update_fields=["password"])
+            Token.objects.filter(user=django_user).delete()
+            request = self.context.get("request")
+            if request is not None:
+                update_session_auth_hash(request, django_user)
         for membership in memberships:
             super().update(instance.memberships.get(current=True), membership)
             super().update(instance.memberships.get(current=True).account, membership)

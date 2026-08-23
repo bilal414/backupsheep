@@ -1,9 +1,13 @@
 from rest_framework.authtoken.models import Token
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .serializers import *
 from django.contrib.auth import login, logout
+from django.db import transaction
+from apps.console.member.models import CoreMember
 from ..utils.api_exceptions import ExceptionDefault
+from ..utils.api_authentication import token_is_expired
 from ..utils.api_throttles import LoginRateThrottle, PasswordResetRateThrottle
 
 
@@ -32,6 +36,9 @@ class APIAuthLogin(APIView):
             request.session["next"] = None
 
             token, created = Token.objects.get_or_create(user=member.user)
+            if not created and token_is_expired(token):
+                token.delete()
+                token = Token.objects.create(user=member.user)
 
             content = {
                 "api_key": token.key,
@@ -43,10 +50,13 @@ class APIAuthLogin(APIView):
 
 
 class APIAuthLogout(APIView):
-    permission_classes = ()
+    permission_classes = (IsAuthenticated,)
 
-    def get(self, request):
+    def post(self, request):
         try:
+            # TokenAuthentication and SessionAuthentication can both reach this
+            # endpoint. Revoke the user's single DRF bearer token in either case.
+            Token.objects.filter(user=request.user).delete()
             logout(request)
             response = {"logout": True}
         except Exception as e:
@@ -87,12 +97,31 @@ class APIAuthReset(APIView):
 
         if serializer.is_valid():
             password = serializer.validated_data.get('password')
-            member = serializer.member
-            member.user.set_password(password)
-            member.user.save()
-            member.password_reset_token = None
-            member.password_reset_token_created = None
-            member.save()
+            token = serializer.validated_data.get("password_token")
+            # Serialize consumption so the same reset link cannot win two
+            # concurrent requests. The second request observes the cleared token.
+            with transaction.atomic():
+                member = (
+                    CoreMember.objects.select_for_update()
+                    .select_related("user")
+                    .get(pk=serializer.member.pk)
+                )
+                if not member.password_reset_token_is_valid(token):
+                    raise ExceptionDefault(
+                        detail={"password_token": ["Invalid or expired password reset token"]}
+                    )
+                member.user.set_password(password)
+                member.user.save(update_fields=["password"])
+                member.password_reset_token = None
+                member.password_reset_token_created = None
+                member.save(
+                    update_fields=[
+                        "password_reset_token",
+                        "password_reset_token_created",
+                        "modified",
+                    ]
+                )
+                Token.objects.filter(user=member.user).delete()
             content = {"password_reset": True}
         else:
             raise ExceptionDefault(detail=serializer.errors)

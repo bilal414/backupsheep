@@ -60,6 +60,28 @@ SECRET_KEY = config["DJANGO_SECRET_KEY"]
 DEBUG = _as_bool(config.get("DJANGO_DEBUG", "false"))
 DJANGO_SERVER = config["DJANGO_SERVER"]
 
+
+def _bounded_positive_int(name, default, maximum):
+    """Parse a security-sensitive duration without allowing an accidental disable."""
+    try:
+        value = int(config.get(name, default))
+    except (TypeError, ValueError) as error:
+        raise ImproperlyConfigured(f"{name} must be an integer number of seconds.") from error
+    if value <= 0 or value > maximum:
+        raise ImproperlyConfigured(
+            f"{name} must be between 1 and {maximum} seconds."
+        )
+    return value
+
+
+# DRF's built-in token model is otherwise permanent. Limit bearer-token lifetime
+# even when an operator forgets to configure it, and refuse values over 90 days.
+API_TOKEN_TTL_SECONDS = _bounded_positive_int(
+    "API_TOKEN_TTL_SECONDS",
+    30 * 24 * 60 * 60,
+    90 * 24 * 60 * 60,
+)
+
 # .env_sample values are merged in as defaults (see config above) so a PaaS deploy
 # that forgets to set DJANGO_SECRET_KEY would otherwise boot with a publicly known
 # signing key. Refuse to start a production instance in that state instead of
@@ -181,8 +203,8 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
     ),
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "apps.api.v1.utils.api_authentication.ConsoleSessionAuthentication",
         "apps.api.v1.utils.api_authentication.CustomTokenAuthentication",
+        "apps.api.v1.utils.api_authentication.ConsoleSessionAuthentication",
     ),
     # The browsable API UI is handy in development but exposes a self-documenting,
     # form-driven interface in production, so only enable it when DEBUG is on.
