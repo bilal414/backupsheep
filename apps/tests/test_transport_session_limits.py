@@ -9,12 +9,19 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+from unittest import mock
 
 from django.test import SimpleTestCase, override_settings
 
 from apps.api.v1.utils.http import TimeoutSession
 from apps.console.backup.models import BaseBackupStoragePoints, _presigned_url_expiry
+from apps.signals import bind_auth_session_version
 from backupsheep import settings as project_settings
+from utils.middleware import (
+    AUTH_SESSION_STARTED_AT_KEY,
+    AuthenticationVersionMiddleware,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -133,6 +140,49 @@ class PresignedDownloadLifetimeTests(SimpleTestCase):
         self.assertNotIn("timedelta(hours=48)", source)
         self.assertNotIn("3600 * 24", source)
         self.assertNotIn("24 * 3600", source)
+
+
+class AbsoluteBrowserSessionTests(SimpleTestCase):
+    @staticmethod
+    def _request(started_at):
+        session = {}
+        if started_at is not None:
+            session[AUTH_SESSION_STARTED_AT_KEY] = started_at
+        return SimpleNamespace(
+            user=SimpleNamespace(is_authenticated=True),
+            session=session,
+        )
+
+    @mock.patch("utils.middleware.time.time", return_value=1_000_000)
+    @mock.patch("django.contrib.auth.logout")
+    def test_expired_and_legacy_sessions_are_logged_out(self, logout, _clock):
+        middleware = AuthenticationVersionMiddleware(lambda request: request)
+
+        middleware(self._request(1_000_000 - project_settings.SESSION_COOKIE_AGE))
+        middleware(self._request(None))
+
+        self.assertEqual(logout.call_count, 2)
+
+    @mock.patch("utils.middleware.time.time", return_value=1_000_000)
+    @mock.patch("django.contrib.auth.logout")
+    def test_fresh_session_remains_authenticated(self, logout, _clock):
+        middleware = AuthenticationVersionMiddleware(lambda request: request)
+
+        middleware(self._request(1_000_000 - 60))
+
+        logout.assert_not_called()
+
+    @mock.patch("apps.signals.time.time", return_value=123_456)
+    def test_every_login_records_immutable_session_start(self, _clock):
+        request = SimpleNamespace(session={})
+
+        bind_auth_session_version(
+            sender=None,
+            request=request,
+            user=SimpleNamespace(),
+        )
+
+        self.assertEqual(request.session[AUTH_SESSION_STARTED_AT_KEY], 123_456)
 
 
 class ProductionTransportSettingsSubprocessTests(SimpleTestCase):

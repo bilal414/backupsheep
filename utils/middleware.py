@@ -1,12 +1,16 @@
+import math
+import time
+
+import pytz
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.http import HttpResponseRedirect, HttpResponsePermanentRedirect
-import pytz
 from django.utils import timezone
 from django.utils.deprecation import MiddlewareMixin
 
 
 AUTH_SESSION_VERSION_KEY = "_backupsheep_auth_session_version"
+AUTH_SESSION_STARTED_AT_KEY = "_backupsheep_auth_session_started_at"
 
 
 class AuthenticationVersionMiddleware:
@@ -19,26 +23,46 @@ class AuthenticationVersionMiddleware:
         user = getattr(request, "user", None)
         if user is not None and user.is_authenticated:
             try:
-                member = user.member
-            except (AttributeError, ObjectDoesNotExist):
-                # A separately-created Django superuser may not have a BackupSheep
-                # member row. The admin route is disabled by default in production.
-                member = None
+                started_at = float(
+                    request.session.get(AUTH_SESSION_STARTED_AT_KEY)
+                )
+            except (TypeError, ValueError):
+                started_at = float("nan")
+            now = time.time()
+            absolute_expiry = int(settings.SESSION_COOKIE_AGE)
+            session_expired = (
+                not math.isfinite(started_at)
+                or started_at > now + 300
+                or now - started_at >= absolute_expiry
+            )
+            if session_expired:
+                # The cookie expiry can roll forward when application code modifies a
+                # session. This independent login timestamp enforces the true maximum.
+                from django.contrib.auth import logout
 
-            if member is not None:
-                bound_version = request.session.get(AUTH_SESSION_VERSION_KEY)
-                if str(bound_version) != str(member.auth_session_version):
-                    from django.contrib.auth import logout
+                logout(request)
+            else:
+                try:
+                    member = user.member
+                except (AttributeError, ObjectDoesNotExist):
+                    # A separately-created Django superuser may not have a BackupSheep
+                    # member row. The admin route is disabled by default in production.
+                    member = None
 
-                    logout(request)
-                elif member.get_active_current_membership() is None:
-                    # Membership suspension is an authentication boundary, not merely
-                    # a queryset filter.  End an existing browser session immediately
-                    # when no tenant remains active.  The model automatically selects
-                    # another active membership first, when one is available.
-                    from django.contrib.auth import logout
+                if member is not None:
+                    bound_version = request.session.get(AUTH_SESSION_VERSION_KEY)
+                    if str(bound_version) != str(member.auth_session_version):
+                        from django.contrib.auth import logout
 
-                    logout(request)
+                        logout(request)
+                    elif member.get_active_current_membership() is None:
+                        # Membership suspension is an authentication boundary, not merely
+                        # a queryset filter. End an existing browser session immediately
+                        # when no tenant remains active. The model automatically selects
+                        # another active membership first, when one is available.
+                        from django.contrib.auth import logout
+
+                        logout(request)
 
         return self.get_response(request)
 
