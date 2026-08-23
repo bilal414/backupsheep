@@ -2266,6 +2266,29 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertTrue(requirements["mysql_explicit_definer"])
         self.assertTrue(requirements["mysql_binlog_restricted_object"])
 
+    def test_mysql_archive_records_multiline_definer_statement_start(self):
+        sql_path = os.path.join(self.tmp, "source_db.sql")
+        payload = (
+            b"/*!50001 CREATE ALGORITHM=UNDEFINED */\n"
+            b"/*!50013 DEFINER=`root`@`localhost` SQL SECURITY DEFINER */\n"
+            b"/*!50001 VIEW `fixture_summary` AS select 1 AS `row_count` */;\n"
+        )
+        with open(sql_path, "wb") as output:
+            output.write(payload)
+
+        _targets, _digests, requirements = RD._validate_extracted_archive(
+            _fake_backup(),
+            _fake_auth(CoreAuthDatabase.DatabaseType.MYSQL),
+            self.tmp,
+            mode="fork",
+            include_requirements=True,
+        )
+
+        self.assertEqual(
+            requirements["mysql_explicit_definer_lines"],
+            {"source_db.sql": [1]},
+        )
+
     def test_mysql_row_data_does_not_require_definer_privilege(self):
         sql_path = os.path.join(self.tmp, "source_db.sql")
         payload = (
@@ -2399,6 +2422,34 @@ class DatabaseRestoreEngineHardeningTests(BaseTestCase):
         self.assertIsNone(
             RD._mysql_system_definer_rejection(
                 raw_error,
+                auth,
+                "source_db.sql",
+                requirements,
+            )
+        )
+
+    def test_mysql_84_error_uses_validated_multiline_statement_start(self):
+        auth = _fake_auth(CoreAuthDatabase.DatabaseType.MYSQL)
+        auth.version = CoreAuthDatabase.DatabaseVersion.MYSQL_8_4
+        requirements = {
+            "mysql_explicit_definer": True,
+            "mysql_explicit_definer_lines": {"source_db.sql": [69]},
+        }
+
+        error = RD._mysql_system_definer_rejection(
+            b"ERROR 1227 (42000) at line 69: SYSTEM_USER required",
+            auth,
+            "source_db.sql",
+            requirements,
+        )
+
+        self.assertEqual(
+            error.code,
+            RD.DATABASE_RESTORE_SYSTEM_DEFINER_ERROR_CODE,
+        )
+        self.assertIsNone(
+            RD._mysql_system_definer_rejection(
+                b"ERROR 1227 (42000) at line 70: unrelated statement",
                 auth,
                 "source_db.sql",
                 requirements,

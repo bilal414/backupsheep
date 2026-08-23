@@ -819,6 +819,36 @@ def _mysql_line_has_explicit_definer(line):
     return _MYSQL_EXPLICIT_DEFINER_RE.search(stripped) is not None
 
 
+def _mysql_statement_start_witness(current_start, line, line_number):
+    """Track the client-reported start line for a MySQL statement.
+
+    MySQL reports an error at the first line of a multi-line statement, while a
+    mysqldump DEFINER clause can appear on a later executable-comment line. This
+    deliberately conservative scanner never treats an ordinary comment or a
+    client DELIMITER directive as a statement witness. An uncertain parse falls
+    back to the existing generic rejection path.
+    """
+    stripped = line.lstrip()
+    if not stripped:
+        return current_start
+    if stripped.upper().startswith(b"DELIMITER "):
+        return None
+    if stripped.startswith((b"--", b"#")):
+        return current_start
+    if stripped.startswith(b"/*") and not stripped.startswith(b"/*!"):
+        return current_start
+    return current_start if current_start is not None else line_number
+
+
+def _mysql_line_terminates_statement(line):
+    stripped = line.strip()
+    if not stripped or stripped.startswith((b"--", b"#")):
+        return False
+    if stripped.upper().startswith(b"DELIMITER "):
+        return True
+    return stripped.endswith(b";")
+
+
 def _mysql_line_has_binlog_restricted_object(line):
     """Detect MySQL stored functions/triggers affected by binary-log policy."""
     stripped = line.lstrip()
@@ -923,11 +953,18 @@ def _validate_extracted_archive(
         )
         database_preamble_seen = False
         autocommit_state = "idle"
+        mysql_statement_start_line = None
         # Read the complete file.  ZIP CRC validation happens in
         # extract_backup_zip; this second pass validates the actual restore
         # input and gives the marker an immutable content identity.
         with open(path, "rb") as sql_file:
             for line_number, line in enumerate(sql_file, start=1):
+                if mysql_family_restore:
+                    mysql_statement_start_line = _mysql_statement_start_witness(
+                        mysql_statement_start_line,
+                        line,
+                        line_number,
+                    )
                 if (
                     mysql_fork_scaffolding
                     and _MYSQL_DUMP_AUTOCOMMIT_OFF_RE.fullmatch(line)
@@ -996,7 +1033,9 @@ def _validate_extracted_archive(
                     )
                     if witnesses is not None:
                         if len(witnesses) < MAX_MYSQL_DEFINER_LINE_WITNESSES:
-                            witnesses.append(line_number)
+                            witness_line = mysql_statement_start_line or line_number
+                            if not witnesses or witnesses[-1] != witness_line:
+                                witnesses.append(witness_line)
                         else:
                             # Keep memory bounded. An unindexed excess witness
                             # remains protected by the existing generic target
@@ -1014,6 +1053,8 @@ def _validate_extracted_archive(
                     raise RestoreError(
                         "stored SQL conflicts with BackupSheep restore ownership metadata."
                     )
+                if mysql_family_restore and _mysql_line_terminates_statement(line):
+                    mysql_statement_start_line = None
                 byte_count += len(line)
                 digest.update(line)
         if mysql_fork_scaffolding and autocommit_state != "idle":
