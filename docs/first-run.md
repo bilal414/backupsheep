@@ -5,6 +5,17 @@ setup wizard. You can't skip it — every request is funneled to `/onboarding/` 
 is finished, and once finished the wizard is **permanently locked** (it can never create a
 second admin or be re-run from the browser).
 
+The verified installer and stock Compose deployment require the first owner to prove
+trusted host access. Read the token from the protected host file, not container inspection
+or install logs:
+
+```bash
+cat .secrets/onboarding_token
+```
+
+Enter that value when the wizard prompts. The direct `ONBOARDING_INSTALL_TOKEN` key stays
+blank in the stock `.env`.
+
 ## The steps
 
 ### 1. Account
@@ -28,7 +39,7 @@ confirm the settings before continuing. Credentials are stored encrypted (keyed 
 
 > **If you disable email**, password-reset emails cannot be delivered. A locked-out admin
 > then has to reset the password from the server:
-> `docker compose run --rm app python manage.py changepassword <email>`. Keep that in mind,
+> `./backupsheep-compose run --rm app python manage.py changepassword <email>`. Keep that in mind,
 > or configure a provider. See [Troubleshooting](troubleshooting.md).
 
 ### 4. Storage destination
@@ -46,6 +57,10 @@ again in a new tab. This step is optional; you can do it later from the console.
 Click **Finish setup**. This marks the install configured, locks the wizard, and drops you
 on the dashboard.
 
+Profile-less Compose still has no workers or scheduler at this point. After reviewing
+credentials and any durable queued/recoverable state, explicitly enable provider
+operations with `./backupsheep-compose --profile operations up --detach`.
+
 ## Admin accounts explained
 
 There are two distinct "admin" concepts:
@@ -62,7 +77,7 @@ can't use the console — they're separate roles. Most operators only ever need 
 admin. Create a superuser only if you want Django's admin site:
 
 ```bash
-docker compose run --rm app python manage.py createsuperuser
+./backupsheep-compose run --rm app python manage.py createsuperuser
 ```
 
 ## Re-running setup

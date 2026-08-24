@@ -36,7 +36,8 @@ categories:
 - **Cloud**: a server, instance, provider-managed database, or supported cloud
   data resource.
 - **Volume**: an independently discovered block volume or disk.
-- **Website**: files and directories reached through FTP, FTPS, or SFTP.
+- **Website**: files and directories reached through FTPS or SFTP; plaintext FTP is
+  a default-off legacy compatibility mode.
 - **Database**: one or more logical MySQL, MariaDB, or PostgreSQL databases.
 - **SaaS**: currently WordPress or Basecamp.
 

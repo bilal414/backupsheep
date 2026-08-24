@@ -1,9 +1,8 @@
 # Core Python packages
 setuptools==83.0.0
-pip==26.1.2
 
 # Django and REST Framework
-Django==6.0.7
+Django==6.0.8
 djangorestframework==3.17.1
 djangorestframework-datatables==0.7.2
 django-filter==25.2
@@ -13,7 +12,7 @@ django-model-utils==5.0.0
 # Database and Data Processing
 psycopg2-binary==2.9.12
 mysql-connector-python==9.7.0
-sqlparse==0.5.5
+sqlparse==0.6.0
 tzdata==2026.2
 
 # Task Queue & Celery
@@ -41,7 +40,7 @@ pcloud==2.0.1
 ibm-cos-sdk==2.16.2
 oss2==2.19.1
 cos-python-sdk-v5==1.9.43
-oci==2.182.1
+oci==2.184.2
 ovh==1.2.0
 
 # File Transfer & Network
@@ -59,21 +58,18 @@ ipaddress==1.0.23
 
 # Security & Authentication
 python-dotenv==1.2.2
-# oci 2.182.1 allows cryptography<50; 46.0.7 stays pinned for reproducibility.
-cryptography==46.0.7
+# oci 2.184.2 supports cryptography<51; 50.0.0 includes the current security fixes.
+cryptography==50.0.0
 sentry-sdk==2.60.0
-firebase-admin==7.4.0
 
 # Utilities & Helpers
 humanfriendly==10.0
 humanize==4.15.0
 shortuuid==1.0.13
 phonenumbers==9.0.30
-twilio==9.10.9
 Pillow==12.3.0
 beautifulsoup4==4.14.3
 slack-sdk==3.42.0
-fake-useragent==2.2.0
 arrow==1.4.0
 croniter==6.2.2
 python-slugify==8.0.4

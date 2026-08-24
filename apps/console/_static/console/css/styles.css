@@ -1,6 +1,7 @@
 @import 'tailwindcss';
 
-@config '../tailwind.config.js';
+/* Build configuration lives outside STATICFILES_DIRS so it is never served publicly. */
+@config '../../../../../tailwind.config.js';
 
 @theme {
   /* Typography */

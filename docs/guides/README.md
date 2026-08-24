@@ -31,9 +31,34 @@ validated against a live production account.
 
 ## Documentation conventions
 
-Commands assume the repository or install directory is the current directory and use
-Docker Compose v2 (`docker compose`). Replace `/opt/backupsheep`, hostnames, account IDs,
-resource IDs and backup paths with values you have resolved for the target deployment.
+Commands assume the repository or install directory is the current directory and require
+Docker Engine 28.0.0+ with Docker Compose 2.33.1+ (`docker compose`). Replace
+`/opt/backupsheep`, hostnames, account IDs, resource IDs and backup paths with values you
+have resolved for the target deployment. Manual deployments explicitly build `app`
+because the stock application roles use `pull_policy: never`. Profile-less starts are
+core-only; commands that authorize provider workers and Beat include
+`--profile operations`.
+
+Deployment commands use the shipped `./backupsheep-compose` wrapper, not raw Compose. It
+pins the project directory, `.env` and base model; rejects ambient profile/Bake/orphan and
+alternate-settings controls; validates the rendered model; and refuses to auto-load a
+`docker-compose.override.yml`. If an installation has an override, inspect its ownership,
+permissions, mounts, privileges, networks and complete rendered diff first, then add its
+exact path before the Compose command, for example:
+
+```bash
+./backupsheep-compose \
+  --approved-compose-file "$PWD/docker-compose.override.yml" \
+  config --quiet
+```
+
+Use that same explicit flag on every later command in the maintenance shell. The only
+other accepted extra file is the repository's pinned RabbitMQ compatibility overlay in
+its dedicated migration runbook. The verified installer intentionally accepts no local
+override at all; use the reviewed manual-deployment path when one is required. The
+wrapper also refuses `down`/`rm` volume deletion unless the same command includes its
+separate `--allow-data-deletion` wrapper flag; that flag is authorization, not proof that
+the selected volumes are disposable.
 
 Examples that inspect state are safe to copy. Commands that restore a database, change
 provider state, delete data or alter routing are called out at the point of use. Always

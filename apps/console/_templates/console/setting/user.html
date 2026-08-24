@@ -52,7 +52,6 @@
                     <tr class="bg-slate-50">
                         <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Name</th>
                         <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Email</th>
-                        <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">API Token</th>
                         <th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">Groups (Type)</th>
                         <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
                     </tr>
@@ -69,9 +68,6 @@
                                 </div>
                             </td>
                             <td class="whitespace-nowrap px-4 py-3 text-slate-700">{{ membership.member.user.email }}</td>
-                            <td class="whitespace-nowrap px-4 py-3">
-                                <span class="font-mono text-xs text-slate-700">{{ membership.member.user.auth_token }}</span>
-                            </td>
                             <td class="px-4 py-3 text-slate-700">
                                 <ul class="space-y-0.5">
                                     {% for group in membership.member.user.groups.all %}

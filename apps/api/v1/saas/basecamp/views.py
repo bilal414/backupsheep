@@ -14,7 +14,8 @@ from apps.api.v1.saas.basecamp.serializers import (
     CoreBasecampReadSerializer,
     CoreBasecampWriteSerializer,
 )
-from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_filters import DateRangeFilter, scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreDatabaseBackup, CoreBasecampBackup
 from apps.console.connection.models import CoreAuthDatabase, CoreConnection
@@ -61,7 +62,7 @@ class CoreBasecampView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query = Q(account=member.get_current_account(), integration__code="basecamp")
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
         query &= ~Q(status=CoreConnection.Status.TOKEN_REFRESH_FAIL)
-        regions = CoreConnection.objects.filter(query).values(
+        regions = visible_connections(member).filter(query).values(
             "id",
             "name",
             "location_id",
@@ -77,7 +78,7 @@ class CoreBasecampView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query &= Q(node__connection__integration__code="basecamp")
         query &= Q(node__type=CoreNode.Type.SAAS)
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-        nodes = CoreBasecamp.objects.filter(query)
+        nodes = scope_direct_node_queryset(request, CoreBasecamp.objects.filter(query))
         all_totals = {
             "nodes": nodes.count(),
             "backups": CoreBasecampBackup.objects.filter(

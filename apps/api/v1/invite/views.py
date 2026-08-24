@@ -130,7 +130,7 @@ class CoreInviteView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
-    @action(detail=True)
+    @action(detail=True, methods=["post"])
     def accept(self, request, pk=None):
         member = self.request.user.member
 

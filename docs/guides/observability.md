@@ -10,7 +10,7 @@ restore monitor; operators must integrate the signals below into their monitorin
 | Layer | Source | What it proves |
 | --- | --- | --- |
 | Web liveness | `GET /healthz/` returns `ok` | A web process handled one HTTP request |
-| Container state | `docker compose ps --all` | Docker health/restart state and one-shot migration exit |
+| Container state | `./backupsheep-compose ps --all`; add `--profile operations` for enabled workers/Beat | Docker health/restart state and one-shot gate exits |
 | PostgreSQL | `pg_isready`, database monitoring | Database accepts a connection; external metrics cover capacity/locks/latency |
 | RabbitMQ | diagnostics, queue metrics | Broker availability, backlog and consumers |
 | Celery | worker ping and inspect | Current worker connectivity and transient task view |
@@ -27,9 +27,15 @@ provider backup job do not prove recoverability.
 
 ```bash
 curl -fsS http://127.0.0.1:8000/healthz/
-docker compose exec -T db pg_isready -U backupsheep -d backupsheep
-docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping
-docker compose exec -T worker-cloud celery -A backupsheep inspect ping
+./backupsheep-compose exec -T db pg_isready -U backupsheep -d backupsheep
+./backupsheep-compose exec -T rabbitmq rabbitmq-diagnostics -q ping
+```
+
+The profile-less core has no workers by design. When operations have been explicitly
+enabled, inspect them separately:
+
+```bash
+./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect ping
 ```
 
 The health endpoint is deliberately unauthenticated and exempt from HTTPS redirect so a
@@ -66,12 +72,12 @@ Suggested job alerts:
 ## RabbitMQ and Celery
 
 ```bash
-docker compose exec -T rabbitmq \
+./backupsheep-compose exec -T rabbitmq \
   rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers durable
 
-docker compose exec -T worker-cloud celery -A backupsheep inspect active
-docker compose exec -T worker-cloud celery -A backupsheep inspect reserved
-docker compose exec -T worker-cloud celery -A backupsheep inspect scheduled
+./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect active
+./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect reserved
+./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect scheduled
 ```
 
 Track queue depth and oldest-message age per lane. A sustained `storage` queue with healthy
@@ -87,9 +93,14 @@ row before intervening.
 Container stdout/stderr:
 
 ```bash
-docker compose logs --since=1h app
-docker compose logs --since=1h worker-cloud worker-database worker-files worker-storage worker-logs beat
-docker compose logs --since=1h db rabbitmq
+./backupsheep-compose logs --since=1h app
+./backupsheep-compose logs --since=1h db rabbitmq
+```
+
+For an operations-enabled deployment, also collect:
+
+```bash
+./backupsheep-compose --profile operations logs --since=1h worker-cloud worker-database worker-files worker-storage worker-logs beat
 ```
 
 The console's Logs page is an account-scoped activity trail with authentication,
@@ -111,9 +122,16 @@ Centralize container logs before their local retention/rotation window expires. 
 ## Sentry
 
 Set `SENTRY_DSN` to enable the initialized Django integration. `DJANGO_SERVER` becomes the
-Sentry environment tag. Current settings request full transaction tracing and profiling
-for sampled transactions; evaluate volume, cost, data handling and retention in the Sentry
-project before enabling it on sensitive production workloads.
+Sentry environment tag. Transaction tracing and profiling both default to `0` (off). An
+operator may explicitly set `SENTRY_TRACES_SAMPLE_RATE` or `SENTRY_PROFILES_SAMPLE_RATE`
+to a value from `0` to `1`, after evaluating volume, cost, data handling and retention in
+the Sentry project. Invalid or out-of-range values stop application startup.
+
+BackupSheep configures Sentry to omit request bodies, Python local variables and default
+PII. A final event scrubber removes credentials, cookies, query strings, raw exception
+messages, breadcrumbs, span data and credential-bearing URLs from both error and
+transaction events. Do not put secrets into custom Sentry tags; telemetry is not an
+approved secret store.
 
 An empty DSN disables event delivery. Sentry does not replace queue, capacity, provider or
 restore monitoring.
@@ -131,9 +149,9 @@ Monitor the host filesystems underlying every named volume:
 Useful local snapshots:
 
 ```bash
-docker compose stats --no-stream
+./backupsheep-compose stats --no-stream
 docker system df
-docker inspect "$(docker compose ps -q app)" \
+docker inspect "$(./backupsheep-compose ps -q app)" \
   --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 ```
 

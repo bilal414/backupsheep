@@ -1,4 +1,4 @@
-"""Operator-only Sentry diagnostics correlated to the public execution ledger."""
+"""Sanitized Sentry diagnostics correlated to the public execution ledger."""
 
 from __future__ import annotations
 
@@ -35,12 +35,13 @@ def capture_execution_diagnostic(
     stage="unknown",
     code="EXECUTION_ERROR",
 ):
-    """Capture raw exception detail only in Sentry with secret-free lookup tags.
+    """Capture a scrubbed exception event with secret-free lookup tags.
 
     The exception itself is intentionally never copied to a model, account log,
-    notification, API response, or transfer log. Sentry remains the operator-only,
-    retention-controlled diagnostic store; the correlation tag joins that private
-    event to the public-safe execution record.
+    notification, API response, or transfer log. The global Sentry privacy hook
+    removes its message, locals and other free-form diagnostic containers before
+    transport; the exception type and correlation tag join the event to the
+    public-safe execution record.
     """
     correlation_id = _safe_correlation(correlation_id)
     if correlation_id is None or not isinstance(error, BaseException):

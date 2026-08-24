@@ -1,4 +1,5 @@
 import datetime
+import fcntl
 import json
 import math
 import os
@@ -7,7 +8,7 @@ import uuid
 import boto3
 import humanfriendly
 import pytz
-from apps.api.v1.utils.http import requests
+from apps.api.v1.utils.http import request_timeout, requests
 from django.conf import settings
 import time
 from celery import current_app
@@ -21,7 +22,11 @@ from backupsheep.celery import app
 
 from apps.console.connection.models import CoreAuthBasecamp
 from apps.console.member.models import CoreMember
-from apps.console.notification.models import CoreNotificationSlack
+from apps.console.notification.models import (
+    CoreNotificationDelivery,
+    CoreNotificationSlack,
+    CoreNotificationTelegram,
+)
 from apps.console.storage.models import CoreStorageType, CoreStorage, CoreStorageOneDrive, CoreStorageDropbox, \
     CoreStorageGoogleDrive
 from apps.console.utils.models import UtilBackup
@@ -1364,6 +1369,87 @@ def delete_from_disk(self, backup_uuid, path_type):
         raise self.retry()
 
 
+@current_app.task(
+    name="reset_incremental_cache",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=60,
+    ignore_result=True,
+)
+def reset_incremental_cache(self, node_id):
+    """Delete one node's local mirror cache from the storage worker boundary.
+
+    The web container mounts the shared backup work volume read-only. Moving this
+    mutation to the storage queue prevents a compromised HTTP process from altering
+    staged archives, manifests, SSH trust material, or another worker's lock files.
+    """
+
+    try:
+        canonical_id = int(node_id)
+    except (TypeError, ValueError):
+        return
+    if canonical_id <= 0 or str(canonical_id) != str(node_id):
+        return
+
+    from apps.console.node.models import CoreNode
+
+    node = CoreNode.objects.filter(pk=canonical_id).only("id").first()
+    if node is None:
+        return
+    cache_key = node.uuid_str
+
+    storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
+    raw_cache_root = os.path.join(storage_dir, "website_cache")
+    cache_root = os.path.realpath(raw_cache_root)
+    if (
+        os.path.islink(raw_cache_root)
+        or cache_root == storage_dir
+        or os.path.commonpath([storage_dir, cache_root]) != storage_dir
+    ):
+        return
+
+    # Use a directory descriptor for every mutation. Relative dir_fd operations
+    # remain anchored to the reviewed cache directory even if another process
+    # renames a path component, and rmtree refuses a top-level symlink. The same
+    # per-node lock is held by the entire incremental mirror+archive operation,
+    # so a reset can neither delete a live cache nor be lost behind a writer.
+    cache_root_fd = None
+    lock_file = None
+    try:
+        os.makedirs(raw_cache_root, mode=0o700, exist_ok=True)
+        root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        root_flags |= getattr(os, "O_NOFOLLOW", 0)
+        cache_root_fd = os.open(raw_cache_root, root_flags)
+
+        lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        lock_fd = os.open(
+            f"{cache_key}.lock", lock_flags, 0o600, dir_fd=cache_root_fd
+        )
+        lock_file = os.fdopen(lock_fd, "a+")
+        os.fchmod(lock_file.fileno(), 0o600)
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+
+        try:
+            shutil.rmtree(cache_key, ignore_errors=False, dir_fd=cache_root_fd)
+        except FileNotFoundError:
+            pass
+
+        try:
+            os.unlink(f"{cache_key}.meta.json", dir_fd=cache_root_fd)
+        except FileNotFoundError:
+            pass
+    except Exception as error:
+        raise self.retry(exc=error)
+    finally:
+        if lock_file is not None:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
+        if cache_root_fd is not None:
+            os.close(cache_root_fd)
+
+
 @current_app.task(name="delete_old_logs", bind=True, ignore_result=True)
 def delete_old_logs(self, max_age_days=None):
     """Prune backup run logs from local _storage once they pass the retention window.
@@ -1583,23 +1669,6 @@ def terminate_backup(self, data):
         raise self.retry()
 
 
-@current_app.task(name="send_to_firebase", track_started=True, bind=True)
-def send_to_firebase(self, data):
-    try:
-        if data.get("notes") == "completed" or data.get("notes") == "failed":
-            time.sleep(5)
-        ref = db.reference(f"nodes/{data.get('node_id')}/logs")
-        ref.set(
-            {
-                "timestamp": int(time.time()),
-                "notes": data.get("notes"),
-                "report": data.get("report", None),
-            }
-        )
-    except Exception as e:
-        raise self.retry()
-
-
 @current_app.task(
     name="send_log_to_db",
     bind=True,
@@ -1607,32 +1676,398 @@ def send_to_firebase(self, data):
     acks_late=False,
     send_events=False,
 )
-def send_log_to_db(self, data):
+def send_log_to_db(self, log_reference):
+    """Create durable per-channel deliveries for a persisted log row.
+
+    New callers send only an integer row id after commit. The dict branch is a
+    compatibility path for messages queued by older releases during an upgrade;
+    it persists that historical payload once. Every message published from this
+    point onward contains only an opaque delivery-row id.
+    """
     from apps.console.log.models import CoreLog
 
     try:
-        if data.get("account_id"):
-            log = CoreLog.objects.create(account_id=data.get("account_id"), data=data)
+        if isinstance(log_reference, dict):
+            data = dict(log_reference)
+            if not data.get("account_id"):
+                return
+            log = CoreLog.objects.create(
+                account_id=data.get("account_id"), data=data
+            )
+        else:
+            try:
+                log_id = int(log_reference)
+            except (TypeError, ValueError):
+                return
+            if log_id <= 0 or str(log_id) != str(log_reference):
+                return
+            log = CoreLog.objects.select_related("account").filter(pk=log_id).first()
+            if log is None:
+                return
+            data = log.data if isinstance(log.data, dict) else {}
 
-            if data.get("sender_name") == "BackupSheep - Notification Bot":
-                message = log.data.get("message")
-                error_details = log.data.get("error_details")
+        if data.get("sender_name") != "BackupSheep - Notification Bot":
+            return
 
-                full_msg = f""
-                if message:
-                    if message.strip() != "":
-                        full_msg += f"{data.get('message')}"
+        channel_references = [
+            *(
+                (CoreNotificationDelivery.ChannelType.SLACK, channel_id)
+                for channel_id in log.account.notification_slack.values_list(
+                    "id", flat=True
+                )
+            ),
+            *(
+                (CoreNotificationDelivery.ChannelType.TELEGRAM, channel_id)
+                for channel_id in log.account.notification_telegram.values_list(
+                    "id", flat=True
+                )
+            ),
+        ]
+        delivery_ids = []
+        now = timezone.now()
+        with transaction.atomic():
+            # Serialize duplicate fan-out tasks for the same log. The unique
+            # constraint remains the final cross-process safety boundary.
+            current_log = (
+                CoreLog.objects.select_for_update()
+                .filter(pk=log.pk)
+                .first()
+            )
+            if current_log is None:
+                return
+            for channel_type, channel_id in channel_references:
+                delivery, _created = CoreNotificationDelivery.objects.get_or_create(
+                    log_id=current_log.pk,
+                    channel_type=channel_type,
+                    channel_id=channel_id,
+                    defaults={"next_attempt_at": now},
+                )
+                if delivery.status in (
+                    CoreNotificationDelivery.Status.SENT,
+                    CoreNotificationDelivery.Status.SKIPPED,
+                ):
+                    continue
+                if (
+                    delivery.status == CoreNotificationDelivery.Status.PROCESSING
+                    and delivery.lease_expires_at
+                    and delivery.lease_expires_at > now
+                ):
+                    continue
+                if delivery.next_attempt_at > now:
+                    continue
+                delivery_ids.append(delivery.pk)
 
-                if error_details:
-                    if error_details.strip() != "":
-                        if len(full_msg) > 0:
-                            full_msg += f" :: "
-                        full_msg += f"{data.get('error_details')}"
-                if len(full_msg) > 0:
-                    log.account.send_notification(full_msg)
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
+            if delivery_ids:
+                transaction.on_commit(
+                    lambda ids=tuple(delivery_ids): _publish_notification_deliveries(
+                        ids
+                    )
+                )
+    except Exception:
+        # The legacy input can contain notification plaintext, and model/query
+        # frames can contain encrypted provider credentials. Do not hand this
+        # exception to an observability SDK or retry the original payload. A
+        # successfully-created delivery is independently recovered by Beat.
+        return
+
+
+def _publish_notification_deliveries(delivery_ids):
+    """Best-effort publish of opaque IDs; the periodic sweep is authoritative."""
+
+    for delivery_id in delivery_ids:
+        try:
+            deliver_log_notification.apply_async(args=[int(delivery_id)])
+        except Exception:
+            # Broker URLs include credentials. Do not capture the exception.
+            continue
+
+
+def _notification_delivery_retry_delay(attempt_count):
+    try:
+        base = max(
+            1,
+            int(getattr(settings, "NOTIFICATION_DELIVERY_BACKOFF_BASE_SECONDS", 30)),
+        )
+    except (TypeError, ValueError):
+        base = 30
+    try:
+        maximum = max(
+            base,
+            int(getattr(settings, "NOTIFICATION_DELIVERY_BACKOFF_MAX_SECONDS", 3600)),
+        )
+    except (TypeError, ValueError):
+        maximum = 3600
+    # Cap the exponent as well as the resulting delay. This prevents a corrupted
+    # or very old attempt counter from constructing an enormous Python integer.
+    exponent = min(max(int(attempt_count) - 1, 0), 16)
+    return min(maximum, base * (2**exponent))
+
+
+def _notification_message(log):
+    data = log.data if isinstance(log.data, dict) else {}
+    parts = []
+    for key in ("message", "error_details"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value)
+    return " :: ".join(parts)
+
+
+def _claim_notification_delivery(delivery_id):
+    now = timezone.now()
+    connect_timeout, read_timeout = request_timeout()
+    minimum_lease_seconds = math.ceil(connect_timeout + read_timeout) + 30
+    try:
+        lease_seconds = max(
+            minimum_lease_seconds,
+            int(getattr(settings, "NOTIFICATION_DELIVERY_LEASE_SECONDS", 120)),
+        )
+    except (TypeError, ValueError):
+        lease_seconds = max(120, minimum_lease_seconds)
+    with transaction.atomic():
+        delivery = (
+            CoreNotificationDelivery.objects.select_for_update()
+            .filter(pk=delivery_id)
+            .first()
+        )
+        if delivery is None or delivery.status in (
+            CoreNotificationDelivery.Status.SENT,
+            CoreNotificationDelivery.Status.SKIPPED,
+        ):
+            return None
+        if (
+            delivery.status == CoreNotificationDelivery.Status.PROCESSING
+            and delivery.lease_expires_at
+            and delivery.lease_expires_at > now
+        ):
+            return None
+        if delivery.next_attempt_at > now:
+            return None
+
+        lease_token = uuid.uuid4()
+        delivery.status = CoreNotificationDelivery.Status.PROCESSING
+        delivery.attempt_count += 1
+        delivery.lease_token = lease_token
+        delivery.lease_expires_at = now + datetime.timedelta(seconds=lease_seconds)
+        delivery.outcome_code = ""
+        delivery.save(
+            update_fields=[
+                "status",
+                "attempt_count",
+                "lease_token",
+                "lease_expires_at",
+                "outcome_code",
+                "modified",
+            ]
+        )
+    return lease_token
+
+
+def _finish_notification_delivery(
+    delivery_id,
+    lease_token,
+    *,
+    sent=False,
+    skipped=False,
+    outcome_code="",
+):
+    retry_delay = None
+    with transaction.atomic():
+        delivery = (
+            CoreNotificationDelivery.objects.select_for_update()
+            .filter(
+                pk=delivery_id,
+                status=CoreNotificationDelivery.Status.PROCESSING,
+                lease_token=lease_token,
+            )
+            .first()
+        )
+        if delivery is None:
+            return
+
+        now = timezone.now()
+        if sent:
+            delivery.status = CoreNotificationDelivery.Status.SENT
+            delivery.next_attempt_at = now
+            delivery.outcome_code = "sent"
+        elif skipped:
+            delivery.status = CoreNotificationDelivery.Status.SKIPPED
+            delivery.next_attempt_at = now
+            delivery.outcome_code = outcome_code[:32]
+        else:
+            retry_delay = _notification_delivery_retry_delay(
+                delivery.attempt_count
+            )
+            delivery.status = CoreNotificationDelivery.Status.RETRY
+            delivery.next_attempt_at = now + datetime.timedelta(
+                seconds=retry_delay
+            )
+            delivery.outcome_code = outcome_code[:32]
+        delivery.lease_token = None
+        delivery.lease_expires_at = None
+        delivery.save(
+            update_fields=[
+                "status",
+                "next_attempt_at",
+                "lease_token",
+                "lease_expires_at",
+                "outcome_code",
+                "modified",
+            ]
+        )
+        if retry_delay is not None:
+            transaction.on_commit(
+                lambda row_id=delivery.pk, delay=retry_delay: (
+                    _publish_notification_delivery_retry(row_id, delay)
+                )
+            )
+
+
+def _publish_notification_delivery_retry(delivery_id, countdown):
+    try:
+        deliver_log_notification.apply_async(
+            args=[int(delivery_id)], countdown=int(countdown)
+        )
+    except Exception:
+        # The database due time remains the recovery witness.
+        return
+
+
+@current_app.task(
+    name="deliver_log_notification",
+    bind=True,
+    ignore_result=True,
+    acks_late=True,
+    send_events=False,
+)
+def deliver_log_notification(self, delivery_reference):
+    """Send one leased channel delivery using an opaque outbox-row ID only."""
+
+    try:
+        delivery_id = int(delivery_reference)
+    except (TypeError, ValueError):
+        return
+    if delivery_id <= 0 or str(delivery_id) != str(delivery_reference):
+        return
+
+    lease_token = _claim_notification_delivery(delivery_id)
+    if lease_token is None:
+        return
+
+    delivery = (
+        CoreNotificationDelivery.objects.select_related("log")
+        .filter(pk=delivery_id, lease_token=lease_token)
+        .first()
+    )
+    if delivery is None:
+        return
+
+    channel_model = {
+        CoreNotificationDelivery.ChannelType.SLACK: CoreNotificationSlack,
+        CoreNotificationDelivery.ChannelType.TELEGRAM: CoreNotificationTelegram,
+    }.get(delivery.channel_type)
+    if channel_model is None:
+        _finish_notification_delivery(
+            delivery_id,
+            lease_token,
+            skipped=True,
+            outcome_code="unknown_channel_type",
+        )
+        return
+
+    channel = channel_model.objects.filter(
+        pk=delivery.channel_id,
+        account_id=delivery.log.account_id,
+    ).first()
+    if channel is None:
+        _finish_notification_delivery(
+            delivery_id,
+            lease_token,
+            skipped=True,
+            outcome_code="channel_missing",
+        )
+        return
+
+    message = _notification_message(delivery.log)
+    if not message:
+        _finish_notification_delivery(
+            delivery_id,
+            lease_token,
+            skipped=True,
+            outcome_code="empty_message",
+        )
+        return
+
+    # No database transaction is open while the provider request is in flight.
+    # This prevents network stalls from holding row locks. The committed lease
+    # above is the concurrency fence.
+    try:
+        sent = bool(channel.send(message))
+    except Exception:
+        # Provider frames can include both plaintext and decrypted credentials.
+        # Record only a fixed machine code; never capture or persist the error.
+        sent = False
+        outcome_code = "provider_exception"
+    else:
+        outcome_code = "provider_rejected"
+
+    _finish_notification_delivery(
+        delivery_id,
+        lease_token,
+        sent=sent,
+        outcome_code=outcome_code,
+    )
+
+
+@current_app.task(
+    name="recover_notification_deliveries",
+    bind=True,
+    ignore_result=True,
+    acks_late=False,
+    send_events=False,
+)
+def recover_notification_deliveries(self):
+    """Republish due or stale deliveries after broker/worker failure."""
+
+    try:
+        batch_size = max(
+            1,
+            min(
+                1000,
+                int(
+                    getattr(
+                        settings,
+                        "NOTIFICATION_DELIVERY_RECOVERY_BATCH_SIZE",
+                        100,
+                    )
+                ),
+            ),
+        )
+    except (TypeError, ValueError):
+        batch_size = 100
+    now = timezone.now()
+    delivery_ids = list(
+        CoreNotificationDelivery.objects.filter(next_attempt_at__lte=now)
+        .filter(
+            Q(
+                status__in=(
+                    CoreNotificationDelivery.Status.PENDING,
+                    CoreNotificationDelivery.Status.RETRY,
+                )
+            )
+            | Q(
+                status=CoreNotificationDelivery.Status.PROCESSING,
+                lease_expires_at__lte=now,
+            )
+            | Q(
+                status=CoreNotificationDelivery.Status.PROCESSING,
+                lease_expires_at__isnull=True,
+            )
+        )
+        .order_by("next_attempt_at", "pk")
+        .values_list("pk", flat=True)[:batch_size]
+    )
+    _publish_notification_deliveries(delivery_ids)
 
 
 @current_app.task(
@@ -1641,17 +2076,18 @@ def send_log_to_db(self, data):
     ignore_result=True,
 )
 def send_log_to_slack(self, url, message):
+    """Drain a pre-outbox plaintext task once, without republishing it."""
+
     try:
         webhook = WebhookClient(url)
         response = webhook.send(
             text=f"{message}",
         )
-        if response.status_code != 200 and response.body != "ok":
-            self.retry()
-
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
+        return response.status_code == 200 and response.body == "ok"
+    except Exception:
+        # This compatibility frame contains a bearer and plaintext. Do not send
+        # it to Sentry and do not create another plaintext broker message.
+        return False
 
 
 @current_app.task(
@@ -1660,19 +2096,27 @@ def send_log_to_slack(self, url, message):
     ignore_result=True,
 )
 def send_log_to_telegram(self, chat_id, message):
+    """Drain only messages queued by older releases.
+
+    New notification fan-out resolves an opaque CoreLog ID in worker-logs and
+    sends in-process. Keep this task for a bounded compatibility window so an
+    upgrade does not lose already durable messages, but do not publish new calls.
+    """
+
     try:
-        result = requests.get(
-            f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_KEY}/sendMessage?"
-            f"chat_id={chat_id}"
-            f"&text={message}",
-            headers={"content-type": "application/json"},
+        result = requests.post(
+            f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_KEY}/sendMessage",
+            json={"chat_id": str(chat_id), "text": str(message)},
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
             verify=True,
+            timeout=request_timeout(),
         )
-        if result.status_code != 200:
-            self.retry()
-    except Exception as e:
-        capture_exception(e)
-        raise self.retry()
+        return result.status_code == 200
+    except Exception:
+        # Avoid Sentry local-variable capture and never republish this legacy
+        # plaintext payload. New delivery retries use an opaque row ID.
+        return False
 
 
 @current_app.task(
@@ -1814,7 +2258,20 @@ def node_delete_requested(self, node_id):
                             # unfenced provider read or terminal status write.
                             backup._enqueue_delete_reconciliation()
                             continue
-                        backup.soft_delete()
+                        deleted = backup.soft_delete()
+                        if deleted is False:
+                            backup.refresh_from_db()
+                            deletion_request = dict(
+                                (backup.metadata or {}).get("_deletion_request") or {}
+                            )
+                            if deletion_request.get("state") == "deferred_protected":
+                                # The backup parent is visible again and must remain
+                                # restorable. Stop the node sweep too: PAUSED is a
+                                # visible, fail-closed outcome that avoids creating
+                                # new backups until the operator resolves protection.
+                                node.status = CoreNode.Status.PAUSED
+                                node.save(update_fields=["status", "modified"])
+                                return {"result": "protected", "node_id": node.pk}
 
                     # A node row owns the backup catalog.  Never cascade-delete it
                     # while a provider still has an unconfirmed backup: doing so
@@ -1848,6 +2305,22 @@ def node_delete_requested(self, node_id):
     except Exception as e:
         capture_exception(e)
         raise self.retry()
+
+
+@current_app.task(name="resume_requested_node_deletions", ignore_result=True)
+def resume_requested_node_deletions():
+    """Republish durable node deletion intents using database ids only."""
+
+    from apps.console.node.models import CoreNode
+
+    node_ids = list(
+        CoreNode.objects.filter(status=CoreNode.Status.DELETE_REQUESTED)
+        .order_by("pk")
+        .values_list("pk", flat=True)[:100]
+    )
+    for node_id in node_ids:
+        node_delete_requested.apply_async(args=[node_id])
+    return node_ids
 
 
 @current_app.task(
@@ -1924,11 +2397,15 @@ def delete_requested_integrations(self):
     bind=True,
 )
 def delete_requested_storages(self):
-    from apps.console.node.models import CoreStorage
+    from apps._tasks.integration.storage.tasks import (
+        _delete_storage_requested_id,
+    )
 
     try:
-        for storage in CoreStorage.objects.filter(status=CoreStorage.Status.DELETE_REQUESTED).order_by("-created"):
-            storage.delete()
+        for storage_id in CoreStorage.objects.filter(
+            status=CoreStorage.Status.DELETE_REQUESTED
+        ).order_by("-created").values_list("pk", flat=True):
+            _delete_storage_requested_id(storage_id)
     except Exception as e:
         capture_exception(e)
         raise self.retry()

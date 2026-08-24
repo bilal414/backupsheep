@@ -1,6 +1,8 @@
 import pytz
+from django.db import transaction
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
+from sentry_sdk import capture_exception
 
 from apps.api.v1.storage.serializers import CoreStorageTypeSerializer
 from apps.api.v1.utils.api_helpers import (
@@ -37,10 +39,9 @@ class CoreStorageLocalWriteSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         try:
-            storage = CoreStorageLocal()
-            if not storage.validate(data):
+            if not CoreStorageLocal.validate_configuration(data):
                 raise ValueError("Please check the path and permissions.")
-        except Exception as e:
+        except Exception:
             raise serializers.ValidationError("Unable to validate local storage. Verify the path and permissions.")
         return data
 
@@ -105,15 +106,40 @@ class CoreStorageWriteSerializer(serializers.ModelSerializer):
         ref_name = "Storage Local Write"
         fields = "__all__"
 
+    @staticmethod
+    def _queue_validation(storage_id):
+        """Publish only the persisted row id after the transaction commits.
+
+        A broker outage leaves the row truthfully PENDING; the periodic storage
+        worker sweep republishes it.  Paths never cross the broker boundary.
+        """
+
+        def publish():
+            try:
+                from apps._tasks.integration.storage.tasks import validate_local_storage
+
+                validate_local_storage.apply_async(args=[storage_id])
+            except Exception as error:
+                capture_exception(error)
+
+        transaction.on_commit(publish)
+
+    @transaction.atomic
     def create(self, validated_data):
-        storage_local = validated_data.pop("storage_local", [])
+        storage_local = validated_data.pop("storage_local", {})
+        validated_data["status"] = CoreStorage.Status.PENDING
         instance = CoreStorage.objects.create(**validated_data)
         storage_local["storage"] = instance
         CoreStorageLocal.objects.create(**storage_local)
+        self._queue_validation(instance.pk)
         return instance
 
+    @transaction.atomic
     def update(self, instance, validated_data):
-        storage_local = validated_data.pop("storage_local", [])
-        super().update(instance.storage_local, storage_local)
+        storage_local = validated_data.pop("storage_local", {})
+        validated_data["status"] = CoreStorage.Status.PENDING
+        if storage_local:
+            super().update(instance.storage_local, storage_local)
         instance = super().update(instance, validated_data)
+        self._queue_validation(instance.pk)
         return instance

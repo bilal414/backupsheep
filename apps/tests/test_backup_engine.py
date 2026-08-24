@@ -1,7 +1,10 @@
 import io
+import ftplib
 import json
 import os
+import shlex
 import shutil
+import ssl
 import subprocess
 import stat
 import tempfile
@@ -23,6 +26,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from apps._tasks.exceptions import (
     IntegrationValidationError,
     NodeBackupFailedError,
+    NodeConnectionErrorWebsite,
     NodeConnectionErrorSFTP,
 )
 from apps._tasks.helper import tasks as helper_tasks
@@ -37,12 +41,21 @@ from apps._tasks.integration.database import backup_database
 from apps._tasks.integration.website import backup_website
 from apps.api.v1.backup.website.serializers import CoreWebsiteBackupSerializer
 from apps.api.v1.node.views import CoreNodeView
-from apps.api.v1.utils.api_helpers import bs_encrypt, ensure_disk_space, zipdir
+from apps.api.v1.utils.api_helpers import (
+    bs_encrypt,
+    ensure_disk_space,
+    FtpImplicitTlsSession,
+    FtpSession,
+    FtpTlsSession,
+    ftp_tls_session_factory,
+    zipdir,
+)
 from apps.console.backup.models import (
     CoreDatabaseBackup,
     CoreDigitalOceanBackup,
     CoreWebsiteBackup,
     CoreWebsiteBackupStoragePoints,
+    _stop_legacy_backup_container,
 )
 from apps.console.connection.models import (
     CoreAuthDatabase,
@@ -61,6 +74,183 @@ from apps.console.storage.models import CoreStorage, CoreStorageLocal
 from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
+
+
+class LegacyContainerStopSafetyTests(TestCase):
+    def test_stop_uses_fixed_argv_for_a_canonical_backup_uuid(self):
+        identifier = "12345678-1234-4234-8234-123456789abc"
+        with mock.patch(
+            "apps.console.backup.models.shutil.which", return_value="/usr/bin/docker"
+        ), mock.patch("apps.console.backup.models.subprocess.run") as run:
+            _stop_legacy_backup_container(f"{identifier}-storage")
+
+        run.assert_called_once_with(
+            ["/usr/bin/docker", "stop", f"{identifier}-storage"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=60,
+        )
+
+    def test_stop_rejects_noncanonical_or_shell_shaped_names(self):
+        for candidate in (
+            "12345678123442348234123456789abc",
+            "12345678-1234-4234-8234-123456789abc;id",
+            "../../another-container",
+            "",
+        ):
+            with self.subTest(candidate=candidate), mock.patch(
+                "apps.console.backup.models.shutil.which"
+            ) as which, mock.patch(
+                "apps.console.backup.models.subprocess.run"
+            ) as run:
+                _stop_legacy_backup_container(candidate)
+                which.assert_not_called()
+                run.assert_not_called()
+
+    def test_stop_is_a_noop_without_a_docker_client(self):
+        with mock.patch(
+            "apps.console.backup.models.shutil.which", return_value=None
+        ), mock.patch("apps.console.backup.models.subprocess.run") as run:
+            _stop_legacy_backup_container(
+                "12345678-1234-4234-8234-123456789abc"
+            )
+        run.assert_not_called()
+
+
+class PlainFtpSecureDefaultTests(TestCase):
+    @override_settings(ALLOW_INSECURE_FTP=False)
+    def test_connection_validation_rejects_plain_ftp_before_network_access(self):
+        for protocol in (CoreAuthWebsite.Protocol.FTP, "1"):
+            with self.subTest(protocol=protocol), mock.patch(
+                "ftputil.FTPHost"
+            ) as ftp_host, self.assertRaisesRegex(
+                NodeConnectionErrorWebsite,
+                "Plain FTP is disabled",
+            ):
+                CoreAuthWebsite().check_connection(
+                    data={
+                        "host": "ftp.example.test",
+                        "port": 21,
+                        "username": "user",
+                        "password": "secret",
+                        "protocol": protocol,
+                    }
+                )
+
+            ftp_host.assert_not_called()
+
+    @override_settings(ALLOW_INSECURE_FTP=False)
+    def test_direct_plain_ftp_session_is_denied_before_connect(self):
+        with mock.patch.object(ftplib.FTP, "connect") as connect, self.assertRaisesRegex(
+            RuntimeError,
+            "Plain FTP is disabled",
+        ):
+            FtpSession("ftp.example.test", "user", "secret", 21)
+
+        connect.assert_not_called()
+
+    def test_invalid_protocol_fails_closed_before_network_access(self):
+        with mock.patch("ftputil.FTPHost") as ftp_host, self.assertRaisesRegex(
+            NodeConnectionErrorWebsite,
+            "missing or unsupported",
+        ):
+            CoreAuthWebsite().check_connection(
+                data={
+                    "host": "ftp.example.test",
+                    "port": 21,
+                    "username": "user",
+                    "password": "secret",
+                    "protocol": "invalid",
+                }
+            )
+
+        ftp_host.assert_not_called()
+
+
+class FtpsSessionSecurityTests(TestCase):
+    def _session(self, *, verify_ssl, explicit):
+        with mock.patch.object(ftplib.FTP_TLS, "connect"), mock.patch.object(
+            ftplib.FTP_TLS, "login"
+        ), mock.patch.object(ftplib.FTP_TLS, "prot_p"):
+            return ftp_tls_session_factory(
+                verify_ssl=verify_ssl,
+                explicit=explicit,
+            )("ftps.example.test", "user", "secret", 990)
+
+    def test_verified_explicit_ftps_requires_certificate_and_hostname(self):
+        session = self._session(verify_ssl=True, explicit=True)
+
+        self.assertIsInstance(session, FtpTlsSession)
+        self.assertEqual(session.context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(session.context.check_hostname)
+
+    def test_verified_implicit_ftps_requires_certificate_and_hostname(self):
+        session = self._session(verify_ssl=True, explicit=False)
+
+        self.assertIsInstance(session, FtpImplicitTlsSession)
+        self.assertEqual(session.context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(session.context.check_hostname)
+
+    def test_certificate_verification_opt_out_still_uses_explicit_tls(self):
+        session = self._session(verify_ssl=False, explicit=True)
+
+        self.assertIsInstance(session, FtpTlsSession)
+        self.assertEqual(session.context.verify_mode, ssl.CERT_NONE)
+        self.assertFalse(session.context.check_hostname)
+
+    def test_certificate_verification_opt_out_still_uses_implicit_tls(self):
+        session = self._session(verify_ssl=False, explicit=False)
+
+        self.assertIsInstance(session, FtpImplicitTlsSession)
+        self.assertEqual(session.context.verify_mode, ssl.CERT_NONE)
+        self.assertFalse(session.context.check_hostname)
+
+    def test_implicit_ftps_wraps_control_socket_with_sni(self):
+        session = object.__new__(FtpImplicitTlsSession)
+        session._implicit_server_hostname = "implicit.example.test"
+        session._sock = None
+        session.context = mock.Mock()
+        raw_socket = mock.sentinel.raw_socket
+        wrapped_socket = mock.sentinel.wrapped_socket
+        session.context.wrap_socket.return_value = wrapped_socket
+
+        session.sock = raw_socket
+
+        session.context.wrap_socket.assert_called_once_with(
+            raw_socket,
+            server_hostname="implicit.example.test",
+        )
+        self.assertIs(session.sock, wrapped_socket)
+
+    def test_connection_validation_honors_ftps_mode_and_verify_policy(self):
+        with mock.patch(
+            "apps.api.v1.utils.api_helpers.ftp_tls_session_factory",
+            return_value=mock.sentinel.session_factory,
+        ) as session_factory, mock.patch("ftputil.FTPHost") as ftp_host:
+            CoreAuthWebsite().check_connection(
+                data={
+                    "host": "ftps.example.test",
+                    "port": 990,
+                    "username": "user",
+                    "password": "secret",
+                    "protocol": CoreAuthWebsite.Protocol.FTPS,
+                    "verify_ssl": False,
+                    "ftps_use_explicit_ssl": False,
+                }
+            )
+
+        session_factory.assert_called_once_with(
+            verify_ssl=False,
+            explicit=False,
+        )
+        ftp_host.assert_called_once_with(
+            "ftps.example.test",
+            "user",
+            "secret",
+            port=990,
+            session_factory=mock.sentinel.session_factory,
+        )
 
 
 class PollCloudBackupTests(BaseTestCase):
@@ -484,6 +674,8 @@ class LftpScriptBuilderTests(TestCase):
                                    ssh_key_path=None, parallel=1, transfer="get a", mirror=False)
         self.assertIn("set ssl:verify-certificate yes", on)
         self.assertIn("set ssl:verify-certificate no", off)
+        self.assertIn("set ftp:ssl-force true", on)
+        self.assertIn("set ftp:ssl-force true", off)
 
     def test_sftp_username_cannot_inject_via_connect_program(self):
         s = W._build_lftp_script(auth=self._auth(CoreAuthWebsite.Protocol.SFTP),
@@ -512,11 +704,20 @@ class LftpScriptBuilderTests(TestCase):
         self.assertIn(settings.SSH_KNOWN_HOSTS_PATH, line)
         self.assertIn('user "user" "secret"', s)
 
-    def test_plain_ftp_disables_tls(self):
+    @override_settings(ALLOW_INSECURE_FTP=False)
+    def test_plain_ftp_is_denied_by_default(self):
+        with self.assertRaisesRegex(NodeBackupFailedError, "Plain FTP is disabled"):
+            W._build_lftp_script(auth=self._auth(CoreAuthWebsite.Protocol.FTP),
+                                 host_url="ftp://h", port=21, username="u", password="p",
+                                 ssh_key_path=None, parallel=1, transfer="get a", mirror=False)
+
+    @override_settings(ALLOW_INSECURE_FTP=True)
+    def test_plain_ftp_explicit_opt_in_disables_tls(self):
         s = W._build_lftp_script(auth=self._auth(CoreAuthWebsite.Protocol.FTP),
                                  host_url="ftp://h", port=21, username="u", password="p",
                                  ssh_key_path=None, parallel=1, transfer="get a", mirror=False)
         self.assertIn("set ftp:ssl-allow false", s)
+        self.assertIn("set ftp:ssl-force false", s)
 
     def test_serial_fallback_changes_only_parallel_mirror_controls(self):
         script = "\n".join(
@@ -562,6 +763,28 @@ class LftpScriptBuilderTests(TestCase):
         )
 
 
+class RemoteTarCommandSafetyTests(TestCase):
+    def test_leading_dash_sources_are_operands_not_tar_options(self):
+        sources = [
+            "--checkpoint=1",
+            "--checkpoint-action=exec=touch /tmp/attacker-controlled",
+        ]
+
+        command = W._build_remote_tar_command(
+            archive_path="/tmp/backupsheep/archive.tar",
+            exclude_rules="--exclude='*.sock'",
+            sources=sources,
+        )
+        arguments = shlex.split(command)
+        operand_boundary = arguments.index("--")
+
+        self.assertIn(
+            "--file=/tmp/backupsheep/archive.tar",
+            arguments[:operand_boundary],
+        )
+        self.assertEqual(arguments[operand_boundary + 1:], sources)
+
+
 class CeleryRoutingTests(TestCase):
     def test_tasks_route_to_expected_queues(self):
         from backupsheep.celery import app
@@ -598,6 +821,7 @@ class CeleryRoutingTests(TestCase):
                      "delete_from_disk", "poll_cloud_backup", "delete_old_logs",
                      "run_scheduled_backup", "resume_in_progress_backups"]:
             self.assertIn(name, app.tasks)
+        self.assertNotIn("send_to_firebase", app.tasks)
 
 
 class DiskCleanupTests(TestCase):
@@ -756,9 +980,14 @@ class WebsiteEngineBase(BaseTestCase):
 
     def _make_backup(self, *, incremental=False, backup_type=None,
                      use_private_key=False, use_public_key=False):
-        """A real website node (FTP password auth, all_paths) + CoreWebsiteBackup row."""
+        """A real website node (SFTP password auth, all_paths) + backup row."""
         node = factories.make_website_node(self.account, self.member)
         auth = node.connection.auth_website
+        # Generic engine tests exercise backup behavior, not the explicit legacy
+        # FTP opt-in. Keep their fixture on the secure production default so a
+        # plaintext-FTP regression cannot be hidden by the test setup.
+        auth.protocol = CoreAuthWebsite.Protocol.SFTP
+        auth.port = 22
         auth.use_private_key = use_private_key
         auth.use_public_key = use_public_key
         auth.save()
@@ -997,9 +1226,21 @@ class CacheFingerprintTests(TestCase):
 
 
 class ResetIncrementalCacheTests(BaseTestCase):
-    """POST reset_incremental wipes the node's local snapshot cache + meta file."""
+    """The web role schedules cache deletion on the storage-worker boundary."""
 
-    def test_reset_incremental_deletes_local_cache(self):
+    @mock.patch(
+        "apps.api.v1.node.views.reset_incremental_cache.apply_async"
+    )
+    def test_reset_incremental_schedules_storage_task(self, apply_async):
+        node = factories.make_website_node(self.account, self.member)
+        request = APIRequestFactory().post(f"/api/v1/nodes/{node.id}/reset_incremental/")
+        force_authenticate(request, user=self.user)
+        view = CoreNodeView.as_view({"post": "reset_incremental"})
+        resp = view(request, pk=node.id)
+        self.assertEqual(resp.status_code, 200)
+        apply_async.assert_called_once_with(args=[node.pk])
+
+    def test_storage_task_deletes_only_requested_cache(self):
         node = factories.make_website_node(self.account, self.member)
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -1012,14 +1253,59 @@ class ResetIncrementalCacheTests(BaseTestCase):
         with open(meta_path, "w") as fh:
             json.dump({"fingerprint": "x"}, fh)
 
-        request = APIRequestFactory().post(f"/api/v1/nodes/{node.id}/reset_incremental/")
-        force_authenticate(request, user=self.user)
-        view = CoreNodeView.as_view({"post": "reset_incremental"})
         with override_settings(BASE_DIR=tmp):
-            resp = view(request, pk=node.id)
-        self.assertEqual(resp.status_code, 200)
+            helper_tasks.reset_incremental_cache.apply(args=[node.pk]).get()
         self.assertFalse(os.path.exists(cache_dir))
         self.assertFalse(os.path.exists(meta_path))
+        self.assertTrue(os.path.isfile(
+            os.path.join(tmp, "_storage", "website_cache", f"{node.uuid_str}.lock")
+        ))
+
+    def test_storage_task_holds_incremental_lock_around_deletion(self):
+        node = factories.make_website_node(self.account, self.member)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        cache_dir = os.path.join(tmp, "_storage", "website_cache", node.uuid_str)
+        os.makedirs(cache_dir)
+
+        events = []
+        real_flock = helper_tasks.fcntl.flock
+        real_rmtree = helper_tasks.shutil.rmtree
+
+        def observed_flock(file_obj, operation):
+            events.append("lock" if operation == helper_tasks.fcntl.LOCK_EX else "unlock")
+            return real_flock(file_obj, operation)
+
+        def observed_rmtree(*args, **kwargs):
+            events.append("delete")
+            return real_rmtree(*args, **kwargs)
+
+        with override_settings(BASE_DIR=tmp), mock.patch.object(
+            helper_tasks.fcntl, "flock", side_effect=observed_flock
+        ), mock.patch.object(
+            helper_tasks.shutil, "rmtree", side_effect=observed_rmtree
+        ):
+            helper_tasks.reset_incremental_cache.apply(args=[node.pk]).get()
+
+        self.assertEqual(events, ["lock", "delete", "unlock"])
+
+    def test_storage_task_rejects_cache_root_symlink_outside_workdir(self):
+        node = factories.make_website_node(self.account, self.member)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        storage_dir = os.path.join(tmp, "_storage")
+        outside = os.path.join(tmp, "backup-storage")
+        victim = os.path.join(outside, node.uuid_str)
+        os.makedirs(victim)
+        with open(os.path.join(victim, "must-survive"), "w") as handle:
+            handle.write("sentinel")
+        os.makedirs(storage_dir)
+        os.symlink(outside, os.path.join(storage_dir, "website_cache"))
+
+        with override_settings(BASE_DIR=tmp):
+            helper_tasks.reset_incremental_cache.apply(args=[node.pk]).get()
+
+        self.assertTrue(os.path.isfile(os.path.join(victim, "must-survive")))
 
 
 class NormalizeSshKeyTests(TestCase):

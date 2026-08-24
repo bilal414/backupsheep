@@ -1,0 +1,1592 @@
+#!/usr/bin/env bash
+# Execute the reviewed BackupSheep Compose model without ambient interpolation.
+set -euo pipefail
+
+die() {
+    printf '%s\n' "BackupSheep Compose refused: $*" >&2
+    exit 64
+}
+
+script_path="${BASH_SOURCE[0]}"
+[[ -f "$script_path" && ! -L "$script_path" ]] \
+    || die "the wrapper must be invoked as a regular, non-symlink file."
+root_dir="$(cd -- "$(dirname -- "$script_path")" && pwd -P)"
+env_file="${root_dir}/.env"
+base_file="${root_dir}/docker-compose.yml"
+default_override="${root_dir}/docker-compose.override.yml"
+rabbitmq_upgrade="${root_dir}/deploy/rabbitmq/upgrade-4.2.9.compose.yml"
+
+file_uid() {
+    stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1"
+}
+
+file_mode() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+file_links() {
+    stat -c '%h' "$1" 2>/dev/null || stat -f '%l' "$1"
+}
+
+file_size() {
+    stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1"
+}
+
+validate_private_file() {
+    local path="$1"
+    local label="$2"
+    local mode=""
+
+    [[ -f "$path" && ! -L "$path" ]] \
+        || die "${label} must be a regular, non-symlink file."
+    [[ "$(file_uid "$path")" == "$EUID" ]] \
+        || die "${label} must be owned by the invoking user."
+    [[ "$(file_links "$path")" == "1" ]] \
+        || die "${label} must not be hard-linked."
+    [[ "$(file_size "$path")" -le 1048576 ]] \
+        || die "${label} is unexpectedly large."
+    mode="$(file_mode "$path")"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] \
+        || die "could not validate permissions for ${label}."
+    (( (8#$mode & 8#022) == 0 )) \
+        || die "${label} must not be writable by group or other users."
+}
+
+validate_private_file "$env_file" ".env"
+validate_private_file "$base_file" "docker-compose.yml"
+[[ "$(file_mode "$env_file")" == "600" ]] \
+    || die ".env must have mode 0600."
+
+! grep -q $'\r' "$env_file" || die ".env contains carriage returns."
+awk '
+    /^[[:space:]]*($|#)/ { next }
+    $0 !~ /^[A-Za-z_][A-Za-z0-9_]*=/ { exit 2 }
+    {
+        key = $0
+        sub(/=.*/, "", key)
+        if (seen[key]++) { exit 3 }
+    }
+' "$env_file" || die ".env has malformed or duplicate keys."
+! grep -Eq '^(COMPOSE_[A-Za-z0-9_]*|BUILDX_[A-Za-z0-9_]*|BUILDKIT_[A-Za-z0-9_]*|DOCKER_BUILDKIT|DOCKER_DEFAULT_PLATFORM|DOCKER_HOST|DOCKER_CONTEXT|BACKUPSHEEP_SECRETS)=' "$env_file" \
+    || die ".env contains a forbidden Docker/Compose control or replacement variable."
+
+project_raw="$(awk -F= '$1 == "BACKUPSHEEP_COMPOSE_PROJECT_NAME" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
+if [[ "$project_raw" == \'*\' && "$project_raw" == *\' ]]; then
+    project_name="${project_raw#\'}"
+    project_name="${project_name%\'}"
+else
+    project_name="$project_raw"
+fi
+[[ "$project_name" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] \
+    || die "BACKUPSHEEP_COMPOSE_PROJECT_NAME must be a non-empty reviewed lowercase project name."
+
+installation_raw="$(awk -F= '$1 == "BACKUPSHEEP_INSTALLATION_ID" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
+case "$installation_raw" in
+    \'*\') installation_id="${installation_raw#\'}"; installation_id="${installation_id%\'}" ;;
+    \"*\") installation_id="${installation_raw#\"}"; installation_id="${installation_id%\"}" ;;
+    *) installation_id="$installation_raw" ;;
+esac
+[[ "$installation_id" =~ ^[0-9a-f]{64}$ ]] \
+    || die "BACKUPSHEEP_INSTALLATION_ID must be one stable 64-character lowercase hexadecimal value."
+
+rabbitmq_generation_raw="$(awk -F= '$1 == "BACKUPSHEEP_RABBITMQ_DATA_GENERATION" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
+case "$rabbitmq_generation_raw" in
+    \'*\') rabbitmq_generation="${rabbitmq_generation_raw#\'}"; rabbitmq_generation="${rabbitmq_generation%\'}" ;;
+    \"*\") rabbitmq_generation="${rabbitmq_generation_raw#\"}"; rabbitmq_generation="${rabbitmq_generation%\"}" ;;
+    *) rabbitmq_generation="$rabbitmq_generation_raw" ;;
+esac
+[[ -z "$rabbitmq_generation" || "$rabbitmq_generation" == "4.3" ]] \
+    || die "BACKUPSHEEP_RABBITMQ_DATA_GENERATION must be blank or the installer-proven value 4.3."
+
+compose_files=(-f "$base_file")
+approved_default=false
+approved_rabbit=false
+allow_data_deletion=false
+allow_runtime_overrides=false
+rabbitmq_transition_target=""
+dry_run_requested=false
+while [[ $# -gt 0 ]]; do
+    approved_file=""
+    case "$1" in
+        --approved-compose-file)
+            [[ $# -ge 2 ]] || die "--approved-compose-file requires a path."
+            approved_file="$2"
+            shift 2
+            ;;
+        --approved-compose-file=*)
+            approved_file="${1#*=}"
+            shift
+            ;;
+        --allow-data-deletion)
+            allow_data_deletion=true
+            shift
+            continue
+            ;;
+        --allow-reviewed-runtime-overrides)
+            allow_runtime_overrides=true
+            shift
+            continue
+            ;;
+        --allow-rabbitmq-generation-transition=*)
+            [[ -z "$rabbitmq_transition_target" ]] \
+                || die "the RabbitMQ generation-transition flag was supplied more than once."
+            rabbitmq_transition_target="${1#*=}"
+            case "$rabbitmq_transition_target" in
+                4.2|4.3) ;;
+                *) die "the RabbitMQ transition target must be exactly 4.2 or 4.3." ;;
+            esac
+            shift
+            continue
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+
+    [[ -n "$approved_file" ]] || die "approved Compose path is empty."
+    [[ -f "$approved_file" && ! -L "$approved_file" ]] \
+        || die "approved Compose path must be a regular, non-symlink file."
+    approved_file="$(cd -- "$(dirname -- "$approved_file")" && pwd -P)/$(basename -- "$approved_file")"
+    case "$approved_file" in
+        "$default_override")
+            [[ "$approved_default" == false ]] \
+                || die "docker-compose.override.yml was supplied more than once."
+            approved_default=true
+            ;;
+        "$rabbitmq_upgrade")
+            [[ "$approved_rabbit" == false ]] \
+                || die "the reviewed RabbitMQ hop was supplied more than once."
+            approved_rabbit=true
+            ;;
+        *)
+            die "only the exact deployment override or reviewed RabbitMQ hop may be added."
+            ;;
+    esac
+    validate_private_file "$approved_file" "approved Compose file"
+done
+
+if [[ -e "$default_override" || -L "$default_override" ]]; then
+    [[ "$approved_default" == true ]] \
+        || die "docker-compose.override.yml exists; review it and pass --approved-compose-file with its exact path."
+fi
+# Canonical precedence is invariant under caller argument order: the local storage
+# override may extend the base, while the reviewed RabbitMQ compatibility hop must be
+# last so another approved file cannot replace its pinned image or migration command.
+compose_files=(-f "$base_file")
+if [[ "$approved_default" == true ]]; then
+    compose_files+=(-f "$default_override")
+fi
+if [[ "$approved_rabbit" == true ]]; then
+    compose_files+=(-f "$rabbitmq_upgrade")
+fi
+[[ $# -gt 0 ]] || die "a Docker Compose command is required."
+
+for argument in "$@"; do
+    case "$argument" in
+        -f|-f=*|-f?*|--file|--file=*|-p|-p=*|-p?*|--project-name|--project-name=*|\
+        --project-directory|--project-directory=*|--env-file|--env-file=*|\
+        --remove-orphans|--remove-orphans=*|--dry-run=*|--no-deps=*|\
+        --all-resources|--all-resources=*|--compatibility|--compatibility=*)
+            die "${argument} may not override the wrapper's model, project, environment, or orphan policy."
+            ;;
+    esac
+done
+
+# Parse the real Compose subcommand rather than treating arbitrary service names or
+# option values as commands. Unknown global options fail closed; unknown subcommands
+# are treated as mutating so future Compose features cannot bypass ownership proof.
+compose_arguments=("$@")
+compose_subcommand=""
+subcommand_index=-1
+argument_index=0
+while (( argument_index < ${#compose_arguments[@]} )); do
+    argument="${compose_arguments[$argument_index]}"
+    case "$argument" in
+        --profile)
+            (( argument_index + 1 < ${#compose_arguments[@]} )) \
+                || die "${argument} requires a value."
+            [[ "${compose_arguments[$((argument_index + 1))]}" == "operations" ]] \
+                || die "the only reviewed Compose profile is operations."
+            argument_index=$((argument_index + 2))
+            ;;
+        --profile=*)
+            [[ "${argument#*=}" == "operations" ]] \
+                || die "the only reviewed Compose profile is operations."
+            argument_index=$((argument_index + 1))
+            ;;
+        --ansi|--progress|--parallel)
+            (( argument_index + 1 < ${#compose_arguments[@]} )) \
+                || die "${argument} requires a value."
+            argument_index=$((argument_index + 2))
+            ;;
+        --ansi=*|--progress=*|--parallel=*)
+            argument_index=$((argument_index + 1))
+            ;;
+        --dry-run)
+            dry_run_requested=true
+            argument_index=$((argument_index + 1))
+            ;;
+        --)
+            argument_index=$((argument_index + 1))
+            (( argument_index < ${#compose_arguments[@]} )) \
+                || die "a Docker Compose subcommand is required after --."
+            compose_subcommand="${compose_arguments[$argument_index]}"
+            subcommand_index=$argument_index
+            break
+            ;;
+        --help|-h)
+            compose_subcommand="help"
+            subcommand_index=$argument_index
+            break
+            ;;
+        --version)
+            compose_subcommand="version"
+            subcommand_index=$argument_index
+            break
+            ;;
+        -*) die "unsupported Compose global option before the subcommand: ${argument}." ;;
+        *)
+            compose_subcommand="$argument"
+            subcommand_index=$argument_index
+            break
+            ;;
+    esac
+done
+[[ -n "$compose_subcommand" ]] || die "a Docker Compose subcommand is required."
+
+mutating_command=true
+case "$compose_subcommand" in
+    config|events|help|images|logs|ls|port|ps|stats|top|version|volumes)
+        mutating_command=false
+        ;;
+    wait)
+        mutating_command=false
+        for ((argument_index = subcommand_index + 1; argument_index < ${#compose_arguments[@]}; argument_index++)); do
+            case "${compose_arguments[$argument_index]}" in
+                --down-project|--down-project=*) mutating_command=true ;;
+            esac
+        done
+        ;;
+esac
+
+if [[ "$compose_subcommand" == "pull" || "$compose_subcommand" == "push" || \
+      "$compose_subcommand" == "publish" || "$compose_subcommand" == "commit" || \
+      "$compose_subcommand" == "cp" || "$compose_subcommand" == "watch" ]]; then
+    die "${compose_subcommand} is outside the reviewed local-image deployment workflow."
+fi
+
+if [[ "$compose_subcommand" == "scale" ]]; then
+    die "use up --scale with an explicitly bounded worker scale through this wrapper."
+fi
+
+if [[ "$compose_subcommand" == "start" || "$compose_subcommand" == "restart" || \
+      "$compose_subcommand" == "unpause" ]]; then
+    die "start/restart/unpause can resume a pre-hardening container; use up --detach with an explicit service set and optional --no-deps so Compose reapplies the reviewed model."
+fi
+
+case "$compose_subcommand" in
+    attach|build|config|create|down|events|exec|help|images|kill|logs|ls|pause|\
+    port|ps|rm|run|stats|stop|top|up|version|volumes|wait)
+        ;;
+    *) die "unsupported or unreviewed Docker Compose subcommand: ${compose_subcommand}." ;;
+esac
+
+if [[ -n "$rabbitmq_transition_target" ]]; then
+    (( ${#compose_arguments[@]} == 4 )) \
+        || die "the RabbitMQ transition flag is scoped to: up --detach --no-deps rabbitmq."
+    [[ "${compose_arguments[0]}" == "up" && \
+       "${compose_arguments[1]}" == "--detach" && \
+       "${compose_arguments[2]}" == "--no-deps" && \
+       "${compose_arguments[3]}" == "rabbitmq" ]] \
+        || die "the RabbitMQ transition flag is scoped to: up --detach --no-deps rabbitmq."
+    if [[ "$rabbitmq_transition_target" == "4.2" ]]; then
+        [[ "$approved_rabbit" == true ]] \
+            || die "the 4.2 transition requires the exact reviewed RabbitMQ overlay."
+    else
+        [[ "$approved_rabbit" == false ]] \
+            || die "the 4.3 transition must use the pinned base model without the 4.2 overlay."
+    fi
+elif [[ "$approved_rabbit" == true && "$mutating_command" == true ]]; then
+    die "the RabbitMQ compatibility overlay may mutate only through an explicit generation-transition command."
+fi
+
+volume_deletion_requested=false
+if [[ "$compose_subcommand" == "down" || "$compose_subcommand" == "rm" ]]; then
+    for ((argument_index = subcommand_index + 1; argument_index < ${#compose_arguments[@]}; argument_index++)); do
+        case "${compose_arguments[$argument_index]}" in
+            -v|-v=*|--volumes|--volumes=*|-[^-]*v*) volume_deletion_requested=true ;;
+            --rmi|--rmi=*) die "down cannot remove shared reviewed image tags through this wrapper." ;;
+        esac
+    done
+fi
+
+fresh_resource_creation=false
+case "$compose_subcommand" in
+    up|create|run) fresh_resource_creation=true ;;
+esac
+rabbitmq_start_possible=false
+if [[ "$compose_subcommand" == "rm" && "$volume_deletion_requested" == true ]]; then
+    die "rm volume deletion can target anonymous volumes and is not supported; use a separately reviewed recovery procedure."
+fi
+if [[ "$volume_deletion_requested" == true ]]; then
+    [[ "$allow_data_deletion" == true ]] \
+        || die "deleting Compose volumes requires the explicit --allow-data-deletion wrapper flag."
+    (( ${#compose_files[@]} == 2 )) \
+        || die "volume deletion is refused while an approved Compose overlay is active."
+fi
+
+validate_reviewed_host_volume() {
+    local specification="$1"
+    local source_path="${specification%%:*}"
+    local remainder="${specification#*:}"
+    local target_path="${remainder%%:*}"
+    local mount_mode="${remainder#*:}"
+    local source_parent=""
+
+    [[ "$source_path" == /* && "$target_path" == "/migration/known_hosts" && "$mount_mode" == "ro" ]] \
+        || die "the reviewed runtime override accepts only the read-only SSH known-hosts migration mount."
+    [[ -f "$source_path" && ! -L "$source_path" ]] \
+        || die "the SSH known-hosts migration source must be a regular, non-symlink file."
+    source_parent="$(cd -- "$(dirname -- "$source_path")" && pwd -P)" \
+        || die "could not resolve the SSH known-hosts migration source."
+    [[ "$source_parent" == "${root_dir}/.backupsheep-ssh-migration."* ]] \
+        || die "the SSH known-hosts migration source must be in this checkout's private migration directory."
+    [[ -d "$source_parent" && ! -L "$source_parent" && \
+       "$(file_uid "$source_parent")" == "$EUID" && \
+       "$(file_mode "$source_parent")" == "700" ]] \
+        || die "the SSH known-hosts migration directory must be private and owned by the invoking user."
+    validate_private_file "$source_path" "SSH known-hosts migration source"
+}
+
+set_env_value_atomically() {
+    local key="$1"
+    local value="$2"
+    local temporary=""
+
+    temporary="$(mktemp "${root_dir}/.env.backupsheep.XXXXXX")" \
+        || die "could not allocate a private .env update file."
+    chmod 0600 "$temporary"
+    if ! awk -v wanted="$key" -v replacement="${key}='${value}'" '
+        BEGIN { replaced = 0 }
+        {
+            current = $0
+            sub(/=.*/, "", current)
+            if (current == wanted) {
+                if (!replaced) print replacement
+                replaced = 1
+                next
+            }
+            print
+        }
+        END { if (!replaced) print replacement }
+    ' "$env_file" > "$temporary"; then
+        rm -f -- "$temporary"
+        die "could not prepare the private .env update."
+    fi
+    mv -f -- "$temporary" "$env_file" \
+        || die "could not atomically persist the private .env update."
+    validate_private_file "$env_file" ".env"
+    [[ "$(file_mode "$env_file")" == "600" ]] \
+        || die ".env lost its required mode during the atomic update."
+}
+
+validate_worker_scale() {
+    local specification="$1"
+    local replica_count=""
+
+    [[ "$specification" =~ ^worker-(cloud|database|files|storage|logs)=([1-9][0-9]?)$ ]] \
+        || die "only worker-cloud, worker-database, worker-files, worker-storage, or worker-logs may be scaled."
+    replica_count="${BASH_REMATCH[2]}"
+    (( replica_count <= 32 )) \
+        || die "worker scaling is bounded to 32 replicas per role."
+}
+
+if [[ "$compose_subcommand" == "build" ]]; then
+    for ((argument_index = subcommand_index + 1; argument_index < ${#compose_arguments[@]}; argument_index++)); do
+        case "${compose_arguments[$argument_index]}" in
+            --build-arg|--build-arg=*|--builder|--builder=*|--ssh|--ssh=*|--push)
+                die "build arguments, alternate builders, SSH forwarding, and pushes are outside the exact reviewed build."
+                ;;
+        esac
+    done
+fi
+
+if [[ "$compose_subcommand" == "up" || "$compose_subcommand" == "create" || \
+      "$compose_subcommand" == "run" ]]; then
+    for ((argument_index = subcommand_index + 1; argument_index < ${#compose_arguments[@]}; argument_index++)); do
+        argument="${compose_arguments[$argument_index]}"
+        case "$argument" in
+            --pull=never) ;;
+            --pull)
+                (( argument_index + 1 < ${#compose_arguments[@]} )) \
+                    || die "--pull requires the value never."
+                [[ "${compose_arguments[$((argument_index + 1))]}" == "never" ]] \
+                    || die "the reviewed application image must never be replaced by a pull."
+                ;;
+            --pull=*) die "the reviewed application image must never be replaced by a pull." ;;
+            --build|--build=*|--renew-anon-volumes|--renew-anon-volumes=*|-V|-V=*|\
+            --no-recreate|--no-recreate=*|\
+            --watch|--watch=*|-w)
+                die "build, anonymous-volume renewal, non-recreation, and watch overrides are not allowed during ${compose_subcommand}."
+                ;;
+        esac
+    done
+fi
+
+selected_services=()
+up_no_dependencies=false
+record_selected_service() {
+    local service_name="$1"
+    case "$service_name" in
+        db|rabbitmq|migrate|preflight|app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs|beat)
+            selected_services+=("$service_name")
+            ;;
+        *) die "unknown or unreviewed Compose service selection: ${service_name}." ;;
+    esac
+}
+
+if [[ "$compose_subcommand" == "up" || "$compose_subcommand" == "create" ]]; then
+    argument_index=$((subcommand_index + 1))
+    while (( argument_index < ${#compose_arguments[@]} )); do
+        argument="${compose_arguments[$argument_index]}"
+        if [[ "$argument" == "--" ]]; then
+            argument_index=$((argument_index + 1))
+            while (( argument_index < ${#compose_arguments[@]} )); do
+                record_selected_service "${compose_arguments[$argument_index]}"
+                argument_index=$((argument_index + 1))
+            done
+            break
+        fi
+
+        if [[ "$compose_subcommand" == "up" ]]; then
+            case "$argument" in
+                --attach|--exit-code-from|--no-attach|--pull|--scale|-t|--timeout|--wait-timeout)
+                    (( argument_index + 1 < ${#compose_arguments[@]} )) \
+                        || die "${argument} requires a value."
+                    [[ "$argument" == "--scale" ]] \
+                        && validate_worker_scale "${compose_arguments[$((argument_index + 1))]}"
+                    argument_index=$((argument_index + 2))
+                    continue
+                    ;;
+                --attach=*|--exit-code-from=*|--no-attach=*|--pull=*|-t?*|--timeout=*|--wait-timeout=*)
+                    argument_index=$((argument_index + 1))
+                    continue
+                    ;;
+                --scale=*)
+                    validate_worker_scale "${argument#*=}"
+                    argument_index=$((argument_index + 1))
+                    continue
+                    ;;
+                --no-deps)
+                    up_no_dependencies=true
+                    argument_index=$((argument_index + 1))
+                    continue
+                    ;;
+                --dry-run)
+                    dry_run_requested=true
+                    argument_index=$((argument_index + 1))
+                    continue
+                    ;;
+                --abort-on-container-exit|--abort-on-container-failure|--always-recreate-deps|\
+                --attach-dependencies|--build|-d|--detach|--force-recreate|--menu|\
+                --no-build|--no-color|--no-log-prefix|--no-recreate|--no-start|--quiet-build|\
+                --quiet-pull|-V|--renew-anon-volumes|--timestamps|--wait|-w|--watch|-y|--yes)
+                    argument_index=$((argument_index + 1))
+                    continue
+                    ;;
+            esac
+        else
+            case "$argument" in
+                --pull|--scale)
+                    (( argument_index + 1 < ${#compose_arguments[@]} )) \
+                        || die "${argument} requires a value."
+                    [[ "$argument" == "--scale" ]] \
+                        && validate_worker_scale "${compose_arguments[$((argument_index + 1))]}"
+                    argument_index=$((argument_index + 2))
+                    continue
+                    ;;
+                --pull=*)
+                    argument_index=$((argument_index + 1))
+                    continue
+                    ;;
+                --scale=*)
+                    validate_worker_scale "${argument#*=}"
+                    argument_index=$((argument_index + 1))
+                    continue
+                    ;;
+                --dry-run)
+                    dry_run_requested=true
+                    argument_index=$((argument_index + 1))
+                    continue
+                    ;;
+                --build|--force-recreate|--no-build|--no-recreate|--quiet-pull|-y|--yes)
+                    argument_index=$((argument_index + 1))
+                    continue
+                    ;;
+            esac
+        fi
+        case "$argument" in
+            -*) die "unsupported Compose ${compose_subcommand} option: ${argument}." ;;
+            *) record_selected_service "$argument" ;;
+        esac
+        argument_index=$((argument_index + 1))
+    done
+fi
+
+lifecycle_services=()
+restart_no_dependencies=false
+if [[ "$compose_subcommand" == "start" || "$compose_subcommand" == "restart" ]]; then
+    argument_index=$((subcommand_index + 1))
+    while (( argument_index < ${#compose_arguments[@]} )); do
+        argument="${compose_arguments[$argument_index]}"
+        case "$argument" in
+            --)
+                argument_index=$((argument_index + 1))
+                while (( argument_index < ${#compose_arguments[@]} )); do
+                    record_selected_service "${compose_arguments[$argument_index]}"
+                    lifecycle_services+=("${compose_arguments[$argument_index]}")
+                    argument_index=$((argument_index + 1))
+                done
+                break
+                ;;
+            --wait-timeout|-t|--timeout)
+                (( argument_index + 1 < ${#compose_arguments[@]} )) \
+                    || die "${argument} requires a value."
+                argument_index=$((argument_index + 2))
+                ;;
+            --no-deps)
+                [[ "$compose_subcommand" == "restart" ]] \
+                    || die "--no-deps is not a reviewed start option."
+                restart_no_dependencies=true
+                argument_index=$((argument_index + 1))
+                ;;
+            --wait-timeout=*|-t?*|--timeout=*|--dry-run|--wait)
+                argument_index=$((argument_index + 1))
+                ;;
+            -*) die "unsupported Compose ${compose_subcommand} option: ${argument}." ;;
+            *)
+                record_selected_service "$argument"
+                lifecycle_services+=("$argument")
+                argument_index=$((argument_index + 1))
+                ;;
+        esac
+    done
+fi
+
+if [[ "$compose_subcommand" == "exec" ]]; then
+    exec_service=""
+    argument_index=$((subcommand_index + 1))
+    while (( argument_index < ${#compose_arguments[@]} )); do
+        argument="${compose_arguments[$argument_index]}"
+        case "$argument" in
+            --privileged|--privileged=*|-u|--user|--user=*|-u?*|-e|--env|--env=*|-e?*)
+                die "exec cannot override privilege, user, or environment through the hardened wrapper."
+                ;;
+            --index|--workdir|-w)
+                (( argument_index + 1 < ${#compose_arguments[@]} )) \
+                    || die "${argument} requires a value before the exec service."
+                argument_index=$((argument_index + 2))
+                ;;
+            --index=*|--workdir=*|-w?*|-d|--detach|--dry-run|-T|--no-tty)
+                argument_index=$((argument_index + 1))
+                ;;
+            --)
+                argument_index=$((argument_index + 1))
+                (( argument_index < ${#compose_arguments[@]} )) \
+                    || die "exec requires a service after --."
+                exec_service="${compose_arguments[$argument_index]}"
+                break
+                ;;
+            -*) die "unsupported Compose exec option: ${argument}." ;;
+            *) exec_service="$argument"; break ;;
+        esac
+    done
+    [[ -n "$exec_service" ]] || die "exec requires an explicit reviewed service."
+
+    # The vendor images start as root for ownership repair. An exec otherwise
+    # inherits that configured user even after PID 1 drops privilege, so force
+    # every stateful diagnostic to the vendor server identity.
+    stateful_exec_user=""
+    case "$exec_service" in
+        db) stateful_exec_user="999:999" ;;
+        rabbitmq) stateful_exec_user="rabbitmq" ;;
+    esac
+    if [[ -n "$stateful_exec_user" ]]; then
+        compose_arguments=(
+            "${compose_arguments[@]:0:$((subcommand_index + 1))}"
+            --user "$stateful_exec_user"
+            "${compose_arguments[@]:$((subcommand_index + 1))}"
+        )
+    fi
+fi
+
+runtime_override_seen=false
+run_service=""
+run_service_index=-1
+if [[ "$compose_subcommand" == "run" ]]; then
+    # Parse only Compose run options. Once SERVICE is reached, all remaining
+    # arguments belong to the container command and cannot change its runtime.
+    argument_index=$((subcommand_index + 1))
+    run_remove_requested=false
+    run_no_dependencies_requested=false
+    while (( argument_index < ${#compose_arguments[@]} )); do
+        argument="${compose_arguments[$argument_index]}"
+        case "$argument" in
+            --)
+                argument_index=$((argument_index + 1))
+                (( argument_index < ${#compose_arguments[@]} )) \
+                    || die "run requires a service after --."
+                run_service="${compose_arguments[$argument_index]}"
+                run_service_index=$argument_index
+                break
+                ;;
+            --cap-add|--cap-drop|--entrypoint|--env|-e|--env-from-file|--label|-l|\
+            --name|--publish|-p|--pull|--user|-u|--volume|-v|--workdir|-w)
+                (( argument_index + 1 < ${#compose_arguments[@]} )) \
+                    || die "${argument} requires a value before the run service."
+                argument_index=$((argument_index + 2))
+                ;;
+            --cap-add=*|--cap-drop=*|--entrypoint=*|--env=*|-e?*|--env-from-file=*|\
+            --label=*|-l?*|--name=*|--publish=*|-p?*|--pull=*|--user=*|-u?*|\
+            --volume=*|-v?*|--workdir=*|-w?*)
+                argument_index=$((argument_index + 1))
+                ;;
+            --no-deps)
+                run_no_dependencies_requested=true
+                argument_index=$((argument_index + 1))
+                ;;
+            --rm)
+                run_remove_requested=true
+                argument_index=$((argument_index + 1))
+                ;;
+            --dry-run)
+                dry_run_requested=true
+                argument_index=$((argument_index + 1))
+                ;;
+            --build|--build=*|-d|--detach|--detach=*|-i|--interactive|-T|--no-tty|\
+            -q|--quiet|--quiet-build|--quiet-pull|--remove-orphans|-P|\
+            -P=*|--service-ports|--service-ports=*|--use-aliases|--use-aliases=*|\
+            --privileged|--privileged=*)
+                argument_index=$((argument_index + 1))
+                ;;
+            -*) die "unsupported Compose run option: ${argument}." ;;
+            *)
+                run_service="$argument"
+                run_service_index=$argument_index
+                break
+                ;;
+        esac
+    done
+    [[ -n "$run_service" ]] || die "run requires an explicit reviewed service."
+    case "$run_service" in
+        app|migrate|preflight|worker-cloud|worker-database|worker-files|worker-storage|worker-logs) ;;
+        *) die "run is restricted to non-root BackupSheep application-image services." ;;
+    esac
+    if [[ "$run_service" != "migrate" && "$run_service" != "preflight" && \
+          "$run_service_index" -ge $((${#compose_arguments[@]} - 1)) ]]; then
+        die "run requires an explicit one-off command for this application service."
+    fi
+
+    capability_count=0
+    cap_chown=false
+    cap_fowner=false
+    cap_dac_override=false
+    user_override_seen=false
+    volume_override_seen=false
+    environment_override_seen=false
+    entrypoint_override=""
+    argument_index=$((subcommand_index + 1))
+    while (( argument_index < run_service_index )); do
+        argument="${compose_arguments[$argument_index]}"
+        override_value=""
+        case "$argument" in
+            --privileged|--privileged=*|-d|--detach|--detach=*|-P|-P=*|\
+            --service-ports|--service-ports=*|\
+            --publish|--publish=*|-p|-p?*|--use-aliases|--use-aliases=*|\
+            --build|--build=*|--env-from-file|--env-from-file=*|\
+            --label|--label=*|-l|-l?*|--name|--name=*|\
+            --workdir|--workdir=*|-w|-w?*)
+                die "run cannot add privilege, ports, aliases, builds, environment files, labels, names, or a working-directory override."
+                ;;
+            --cap-add|--entrypoint|--env|-e|--user|-u|--volume|-v)
+                (( argument_index + 1 < ${#compose_arguments[@]} )) \
+                    || die "${argument} requires a reviewed value."
+                override_value="${compose_arguments[$((argument_index + 1))]}"
+                argument_index=$((argument_index + 1))
+                ;;
+            --cap-add=*|--entrypoint=*|--env=*|--user=*|--volume=*)
+                override_value="${argument#*=}"
+                ;;
+            -e?*|-u?*|-v?*)
+                override_value="${argument:2}"
+                ;;
+            --cap-drop|--cap-drop=*)
+                # Adding another capability drop only tightens the base model.
+                argument_index=$((argument_index + 1))
+                continue
+                ;;
+            *)
+                argument_index=$((argument_index + 1))
+                continue
+                ;;
+        esac
+
+        [[ "$allow_runtime_overrides" == true ]] \
+            || die "${argument} requires --allow-reviewed-runtime-overrides before the Compose command."
+        runtime_override_seen=true
+        case "$argument" in
+            --cap-add|--cap-add=*)
+                case "$override_value" in
+                    CHOWN) cap_chown=true ;;
+                    FOWNER) cap_fowner=true ;;
+                    DAC_OVERRIDE) cap_dac_override=true ;;
+                    *) die "only CHOWN, FOWNER, and DAC_OVERRIDE are reviewed maintenance capabilities." ;;
+                esac
+                capability_count=$((capability_count + 1))
+                ;;
+            --entrypoint|--entrypoint=*)
+                case "$override_value" in
+                    sh|/bin/sh|python) ;;
+                    *) die "the reviewed entrypoint override must be sh, /bin/sh, or python." ;;
+                esac
+                [[ -z "$entrypoint_override" ]] \
+                    || die "the run entrypoint may be overridden only once."
+                entrypoint_override="$override_value"
+                ;;
+            --env|--env=*|-e|-e?*)
+                [[ "$override_value" == "DJANGO_SERVER=test" ]] \
+                    || die "the only reviewed runtime environment override is DJANGO_SERVER=test."
+                environment_override_seen=true
+                ;;
+            --user|--user=*|-u|-u?*)
+                [[ "$override_value" == "0:0" ]] \
+                    || die "the reviewed maintenance user override must be exactly 0:0."
+                user_override_seen=true
+                ;;
+            --volume|--volume=*|-v|-v?*)
+                validate_reviewed_host_volume "$override_value"
+                volume_override_seen=true
+                ;;
+        esac
+        argument_index=$((argument_index + 1))
+    done
+
+    if [[ "$user_override_seen" == true || "$capability_count" -gt 0 ]]; then
+        [[ "$run_service" == "worker-storage" && "$user_override_seen" == true && \
+           "$entrypoint_override" == "sh" && "$volume_override_seen" == false && \
+           "$environment_override_seen" == false && "$capability_count" -eq 3 && \
+           "$cap_chown" == true && "$cap_fowner" == true && "$cap_dac_override" == true && \
+           "$run_remove_requested" == true && "$run_no_dependencies_requested" == true && \
+           "${compose_arguments[$((run_service_index + 1))]-}" == "-ceu" ]] \
+            || die "root/capability overrides are restricted to the exact worker-storage ownership migration."
+    elif [[ "$volume_override_seen" == true ]]; then
+        [[ "$run_service" == "app" && "$entrypoint_override" == "/bin/sh" && \
+           "$environment_override_seen" == false && "$run_remove_requested" == true && \
+           "$run_no_dependencies_requested" == true && \
+           "${compose_arguments[$((run_service_index + 1))]-}" == "-ceu" ]] \
+            || die "the host-file override is restricted to the exact app SSH-trust migration."
+    elif [[ "$environment_override_seen" == true || "$entrypoint_override" == "python" ]]; then
+        [[ "$run_service" == "app" || "$run_service" == "worker-cloud" ]] \
+            || die "offline test overrides are restricted to app or worker-cloud."
+        [[ "$environment_override_seen" == true && \
+           ( -z "$entrypoint_override" || "$entrypoint_override" == "python" ) ]] \
+            || die "the Python test entrypoint requires the reviewed DJANGO_SERVER=test override."
+        [[ "$run_remove_requested" == true && "$run_no_dependencies_requested" == true ]] \
+            || die "offline test overrides require disposable --rm --no-deps execution."
+        if [[ "$entrypoint_override" == "python" ]]; then
+            [[ "${compose_arguments[$((run_service_index + 1))]-}" == "manage.py" && \
+               "${compose_arguments[$((run_service_index + 2))]-}" == "test" ]] \
+                || die "the reviewed Python entrypoint is restricted to manage.py test."
+        else
+            [[ "${compose_arguments[$((run_service_index + 1))]-}" == "python" && \
+               "${compose_arguments[$((run_service_index + 2))]-}" == "manage.py" && \
+               "${compose_arguments[$((run_service_index + 3))]-}" == "test" ]] \
+                || die "the reviewed test environment override is restricted to python manage.py test."
+        fi
+    elif [[ -n "$entrypoint_override" ]]; then
+        die "the reviewed shell entrypoint is incomplete without its exact maintenance override set."
+    fi
+fi
+if [[ "$allow_runtime_overrides" == true && "$runtime_override_seen" == false ]]; then
+    die "--allow-reviewed-runtime-overrides was supplied but no reviewed run override was present."
+fi
+
+# Decide whether this exact command can open the RabbitMQ data volume. Commands
+# scoped with --no-deps to another service must remain usable during a broker
+# migration; broad starts and dependency-starting roles stay generation-gated.
+if [[ -n "$rabbitmq_transition_target" ]]; then
+    rabbitmq_start_possible=true
+elif [[ "$compose_subcommand" == "run" ]]; then
+    if [[ "$run_service" != "migrate" && "$run_no_dependencies_requested" == false ]]; then
+        rabbitmq_start_possible=true
+    fi
+elif [[ "$compose_subcommand" == "up" || "$compose_subcommand" == "create" ]]; then
+    selected_rabbitmq=false
+    selected_dependency_role=false
+    if (( ${#selected_services[@]} > 0 )); then
+        for argument in "${selected_services[@]}"; do
+            case "$argument" in
+                db|migrate)
+                    ;;
+                rabbitmq)
+                    selected_rabbitmq=true
+                    selected_dependency_role=true
+                    ;;
+                app|preflight|worker-cloud|worker-database|worker-files|worker-storage|worker-logs|beat)
+                    selected_dependency_role=true
+                    ;;
+            esac
+        done
+    fi
+    if (( ${#selected_services[@]} == 0 )); then
+        rabbitmq_start_possible=true
+    elif [[ "$up_no_dependencies" == true ]]; then
+        rabbitmq_start_possible="$selected_rabbitmq"
+    else
+        rabbitmq_start_possible="$selected_dependency_role"
+    fi
+elif [[ "$compose_subcommand" == "start" ]]; then
+    if (( ${#lifecycle_services[@]} == 0 )); then
+        rabbitmq_start_possible=true
+    else
+        for argument in "${lifecycle_services[@]}"; do
+            [[ "$argument" == "rabbitmq" ]] && rabbitmq_start_possible=true
+        done
+    fi
+elif [[ "$compose_subcommand" == "restart" ]]; then
+    if (( ${#lifecycle_services[@]} == 0 )); then
+        rabbitmq_start_possible=true
+    else
+        for argument in "${lifecycle_services[@]}"; do
+            if [[ "$argument" == "rabbitmq" ]]; then
+                rabbitmq_start_possible=true
+            elif [[ "$restart_no_dependencies" == false ]]; then
+                case "$argument" in
+                    app|preflight|worker-cloud|worker-database|worker-files|worker-storage|worker-logs|beat)
+                        rabbitmq_start_possible=true
+                        ;;
+                esac
+            fi
+        done
+    fi
+fi
+
+docker_bin="$(command -v docker || true)"
+[[ -n "$docker_bin" ]] || die "docker is not available in PATH."
+[[ -x /usr/bin/env ]] || die "/usr/bin/env is required."
+
+safe_environment=(
+    /usr/bin/env -i
+    "HOME=${HOME-}"
+    "PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}"
+    "COMPOSE_BAKE=false"
+    "COMPOSE_EXPERIMENTAL=false"
+    "COMPOSE_REMOVE_ORPHANS=0"
+)
+for transport_variable in \
+    DOCKER_API_VERSION \
+    DOCKER_CERT_PATH \
+    DOCKER_CONFIG \
+    DOCKER_CONTEXT \
+    DOCKER_CUSTOM_HEADERS \
+    DOCKER_HOST \
+    DOCKER_TLS \
+    DOCKER_TLS_VERIFY \
+    SSH_AUTH_SOCK \
+    XDG_RUNTIME_DIR \
+    SSL_CERT_DIR \
+    SSL_CERT_FILE \
+    HTTP_PROXY \
+    HTTPS_PROXY \
+    NO_PROXY \
+    http_proxy \
+    https_proxy \
+    no_proxy; do
+    if [[ -n "${!transport_variable-}" ]]; then
+        safe_environment+=(
+            "${transport_variable}=${!transport_variable}"
+        )
+    fi
+done
+
+compose_command=(
+    "${safe_environment[@]}"
+    "$docker_bin" compose
+    --project-name "$project_name"
+    --project-directory "$root_dir"
+    --env-file "$env_file"
+    "${compose_files[@]}"
+)
+base_compose_command=(
+    "${safe_environment[@]}"
+    "$docker_bin" compose
+    --project-name "$project_name"
+    --project-directory "$root_dir"
+    --env-file "$env_file"
+    -f "$base_file"
+)
+rabbit_upgrade_compose_command=(
+    "${safe_environment[@]}"
+    "$docker_bin" compose
+    --project-name "$project_name"
+    --project-directory "$root_dir"
+    --env-file "$env_file"
+    -f "$base_file"
+    -f "$rabbitmq_upgrade"
+)
+
+docker_command=("${safe_environment[@]}" "$docker_bin")
+
+docker_resource_label() {
+    local resource_type="$1"
+    local resource_id="$2"
+    local label_name="$3"
+
+    case "$resource_type" in
+        container)
+            "${docker_command[@]}" inspect --format \
+                "{{with index .Config.Labels \"${label_name}\"}}{{.}}{{end}}" \
+                "$resource_id"
+            ;;
+        network)
+            "${docker_command[@]}" network inspect --format \
+                "{{with index .Labels \"${label_name}\"}}{{.}}{{end}}" \
+                "$resource_id"
+            ;;
+        volume)
+            "${docker_command[@]}" volume inspect --format \
+                "{{with index .Labels \"${label_name}\"}}{{.}}{{end}}" \
+                "$resource_id"
+            ;;
+        *) die "unknown Docker resource type during ownership validation." ;;
+    esac
+}
+
+docker_resource_name() {
+    local resource_type="$1"
+    local resource_id="$2"
+
+    case "$resource_type" in
+        network) "${docker_command[@]}" network inspect --format '{{.Name}}' "$resource_id" ;;
+        volume) "${docker_command[@]}" volume inspect --format '{{.Name}}' "$resource_id" ;;
+        *) die "unknown Docker resource type during name validation." ;;
+    esac
+}
+
+parse_rendered_resource_map() {
+    local section="$1"
+    local rendered_model="$2"
+
+    # Compose's canonical YAML is generated by the Docker CLI, not read from an
+    # operator-authored file. Accept only its simple top-level resource shape and
+    # fail closed if a future Compose release changes that contract.
+    printf '%s\n' "$rendered_model" | awk -v wanted="$section" '
+        BEGIN { external = "false" }
+        function emit_resource() {
+            if (logical == "") return
+            if (physical == "" || external == "true") invalid = 1
+            if (logical !~ /^[A-Za-z0-9_.-]+$/ || physical !~ /^[A-Za-z0-9_.-]+$/) invalid = 1
+            print logical "|" physical "|" external
+            logical = ""
+            physical = ""
+            external = "false"
+            seen++
+        }
+        $0 == wanted ":" {
+            in_section = 1
+            next
+        }
+        in_section && $0 ~ /^[^[:space:]]/ {
+            emit_resource()
+            in_section = 0
+        }
+        in_section && $0 ~ /^  [A-Za-z0-9_.-]+:$/ {
+            emit_resource()
+            logical = $0
+            sub(/^  /, "", logical)
+            sub(/:$/, "", logical)
+            next
+        }
+        in_section && logical != "" && $0 ~ /^    name:[[:space:]]*/ {
+            physical = $0
+            sub(/^    name:[[:space:]]*/, "", physical)
+            if (physical ~ /^".*"$/) {
+                sub(/^"/, "", physical)
+                sub(/"$/, "", physical)
+            }
+            next
+        }
+        in_section && logical != "" && $0 == "    external: true" {
+            external = "true"
+            next
+        }
+        END {
+            emit_resource()
+            if (!seen || invalid) exit 41
+        }
+    '
+}
+
+validate_compose_project_ownership() {
+    local require_existing_sentinel="${1:-false}"
+    local resource_id=""
+    local resource_name=""
+    local resource_installation_id=""
+    local working_dir=""
+    local config_files=""
+    local base_config_files=""
+    local rabbit_config_files=""
+    local logical_name=""
+    local physical_name=""
+    local external_resource=""
+    local available_services=""
+    local available_networks=""
+    local available_volumes=""
+    local rendered_model=""
+    local network_map=""
+    local volume_map=""
+    local all_network_names=""
+    local all_volume_names=""
+    local resource_project=""
+    local container_count=0
+    local network_count=0
+    local volume_count=0
+    local identity_volume_count=0
+    local legacy_container_identity_count=0
+    local container_listing=""
+    local network_listing=""
+    local volume_listing=""
+    local -a container_ids=()
+    local -a network_ids=()
+    local -a volume_ids=()
+
+    rendered_model="$("${compose_command[@]}" --profile operations config)" \
+        || die "could not render the reviewed Compose model."
+    network_map="$(parse_rendered_resource_map networks "$rendered_model")" \
+        || die "could not prove canonical non-external Compose network names."
+    volume_map="$(parse_rendered_resource_map volumes "$rendered_model")" \
+        || die "could not prove canonical non-external Compose volume names."
+    available_networks="$(awk -F'|' '{ print $1 }' <<< "$network_map")"
+    available_volumes="$(awk -F'|' '{ print $1 }' <<< "$volume_map")"
+
+    while IFS='|' read -r logical_name physical_name external_resource; do
+        [[ "$external_resource" == "false" && "$physical_name" == "${project_name}_${logical_name}" ]] \
+            || die "network ${logical_name} must use its canonical project-owned name and cannot be external."
+    done <<< "$network_map"
+    while IFS='|' read -r logical_name physical_name external_resource; do
+        [[ "$external_resource" == "false" && "$physical_name" == "${project_name}_${logical_name}" ]] \
+            || die "volume ${logical_name} must use its canonical project-owned name and cannot be external."
+    done <<< "$volume_map"
+
+    container_listing="$(
+        "${docker_command[@]}" ps --all --quiet \
+            --filter "label=com.docker.compose.project=${project_name}"
+    )" || die "could not inventory existing Compose containers; refusing command."
+    network_listing="$(
+        "${docker_command[@]}" network ls --quiet \
+            --filter "label=com.docker.compose.project=${project_name}"
+    )" || die "could not inventory existing Compose networks; refusing command."
+    volume_listing="$(
+        "${docker_command[@]}" volume ls --quiet \
+            --filter "label=com.docker.compose.project=${project_name}"
+    )" || die "could not inventory existing Compose volumes; refusing command."
+    all_network_names="$("${docker_command[@]}" network ls --format '{{.Name}}')" \
+        || die "could not inventory Docker network names; refusing command."
+    all_volume_names="$("${docker_command[@]}" volume ls --format '{{.Name}}')" \
+        || die "could not inventory Docker volume names; refusing command."
+
+    while IFS= read -r resource_id; do
+        if [[ -n "$resource_id" ]]; then
+            container_ids+=("$resource_id")
+            container_count=$((container_count + 1))
+        fi
+    done <<< "$container_listing"
+    while IFS= read -r resource_id; do
+        if [[ -n "$resource_id" ]]; then
+            network_ids+=("$resource_id")
+            network_count=$((network_count + 1))
+        fi
+    done <<< "$network_listing"
+    while IFS= read -r resource_id; do
+        if [[ -n "$resource_id" ]]; then
+            volume_ids+=("$resource_id")
+            volume_count=$((volume_count + 1))
+        fi
+    done <<< "$volume_listing"
+
+    base_config_files="$base_file"
+    if [[ "$approved_default" == true ]]; then
+        base_config_files+=",${default_override}"
+    fi
+    rabbit_config_files="${base_config_files},${rabbitmq_upgrade}"
+
+    # Compose can adopt an exact-name pre-existing resource after only a warning.
+    # Prove every physical name, including unlabeled collisions omitted from the
+    # project-filtered inventory.
+    while IFS='|' read -r logical_name physical_name external_resource; do
+        grep -Fxq "$physical_name" <<< "$all_network_names" || continue
+        resource_project="$(docker_resource_label network "$physical_name" com.docker.compose.project)" \
+            || die "could not inspect Docker network ${physical_name}."
+        resource_installation_id="$(docker_resource_label network "$physical_name" com.docker.compose.network)" \
+            || die "could not inspect Docker network ${physical_name}."
+        [[ "$resource_project" == "$project_name" && "$resource_installation_id" == "$logical_name" ]] \
+            || die "Docker network ${physical_name} collides with this model but is not owned by it."
+    done <<< "$network_map"
+    while IFS='|' read -r logical_name physical_name external_resource; do
+        grep -Fxq "$physical_name" <<< "$all_volume_names" || continue
+        resource_project="$(docker_resource_label volume "$physical_name" com.docker.compose.project)" \
+            || die "could not inspect Docker volume ${physical_name}."
+        resource_installation_id="$(docker_resource_label volume "$physical_name" com.docker.compose.volume)" \
+            || die "could not inspect Docker volume ${physical_name}."
+        [[ "$resource_project" == "$project_name" && "$resource_installation_id" == "$logical_name" ]] \
+            || die "Docker volume ${physical_name} collides with this model but is not owned by it."
+    done <<< "$volume_map"
+
+    if (( container_count == 0 && network_count == 0 && volume_count == 0 )); then
+        [[ "$require_existing_sentinel" == false ]] \
+            || die "volume deletion requires an existing verified installation-identity sentinel."
+        if [[ "$fresh_resource_creation" == true && "$dry_run_requested" == false ]]; then
+            local sentinel_name="${project_name}_installation_identity"
+            local created_name=""
+            created_name="$(
+                "${docker_command[@]}" volume create \
+                    --driver local \
+                    --label "com.docker.compose.project=${project_name}" \
+                    --label "com.docker.compose.volume=installation_identity" \
+                    --label "com.backupsheep.installation-id=${installation_id}" \
+                    "$sentinel_name"
+            )" || die "could not create the fresh installation-identity sentinel."
+            [[ "$created_name" == "$sentinel_name" ]] \
+                || die "Docker returned an unexpected installation-identity volume name."
+            resource_project="$(docker_resource_label volume "$sentinel_name" com.docker.compose.project)" \
+                || die "could not re-inspect the fresh installation-identity sentinel."
+            logical_name="$(docker_resource_label volume "$sentinel_name" com.docker.compose.volume)" \
+                || die "could not re-inspect the fresh installation-identity sentinel."
+            resource_installation_id="$(docker_resource_label volume "$sentinel_name" com.backupsheep.installation-id)" \
+                || die "could not re-inspect the fresh installation-identity sentinel."
+            [[ "$resource_project" == "$project_name" && \
+               "$logical_name" == "installation_identity" && \
+               "$resource_installation_id" == "$installation_id" ]] \
+                || die "the fresh installation-identity sentinel did not retain every required label."
+        fi
+        return
+    fi
+
+    available_services="$("${compose_command[@]}" --profile operations config --services)" \
+        || die "could not inventory services in the reviewed Compose model."
+
+    if (( container_count > 0 )); then
+        for resource_id in "${container_ids[@]}"; do
+            working_dir="$(docker_resource_label container "$resource_id" com.docker.compose.project.working_dir)" \
+                || die "could not inspect a Compose container working directory."
+            config_files="$(docker_resource_label container "$resource_id" com.docker.compose.project.config_files)" \
+                || die "could not inspect a Compose container configuration path."
+            logical_name="$(docker_resource_label container "$resource_id" com.docker.compose.service)" \
+                || die "could not inspect a Compose container service label."
+            [[ "$working_dir" == "$root_dir" ]] \
+                || die "Compose project ${project_name} has a container owned by a different installation path."
+            if [[ "$logical_name" == "rabbitmq" ]]; then
+                if [[ -n "$rabbitmq_transition_target" ]]; then
+                    [[ "$config_files" == "$base_config_files" || "$config_files" == "$rabbit_config_files" ]] \
+                        || die "the RabbitMQ transition found a container outside the two canonical migration models."
+                else
+                    [[ "$config_files" == "$base_config_files" ]] \
+                        || die "RabbitMQ is still labeled with the compatibility overlay; complete the reviewed 4.3 transition."
+                fi
+            else
+                [[ "$config_files" == "$base_config_files" ]] \
+                    || die "Compose project ${project_name} has a container owned by a different model."
+            fi
+            grep -Fxq "$logical_name" <<< "$available_services" \
+                || die "Compose project ${project_name} has an unexpected service container: ${logical_name}."
+            resource_installation_id="$(docker_resource_label container "$resource_id" com.backupsheep.installation-id)" \
+                || die "could not inspect a Compose container installation identity."
+            if [[ -z "$resource_installation_id" ]]; then
+                legacy_container_identity_count=$((legacy_container_identity_count + 1))
+            else
+                [[ "$resource_installation_id" == "$installation_id" ]] \
+                    || die "Compose project ${project_name} has a container with a different BackupSheep installation identity."
+            fi
+        done
+    fi
+
+    # The empty sentinel volume is the durable ownership witness after `down`
+    # removes every container and network. Other stock volume labels are immutable
+    # but may predate the installation-id label, so a blank legacy label is accepted
+    # only after this sentinel is proved.
+    if (( volume_count > 0 )); then
+        for resource_id in "${volume_ids[@]}"; do
+            logical_name="$(docker_resource_label volume "$resource_id" com.docker.compose.volume)" \
+                || die "could not inspect a Compose volume logical name."
+            [[ "$logical_name" == "installation_identity" ]] || continue
+            resource_name="$(docker_resource_name volume "$resource_id")" \
+                || die "could not inspect the Compose ownership-sentinel name."
+            [[ "$resource_name" == "${project_name}_installation_identity" ]] \
+                || die "the Compose ownership sentinel has a non-canonical name."
+            resource_installation_id="$(docker_resource_label volume "$resource_id" com.backupsheep.installation-id)" \
+                || die "could not inspect the Compose ownership sentinel."
+            [[ "$resource_installation_id" == "$installation_id" ]] \
+                || die "the Compose ownership sentinel belongs to a different BackupSheep installation."
+            identity_volume_count=$((identity_volume_count + 1))
+        done
+    fi
+    (( identity_volume_count == 1 )) \
+        || die "existing Compose resources require exactly one matching installation-identity sentinel."
+
+    # Container labels are immutable. The installer may encounter containers from a
+    # pre-hardening stock deployment whose exact project, installation path, config
+    # file and service were proved before it created this sentinel. A blank identity
+    # is accepted only under that durable witness so Compose can safely recreate the
+    # legacy containers (including the reviewed RabbitMQ generation hops).
+    if (( legacy_container_identity_count > 0 )); then
+        (( identity_volume_count == 1 )) \
+            || die "legacy Compose containers require the matching installation-identity sentinel."
+    fi
+
+    if (( network_count > 0 )); then
+        for resource_id in "${network_ids[@]}"; do
+            logical_name="$(docker_resource_label network "$resource_id" com.docker.compose.network)" \
+                || die "could not inspect a Compose network logical name."
+            grep -Fxq "$logical_name" <<< "$available_networks" \
+                || die "Compose project ${project_name} has an unexpected network: ${logical_name}."
+            resource_name="$(docker_resource_name network "$resource_id")" \
+                || die "could not inspect a Compose network name."
+            [[ "$resource_name" == "${project_name}_${logical_name}" ]] \
+                || die "Compose network ${logical_name} has a non-canonical physical name."
+            resource_installation_id="$(docker_resource_label network "$resource_id" com.backupsheep.installation-id)" \
+                || die "could not inspect a Compose network installation identity."
+            if [[ -z "$resource_installation_id" ]]; then
+                : # Legacy labels are immutable; the matching sentinel proves this project.
+            else
+                [[ "$resource_installation_id" == "$installation_id" ]] \
+                    || die "Compose network ${logical_name} belongs to a different BackupSheep installation."
+            fi
+        done
+    fi
+
+    if (( volume_count > 0 )); then
+        for resource_id in "${volume_ids[@]}"; do
+            logical_name="$(docker_resource_label volume "$resource_id" com.docker.compose.volume)" \
+                || die "could not inspect a Compose volume logical name."
+            grep -Fxq "$logical_name" <<< "$available_volumes" \
+                || die "Compose project ${project_name} has an unexpected volume: ${logical_name}."
+            resource_name="$(docker_resource_name volume "$resource_id")" \
+                || die "could not inspect a Compose volume name."
+            [[ "$resource_name" == "${project_name}_${logical_name}" ]] \
+                || die "Compose volume ${logical_name} has a non-canonical physical name."
+            resource_installation_id="$(docker_resource_label volume "$resource_id" com.backupsheep.installation-id)" \
+                || die "could not inspect a Compose volume installation identity."
+            if [[ -z "$resource_installation_id" ]]; then
+                : # Legacy labels are immutable; the matching sentinel proves this project.
+            else
+                [[ "$resource_installation_id" == "$installation_id" ]] \
+                    || die "Compose volume ${logical_name} belongs to a different BackupSheep installation."
+            fi
+        done
+    fi
+}
+
+single_pinned_image_from_listing() {
+    local image_listing="$1"
+    local image_ref=""
+    local candidate_image_ref=""
+    local image_count=0
+
+    while IFS= read -r candidate_image_ref; do
+        [[ -n "$candidate_image_ref" ]] || continue
+        image_count=$((image_count + 1))
+        (( image_count == 1 )) \
+            || return 1
+        image_ref="$candidate_image_ref"
+    done <<< "$image_listing"
+    (( image_count == 1 )) \
+        || return 1
+    [[ "$image_ref" =~ ^[^[:space:]@]+:[^/[:space:]@]+@sha256:[0-9a-f]{64}$ ]] \
+        || return 1
+    printf '%s\n' "$image_ref"
+}
+
+expected_pinned_rabbitmq_image() {
+    local base_image_listing=""
+    local combined_image_listing=""
+    local base_image_ref=""
+    local combined_image_ref=""
+
+    base_image_listing="$("${base_compose_command[@]}" config --images rabbitmq)" \
+        || die "could not resolve the base-model RabbitMQ target image."
+    base_image_ref="$(single_pinned_image_from_listing "$base_image_listing")" \
+        || die "the base-model RabbitMQ service must resolve to exactly one tag-and-digest pinned image."
+    combined_image_listing="$("${compose_command[@]}" config --images rabbitmq)" \
+        || die "could not resolve the combined-model RabbitMQ target image."
+    combined_image_ref="$(single_pinned_image_from_listing "$combined_image_listing")" \
+        || die "the combined RabbitMQ service must resolve to exactly one tag-and-digest pinned image."
+    [[ "$combined_image_ref" == "$base_image_ref" ]] \
+        || die "an approved deployment override changed the base model's pinned RabbitMQ image."
+    printf '%s\n' "$base_image_ref"
+}
+
+expected_pinned_rabbitmq_42_image() {
+    local image_listing=""
+    local image_ref=""
+
+    validate_private_file "$rabbitmq_upgrade" "reviewed RabbitMQ 4.2 overlay"
+    image_listing="$("${rabbit_upgrade_compose_command[@]}" config --images rabbitmq)" \
+        || die "could not resolve the isolated RabbitMQ 4.2 compatibility image."
+    image_ref="$(single_pinned_image_from_listing "$image_listing")" \
+        || die "the RabbitMQ 4.2 compatibility service must resolve to exactly one tag-and-digest pinned image."
+    printf '%s\n' "$image_ref"
+}
+
+attest_pinned_rabbitmq_container_image() {
+    local rabbit_container_id="$1"
+    local expected_image_ref="$2"
+    local expected_image_id=""
+    local container_image_ref=""
+    local container_image_id=""
+
+    expected_image_id="$(
+        "${docker_command[@]}" image inspect --format '{{.Id}}' "$expected_image_ref"
+    )" || die "the pinned RabbitMQ target image is not present for attestation."
+    [[ "$expected_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || die "the pinned RabbitMQ target returned a malformed local image ID."
+    container_image_ref="$(
+        "${docker_command[@]}" inspect --format '{{.Config.Image}}' "$rabbit_container_id"
+    )" || die "could not inspect the RabbitMQ container image reference."
+    container_image_id="$(
+        "${docker_command[@]}" inspect --format '{{.Image}}' "$rabbit_container_id"
+    )" || die "could not inspect the RabbitMQ container image ID."
+    [[ "$container_image_ref" == "$expected_image_ref" \
+        && "$container_image_id" == "$expected_image_id" ]] \
+        || die "the RabbitMQ container is not running the exact digest-pinned reviewed image."
+}
+
+validate_enabled_rabbitmq_feature_flags() {
+    local rabbit_container_id="$1"
+    local policy="$2"
+    local expected_khepri_state="$3"
+    local phase="$4"
+    local feature_flags=""
+
+    feature_flags="$(
+        "${docker_command[@]}" exec --user rabbitmq "$rabbit_container_id" \
+            rabbitmqctl -q list_feature_flags name stability state 2>/dev/null
+    )" || die "could not query RabbitMQ feature flags during ${phase}."
+    printf '%s\n' "$feature_flags" | awk \
+        -v policy="$policy" -v expected_khepri_state="$expected_khepri_state" '
+        $1 == "name" && $2 == "stability" && $3 == "state" { next }
+        NF != 3 || seen[$1]++ { exit 41 }
+        {
+            row_count++
+        }
+        $2 == "required" || (policy == "all" && $2 == "stable") {
+            gated_count++
+            if ($3 != "enabled") exit 42
+        }
+        $1 == "khepri_db" {
+            khepri_count++
+            khepri_state = $3
+        }
+        END {
+            if (row_count == 0 || (policy == "all" && gated_count == 0)) exit 43
+            if (expected_khepri_state != "none" &&
+                (khepri_count != 1 || khepri_state != expected_khepri_state)) exit 44
+        }
+    ' || die "RabbitMQ feature flags are ambiguous or a stable/required flag is not enabled during ${phase}."
+}
+
+validate_rabbitmq_data_generation() {
+    local resource_id=""
+    local logical_name=""
+    local rabbit_container_id=""
+    local rabbit_volume_id=""
+    local container_listing=""
+    local volume_listing=""
+    local container_state=""
+    local container_health=""
+    local server_version=""
+    local expected_source_image=""
+
+    if [[ "$rabbitmq_start_possible" != true ]]; then
+        return 0
+    fi
+
+    container_listing="$(
+        "${docker_command[@]}" ps --all --quiet \
+            --filter "label=com.docker.compose.project=${project_name}"
+    )" || die "could not inventory RabbitMQ containers; refusing startup."
+    volume_listing="$(
+        "${docker_command[@]}" volume ls --quiet \
+            --filter "label=com.docker.compose.project=${project_name}"
+    )" || die "could not inventory RabbitMQ volumes; refusing startup."
+
+    while IFS= read -r resource_id; do
+        [[ -n "$resource_id" ]] || continue
+        logical_name="$(docker_resource_label container "$resource_id" com.docker.compose.service)" \
+            || die "could not inspect a project container while proving RabbitMQ generation."
+        if [[ "$logical_name" == "rabbitmq" ]]; then
+            [[ -z "$rabbit_container_id" ]] \
+                || die "multiple RabbitMQ containers claim this Compose project."
+            rabbit_container_id="$resource_id"
+        fi
+    done <<< "$container_listing"
+    while IFS= read -r resource_id; do
+        [[ -n "$resource_id" ]] || continue
+        logical_name="$(docker_resource_label volume "$resource_id" com.docker.compose.volume)" \
+            || die "could not inspect a project volume while proving RabbitMQ generation."
+        if [[ "$logical_name" == "rabbitmq_data" ]]; then
+            [[ -z "$rabbit_volume_id" ]] \
+                || die "multiple RabbitMQ data volumes claim this Compose project."
+            rabbit_volume_id="$resource_id"
+        fi
+    done <<< "$volume_listing"
+
+    if [[ -z "$rabbit_volume_id" ]]; then
+        [[ -z "$rabbitmq_transition_target" ]] \
+            || die "a RabbitMQ generation transition requires an existing broker data volume."
+        if [[ -z "$rabbitmq_generation" && "$dry_run_requested" == false ]]; then
+            set_env_value_atomically BACKUPSHEEP_RABBITMQ_DATA_GENERATION 4.3
+            rabbitmq_generation="4.3"
+        fi
+        return
+    fi
+
+    if [[ -z "$rabbitmq_transition_target" ]]; then
+        [[ "$rabbitmq_generation" == "4.3" ]] \
+            || die "an existing RabbitMQ volume has no proven 4.3 generation; follow docs/guides/rabbitmq-upgrade.md."
+        return
+    fi
+
+    [[ -z "$rabbitmq_generation" ]] \
+        || die "a RabbitMQ transition is valid only while the installer generation witness is blank."
+    [[ -n "$rabbit_container_id" ]] \
+        || die "the RabbitMQ transition requires one live source-version container."
+    container_state="$("${docker_command[@]}" inspect --format '{{.State.Status}}' "$rabbit_container_id")" \
+        || die "could not inspect the source RabbitMQ container state."
+    container_health="$("${docker_command[@]}" inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$rabbit_container_id")" \
+        || die "could not inspect the source RabbitMQ container health."
+    [[ "$container_state" == "running" && "$container_health" == "healthy" ]] \
+        || die "the RabbitMQ generation transition requires a running healthy source broker."
+    server_version="$(
+        "${docker_command[@]}" exec --user rabbitmq "$rabbit_container_id" \
+            rabbitmq-diagnostics -q server_version 2>/dev/null
+    )" || die "could not query the source RabbitMQ server version as the broker identity."
+
+    if [[ "$rabbitmq_transition_target" == "4.2" ]]; then
+        [[ "$server_version" == 3.13.* ]] \
+            || die "the reviewed 4.2 compatibility hop requires a healthy RabbitMQ 3.13 source."
+        validate_enabled_rabbitmq_feature_flags "$rabbit_container_id" all disabled "the 3.13 to 4.2 pre-hop gate; Khepri enabled on 3.13 requires a blue-green migration"
+    else
+        [[ "$server_version" == "4.2.9" || "$server_version" == "4.3.5" ]] \
+            || die "the reviewed 4.3 hop requires the exact healthy RabbitMQ 4.2.9 source or exact 4.3.5 reconciliation result."
+        if [[ "$server_version" == "4.2.9" ]]; then
+            validate_enabled_rabbitmq_feature_flags "$rabbit_container_id" all enabled "the RabbitMQ 4.3 pre-hop gate"
+            expected_source_image="$(expected_pinned_rabbitmq_42_image)"
+            attest_pinned_rabbitmq_container_image "$rabbit_container_id" "$expected_source_image"
+        else
+            validate_enabled_rabbitmq_feature_flags "$rabbit_container_id" required enabled "the RabbitMQ 4.3 reconciliation gate"
+            # A prior 4.3 Compose recreation may have succeeded before the witness
+            # write. Attest the exact pinned image before allowing a reconciliation
+            # invocation to reach Compose, preventing an accidental newer-to-older hop.
+            expected_source_image="$(expected_pinned_rabbitmq_image)"
+            attest_pinned_rabbitmq_container_image "$rabbit_container_id" "$expected_source_image"
+        fi
+    fi
+}
+
+verify_and_record_completed_rabbitmq_43_transition() {
+    local attempt=0
+    local resource_id=""
+    local rabbit_container_id=""
+    local container_listing=""
+    local logical_name=""
+    local working_dir=""
+    local config_files=""
+    local expected_config_files="$base_file"
+    local resource_installation_id=""
+    local container_state=""
+    local container_health=""
+    local server_version=""
+    local expected_image_ref=""
+
+    if [[ "$approved_default" == true ]]; then
+        expected_config_files+=",${default_override}"
+    fi
+
+    # Re-prove every project resource after Compose returns. This catches model,
+    # path, logical-name, physical-name or identity drift across the recreation.
+    validate_compose_project_ownership false
+
+    while (( attempt < 60 )); do
+        attempt=$((attempt + 1))
+        rabbit_container_id=""
+        container_listing="$(
+            "${docker_command[@]}" ps --all --quiet \
+                --filter "label=com.docker.compose.project=${project_name}"
+        )" || die "could not inventory the completed RabbitMQ 4.3 transition."
+        while IFS= read -r resource_id; do
+            [[ -n "$resource_id" ]] || continue
+            logical_name="$(docker_resource_label container "$resource_id" com.docker.compose.service)" \
+                || die "could not inspect a post-transition project container."
+            [[ "$logical_name" == "rabbitmq" ]] || continue
+            [[ -z "$rabbit_container_id" ]] \
+                || die "multiple RabbitMQ containers appeared after the 4.3 transition."
+            rabbit_container_id="$resource_id"
+        done <<< "$container_listing"
+
+        if [[ -z "$rabbit_container_id" ]]; then
+            sleep 1
+            continue
+        fi
+
+        working_dir="$(docker_resource_label container "$rabbit_container_id" com.docker.compose.project.working_dir)" \
+            || die "could not inspect the post-transition RabbitMQ working directory."
+        config_files="$(docker_resource_label container "$rabbit_container_id" com.docker.compose.project.config_files)" \
+            || die "could not inspect the post-transition RabbitMQ model."
+        resource_installation_id="$(docker_resource_label container "$rabbit_container_id" com.backupsheep.installation-id)" \
+            || die "could not inspect the post-transition RabbitMQ installation identity."
+        [[ "$working_dir" == "$root_dir" \
+            && "$config_files" == "$expected_config_files" \
+            && "$resource_installation_id" == "$installation_id" ]] \
+            || die "the post-transition RabbitMQ container was not recreated from the exact identified base model."
+
+        container_state="$("${docker_command[@]}" inspect --format '{{.State.Status}}' "$rabbit_container_id")" \
+            || die "could not inspect the post-transition RabbitMQ state."
+        container_health="$("${docker_command[@]}" inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$rabbit_container_id")" \
+            || die "could not inspect the post-transition RabbitMQ health."
+        if [[ "$container_state" != "running" || "$container_health" != "healthy" ]]; then
+            sleep 1
+            continue
+        fi
+
+        server_version="$(
+            "${docker_command[@]}" exec --user rabbitmq "$rabbit_container_id" \
+                rabbitmq-diagnostics -q server_version 2>/dev/null
+        )" || die "could not query the post-transition RabbitMQ server version."
+        [[ "$server_version" == "4.3.5" ]] \
+            || die "the post-transition broker is not the pinned RabbitMQ 4.3.5 target; the generation witness remains blank."
+        expected_image_ref="$(expected_pinned_rabbitmq_image)"
+        attest_pinned_rabbitmq_container_image "$rabbit_container_id" "$expected_image_ref"
+        validate_enabled_rabbitmq_feature_flags "$rabbit_container_id" required enabled "the RabbitMQ 4.3 post-transition gate"
+
+        set_env_value_atomically BACKUPSHEEP_RABBITMQ_DATA_GENERATION 4.3
+        rabbitmq_generation="4.3"
+        return 0
+    done
+
+    die "RabbitMQ did not become running and healthy after the 4.3 transition; the generation witness remains blank."
+}
+
+# Validate the same fully rendered model immediately before every read or mutation.
+"${compose_command[@]}" config --quiet
+if [[ "$mutating_command" == true ]]; then
+    validate_compose_project_ownership "$volume_deletion_requested"
+    validate_rabbitmq_data_generation
+fi
+"${compose_command[@]}" "${compose_arguments[@]}"
+if [[ "$rabbitmq_transition_target" == "4.3" ]]; then
+    verify_and_record_completed_rabbitmq_43_transition
+fi

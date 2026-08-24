@@ -58,6 +58,7 @@ class CoreWordPressBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     serializer_class = CoreWordPressBackupSerializer
     backup_model = CoreWordPressBackup
     backup_node_relation = "wordpress"
+    backup_delete_model_key = "wordpress"
     all_fields = [f.name for f in CoreWordPressBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -70,8 +71,7 @@ class CoreWordPressBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
-        instance.soft_delete()
-        return Response(status=status.HTTP_204_NO_CONTENT, data={})
+        return self.request_backup_delete(instance)
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, *args, **kwargs):

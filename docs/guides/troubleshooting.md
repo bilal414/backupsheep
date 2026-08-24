@@ -10,31 +10,35 @@ guards.
 cd /opt/backupsheep
 git rev-parse HEAD
 git status --short --branch
-docker compose config --quiet
-docker compose ps --all
-docker compose logs --tail=200 migrate app
+./backupsheep-compose config --quiet
+./backupsheep-compose ps --all
+./backupsheep-compose logs --tail=200 migrate preflight app
 curl -fsS http://127.0.0.1:8000/healthz/
-docker compose exec -T db pg_isready -U backupsheep -d backupsheep
-docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping
-docker compose exec -T worker-cloud celery -A backupsheep inspect ping
+./backupsheep-compose exec -T db pg_isready -U backupsheep -d backupsheep
+./backupsheep-compose exec -T rabbitmq rabbitmq-diagnostics -q ping
 ```
 
 For a backup or restore, also capture its safe correlation ID, status, phase, retry time,
-provider status and reconciliation state from the console/API.
+provider status and reconciliation state from the console/API. When operations are
+intentionally enabled, also run
+`./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect ping`.
 
 ## Installation and startup
 
 ### Production refuses the sample Django key
 
-With `DJANGO_SERVER=prod`, the app refuses `DJANGO_SECRET_KEY=change-this-key`. Generate a
-long random value, store it in `.env`, keep the file mode restrictive and recreate the
-services. Keep the value stable after first use.
+With `DJANGO_SERVER=prod`, the app refuses `DJANGO_SECRET_KEY=change-this-key`. In the
+stock stack the real value belongs in `.secrets/django_secret_key`, while the direct
+`.env` key stays blank. Keep the protected file stable after first use. Installer-managed
+installations validate its owner, mode and content automatically; follow the manual
+installation guide rather than inventing a second secret source.
 
 ### PostgreSQL does not start or authentication fails
 
-For the bundled stack, confirm `DB_HOST=db`, `DB_PORT=5432`, and non-empty matching
-`DB_NAME`, `DB_USER`, `DB_PASSWORD` values. PostgreSQL initializes its role/password only
-when the volume is first created; changing `.env` later does not alter the existing role.
+For the bundled stack, confirm `DB_HOST=db`, `DB_PORT=5432`, matching `DB_NAME`/`DB_USER`,
+and the protected `.secrets/db_password` file. The direct `DB_PASSWORD` value stays blank.
+PostgreSQL initializes its role/password only when the volume is first created; replacing
+the secret file later does not alter the existing role.
 
 Do not delete `pgdata` to solve a credential mismatch. Restore the old setting, change the
 role password through an authenticated PostgreSQL session, or recover the database into a
@@ -43,26 +47,27 @@ new verified instance.
 ### `migrate` exits non-zero
 
 ```bash
-docker compose logs --tail=300 migrate db
+./backupsheep-compose logs --tail=300 migrate db
 ```
 
-Fix database connectivity, permissions, disk or migration errors, then run `docker compose
+Fix database connectivity, permissions, disk or migration errors, then run `./backupsheep-compose
 up --detach` again. Application services wait for a successful migration. Do not fake the
 migration state or start the web image independently against an unverified schema.
 
 ### The UI has no styles
 
-The app entrypoint runs `collectstatic`, and WhiteNoise serves the result. Rebuild the
-current image and inspect app startup:
+Static assets are collected in the offline, non-root image-build step and WhiteNoise
+serves the immutable result. Rebuild the current image and inspect app startup:
 
 ```bash
-docker compose build app
-docker compose up --detach app
-docker compose logs --tail=200 app
+./backupsheep-compose build db app
+./backupsheep-compose up --detach app
+./backupsheep-compose logs --tail=200 app
 ```
 
 Confirm the browser is not caching a failed asset response and that the reverse proxy
-forwards `/static/` to the app.
+forwards `/static/` to the app. Do not mount a volume or tmpfs over `/code/static`, because
+that hides the assets embedded in the image.
 
 ## HTTP, login and onboarding
 
@@ -88,14 +93,15 @@ proxy is not stripping headers. External token-authenticated clients should send
 
 ### Install token is rejected or missing
 
-If `ONBOARDING_INSTALL_TOKEN` is blank, request `/onboarding/` once, then read:
+Stock Compose mounts the onboarding token only into `app`. Read it as the trusted host
+owner, not through the web container or its environment:
 
 ```bash
-docker compose exec app cat /code/_storage/install_token
+cat .secrets/onboarding_token
 ```
 
-The web app must have a writable shared `/code/_storage`. If a user already exists, the
-first-owner step is intentionally locked; use login/password recovery instead.
+If a user already exists, the first-owner step is intentionally locked; use login/password
+recovery instead.
 
 ### Console owner cannot use `/django-admin/`
 
@@ -103,7 +109,7 @@ The BackupSheep owner is not a Django superuser. Create a separate superuser onl
 needed:
 
 ```bash
-docker compose run --rm app python manage.py createsuperuser
+./backupsheep-compose run --rm app python manage.py createsuperuser
 ```
 
 ### Password email does not arrive
@@ -112,23 +118,32 @@ Send an email test from settings and inspect `worker-logs`. If no transactional 
 is configured, reset from the host:
 
 ```bash
-docker compose run --rm app python manage.py changepassword user@example.com
+./backupsheep-compose run --rm app python manage.py changepassword user@example.com
 ```
 
 ## RabbitMQ and workers
 
 ### Workers report connection refused
 
-Inside Compose, RabbitMQ is `rabbitmq`, not `localhost`. Keep the default
-`amqp://guest:guest@rabbitmq:5672//` only on the private Compose network. For an external
-broker, verify the `amqp`/`amqps` URL, credentials, vhost, TLS and firewall.
+Inside Compose, RabbitMQ is `rabbitmq`, not `localhost`. Keep `RABBITMQ_HOST=rabbitmq`, use
+the dedicated `backupsheep` user/vhost, and confirm `.secrets/rabbitmq_password` contains
+the same value used when the persistent broker volume was initialized. The direct
+`RABBITMQ_PASSWORD` key remains blank in stock Compose. For an external broker, verify the
+`amqp`/`amqps` URL, credentials, vhost, TLS and firewall.
 
 ### One worker lane is missing
 
+First confirm that operations were intentionally enabled. A fresh/profile-less deployment
+has no worker or Beat containers by design. To opt in after the recovery review:
+
 ```bash
-docker compose ps --all
-docker compose logs --tail=200 worker-cloud worker-database worker-files worker-storage worker-logs
-docker compose exec -T worker-cloud celery -A backupsheep inspect ping
+./backupsheep-compose --profile operations up --detach
+```
+
+```bash
+./backupsheep-compose --profile operations ps --all
+./backupsheep-compose --profile operations logs --tail=200 worker-cloud worker-database worker-files worker-storage worker-logs
+./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect ping
 ```
 
 Start the missing service. Do not reroute disk-touching tasks to a worker without the
@@ -140,7 +155,7 @@ Check the `storage` queue, destination provider and work-volume capacity. If wor
 healthy and the destination is the bottleneck, scale the lane:
 
 ```bash
-docker compose up --detach --scale worker-storage=4
+./backupsheep-compose --profile operations up --detach --scale worker-storage=4
 ```
 
 Do not scale through provider rate limits without measuring errors/retry behavior.
@@ -202,9 +217,14 @@ changed key based only on the failing connection itself.
 
 ### Managed SSH key is not offered
 
-Both `SSH_MANAGED_PUBLIC_KEY` and `SSH_MANAGED_PRIVATE_KEY_PATH` must be set, and the
-private file must exist where `app`, `worker-files` and `worker-database` can read it. Use
-mode `0600` and the shared work volume.
+Set the matching `SSH_MANAGED_PUBLIC_KEY` and place the unencrypted private key in
+`.secrets/ssh_managed_private_key`, mode `0444`; leave that file empty to disable the
+feature. Do not set a legacy direct key path and do not put the key in `backup_workdir`.
+On each app/database/files start, the entrypoint requires a regular, NUL-free key no larger
+than 64 KiB, validates it without a passphrase, copies it into private tmpfs at
+`/run/backupsheep/ssh/managed_private_key`, mode `0600`, and exports that path. Inspect the
+role's startup refusal if staging fails. Never point SSH directly at the mode-`0444`
+`/run/secrets/ssh_managed_private_key` source.
 
 ### FTPS certificate failure
 
@@ -249,9 +269,10 @@ editing `.env`.
 
 ### Local Storage file is missing
 
-Confirm `BS_LOCAL_STORAGE_PATH`, the app/worker mounts and the destination's optional
-subpath. Every relevant process must see the same archive. A container-local path will be
-lost or appear empty after recreation.
+Confirm `BS_LOCAL_STORAGE_PATH`, the role-specific mounts and the destination's optional
+subpath. Stock Compose grants `worker-storage` read/write access, app/cloud/database/files
+read-only access, and no mount to logs/Beat. Every relevant reader must see the same
+archive. A container-local path will be lost or appear empty after recreation.
 
 ### Transfer-log download says unavailable
 

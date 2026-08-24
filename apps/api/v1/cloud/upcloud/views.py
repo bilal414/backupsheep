@@ -13,7 +13,8 @@ from apps.api.v1.cloud.upcloud.serializers import (
     CoreCloudUpCloudReadSerializer,
     CoreCloudUpCloudWriteSerializer,
 )
-from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_filters import DateRangeFilter, scope_direct_node_queryset
+from apps.api.v1.utils.api_helpers import visible_connections
 from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
 from apps.console.backup.models import CoreUpCloudBackup
 from apps.console.connection.models import CoreConnection
@@ -58,7 +59,7 @@ class CoreCloudUpCloudView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
         query &= ~Q(status=CoreConnection.Status.TOKEN_REFRESH_FAIL)
         return Response(
-            CoreConnection.objects.filter(query).values(
+            visible_connections(member).filter(query).values(
                 "id",
                 "name",
                 "location_id",
@@ -74,7 +75,7 @@ class CoreCloudUpCloudView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         query &= Q(node__connection__integration__code="upcloud")
         query &= Q(node__type=CoreNode.Type.CLOUD)
         query &= ~Q(node__status=CoreNode.Status.DELETE_REQUESTED)
-        nodes = CoreUpCloud.objects.filter(query)
+        nodes = scope_direct_node_queryset(request, CoreUpCloud.objects.filter(query))
         return Response(
             {
                 "nodes": nodes.count(),

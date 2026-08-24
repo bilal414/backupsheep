@@ -1,5 +1,5 @@
 import pytz
-from django.conf import settings
+from django.db import transaction
 from django.utils.timezone import get_current_timezone
 from requests import JSONDecodeError
 from rest_framework import serializers
@@ -8,14 +8,13 @@ from apps.api.v1.utils.api_helpers import (
     CurrentMemberDefault,
     CurrentAccountDefault,
     IntegrationDefault,
-    bs_encrypt,
 )
 from apps.console.connection.models import (
     CoreConnection,
     CoreConnectionLocation,
     CoreAuthWordPress,
+    WORDPRESS_SECRET_PREFIX,
 )
-from apps.console.node.models import CoreNode
 from apps.api.v1.account.serializers import CoreAccountSerializer
 from apps.api.v1.connection.serializers import (
     CoreIntegrationSerializer,
@@ -24,6 +23,7 @@ from apps.api.v1.connection.serializers import (
 
 
 class CoreAuthWordPressReadSerializer(serializers.ModelSerializer):
+    http_user = serializers.SerializerMethodField()
     key_configured = serializers.SerializerMethodField()
     http_password_configured = serializers.SerializerMethodField()
 
@@ -40,6 +40,12 @@ class CoreAuthWordPressReadSerializer(serializers.ModelSerializer):
     @staticmethod
     def get_key_configured(obj):
         return bool(obj.key)
+
+    @staticmethod
+    def get_http_user(obj):
+        # The database contains only ciphertext; decrypt solely for the existing
+        # edit form, never serialize the persisted representation.
+        return obj.get_http_user()
 
     @staticmethod
     def get_http_password_configured(obj):
@@ -112,8 +118,14 @@ class CoreAuthWordPressWriteSerializer(serializers.ModelSerializer):
 
         parent_instance = getattr(getattr(self, "parent", None), "instance", None)
         existing = getattr(parent_instance, "auth_wordpress", None) if parent_instance else None
+        existing_values = {
+            "url": getattr(existing, "url", None),
+            "key": existing.get_key() if existing else None,
+            "http_user": existing.get_http_user() if existing else None,
+            "http_pass": existing.get_http_pass() if existing else None,
+        }
         combined = {
-            field: data[field] if field in data else getattr(existing, field, None)
+            field: data[field] if field in data else existing_values[field]
             for field in ("url", "key", "http_user", "http_pass")
         }
         if not combined["url"] or not combined["key"]:
@@ -124,11 +136,17 @@ class CoreAuthWordPressWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"http_auth": "HTTP username and password must be configured together."}
             )
+        for field_name in ("key", "http_user", "http_pass"):
+            value = data.get(field_name)
+            if isinstance(value, str) and value.startswith(WORDPRESS_SECRET_PREFIX):
+                raise serializers.ValidationError(
+                    {field_name: "The supplied credential format is reserved."}
+                )
 
         try:
             auth_wordpress = CoreAuthWordPress()
 
-            combined["url"] = combined["url"].rstrip('/')
+            combined["url"] = auth_wordpress._normalized_base_url(combined["url"])
             if "url" in data:
                 data["url"] = combined["url"]
 
@@ -170,6 +188,7 @@ class CoreWordPressConnectionWriteSerializer(serializers.ModelSerializer):
         model = CoreConnection
         fields = "__all__"
 
+    @transaction.atomic
     def create(self, validated_data):
         auth_wordpress = validated_data.pop("auth_wordpress", [])
         instance = CoreConnection.objects.create(**validated_data)
@@ -177,6 +196,7 @@ class CoreWordPressConnectionWriteSerializer(serializers.ModelSerializer):
         CoreAuthWordPress.objects.create(**auth_wordpress)
         return instance
 
+    @transaction.atomic
     def update(self, instance, validated_data):
         if validated_data.get("location"):
             if instance.location != validated_data["location"]:

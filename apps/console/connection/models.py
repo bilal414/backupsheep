@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import tempfile
 import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 from apps.api.v1.utils.http import request_timeout, requests
 from apps.api.v1.utils.boto import bounded_boto3_client
@@ -63,6 +64,19 @@ _PROVIDER_SDK_TIMEOUT_FLOOR = 0.1
 _PROVIDER_SDK_TIMEOUT_MAX_DEFAULT = 300.0
 _GOOGLE_TIMEOUT_UNSET = object()
 _GOOGLE_REFRESH_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+WORDPRESS_SECRET_PREFIX = "bs-wordpress-fernet-v1:"
+WORDPRESS_KEY_HEADER = "X-BackupSheep-Key"
+_WORDPRESS_ROUTES = frozenset(
+    {
+        "backup",
+        "delete",
+        "download",
+        "files",
+        "rebuild_history",
+        "status",
+        "validate",
+    }
+)
 
 
 def _provider_sdk_timeout():
@@ -119,6 +133,7 @@ class _BoundedGoogleAuthorizedSession(AuthorizedSession):
         # token.  Use a private session with zero adapter retries; this does not
         # alter requests or Google SDK process globals.
         auth_session = requests.Session()
+        auth_session.max_redirects = 0
         no_retry_adapter = requests.adapters.HTTPAdapter(max_retries=0)
         auth_session.mount("http://", no_retry_adapter)
         auth_session.mount("https://", no_retry_adapter)
@@ -128,6 +143,7 @@ class _BoundedGoogleAuthorizedSession(AuthorizedSession):
             auth_request=Request(auth_session),
             refresh_timeout=self._backupsheep_timeout[1],
         )
+        self.max_redirects = 0
 
         # AuthorizedSession inherits requests.Session.  Make the no-retry policy
         # explicit for all methods; task-level recovery and provider idempotency
@@ -340,10 +356,10 @@ class CoreAuthDigitalOcean(TimeStampedModel):
 
     def refresh_auth_token(self):
         from datetime import datetime, timezone
-        from urllib.parse import urlsplit
 
         from ..node.models import CoreNode
         from apps.api.v1.connection.digitalocean.client import DigitalOceanAPIError
+        from apps.api.v1.utils.oauth_security import validated_https_endpoint
 
         # Personal access-token connections do not use OAuth refresh tokens.
         if self.api_key:
@@ -356,21 +372,12 @@ class CoreAuthDigitalOcean(TimeStampedModel):
         if not refresh_token_decrypted:
             return False
 
-        token_url = str(settings.DIGITALOCEAN_TOKEN_URL or "").strip()
-        try:
-            parsed = urlsplit(token_url)
-            has_port = parsed.port is not None
-        except ValueError as error:
-            raise DigitalOceanAPIError("PROVIDER_REQUEST_FAILED") from error
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or has_port
-            or parsed.query
-            or parsed.fragment
-        ):
+        token_url = validated_https_endpoint(
+            settings.DIGITALOCEAN_TOKEN_URL,
+            allowed_hostnames={"cloud.digitalocean.com"},
+            allowed_paths={"/v1/oauth/token"},
+        )
+        if token_url is None:
             raise DigitalOceanAPIError("PROVIDER_REQUEST_FAILED")
 
         form = {
@@ -388,6 +395,7 @@ class CoreAuthDigitalOcean(TimeStampedModel):
                 token_url,
                 data=form,
                 headers={"Accept": "application/json"},
+                allow_redirects=False,
                 verify=True,
                 timeout=request_timeout(),
             )
@@ -1193,18 +1201,13 @@ class CoreAuthOVHCA(TimeStampedModel):
         db_table = "core_auth_ovh_ca"
 
     def get_client(self):
-        import ovh
+        from apps.api.v1.connection.ovh_oauth import build_ovh_client
 
         encryption_key = self.connection.account.get_encryption_key()
-
-        client = ovh.Client(
-            endpoint=str("ovh-ca"),
-            application_key=settings.OVH_CA_APP_KEY,
-            application_secret=settings.OVH_CA_APP_SECRET,
+        return build_ovh_client(
+            "ovh_ca",
             consumer_key=bs_decrypt(self.consumer_key, encryption_key),
-            timeout=_provider_sdk_timeout(),
         )
-        return client
 
     def get_eligible_objects(self, object_type="cloud"):
         eligible_objects = []
@@ -1264,18 +1267,13 @@ class CoreAuthOVHEU(TimeStampedModel):
         db_table = "core_auth_ovh_eu"
 
     def get_client(self):
-        import ovh
+        from apps.api.v1.connection.ovh_oauth import build_ovh_client
 
         encryption_key = self.connection.account.get_encryption_key()
-
-        client = ovh.Client(
-            endpoint=str("ovh-eu"),
-            application_key=settings.OVH_EU_APP_KEY,
-            application_secret=settings.OVH_EU_APP_SECRET,
+        return build_ovh_client(
+            "ovh_eu",
             consumer_key=bs_decrypt(self.consumer_key, encryption_key),
-            timeout=_provider_sdk_timeout(),
         )
-        return client
 
     def get_eligible_objects(self, object_type="cloud"):
         eligible_objects = []
@@ -1335,18 +1333,13 @@ class CoreAuthOVHUS(TimeStampedModel):
         db_table = "core_auth_ovh_us"
 
     def get_client(self):
-        import ovh
+        from apps.api.v1.connection.ovh_oauth import build_ovh_client
 
         encryption_key = self.connection.account.get_encryption_key()
-
-        client = ovh.Client(
-            endpoint=str("ovh-us"),
-            application_key=settings.OVH_US_APP_KEY,
-            application_secret=settings.OVH_US_APP_SECRET,
+        return build_ovh_client(
+            "ovh_us",
             consumer_key=bs_decrypt(self.consumer_key, encryption_key),
-            timeout=_provider_sdk_timeout(),
         )
-        return client
 
     def get_eligible_objects(self, object_type="cloud"):
         eligible_objects = []
@@ -1925,24 +1918,47 @@ class CoreAuthWebsite(TimeStampedModel):
 
     def check_connection(self, data=None, check_errors=None):
         import ftputil
-        from apps.api.v1.utils.api_helpers import bs_decrypt, FtpSession, FtpTlsSession
+        from apps.api.v1.utils.api_helpers import (
+            bs_decrypt,
+            FtpSession,
+            ftp_tls_session_factory,
+        )
         import paramiko
         import tempfile
         import os
+
+        raw_protocol = data.get("protocol") if data else self.protocol
+        try:
+            protocol = self.Protocol(int(raw_protocol))
+        except (TypeError, ValueError):
+            raise NodeConnectionErrorWebsite(
+                "The website transfer protocol is missing or unsupported."
+            ) from None
+        if (
+            protocol == self.Protocol.FTP
+            and not settings.ALLOW_INSECURE_FTP
+        ):
+            raise NodeConnectionErrorWebsite(
+                "Plain FTP is disabled because it exposes credentials and backup "
+                "data in transit. Use SFTP or FTPS, or explicitly set "
+                "ALLOW_INSECURE_FTP=true after accepting that risk."
+            )
 
         if data:
             username = data.get("username")
             password = data.get("password")
             port = data.get("port")
             host = data.get("host")
-            protocol = data.get("protocol")
+            verify_ssl = data.get("verify_ssl") is not False
+            ftps_use_explicit_ssl = bool(data.get("ftps_use_explicit_ssl"))
         else:
             encryption_key = self.connection.account.get_encryption_key()
             username = bs_decrypt(self.username, encryption_key)
             password = bs_decrypt(self.password, encryption_key)
             port = self.port
             host = self.host
-            protocol = self.protocol
+            verify_ssl = self.verify_ssl is not False
+            ftps_use_explicit_ssl = bool(self.ftps_use_explicit_ssl)
 
         if protocol == self.Protocol.FTP:
             try:
@@ -1968,7 +1984,10 @@ class CoreAuthWebsite(TimeStampedModel):
                     username,
                     password,
                     port=port,
-                    session_factory=FtpTlsSession,
+                    session_factory=ftp_tls_session_factory(
+                        verify_ssl=verify_ssl,
+                        explicit=ftps_use_explicit_ssl,
+                    ),
                 ) as hosting_host:
                     hosting_host.listdir(path or ".")
                     hosting_host.close()
@@ -2040,7 +2059,7 @@ class CoreAuthWebsite(TimeStampedModel):
             from apps.api.v1.utils.api_helpers import (
                 bs_decrypt,
                 FtpSession,
-                FtpTlsSession,
+                ftp_tls_session_factory,
                 isFile,
                 isdir,
             )
@@ -2095,7 +2114,10 @@ class CoreAuthWebsite(TimeStampedModel):
                     bs_decrypt(self.username, encryption_key),
                     bs_decrypt(self.password, encryption_key),
                     port=int(self.port),
-                    session_factory=FtpTlsSession,
+                    session_factory=ftp_tls_session_factory(
+                        verify_ssl=self.verify_ssl is not False,
+                        explicit=bool(self.ftps_use_explicit_ssl),
+                    ),
                 ) as hosting_host:
 
                     names = hosting_host.listdir(path or ".")
@@ -3461,39 +3483,210 @@ class CoreAuthDatabase(TimeStampedModel):
 class CoreAuthWordPress(TimeStampedModel):
     connection = models.OneToOneField("CoreConnection", related_name="auth_wordpress", on_delete=models.CASCADE)
     url = models.URLField()
-    key = models.CharField(max_length=255)
-    http_user = models.CharField(max_length=255, null=True, blank=True)
-    http_pass = models.CharField(max_length=255, null=True, blank=True)
+    key = models.TextField(editable=False)
+    http_user = models.TextField(null=True, blank=True, editable=False)
+    http_pass = models.TextField(null=True, blank=True, editable=False)
 
     class Meta:
         db_table = "core_auth_wordpress"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(key__startswith=WORDPRESS_SECRET_PREFIX),
+                name="wordpress_key_ciphertext_v1",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(http_user__isnull=True)
+                | models.Q(http_user__startswith=WORDPRESS_SECRET_PREFIX),
+                name="wordpress_http_user_ciphertext_v1",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(http_pass__isnull=True)
+                | models.Q(http_pass__startswith=WORDPRESS_SECRET_PREFIX),
+                name="wordpress_http_pass_ciphertext_v1",
+            ),
+        ]
+
+    _SECRET_FIELDS = ("key", "http_user", "http_pass")
+
+    @staticmethod
+    def _normalize_secret_value(value):
+        if isinstance(value, memoryview):
+            value = value.tobytes()
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return bytes(value).decode("ascii")
+            except UnicodeDecodeError:
+                return value
+        return value
+
+    def _account_encryption_key(self):
+        if not self.connection_id:
+            raise ValueError("A saved WordPress connection is required")
+        try:
+            key = self.connection.account.get_encryption_key()
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(
+                "The WordPress connection account has no usable encryption key"
+            ) from error
+        if not key:
+            raise ValueError(
+                "The WordPress connection account has no usable encryption key"
+            )
+        return key
+
+    def _encrypt_secret(self, value):
+        if value in (None, "", b""):
+            return None
+        if not isinstance(value, str):
+            raise ValueError("WordPress credentials must be plaintext strings")
+        ciphertext = bs_encrypt(value, self._account_encryption_key())
+        if not ciphertext:
+            raise ValueError("Unable to encrypt WordPress credential")
+        return WORDPRESS_SECRET_PREFIX + bytes(ciphertext).decode("ascii")
+
+    def _decrypt_secret(self, field_name):
+        if field_name not in self._SECRET_FIELDS:
+            raise ValueError("Unknown WordPress credential field")
+        value = self._normalize_secret_value(getattr(self, field_name, None))
+        if not isinstance(value, str) or not value.startswith(WORDPRESS_SECRET_PREFIX):
+            return None
+        return bs_decrypt(
+            value[len(WORDPRESS_SECRET_PREFIX) :].encode("ascii"),
+            self._account_encryption_key(),
+        )
+
+    def get_key(self):
+        return self._decrypt_secret("key")
+
+    def get_http_user(self):
+        return self._decrypt_secret("http_user")
+
+    def get_http_pass(self):
+        return self._decrypt_secret("http_pass")
+
+    def save(self, *args, **kwargs):
+        changed_secret_fields = set()
+        for field_name in self._SECRET_FIELDS:
+            value = self._normalize_secret_value(getattr(self, field_name, None))
+            if value in (None, "", b""):
+                if field_name == "key":
+                    raise ValueError("A WordPress integration key is required")
+                normalized = None
+            elif isinstance(value, str):
+                normalized = value
+                if not normalized.startswith(WORDPRESS_SECRET_PREFIX):
+                    normalized = self._encrypt_secret(normalized)
+                setattr(self, field_name, normalized)
+                if self._decrypt_secret(field_name) is None:
+                    raise ValueError(
+                        f"{field_name} ciphertext could not be decrypted for this account"
+                    )
+            else:
+                raise ValueError(f"{field_name} is not versioned ciphertext")
+            if normalized != value:
+                changed_secret_fields.add(field_name)
+            setattr(self, field_name, normalized)
+
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and changed_secret_fields:
+            kwargs["update_fields"] = set(update_fields) | changed_secret_fields
+        return super().save(*args, **kwargs)
+
+    @staticmethod
+    def _normalized_base_url(value):
+        """Return an origin-bound WordPress base URL without ambient URL data."""
+
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("A WordPress URL is required")
+        parts = urlsplit(value.strip())
+        if parts.scheme.lower() != "https" or not parts.hostname:
+            raise ValueError("WordPress credentials require an HTTPS URL")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("WordPress URL must not contain credentials")
+        if parts.query or parts.fragment:
+            raise ValueError("WordPress URL must not contain a query or fragment")
+
+        host = parts.hostname.rstrip(".").lower()
+        try:
+            host = host.encode("idna").decode("ascii")
+            port = parts.port
+        except (UnicodeError, ValueError) as error:
+            raise ValueError("WordPress URL has an invalid host or port") from error
+        if not host or any(ord(character) < 32 for character in parts.path):
+            raise ValueError("WordPress URL is invalid")
+        rendered_host = f"[{host}]" if ":" in host else host
+        if port is not None:
+            rendered_host = f"{rendered_host}:{port}"
+        path = (parts.path or "").rstrip("/")
+        return urlunsplit((parts.scheme.lower(), rendered_host, path, "", ""))
+
+    def request(self, route, *, params=None, data=None, stream=False, timeout=None):
+        """Call one exact WordPress origin without placing credentials in its URL."""
+
+        if route not in _WORDPRESS_ROUTES:
+            raise ValueError("Unsupported WordPress API route")
+        supplied = data or {}
+        base_url = self._normalized_base_url(supplied.get("url", self.url))
+
+        from apps.api.v1.utils.wordpress_transport import (
+            pinned_wordpress_get,
+            resolve_wordpress_target,
+        )
+
+        # Resolve and approve the target before decrypting any credential. The
+        # transport later connects to this exact IP and never resolves again.
+        target = resolve_wordpress_target(base_url)
+        key = supplied.get("key") if data is not None else self.get_key()
+        http_user = (
+            supplied.get("http_user") if data is not None else self.get_http_user()
+        )
+        http_pass = (
+            supplied.get("http_pass") if data is not None else self.get_http_pass()
+        )
+        if not isinstance(key, str) or not key:
+            raise ValueError("WordPress integration key is unavailable")
+        if bool(http_user) != bool(http_pass):
+            raise ValueError(
+                "WordPress HTTP username and password must be configured together"
+            )
+
+        headers = self.get_client()
+        headers[WORDPRESS_KEY_HEADER] = key
+        query = {"rest_route": f"/backupsheep/updraftplus/{route}"}
+        for name, value in (params or {}).items():
+            if str(name).lower() in {"key", "x-backupsheep-key", "authorization"}:
+                raise ValueError("WordPress credentials must not be query parameters")
+            query[name] = value
+        request_kwargs = {
+            "params": query,
+            "headers": headers,
+            "auth": (http_user, http_pass) if http_user and http_pass else None,
+            "stream": stream,
+        }
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+        return pinned_wordpress_get(
+            target,
+            params=request_kwargs["params"],
+            headers=request_kwargs["headers"],
+            auth=request_kwargs["auth"],
+            stream=request_kwargs["stream"],
+            timeout=request_kwargs.get("timeout"),
+        )
 
     def get_client(self):
-        user_agent = (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.75.14"
-            " (KHTML, like Gecko) Version/7.0.3 Safari/7046A194A"
-        )
-        try:
-            from fake_useragent import UserAgent
-
-            ua = UserAgent(use_cache_server=False)
-            user_agent = ua.random
-        except Exception as e:
-            pass
-
-        client = {
-            "User-Agent": user_agent,
+        return {
+            "User-Agent": "BackupSheep-WordPress/1",
             "content-type": "application/json",
         }
-        return client
 
     def get_auth(self, data=None):
         if data:
             http_user = data.get("http_user")
             http_pass = data.get("http_pass")
         else:
-            http_user = self.http_user
-            http_pass = self.http_pass
+            http_user = self.get_http_user()
+            http_pass = self.get_http_pass()
         auth = None
         if http_user and http_pass:
             auth = (http_user, http_pass)
@@ -3501,44 +3694,20 @@ class CoreAuthWordPress(TimeStampedModel):
 
     def validate(self, data=None, check_errors=None, raise_exp=None):
         from bs4 import BeautifulSoup
-        from requests.adapters import HTTPAdapter
-        from urllib3 import Retry
-        import ssl
         import time
 
         if data:
             url = data["url"]
-            key = data["key"]
         else:
             url = self.url
-            key = self.key
-
-        # Block SSRF to cloud metadata / loopback / link-local before any request is made.
-        from apps.api.v1.utils.api_helpers import assert_url_not_metadata
-
-        assert_url_not_metadata(url, "WordPress url")
-
-        client = self.get_client()
-        safe_url = url
-
-        # adapter = SSLAdapter(ssl.PROTOCOL_TLSv1_2)
-        # s = requests.Session()
-        # s.mount('https://', adapter)
+        safe_url = self._normalized_base_url(url)
         try:
-            session = requests.Session()
-            session.auth = self.get_auth(data)
-            retry_strategy = Retry(
-                total=3,
-                backoff_factor=5,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["HEAD", "GET", "OPTIONS"],
+            result = self.request(
+                "validate",
+                params={"t": time.time()},
+                data=data,
+                timeout=60,
             )
-            adapter = HTTPAdapter(max_retries=retry_strategy)
-            session.mount("http://", adapter)
-            session.mount("https://", adapter)
-            url = f"{url}/?rest_route=/backupsheep/updraftplus/validate&key={key}&t={time.time()}"
-            safe_url = url.replace(f"key={key}", "key=[REDACTED]")
-            result = session.get(url, timeout=60, verify=True, headers=client)
         except Exception as e:
             if check_errors:
                 if "handshake failure" in e.__str__():
@@ -3649,6 +3818,7 @@ class CoreAuthBasecamp(TimeStampedModel):
     def get_refresh_token(self):
         from django.conf import settings
         from datetime import datetime
+        from apps.api.v1.utils.oauth_security import validated_https_endpoint
 
         encryption_key = self.connection.account.get_encryption_key()
 
@@ -3662,7 +3832,22 @@ class CoreAuthBasecamp(TimeStampedModel):
             # "redirect_uri": f"{settings.APP_URL + settings.BASECAMP_REDIRECT_URL}",
         }
 
-        token_request = requests.post(settings.BASECAMP_TOKEN_ENDPOINT, data=params)
+        token_endpoint = validated_https_endpoint(
+            settings.BASECAMP_TOKEN_ENDPOINT,
+            allowed_hostnames={"launchpad.37signals.com"},
+            allowed_paths={"/authorization/token"},
+        )
+        if token_endpoint is None:
+            return False
+
+        token_request = requests.post(
+            token_endpoint,
+            data=params,
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if token_request.status_code == 200:
             token_data = token_request.json()
@@ -3671,13 +3856,23 @@ class CoreAuthBasecamp(TimeStampedModel):
                 self.refresh_token = bs_encrypt(token_data["refresh_token"], encryption_key)
             self.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])), tz=timezone.utc)
             self.save()
+            return True
+        return False
 
     def validate(self, data=None, check_errors=None, raise_exp=None):
         url = "https://launchpad.37signals.com/authorization.json"
 
         headers = self.get_client()
 
-        response = requests.request("GET", url, headers=headers, data={})
+        response = requests.request(
+            "GET",
+            url,
+            headers=headers,
+            data={},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if response.status_code == 200:
             return True

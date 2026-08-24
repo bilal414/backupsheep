@@ -31,7 +31,6 @@ class CoreNotificationSlackView(viewsets.ModelViewSet):
         CoreNotificationSlackViewPermissions,
     )
     serializer_class = CoreNotificationSlackSerializer
-    all_fields = [f.name for f in CoreNotificationSlack._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
         DatatablesFilterBackend,
@@ -39,7 +38,9 @@ class CoreNotificationSlackView(viewsets.ModelViewSet):
         DateRangeFilter,
     ]
     filterset_class = CoreNotificationSlackFilter
-    search_fields = all_fields
+    # Binary credential fields are intentionally neither searchable nor
+    # representable through the API.
+    search_fields = ["app_id", "bot_user_id", "channel", "channel_id"]
 
     def get_queryset(self):
         member = self.request.user.member
@@ -50,10 +51,11 @@ class CoreNotificationSlackView(viewsets.ModelViewSet):
     @action(detail=True)
     def validate(self, request, pk=None):
         slack_notification = self.get_object()
+        team_name = slack_notification.team_name
         if slack_notification.validate():
             return Response(
                 {
-                    "detail": f"Validation request successful for Slack team {slack_notification.data['team']['name']} "
+                    "detail": f"Validation request successful for Slack team {team_name} "
                     f"on channel {slack_notification.channel}."
                 },
                 status=status.HTTP_200_OK,
@@ -61,7 +63,7 @@ class CoreNotificationSlackView(viewsets.ModelViewSet):
         else:
             return Response(
                 {
-                    "detail": f"Unable to connect to Slack team {slack_notification.data['team']['name']} "
+                    "detail": f"Unable to connect to Slack team {team_name} "
                     f"on channel {slack_notification.channel}. Please reconnect or contact support."
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -74,7 +76,6 @@ class CoreNotificationTelegramView(viewsets.ModelViewSet):
         CoreNotificationTelegramViewPermissions,
     )
     serializer_class = CoreNotificationTelegramSerializer
-    all_fields = [f.name for f in CoreNotificationTelegram._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
         DatatablesFilterBackend,
@@ -82,7 +83,9 @@ class CoreNotificationTelegramView(viewsets.ModelViewSet):
         DateRangeFilter,
     ]
     filterset_class = CoreNotificationTelegramFilter
-    search_fields = all_fields
+    # Chat IDs are provider identifiers and should not be exposed through broad
+    # search expressions. Channel display names are sufficient for the console.
+    search_fields = ["channel_name"]
 
     def get_queryset(self):
         member = self.request.user.member
@@ -119,7 +122,6 @@ class CoreNotificationEmailView(viewsets.ModelViewSet):
         CoreNotificationEmailViewPermissions,
     )
     serializer_class = CoreNotificationEmailSerializer
-    all_fields = [f.name for f in CoreNotificationEmail._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
         DatatablesFilterBackend,
@@ -127,7 +129,8 @@ class CoreNotificationEmailView(viewsets.ModelViewSet):
         DateRangeFilter,
     ]
     filterset_class = CoreNotificationEmailFilter
-    search_fields = all_fields
+    # Verification digests and internal ownership fields are not searchable.
+    search_fields = ["email"]
 
     def get_queryset(self):
         member = self.request.user.member

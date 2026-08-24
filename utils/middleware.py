@@ -1,8 +1,157 @@
-from django.conf import settings
-from django.http import HttpResponseRedirect, HttpResponsePermanentRedirect
+import math
+from time import time as wall_time
+
 import pytz
+from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
+from django.http import (
+    HttpResponseNotAllowed,
+    HttpResponsePermanentRedirect,
+    HttpResponseRedirect,
+)
 from django.utils import timezone
 from django.utils.deprecation import MiddlewareMixin
+
+
+AUTH_SESSION_VERSION_KEY = "_backupsheep_auth_session_version"
+AUTH_SESSION_STARTED_AT_KEY = "_backupsheep_auth_session_started_at"
+
+
+class AllowedHttpMethodsMiddleware:
+    """Reject extension and tunnelling verbs before they reach application views."""
+
+    ALLOWED_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+    _ALLOWED_METHOD_SET = frozenset(ALLOWED_METHODS)
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.method.upper() not in self._ALLOWED_METHOD_SET:
+            return HttpResponseNotAllowed(self.ALLOWED_METHODS)
+        return self.get_response(request)
+
+
+class AuthenticationVersionMiddleware:
+    """Reject revoked sessions and sessions without an active tenant membership."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        user = getattr(request, "user", None)
+        if user is not None and user.is_authenticated:
+            try:
+                started_at = float(
+                    request.session.get(AUTH_SESSION_STARTED_AT_KEY)
+                )
+            except (TypeError, ValueError):
+                started_at = float("nan")
+            now = wall_time()
+            absolute_expiry = int(settings.SESSION_COOKIE_AGE)
+            session_expired = (
+                not math.isfinite(started_at)
+                or started_at > now + 300
+                or now - started_at >= absolute_expiry
+            )
+            if session_expired:
+                # The cookie expiry can roll forward when application code modifies a
+                # session. This independent login timestamp enforces the true maximum.
+                from django.contrib.auth import logout
+
+                logout(request)
+            else:
+                try:
+                    member = user.member
+                except (AttributeError, ObjectDoesNotExist):
+                    # A separately-created Django superuser may not have a BackupSheep
+                    # member row. The admin route is disabled by default in production.
+                    member = None
+
+                if member is not None:
+                    bound_version = request.session.get(AUTH_SESSION_VERSION_KEY)
+                    if str(bound_version) != str(member.auth_session_version):
+                        from django.contrib.auth import logout
+
+                        logout(request)
+                    elif member.get_active_current_membership() is None:
+                        # Membership suspension is an authentication boundary, not merely
+                        # a queryset filter. End an existing browser session immediately
+                        # when no tenant remains active. The model automatically selects
+                        # another active membership first, when one is available.
+                        from django.contrib.auth import logout
+
+                        logout(request)
+
+        return self.get_response(request)
+
+
+class BrowserSecurityHeadersMiddleware:
+    """Apply conservative browser and cache policy to every application response.
+
+    BackupSheep still has legacy inline JavaScript on the authenticated console,
+    so the general policy remains compatible with that surface. Public
+    authentication, reset, invite, and HTML error pages are dependency-isolated
+    and receive the strict allowlist below.
+    """
+
+    CONTENT_SECURITY_POLICY = (
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'"
+    )
+    AUTH_CONTENT_SECURITY_POLICY = (
+        "default-src 'none'; "
+        "script-src 'self'; "
+        "style-src 'self'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "font-src 'self'; "
+        "base-uri 'none'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'"
+    )
+    PERMISSIONS_POLICY = (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=(), "
+        "browsing-topics=()"
+    )
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        path = request.path
+        sensitive_auth_page = (
+            path in {"/login", "/reset"}
+            or path.startswith(("/login/", "/reset/", "/invite/", "/error/"))
+        )
+        html_error_page = (
+            response.status_code >= 400
+            and response.headers.get("Content-Type", "").lower().startswith("text/html")
+        )
+        if sensitive_auth_page or html_error_page:
+            response.headers["Content-Security-Policy"] = (
+                self.AUTH_CONTENT_SECURITY_POLICY
+            )
+            response.headers["Referrer-Policy"] = "no-referrer"
+        else:
+            response.headers.setdefault(
+                "Content-Security-Policy", self.CONTENT_SECURITY_POLICY
+            )
+        response.headers.setdefault("Permissions-Policy", self.PERMISSIONS_POLICY)
+
+        # Authentication, tenant metadata, provider inventory and backup state
+        # must not be retained by shared proxies or browser disk caches. Static
+        # assets keep WhiteNoise's content-addressed caching policy.
+        if (
+            not request.path.startswith(settings.STATIC_URL)
+            and request.path != "/healthz/"
+        ):
+            response.headers["Cache-Control"] = "no-store, private, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+        return response
 
 
 class OnboardingMiddleware(object):

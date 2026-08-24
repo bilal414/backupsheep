@@ -10,9 +10,11 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 import io
+import ipaddress
 import json
 import os
 import re
+import ssl
 import warnings
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlparse
@@ -24,6 +26,9 @@ import google.auth
 from dotenv import load_dotenv
 from dotenv import dotenv_values
 
+from backupsheep.sentry_security import scrub_sentry_event
+from backupsheep.runtime_secrets import resolve_file_backed_secrets
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -33,8 +38,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 # place as the relative "_storage/" paths they use; ensure it exists.
 os.makedirs(os.path.join(BASE_DIR, "_storage"), exist_ok=True)
 
-if "BACKUPSHEEP_SECRETS" in os.environ:
-    config = json.loads(os.environ.get("BACKUPSHEEP_SECRETS"))
+backupsheep_secrets_json = os.environ.get("BACKUPSHEEP_SECRETS")
+if backupsheep_secrets_json:
+    config = json.loads(backupsheep_secrets_json)
 else:
     config = {
         # Keep the sample's defaults available to PaaS deployments, where runtime
@@ -44,6 +50,12 @@ else:
         **dotenv_values(os.path.join(BASE_DIR, ".env")),
         **os.environ,  # override loaded values with environment variables
     }
+
+# The stock Docker deployment injects generated control-plane credentials as
+# individually granted, read-only files below /run/secrets. Resolve only the explicit
+# allowlist before any setting consumes those values. Direct environment variables stay
+# supported for PaaS/external deployments that do not use the Compose secret contract.
+config = resolve_file_backed_secrets(config)
 
 # Coerce env strings to real booleans: dotenv/docker env_file always yield strings, and
 # a bare bool("false") is True, so a raw string can never be turned off. Treat only the
@@ -59,6 +71,140 @@ def _as_bool(value, default=False):
 SECRET_KEY = config["DJANGO_SECRET_KEY"]
 DEBUG = _as_bool(config.get("DJANGO_DEBUG", "false"))
 DJANGO_SERVER = config["DJANGO_SERVER"]
+# The Django admin has its own password-only login and does not inherit the
+# console's authenticator-MFA challenge. Keep the route absent in production
+# unless an operator explicitly enables it behind an administrative access
+# boundary. Development installs retain the historical default.
+DJANGO_ADMIN_ENABLED = _as_bool(
+    config.get("DJANGO_ADMIN_ENABLED"),
+    default=DEBUG,
+)
+
+
+def _bounded_positive_int(name, default, maximum):
+    """Parse a security-sensitive duration without allowing an accidental disable."""
+    try:
+        value = int(config.get(name, default))
+    except (TypeError, ValueError) as error:
+        raise ImproperlyConfigured(f"{name} must be an integer number of seconds.") from error
+    if value <= 0 or value > maximum:
+        raise ImproperlyConfigured(
+            f"{name} must be between 1 and {maximum} seconds."
+        )
+    return value
+
+
+def _private_network_allowlist(name):
+    """Parse an explicit list of private networks; public catch-alls are invalid."""
+
+    private_supernets = tuple(
+        ipaddress.ip_network(value)
+        for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+    )
+    raw_value = config.get(name, "")
+    values = (
+        raw_value
+        if isinstance(raw_value, (list, tuple))
+        else str(raw_value).split(",")
+    )
+    networks = []
+    for value in values:
+        value = str(value).strip()
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as error:
+            raise ImproperlyConfigured(
+                f"{name} must contain exact comma-separated CIDR networks."
+            ) from error
+        if not any(
+            network.version == private_supernet.version
+            and network.subnet_of(private_supernet)
+            for private_supernet in private_supernets
+        ):
+            raise ImproperlyConfigured(
+                f"{name} may contain only RFC1918 IPv4 or ULA IPv6 networks."
+            )
+        networks.append(network)
+    if len(networks) > 32:
+        raise ImproperlyConfigured(f"{name} may contain at most 32 networks.")
+    return tuple(networks)
+
+
+def _trusted_proxy_network_allowlist(name):
+    """Parse exact immediate-proxy addresses/CIDRs for auth throttling."""
+
+    raw_value = config.get(name, "")
+    values = (
+        raw_value
+        if isinstance(raw_value, (list, tuple))
+        else str(raw_value).split(",")
+    )
+    networks = []
+    for value in values:
+        value = str(value).strip()
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as error:
+            raise ImproperlyConfigured(
+                f"{name} must contain exact comma-separated IP addresses or CIDRs."
+            ) from error
+        if network.prefixlen == 0:
+            raise ImproperlyConfigured(
+                f"{name} cannot trust every address; configure only immediate proxies."
+            )
+        if network not in networks:
+            networks.append(network)
+    if len(networks) > 32:
+        raise ImproperlyConfigured(f"{name} may contain at most 32 networks.")
+    return tuple(networks)
+
+
+# DRF's built-in token model is otherwise permanent. Limit bearer-token lifetime
+# even when an operator forgets to configure it, and refuse values over 90 days.
+API_TOKEN_TTL_SECONDS = _bounded_positive_int(
+    "API_TOKEN_TTL_SECONDS",
+    30 * 24 * 60 * 60,
+    90 * 24 * 60 * 60,
+)
+
+# Bound browser authentication independently of API tokens. Browser-close removes
+# the client cookie early; the server-side row still has this absolute upper bound.
+SESSION_COOKIE_AGE = _bounded_positive_int(
+    "SESSION_COOKIE_AGE",
+    12 * 60 * 60,
+    12 * 60 * 60,
+)
+SESSION_EXPIRE_AT_BROWSER_CLOSE = _as_bool(
+    config.get("SESSION_EXPIRE_AT_BROWSER_CLOSE"),
+    default=True,
+)
+
+# Authentication throttles use REMOTE_ADDR by default. A reverse proxy collapses
+# that into one shared bucket, so an operator may explicitly trust the immediate
+# proxy and have it overwrite X-BackupSheep-Client-IP. Never infer this trust from
+# X-Forwarded-For or from the presence of the dedicated header alone.
+AUTH_THROTTLE_TRUSTED_PROXY_ENABLED = _as_bool(
+    config.get("AUTH_THROTTLE_TRUSTED_PROXY_ENABLED"),
+    default=False,
+)
+AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS = _trusted_proxy_network_allowlist(
+    "AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS"
+)
+if (
+    AUTH_THROTTLE_TRUSTED_PROXY_ENABLED
+    and not AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS
+):
+    raise ImproperlyConfigured(
+        "AUTH_THROTTLE_TRUSTED_PROXY_NETWORKS is required when trusted-proxy "
+        "authentication throttling is enabled."
+    )
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_SAVE_EVERY_REQUEST = False
 
 # .env_sample values are merged in as defaults (see config above) so a PaaS deploy
 # that forgets to set DJANGO_SECRET_KEY would otherwise boot with a publicly known
@@ -81,12 +227,13 @@ CSRF_TRUSTED_ORIGINS = [f"{config['APP_PROTOCOL']}{config['APP_DOMAIN']}"]
 HTTPS_ENABLED = _as_bool(config.get("DJANGO_HTTPS", "false"))
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_CONTENT_TYPE_NOSNIFF = True
+SESSION_COOKIE_SECURE = HTTPS_ENABLED
+CSRF_COOKIE_SECURE = HTTPS_ENABLED
+CSRF_COOKIE_SAMESITE = "Lax"
 # Platform health probes commonly reach the container over private HTTP even when the
 # public endpoint is HTTPS. This endpoint contains no sensitive data and must remain 200.
 SECURE_REDIRECT_EXEMPT = [r"^healthz/$"]
 if HTTPS_ENABLED:
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
     SECURE_SSL_REDIRECT = True
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
@@ -108,18 +255,21 @@ INSTALLED_APPS = [
     "django_filters",
     "django_celery_results",
     "django_celery_beat",
-    'apps',
+    "apps.apps.BackupSheepAppConfig",
 
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "utils.middleware.BrowserSecurityHeadersMiddleware",
+    "utils.middleware.AllowedHttpMethodsMiddleware",
     # Serve static files directly from gunicorn (no nginx in the container).
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "utils.middleware.AuthenticationVersionMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "django_user_agents.middleware.UserAgentMiddleware",
@@ -182,8 +332,8 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
     ),
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "apps.api.v1.utils.api_authentication.ConsoleSessionAuthentication",
         "apps.api.v1.utils.api_authentication.CustomTokenAuthentication",
+        "apps.api.v1.utils.api_authentication.ConsoleSessionAuthentication",
     ),
     # The browsable API UI is handy in development but exposes a self-documenting,
     # form-driven interface in production, so only enable it when DEBUG is on.
@@ -200,6 +350,66 @@ REST_FRAMEWORK = {
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 MIGRATION_MODULES = {"apps": "apps._migrations"}
+
+
+def _is_local_transport_host(host, compose_hostname):
+    """Return true only for a loopback, Unix socket, or exact stock service name.
+
+    RFC1918 addresses and arbitrary internal DNS names are intentionally not trusted:
+    they can cross hosts and therefore need authenticated transport in production.
+    """
+    value = str(host or "").strip().lower().rstrip(".")
+    if not value or value.startswith("/"):
+        return True
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    if value in {"localhost", compose_hostname}:
+        return True
+    try:
+        return ipaddress.ip_address(value.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_database_transport(database, values):
+    if str(values.get("DJANGO_SERVER") or "").strip().lower() != "prod":
+        return database
+
+    options = database.get("OPTIONS") or {}
+    # libpq accepts alternate routing through URL options, service files, and
+    # PG* environment defaults. Include every route that could bypass DB_HOST.
+    primary_host = (
+        database.get("HOST")
+        or options.get("host")
+        or values.get("PGHOST")
+        or ""
+    )
+    hostaddr = options.get("hostaddr") or values.get("PGHOSTADDR") or ""
+    service_routing = any(
+        str(candidate or "").strip()
+        for candidate in (
+            options.get("service"),
+            options.get("servicefile"),
+            values.get("PGSERVICE"),
+            values.get("PGSERVICEFILE"),
+        )
+    )
+    local_route = (
+        not service_routing
+        and _is_local_transport_host(primary_host, "db")
+        and (not hostaddr or _is_local_transport_host(hostaddr, "db"))
+    )
+    if local_route:
+        return database
+
+    sslmode = str(options.get("sslmode") or "").strip().lower()
+    sslrootcert = str(options.get("sslrootcert") or "").strip()
+    if sslmode != "verify-full" or not sslrootcert:
+        raise ImproperlyConfigured(
+            "External PostgreSQL requires sslmode=verify-full and a configured "
+            "sslrootcert (DATABASE_URL query options or DB_SSLMODE/DB_SSLROOTCERT)."
+        )
+    return database
 
 
 def _database_config():
@@ -220,8 +430,10 @@ def _database_config():
         if config.get("DB_SSLMODE"):
             # An explicit DB_SSLMODE is useful when a platform URL omits its TLS mode.
             options["sslmode"] = config["DB_SSLMODE"]
+        if config.get("DB_SSLROOTCERT"):
+            options["sslrootcert"] = config["DB_SSLROOTCERT"]
 
-        return {
+        database = {
             "ENGINE": "django.db.backends.postgresql",
             "NAME": unquote(parsed.path.lstrip("/")),
             "USER": unquote(parsed.username or ""),
@@ -230,12 +442,15 @@ def _database_config():
             "PORT": str(parsed.port or 5432),
             "OPTIONS": options,
         }
+        return _validate_database_transport(database, config)
 
     options = {}
     if config.get("DB_SSLMODE"):
         options["sslmode"] = config["DB_SSLMODE"]
+    if config.get("DB_SSLROOTCERT"):
+        options["sslrootcert"] = config["DB_SSLROOTCERT"]
 
-    return {
+    database = {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": config["DB_NAME"],
         "USER": config["DB_USER"],
@@ -244,6 +459,7 @@ def _database_config():
         "PORT": config["DB_PORT"],
         "OPTIONS": options,
     }
+    return _validate_database_transport(database, config)
 
 
 DATABASES = {"default": _database_config()}
@@ -314,24 +530,47 @@ APP_DOMAIN = config["APP_DOMAIN"]
 APP_PROTOCOL = config["APP_PROTOCOL"]
 APP_URL = f"{APP_PROTOCOL}{APP_DOMAIN}"
 
+
+def _sentry_sample_rate(name):
+    """Return an explicit, bounded Sentry sampling rate.
+
+    Error events remain available when a DSN is configured, while tracing and
+    profiling are off unless an operator deliberately opts in.  Refusing an
+    invalid value is safer than silently turning on high-volume telemetry.
+    """
+
+    raw_value = config.get(name, 0)
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as error:
+        raise ImproperlyConfigured(f"{name} must be a number between 0 and 1.") from error
+    if not 0 <= value <= 1:
+        raise ImproperlyConfigured(f"{name} must be between 0 and 1.")
+    return value
+
+
+SENTRY_TRACES_SAMPLE_RATE = _sentry_sample_rate("SENTRY_TRACES_SAMPLE_RATE")
+SENTRY_PROFILES_SAMPLE_RATE = _sentry_sample_rate("SENTRY_PROFILES_SAMPLE_RATE")
+
 sentry_sdk.init(
     dsn=config["SENTRY_DSN"],
-    # Set traces_sample_rate to 1.0 to capture 100%
-    # of transactions for performance monitoring.
-    traces_sample_rate=1.0,
-    # Set profiles_sample_rate to 1.0 to profile 100%
-    # of sampled transactions.
-    # We recommend adjusting this value in production.
-    profiles_sample_rate=1.0,
+    traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+    profiles_sample_rate=SENTRY_PROFILES_SAMPLE_RATE,
+    include_local_variables=False,
+    # sentry-sdk's Python option equivalent to request_bodies="never".
+    max_request_body_size="never",
+    send_default_pii=False,
+    before_send=scrub_sentry_event,
+    before_send_transaction=scrub_sentry_event,
     integrations=[
         DjangoIntegration(
-            transaction_style='url',
+            transaction_style="url",
             middleware_spans=True,
             signals_spans=False,
             cache_spans=False,
         ),
     ],
-    environment=DJANGO_SERVER
+    environment=DJANGO_SERVER,
 )
 
 HOME_URL = "/console"
@@ -512,13 +751,22 @@ def _resolve_celery_broker_url(values):
     """
     host = str(values.get("RABBITMQ_HOST") or "").strip()
     if host:
+        scheme = str(values.get("RABBITMQ_SCHEME") or "amqp").strip().lower()
+        if scheme not in {"amqp", "amqps"}:
+            raise ImproperlyConfigured(
+                "RABBITMQ_SCHEME must be amqp or amqps."
+            )
         if not (values.get("RABBITMQ_USER") and values.get("RABBITMQ_PASSWORD")):
-            # guest/guest is RabbitMQ's well-known default; fine for the private
-            # Compose network, dangerous for any broker reachable beyond it.
+            if str(values.get("DJANGO_SERVER") or "").strip().lower() == "prod":
+                raise ImproperlyConfigured(
+                    "RABBITMQ_USER and RABBITMQ_PASSWORD are required when "
+                    "RABBITMQ_HOST is configured in production."
+                )
+            # Retain the historical local-development fallback, but never permit
+            # it in production above.
             warnings.warn(
                 "RABBITMQ_HOST is set without RABBITMQ_USER/RABBITMQ_PASSWORD; "
-                "falling back to the well-known guest/guest credentials. Set explicit "
-                "credentials unless this broker is on a trusted private network.",
+                "using guest/guest for non-production development only.",
                 stacklevel=2,
             )
         port = str(values.get("RABBITMQ_PORT") or "5672").strip()
@@ -527,8 +775,10 @@ def _resolve_celery_broker_url(values):
         vhost = str(values.get("RABBITMQ_VHOST") or "/").strip().strip("/")
         vhost_path = quote(vhost, safe="")
         if vhost_path:
-            return f"amqp://{user}:{password}@{host}:{port}/{vhost_path}"
-        return f"amqp://{user}:{password}@{host}:{port}//"
+            broker_url = f"{scheme}://{user}:{password}@{host}:{port}/{vhost_path}"
+        else:
+            broker_url = f"{scheme}://{user}:{password}@{host}:{port}//"
+        return _validate_broker_transport(broker_url, values)
 
     # The Heroku template provisions CloudAMQP's RabbitMQ plan, which exposes its
     # canonical AMQP URL as CLOUDAMQP_URL. Prefer it over the Compose fallback from
@@ -538,12 +788,75 @@ def _resolve_celery_broker_url(values):
         or values.get("CELERY_BROKER_URL")
         or DEFAULT_CELERY_BROKER_URL
     )
+    if (
+        str(values.get("DJANGO_SERVER") or "").strip().lower() == "prod"
+        and broker_url == DEFAULT_CELERY_BROKER_URL
+    ):
+        raise ImproperlyConfigured(
+            "A non-default RabbitMQ broker URL or explicit RabbitMQ credentials "
+            "are required in production."
+        )
     if urlparse(broker_url).scheme not in {"amqp", "amqps"}:
         raise ValueError("RabbitMQ broker URLs must use the amqp:// or amqps:// scheme.")
+    return _validate_broker_transport(broker_url, values)
+
+
+def _validate_broker_transport(broker_url, values):
+    query_keys = {
+        key.strip().lower()
+        for key, _value in parse_qsl(urlparse(broker_url).query, keep_blank_values=True)
+    }
+    if any(
+        key.startswith("ssl_")
+        or key in {"cert_reqs", "check_hostname", "server_hostname"}
+        for key in query_keys
+    ):
+        raise ImproperlyConfigured(
+            "RabbitMQ TLS options are not accepted in the broker URL. Use "
+            "RABBITMQ_CA_CERT; certificate and hostname verification cannot be "
+            "overridden."
+        )
+    parsed = urlparse(broker_url)
+    if parsed.scheme == "amqps" and not parsed.hostname:
+        raise ImproperlyConfigured(
+            "amqps:// RabbitMQ URLs require an explicit hostname for certificate "
+            "verification."
+        )
+    if str(values.get("DJANGO_SERVER") or "").strip().lower() != "prod":
+        return broker_url
+    if ";" in broker_url:
+        raise ImproperlyConfigured(
+            "Production RabbitMQ configuration accepts one verified broker URL; "
+            "semicolon failover URLs could cross transport trust boundaries."
+        )
+    if _is_local_transport_host(parsed.hostname, "rabbitmq"):
+        return broker_url
+    if parsed.scheme != "amqps":
+        raise ImproperlyConfigured(
+            "External RabbitMQ requires amqps:// with certificate and hostname "
+            "verification. Plain amqp:// is limited to loopback or the stock "
+            "rabbitmq Compose service."
+        )
     return broker_url
 
 
+def _broker_ssl_options(broker_url, values):
+    parsed = urlparse(broker_url)
+    if parsed.scheme != "amqps":
+        return False
+    options = {
+        "cert_reqs": ssl.CERT_REQUIRED,
+        # py-amqp uses this for both SNI and certificate hostname matching.
+        "server_hostname": parsed.hostname,
+    }
+    ca_cert = str(values.get("RABBITMQ_CA_CERT") or "").strip()
+    if ca_cert:
+        options["ca_certs"] = ca_cert
+    return options
+
+
 CELERY_BROKER_URL = _resolve_celery_broker_url(config)
+CELERY_BROKER_USE_SSL = _broker_ssl_options(CELERY_BROKER_URL, config)
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = TIME_ZONE
@@ -615,6 +928,23 @@ CELERY_BEAT_SCHEDULER = "backupsheep.scheduler:BackupDatabaseScheduler"
 # any external bucket) and pruned by the delete_old_logs task after this many days.
 LOG_RETENTION_DAYS = int(config.get("LOG_RETENTION_DAYS", 30))
 
+# Notification providers are contacted only after a short database lease has
+# committed. Failed delivery retries use bounded exponential backoff, while the
+# periodic recovery sweep republishes only opaque outbox row IDs after broker or
+# worker loss.
+NOTIFICATION_DELIVERY_LEASE_SECONDS = int(
+    config.get("NOTIFICATION_DELIVERY_LEASE_SECONDS", 120)
+)
+NOTIFICATION_DELIVERY_BACKOFF_BASE_SECONDS = int(
+    config.get("NOTIFICATION_DELIVERY_BACKOFF_BASE_SECONDS", 30)
+)
+NOTIFICATION_DELIVERY_BACKOFF_MAX_SECONDS = int(
+    config.get("NOTIFICATION_DELIVERY_BACKOFF_MAX_SECONDS", 60 * 60)
+)
+NOTIFICATION_DELIVERY_RECOVERY_BATCH_SIZE = int(
+    config.get("NOTIFICATION_DELIVERY_RECOVERY_BATCH_SIZE", 100)
+)
+
 # A periodic recovery sweep catches tasks that were lost before late-ack redelivery
 # (for example during broker/server maintenance) and stale ETA poll messages. The
 # provider backup UUID/name is deterministic, so recovery can look up an already
@@ -659,6 +989,12 @@ BACKUP_STORAGE_LEASE_SECONDS = int(
 )
 BACKUP_STORAGE_HEARTBEAT_SECONDS = int(
     config.get("BACKUP_STORAGE_HEARTBEAT_SECONDS", 30)
+)
+# Storage-point deletion claims are committed before provider I/O. Keep this
+# comfortably above every bounded storage-provider timeout; it is separate from
+# cloud snapshot deletion's shorter BACKUP_DELETE_LEASE_SECONDS setting.
+STORAGE_POINT_DELETE_LEASE_SECONDS = int(
+    config.get("STORAGE_POINT_DELETE_LEASE_SECONDS", 3600)
 )
 RESTORE_WORKER_LEASE_SECONDS = int(
     config.get("RESTORE_WORKER_LEASE_SECONDS", 180)
@@ -803,10 +1139,28 @@ BACKUP_STORAGE_STALE_SECONDS = int(
     config.get("BACKUP_STORAGE_STALE_SECONDS", 6 * 60 * 60)
 )
 
-# Lifetime (seconds) of presigned download URLs generated for backup archives. 24h by
-# default; lower it for immutable/compliance destinations where long-lived URLs weaken
-# the protection story.
-S3_DOWNLOAD_URL_EXPIRES = int(config.get("S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))
+# Lifetime (seconds) of provider-signed archive download URLs. Five minutes is the
+# secure default and one hour is the hard configuration ceiling.
+S3_DOWNLOAD_URL_EXPIRES = _bounded_positive_int(
+    "S3_DOWNLOAD_URL_EXPIRES",
+    5 * 60,
+    60 * 60,
+)
+
+# WordPress targets are public HTTPS origins by default. Self-hosters that must
+# reach a private WordPress origin can enumerate only the required private CIDRs;
+# loopback, link-local, reserved and metadata targets remain forbidden regardless.
+WORDPRESS_PRIVATE_TARGET_CIDRS = _private_network_allowlist(
+    "WORDPRESS_PRIVATE_TARGET_CIDRS"
+)
+
+# Plain FTP sends credentials and backup contents without transport encryption.
+# Keep it unavailable unless an operator accepts that risk explicitly for a legacy
+# endpoint. FTPS and SFTP remain enabled without this compatibility escape hatch.
+ALLOW_INSECURE_FTP = _as_bool(
+    config.get("ALLOW_INSECURE_FTP"),
+    default=False,
+)
 
 # Paramiko and the system SSH client both require a verified host key for SSH/SFTP
 # backup sources.  Keep the file under the persistent _storage volume by default so
@@ -975,6 +1329,28 @@ CELERY_BEAT_SCHEDULE = {
         "task": "resume_lightsail_bucket_restores",
         "schedule": 60.0,
     },
+    # Local Storage validation/deletion requests are durable database states.
+    # These sweeps recover a broker publish lost after an API transaction commits;
+    # only worker-storage receives the tasks or a writable /backups mount.
+    "validate-pending-local-storages": {
+        "task": "validate_pending_local_storages",
+        "schedule": 60.0,
+    },
+    "resume-requested-storage-deletions": {
+        "task": "resume_requested_storage_deletions",
+        "schedule": 60.0,
+    },
+    "resume-requested-node-deletions": {
+        "task": "resume_requested_node_deletions",
+        "schedule": 60.0,
+    },
+    # Recover outbox publications lost after commit and processing leases left by
+    # a crashed logs worker. Provider delivery is at-least-once across the narrow
+    # crash-after-send/before-SENT window.
+    "recover-notification-deliveries": {
+        "task": "recover_notification_deliveries",
+        "schedule": 60.0,
+    },
 }
 
 # Task routing across the worker types (see docker-compose.yml):
@@ -982,10 +1358,9 @@ CELERY_BEAT_SCHEDULE = {
 #   database .. database dumps (heavy CPU/disk); isolated so a big dump can't starve
 #               file backups
 #   files ..... website / wordpress / basecamp dumps (heavy CPU/disk); isolated
-#   storage ... uploads each dump to the storage backends + local cleanup; scalable pool
-#               (worker-storage) sharing the _storage volume with the dump workers
-#   logs ...... DB log entries, Slack/Telegram/Firebase notifications, and on-disk
-#               run-log retention (worker-logs)
+#   storage ... uploads each dump to the storage backends + every local-artifact
+#               mutation/cleanup; scalable pool sharing _storage with dump workers
+#   logs ...... DB log entries and Slack/Telegram notifications; no artifact volume
 #
 # storage_upload/finalize_backup/delete_from_disk go to "storage" so they always run on a
 # worker that can see the files the dump produced. Anything not listed here falls to the
@@ -1004,6 +1379,22 @@ CELERY_TASK_ROUTES = {
     "storage_upload": {"queue": "storage"},
     "finalize_backup": {"queue": "storage"},
     "delete_from_disk": {"queue": "storage"},
+    "reset_incremental_cache": {"queue": "storage"},
+    "delete_old_logs": {"queue": "storage"},
+    "validate_local_storage": {"queue": "storage"},
+    "validate_pending_local_storages": {"queue": "storage"},
+    "delete_backup_requested": {"queue": "storage"},
+    "delete_storage_requested": {"queue": "storage"},
+    "resume_requested_storage_deletions": {"queue": "storage"},
+    # These legacy maintenance paths can invoke storage-point deletion. Keep
+    # them on the same RW boundary even when an older django-celery-beat row
+    # publishes the task by its historical name.
+    "node_delete_requested": {"queue": "storage"},
+    "resume_requested_node_deletions": {"queue": "storage"},
+    "clean_delete_failed_backups": {"queue": "storage"},
+    "delete_requested_integrations": {"queue": "storage"},
+    "delete_requested_storages": {"queue": "storage"},
+    "account_delete": {"queue": "storage"},
     # S3 lifecycle rule application + deferred Object Lock delete retries.
     "storage_aws_s3_sync_lifecycle": {"queue": "storage"},
     "retry_protected_storage_deletes": {"queue": "storage"},
@@ -1042,12 +1433,12 @@ CELERY_TASK_ROUTES = {
     "resume_in_progress_backups": {"queue": "default"},
     "resume_in_progress_restores": {"queue": "default"},
     "resume_pending_backup_requests": {"queue": "default"},
-    # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram/Firebase
+    # Log + notification pipeline (worker-logs): DB log entries, Slack/Telegram
     # fan-out, and on-disk run-log retention.
     "send_log_to_db": {"queue": "logs"},
+    "deliver_log_notification": {"queue": "logs"},
+    "recover_notification_deliveries": {"queue": "logs"},
     "send_log_to_slack": {"queue": "logs"},
     "send_log_to_telegram": {"queue": "logs"},
-    "send_to_firebase": {"queue": "logs"},
-    "delete_old_logs": {"queue": "logs"},
     "delete_old_db_logs": {"queue": "logs"},
 }

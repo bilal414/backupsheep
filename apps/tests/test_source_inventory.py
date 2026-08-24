@@ -133,7 +133,9 @@ class SourceInventoryTests(BaseTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response["Cache-Control"], "private, no-store")
+        self.assertEqual(
+            response["Cache-Control"], "no-store, private, max-age=0"
+        )
         self.assertEqual(
             response["Content-Disposition"],
             'attachment; filename="backupsheep-sources.csv"',

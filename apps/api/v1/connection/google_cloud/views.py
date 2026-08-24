@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from apps.console.connection.models import CoreConnection, CoreConnectionLocation
-from apps.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberGroupPermissions
 from apps.console.node.models import CoreOVHCA, CoreGoogleCloud, CoreNode
 from .filters import CoreGoogleCloudFilter
 from .serializers import CoreGoogleCloudConnectionReadSerializer, CoreGoogleCloudConnectionWriteSerializer
@@ -24,7 +24,12 @@ from django.core.cache import cache
 
 
 class CoreGoogleCloudView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
-    permission_classes = (IsAuthenticated, MemberPermissions,)
+    permission_classes = (IsAuthenticated, MemberGroupPermissions,)
+    action_permissions = {
+        "*": "node_changes",
+        "validate": "node_changes",
+        "objects": "node_changes",
+    }
     read_serializer_class = CoreGoogleCloudConnectionReadSerializer
     write_serializer_class = CoreGoogleCloudConnectionWriteSerializer
     all_fields = [f.name for f in CoreConnection._meta.get_fields()]

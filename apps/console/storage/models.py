@@ -4,7 +4,7 @@ import uuid
 from datetime import timedelta
 from decimal import Decimal
 
-from apps.api.v1.utils.http import requests
+from apps.api.v1.utils.http import request_timeout, requests
 from apps.api.v1.utils.boto import (
     bounded_boto3_client,
     bounded_ibm_boto3_client,
@@ -158,7 +158,14 @@ class CoreStorageDropbox(TimeStampedModel):
             "client_secret": settings.DROPBOX_APP_SECRET,
         }
 
-        token_request = requests.post(dropbox_url, data=params)
+        token_request = requests.post(
+            dropbox_url,
+            data=params,
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if token_request.status_code == 200:
             token_data = token_request.json()
@@ -168,6 +175,8 @@ class CoreStorageDropbox(TimeStampedModel):
 
 
 class CoreStoragePCloud(TimeStampedModel):
+    API_HOSTNAMES = frozenset({"api.pcloud.com", "eapi.pcloud.com"})
+
     class Location(models.IntegerChoices):
         US = 1, "US"
         EUROPE = 2, "EUROPE"
@@ -185,11 +194,10 @@ class CoreStoragePCloud(TimeStampedModel):
         db_table = "core_storage_pcloud"
 
     def get_client(self, file_upload=None, data=None):
-        encryption_key = self.storage.account.get_encryption_key()
-
         if data:
             access_token = data["access_token"]
         else:
+            encryption_key = self.storage.account.get_encryption_key()
             access_token = bs_decrypt(self.access_token, encryption_key)
 
         client = {
@@ -214,17 +222,23 @@ class CoreStoragePCloud(TimeStampedModel):
             no_delete = data.get("no_delete")
         else:
             hostname = self.hostname
-            no_delete = self.no_delete
+            no_delete = getattr(self, "no_delete", False)
+
+        hostname = str(hostname or "").strip().lower().rstrip(".")
+        if hostname not in self.API_HOSTNAMES:
+            return False
 
         local_txt_file = "_upload_test_files/backupsheep.txt"
         filename = f"backupsheep_{uuid.uuid4().hex}.txt"
         pcloud_path = f"/validate/{filename}"
-        token = self.get_access_token()
         headers = self.get_client(data=data)
         folder_response = requests.post(
-            f"https://{hostname}/createfolderifnotexists?path=/validate",
+            f"https://{hostname}/createfolderifnotexists",
+            params={"path": "/validate"},
             headers=headers,
             verify=True,
+            timeout=request_timeout(),
+            allow_redirects=False,
         )
         if int(getattr(folder_response, "status_code", 0) or 0) >= 400:
             return False
@@ -232,9 +246,12 @@ class CoreStoragePCloud(TimeStampedModel):
         with open(local_txt_file, "rb") as file_to_upload:
             upload_response = requests.post(
                 f"https://{hostname}/uploadfile",
-                params={"access_token": token, "path": "/validate", "renameifexists": 0},
+                data={"path": "/validate", "renameifexists": 0},
+                headers=headers,
                 files={"file": (filename, file_to_upload, "text/plain")},
                 verify=True,
+                timeout=request_timeout(),
+                allow_redirects=False,
             )
         if int(getattr(upload_response, "status_code", 0) or 0) >= 400:
             return False
@@ -247,12 +264,14 @@ class CoreStoragePCloud(TimeStampedModel):
             if not no_delete:
                 requests.post(
                     f"https://{hostname}/deletefile",
-                    params={
-                        "access_token": token,
+                    data={
                         "path": pcloud_path,
                         "fileid": metadata[0].get("fileid"),
                     },
+                    headers=headers,
                     verify=True,
+                    timeout=request_timeout(),
+                    allow_redirects=False,
                 )
             return True
 
@@ -295,6 +314,7 @@ class CoreStorageOneDrive(TimeStampedModel):
         from django.conf import settings
         from datetime import datetime
         import time
+        from apps.api.v1.utils.oauth_security import validated_https_endpoint
 
         encryption_key = self.storage.account.get_encryption_key()
 
@@ -307,7 +327,22 @@ class CoreStorageOneDrive(TimeStampedModel):
             "client_secret": settings.MS_CLIENT_SECRET_VALUE,
         }
 
-        token_request = requests.post(settings.MS_OAUTH_TOKEN_URL, data=params)
+        token_endpoint = validated_https_endpoint(
+            settings.MS_OAUTH_TOKEN_URL,
+            allowed_hostnames={"login.microsoftonline.com"},
+            allowed_path_suffixes={"/oauth2/v2.0/token"},
+        )
+        if token_endpoint is None:
+            return False
+
+        token_request = requests.post(
+            token_endpoint,
+            data=params,
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
+        )
 
         if token_request.status_code == 200:
             token_data = token_request.json()
@@ -316,8 +351,9 @@ class CoreStorageOneDrive(TimeStampedModel):
             self.expiry = datetime.fromtimestamp((int(time.time()) + int(token_data["expires_in"])))
             self.scope = token_data["scope"]
             self.save()
+            return True
         else:
-            print(token_request.json())
+            return False
 
     def validate(self, data=None, raise_exp=None):
         from django.conf import settings
@@ -407,7 +443,9 @@ class CoreStorageGoogleDrive(TimeStampedModel):
         # Token exchange is a provider POST. It gets the same finite timeout as
         # every other provider request and the shared session does not retry POST,
         # so a lost token response cannot be replayed by the HTTP adapter.
-        request = Request(session=requests.Session())
+        refresh_session = requests.Session()
+        refresh_session.max_redirects = 0
+        request = Request(session=refresh_session)
 
         def bounded_request(**kwargs):
             kwargs["timeout"] = _provider_sdk_timeout()
@@ -2751,40 +2789,137 @@ class CoreStorageLocal(TimeStampedModel):
 
         return os.path.realpath(settings.LOCAL_STORAGE_ROOT)
 
+    @staticmethod
+    def _path_parts(subpath):
+        """Return a canonical root-relative directory path without touching disk.
+
+        Local Storage configuration is accepted by the Internet-facing API, while
+        the mounted backup volume is writable only by ``worker-storage``.  Keep the
+        API-side check lexical: no create/open/unlink operation belongs in the web
+        process, and no absolute path is ever placed on the broker.
+        """
+
+        value = str(subpath or "")
+        if "\x00" in value or os.path.isabs(value):
+            raise ValueError("Path must be relative to the local storage root.")
+        normalized = value.replace("\\", "/")
+        parts = []
+        for part in normalized.split("/"):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                raise ValueError("Path must stay inside the local storage root.")
+            parts.append(part)
+        return tuple(parts)
+
+    @classmethod
+    def validate_configuration(cls, data=None):
+        """Validate only persisted configuration; never mutate ``/backups``."""
+
+        path = data.get("path") if isinstance(data, dict) else data
+        cls._path_parts(path)
+        return True
+
     def resolve_path(self, subpath=None):
         """Resolve `subpath` (defaults to this storage's `path`) to an absolute
         directory inside the local storage root. Rejects absolute paths and any
         '..' traversal escaping the root."""
         root = self.storage_root()
-        subpath = (subpath if subpath is not None else self.path) or ""
-        if os.path.isabs(subpath):
-            raise ValueError("Path must be relative to the local storage root.")
-        target = os.path.realpath(os.path.join(root, subpath))
+        subpath = subpath if subpath is not None else self.path
+        parts = self._path_parts(subpath)
+        target = os.path.realpath(os.path.join(root, *parts))
         if target != root and not target.startswith(root + os.sep):
             raise ValueError("Path must stay inside the local storage root.")
         return target
 
-    def validate(self, data=None, raise_exp=None):
-        if data is not None:
-            path = data.get("path")
-        else:
-            path = self.path
+    def _open_directory(self, *, create):
+        """Open the configured directory through no-follow directory fds.
 
-        target_dir = self.resolve_path(path)
-        os.makedirs(target_dir, exist_ok=True)
+        Walking from the already-open Local Storage root prevents a symlink in a
+        configured component from redirecting a validation/upload outside the
+        mounted volume.  The returned fd is owned by the caller.
+        """
 
-        # Validation can run concurrently when duplicate Celery deliveries race
-        # through backup_initiate. A second-resolution timestamp lets one probe
-        # delete another probe's file and falsely report the storage as invalid.
-        filename = f"backupsheep_test_{uuid.uuid4().hex}.txt"
-        test_file = os.path.join(target_dir, filename)
+        root = self.storage_root()
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        current_fd = os.open(root, flags)
+        try:
+            for part in self._path_parts(self.path):
+                if create:
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                    except FileExistsError:
+                        pass
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd
+        except Exception:
+            os.close(current_fd)
+            raise
 
-        with open(test_file, "w") as fh:
-            fh.write(filename)
+    def prepare_directory(self):
+        """Create/open the configured directory from ``worker-storage`` only."""
 
-        with open(test_file, "r") as fh:
-            if fh.read() != filename:
+        directory_fd = self._open_directory(create=True)
+        try:
+            return self.resolve_path()
+        finally:
+            os.close(directory_fd)
+
+    def probe_filesystem(self):
+        """Perform the destructive write/read/unlink probe on worker-storage."""
+
+        directory_fd = self._open_directory(create=True)
+        filename = f".backupsheep-validation-{uuid.uuid4().hex}"
+        file_fd = None
+        try:
+            flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            file_fd = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+            payload = filename.encode("ascii")
+            if os.write(file_fd, payload) != len(payload):
                 return False
+            os.fsync(file_fd)
+            os.lseek(file_fd, 0, os.SEEK_SET)
+            return os.read(file_fd, len(payload) + 1) == payload
+        finally:
+            if file_fd is not None:
+                os.close(file_fd)
+            try:
+                os.unlink(filename, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            os.close(directory_fd)
 
-        os.remove(test_file)
-        return True
+    def validate(self, data=None, raise_exp=None):
+        """Return durable configuration eligibility without touching the volume.
+
+        New/updated Local Storage rows remain ``PENDING`` until the dedicated
+        storage worker completes :meth:`probe_filesystem`.  Backup source workers
+        can therefore evaluate a destination without acquiring write access to
+        ``/backups``.
+        """
+
+        if data is not None:
+            return self.validate_configuration(data)
+        self.validate_configuration(self.path)
+        return bool(
+            self.storage_id
+            and self.storage.status == self.storage.Status.ACTIVE
+        )
+
+
+class CoreStorageDeletionLease(TimeStampedModel):
+    """Internal coordinator lease for one storage-configuration deletion."""
+
+    storage = models.OneToOneField(
+        CoreStorage, related_name="deletion_lease", on_delete=models.CASCADE
+    )
+    owner = models.CharField(max_length=255, blank=True, default="")
+    token = models.UUIDField(null=True, blank=True, editable=False)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "core_storage_deletion_lease"

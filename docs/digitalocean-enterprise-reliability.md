@@ -335,10 +335,9 @@ The DigitalOcean-focused tests cover:
 Canonical focused command:
 
 ```bash
-docker compose build app
-docker compose run --rm --no-deps \
+./backupsheep-compose build db app
+./backupsheep-compose --allow-reviewed-runtime-overrides run --rm --no-deps \
   -e DJANGO_SERVER=test \
-  -e DJANGO_SECRET_KEY=offline-test-key-only \
   --entrypoint python app manage.py test \
   apps.tests.test_digitalocean_adapter_reliability \
   apps.tests.test_provider_polling_reliability \

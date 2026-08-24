@@ -49,6 +49,14 @@
                     </template>
                 </div>
                 <div class="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                    <div x-cloak x-show="!binding?.uri">
+                        <label for="current_password" class="block text-sm font-medium text-slate-700">Current Password</label>
+                        <input x-model="member.current_password" type="password" name="currentPassword"
+                               id="current_password" autocomplete="current-password"
+                               class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
+                        <p x-cloak x-show="memberErrors.current_password" class="mt-1.5 text-xs font-medium text-red-600"
+                           x-text="memberErrors.current_password"></p>
+                    </div>
                     <div>
                         <label for="displayName" class="block text-sm font-medium text-slate-700">Display Name</label>
                         <input x-model="member.display_name" type="text" name="displayName" id="displayName"
@@ -59,12 +67,12 @@
                            id="displayName-error"
                            x-text="memberErrors.display_name"></p>
                     </div>
-                    <div x-cloak x-show="binding?.uri">
+                    <div x-cloak x-show="binding?.uri || member.auth_multi_factor_id">
                         <label for="verify_token" class="block text-sm font-medium text-slate-700">Verify Token</label>
                         <input x-model="member.auth_multi_factor_token" type="text" name="verificationCode"
                                id="verify_token"
-                               placeholder=""
-                               autocomplete="verify_token"
+                               inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+                               autocomplete="one-time-code"
                                class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                         <p x-cloak x-show="memberErrors.auth_multi_factor_token" class="mt-1.5 text-xs font-medium text-red-600"
                            id="verificationCode-error"
@@ -85,9 +93,6 @@
                                class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 read-only:bg-slate-50 read-only:text-slate-500 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20">
                     </div>
                 </div>
-                <div x-cloak x-show="binding.uri" class="flex justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50 p-6">
-                    <div id="qrcode" class="rounded-lg bg-white p-3 shadow-sm"></div>
-                </div>
             </div>
             <div class="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-3">
                 <button @click="setupTokenAuth()" x-cloak x-show="!member.auth_multi_factor_id"
@@ -107,8 +112,6 @@
     </div>
 {% endblock %}
 {% block extra_scripts %}
-    <script src="https://cdn.rawgit.com/davidshimjs/qrcodejs/gh-pages/qrcode.min.js"></script>
-
     <script>
         document.addEventListener('alpine:init', () => {
             Alpine.data('settingsMultiFactor', () => ({
@@ -117,6 +120,7 @@
                     display_name: null,
                     auth_multi_factor_id: null,
                     auth_multi_factor_token: null,
+                    current_password: null,
                 },
                 binding: {},
                 recaptchaVerifier: null,
@@ -126,7 +130,7 @@
                 init() {//user.providerData[0].providerId
                     {% if request.user.member.auth_multi_factor_id %}
                         this.member.auth_multi_factor_id = "{{ request.user.member.auth_multi_factor_id }}";
-                        this.member.display_name = "{{ request.user.member.auth_multi_factor_display_name }}";
+                        this.member.display_name = "{{ request.user.member.auth_multi_factor_display_name|escapejs }}";
                     {% endif %}
                 },
                 async setupTokenAuth() {
@@ -168,7 +172,7 @@
                         });
                         this.binding = json.binding;
                         this.member.auth_multi_factor_id = json.auth_multi_factor_id;
-                        new QRCode(document.getElementById("qrcode"), this.binding.uri);
+                        this.member.current_password = null;
                     }).catch((error) => {
                         Alpine.store('notifications').items.push({
                             show: true,

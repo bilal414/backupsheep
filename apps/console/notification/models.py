@@ -1,11 +1,14 @@
 import boto3
-from apps.api.v1.utils.http import requests
+from apps.api.v1.utils.http import request_timeout, requests
 from apps.api.v1.utils.boto import bounded_boto3_client
+from apps.api.v1.utils.api_helpers import bs_decrypt, bs_encrypt
 from django.conf import settings
 from django.db import models
 from django.db.models import UniqueConstraint
+from django.utils import timezone
 from model_utils.models import TimeStampedModel
-import uuid
+import secrets
+from django.utils.crypto import salted_hmac
 
 from sentry_sdk import capture_exception
 
@@ -14,7 +17,42 @@ from apps.console.member.models import CoreMember
 from apps.api.v1._thirdparty.aws.ses import SesMailSender, SesDestination
 
 
+SLACK_SECRET_PREFIX = "bs-slack-fernet-v1:"
+SLACK_API_HOSTNAMES = frozenset({"slack.com", "slack-gov.com"})
+SLACK_WEBHOOK_HOSTNAMES = frozenset({"hooks.slack.com", "hooks.slack-gov.com"})
+
+
+def sanitize_slack_oauth_metadata(payload):
+    """Keep display-only Slack identity metadata, never OAuth/webhook secrets."""
+
+    if not isinstance(payload, dict):
+        return {}
+
+    sanitized = {}
+    for name in ("team", "enterprise"):
+        value = payload.get(name)
+        if not isinstance(value, dict):
+            continue
+        identity = {
+            key: value.get(key)
+            for key in ("id", "name")
+            if isinstance(value.get(key), str) and value.get(key)
+        }
+        if identity:
+            sanitized[name] = identity
+    return sanitized
+
+
 class CoreNotificationEmail(TimeStampedModel):
+    VERIFY_TOKEN_TTL_HOURS = 24
+
+    @staticmethod
+    def verification_token_digest(token):
+        return salted_hmac(
+            "backupsheep.notification-email-verification",
+            str(token or ""),
+        ).hexdigest()
+
     class Status(models.IntegerChoices):
         UN_VERIFIED = 0, "Un-Verified"
         VERIFIED = 1, "Verified"
@@ -25,6 +63,7 @@ class CoreNotificationEmail(TimeStampedModel):
     email = models.EmailField(max_length=256)
     status = models.IntegerField(choices=Status.choices, default=Status.UN_VERIFIED)
     verify_code = models.CharField(max_length=256, null=True)
+    verify_code_created = models.DateTimeField(null=True, editable=False)
 
     class Meta:
         db_table = "core_notification_email"
@@ -36,9 +75,12 @@ class CoreNotificationEmail(TimeStampedModel):
         ]
 
     def send_verification_email(self):
-        verify_code = str(uuid.uuid4()).split("-")[0]
+        # A short UUID prefix provided only 32 bits of entropy. This bearer is
+        # delivered by email, so give it full token entropy and expire it at use.
+        verify_code = secrets.token_urlsafe(32)
 
-        self.verify_code = verify_code
+        self.verify_code = self.verification_token_digest(verify_code)
+        self.verify_code_created = timezone.now()
         self.status = self.Status.UN_VERIFIED
         self.save()
 
@@ -47,14 +89,21 @@ class CoreNotificationEmail(TimeStampedModel):
         email_notification.email = self.email
         email_notification.template = "verify_email"
         email_notification.context = {
-            "action_url": f"{settings.APP_URL}/console/notification/email/verify/{self.verify_code}/",
+            "action_url": "[redacted email verification link]",
             "help_url": f"{settings.APP_URL}",
             "sender_name": f"{settings.APP_NAME} - Notification Bot",
         }
         email_notification.save()
 
-        # Now Send email
-        email_notification.send()
+        email_notification.send(
+            delivery_context={
+                "action_url": (
+                    f"{settings.APP_URL}/console/notification/email/verify/"
+                    f"{verify_code}/"
+                )
+            },
+            persist_rendered=False,
+        )
 
 
 class CoreNotificationLogEmail(TimeStampedModel):
@@ -70,10 +119,21 @@ class CoreNotificationLogEmail(TimeStampedModel):
     class Meta:
         db_table = "core_notification_log_email"
 
-    def send(self):
+    def send(self, *, delivery_context=None, persist_rendered=True):
+        """Render and deliver an email without requiring bearer data at rest.
+
+        ``delivery_context`` exists only for this call and overrides the safe,
+        persisted context.  Callers sending password-reset or other bearer links
+        can set ``persist_rendered=False`` so neither rendered body is retained.
+        The default remains compatible with ordinary notification audit logs.
+        """
+
         from django.template.loader import render_to_string
         from apps.console.setting.models import CoreSiteSettings
         import json
+
+        if delivery_context is not None and not isinstance(delivery_context, dict):
+            raise TypeError("delivery_context must be a dictionary")
 
         # Provider + credentials and branding come from the DB-backed site settings
         # (configured in the onboarding wizard), falling back to the matching .env values.
@@ -82,10 +142,29 @@ class CoreNotificationLogEmail(TimeStampedModel):
         app_url = f"{site.get_app_protocol()}{site.get_app_domain()}"
 
         # render_to_string does not run context processors, so inject branding explicitly.
-        email_context = {**(self.context or {}), "site_app_name": app_name, "site_app_url": app_url}
-        self.html_body = render_to_string(f"console/emails/{self.template}.html", email_context)
-        self.text_body = render_to_string(f"console/emails/{self.template}.txt.html", email_context)
-        self.subject = render_to_string(f"console/emails/{self.template}.subject.html", email_context)
+        email_context = {
+            **(self.context or {}),
+            **(delivery_context or {}),
+            "site_app_name": app_name,
+            "site_app_url": app_url,
+        }
+        rendered_html = render_to_string(
+            f"console/emails/{self.template}.html", email_context
+        )
+        rendered_text = render_to_string(
+            f"console/emails/{self.template}.txt.html", email_context
+        )
+        rendered_subject = render_to_string(
+            f"console/emails/{self.template}.subject.html", email_context
+        )
+        self.subject = rendered_subject
+        if persist_rendered:
+            self.html_body = rendered_html
+            self.text_body = rendered_text
+        else:
+            # Clear bodies as well, in case a log row is deliberately re-sent.
+            self.html_body = None
+            self.text_body = None
         self.save()
 
         email_provider = site.get_email_provider()
@@ -98,9 +177,9 @@ class CoreNotificationLogEmail(TimeStampedModel):
                 auth=("api", site.email_cred("api_key", "MAILGUN_API_KEY")),
                 data={"from": f"{app_name} <{site.email_cred('email', 'MAILGUN_EMAIL')}>",
                       "to": [self.email],
-                      "subject": self.subject,
-                      "text": self.text_body,
-                      "html": self.html_body
+                      "subject": rendered_subject,
+                      "text": rendered_text,
+                      "html": rendered_html
                       }
             )
             self.message_id = response.json().get("message_id")
@@ -108,9 +187,9 @@ class CoreNotificationLogEmail(TimeStampedModel):
         elif email_provider == "postmark":
             parameters = {"From": f"{app_name} <{site.email_cred('email', 'POSTMARK_EMAIL')}>",
                           "To": self.email,
-                          "Subject": self.subject,
-                          "TextBody": self.text_body,
-                          "HtmlBody": self.html_body,
+                          "Subject": rendered_subject,
+                          "TextBody": rendered_text,
+                          "HtmlBody": rendered_html,
                           "MessageStream": "outbound"
                           }
             data = json.dumps(parameters)
@@ -142,9 +221,9 @@ class CoreNotificationLogEmail(TimeStampedModel):
             message_id = ses_mail_sender.send_email(
                 source,
                 SesDestination([self.email]),
-                self.subject,
-                self.text_body,
-                self.html_body,
+                rendered_subject,
+                rendered_text,
+                rendered_html,
                 config_set=config_set,
             )
 
@@ -156,14 +235,14 @@ class CoreNotificationSlack(TimeStampedModel):
     account = models.ForeignKey(CoreAccount, related_name="notification_slack", on_delete=models.CASCADE)
     app_id = models.CharField(max_length=64, editable=False)
     token_type = models.CharField(max_length=64, editable=False)
-    access_token = models.TextField(editable=False)
+    access_token = models.TextField(null=True, editable=False)
     bot_user_id = models.CharField(max_length=64, editable=False)
-    refresh_token = models.TextField(editable=False)
+    refresh_token = models.TextField(null=True, editable=False)
     expiry = models.DateTimeField(null=True)
     channel = models.CharField(max_length=64, editable=False)
     channel_id = models.CharField(max_length=64, editable=False)
-    configuration_url = models.URLField(editable=False)
-    url = models.URLField(editable=False)
+    configuration_url = models.TextField(null=True, editable=False)
+    url = models.TextField(null=True, editable=False)
     data = models.JSONField(null=True)
     added_by = models.ForeignKey(
         CoreMember,
@@ -174,59 +253,199 @@ class CoreNotificationSlack(TimeStampedModel):
 
     class Meta:
         db_table = "core_notification_slack"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(access_token__isnull=True)
+                | models.Q(access_token__startswith=SLACK_SECRET_PREFIX),
+                name="slack_access_token_ciphertext_v1",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(refresh_token__isnull=True)
+                | models.Q(refresh_token__startswith=SLACK_SECRET_PREFIX),
+                name="slack_refresh_token_ciphertext_v1",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(configuration_url__isnull=True)
+                | models.Q(configuration_url__startswith=SLACK_SECRET_PREFIX),
+                name="slack_configuration_ciphertext_v1",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(url__isnull=True)
+                | models.Q(url__startswith=SLACK_SECRET_PREFIX),
+                name="slack_webhook_ciphertext_v1",
+            ),
+        ]
+
+    _SECRET_FIELDS = ("access_token", "refresh_token", "configuration_url", "url")
+
+    @staticmethod
+    def _normalize_secret_value(value):
+        if isinstance(value, memoryview):
+            value = value.tobytes()
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return bytes(value).decode("ascii")
+            except UnicodeDecodeError:
+                return value
+        return value
+
+    def _encrypt_secret(self, value):
+        if value in (None, "", b""):
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Slack secrets must be supplied as plaintext strings")
+        ciphertext = bs_encrypt(value, self.account.get_encryption_key())
+        if not ciphertext:
+            raise ValueError("Unable to encrypt Slack secret")
+        return SLACK_SECRET_PREFIX + bytes(ciphertext).decode("ascii")
+
+    def _decrypt_secret(self, field_name):
+        value = self._normalize_secret_value(getattr(self, field_name, None))
+        if not isinstance(value, str) or not value.startswith(SLACK_SECRET_PREFIX):
+            return None
+        try:
+            return bs_decrypt(
+                value[len(SLACK_SECRET_PREFIX) :].encode("ascii"),
+                self.account.get_encryption_key(),
+            )
+        except Exception as error:
+            # Account/key damage and malformed ciphertext must never fall back to
+            # treating the database value as a usable provider credential.
+            capture_exception(error)
+            return None
+
+    def set_secrets(
+        self,
+        *,
+        access_token=None,
+        refresh_token=None,
+        configuration_url=None,
+        webhook_url=None,
+    ):
+        self.access_token = self._encrypt_secret(access_token)
+        self.refresh_token = self._encrypt_secret(refresh_token)
+        self.configuration_url = self._encrypt_secret(configuration_url)
+        self.url = self._encrypt_secret(webhook_url)
+
+    @property
+    def team_name(self):
+        metadata = sanitize_slack_oauth_metadata(self.data)
+        return metadata.get("team", {}).get("name") or "your Slack workspace"
+
+    def save(self, *args, **kwargs):
+        # Protect direct ORM callers as well as the OAuth callback. Versioned
+        # ciphertext is validated before any row can be re-saved, preventing
+        # accidental plaintext writes and accidental double encryption.
+        for field_name in self._SECRET_FIELDS:
+            value = self._normalize_secret_value(getattr(self, field_name, None))
+            if isinstance(value, str):
+                if not value:
+                    setattr(self, field_name, None)
+                    continue
+                if not value.startswith(SLACK_SECRET_PREFIX):
+                    value = self._encrypt_secret(value)
+                setattr(self, field_name, value)
+                if self._decrypt_secret(field_name) is None:
+                    raise ValueError(f"{field_name} ciphertext could not be decrypted")
+            elif value not in (None, b""):
+                raise ValueError(f"{field_name} is not versioned ciphertext")
+        self.data = sanitize_slack_oauth_metadata(self.data)
+        return super().save(*args, **kwargs)
 
     def refresh_auth_token(self):
-        from slack_sdk import WebClient, WebhookClient
-        from datetime import datetime
-        import time
+        from datetime import timedelta
+        from apps.api.v1.utils.oauth_security import validated_https_endpoint
 
-        token_request_url = (
-            f"{settings.SLACK_TOKEN_URL}?"
-            f"grant_type=refresh_token"
-            f"&client_id={settings.SLACK_CLIENT_ID}"
-            f"&client_secret={settings.SLACK_CLIENT_SECRET}"
-            f"&refresh_token={self.refresh_token}"
+        refresh_token = self._decrypt_secret("refresh_token")
+        if not refresh_token:
+            return False
+        token_request_url = validated_https_endpoint(
+            settings.SLACK_TOKEN_URL,
+            allowed_hostnames=SLACK_API_HOSTNAMES,
+            allowed_paths={"/api/oauth.v2.access"},
+        )
+        if token_request_url is None:
+            return False
+
+        result = requests.post(
+            token_request_url,
+            data={
+                "grant_type": "refresh_token",
+                "client_id": settings.SLACK_CLIENT_ID,
+                "client_secret": settings.SLACK_CLIENT_SECRET,
+                "refresh_token": refresh_token,
+            },
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            verify=True,
+            timeout=request_timeout(),
         )
 
-        result = requests.post(token_request_url)
-
-        if result.status_code == 200:
+        if result.status_code != 200:
+            return False
+        try:
             slack_data = result.json()
+            access_token = slack_data.get("access_token")
+            rotated_refresh_token = slack_data.get("refresh_token")
+            expires_in = int(slack_data.get("expires_in"))
+        except (TypeError, ValueError):
+            return False
+        if (
+            not slack_data.get("ok")
+            or not isinstance(access_token, str)
+            or not access_token
+            or not isinstance(rotated_refresh_token, str)
+            or not rotated_refresh_token
+            or expires_in <= 0
+        ):
+            return False
 
-            if slack_data.get("ok"):
-                self.refresh_token = slack_data.get("refresh_token")
-                self.access_token = slack_data.get("access_token")
-                self.expiry = datetime.fromtimestamp((int(time.time()) + int(slack_data["expires_in"])))
-                self.data = slack_data
-                self.save()
+        self.access_token = self._encrypt_secret(access_token)
+        self.refresh_token = self._encrypt_secret(rotated_refresh_token)
+        self.expiry = timezone.now() + timedelta(seconds=expires_in)
+        merged_metadata = sanitize_slack_oauth_metadata(self.data)
+        merged_metadata.update(sanitize_slack_oauth_metadata(slack_data))
+        self.data = merged_metadata
+        self.save()
+        return True
 
-                # # Send Welcome Message on Slack
-                # webhook = WebhookClient(self.url)
-                # webhook.send(
-                #     text="Hey! Your slack token is successfully refreshed.",
-                # )
+    def _post_webhook(self, message):
+        from apps.api.v1.utils.oauth_security import validated_https_endpoint
+
+        webhook_url = self._decrypt_secret("url")
+        if not webhook_url:
+            return False
+        endpoint = validated_https_endpoint(
+            webhook_url,
+            allowed_hostnames=SLACK_WEBHOOK_HOSTNAMES,
+            allowed_path_prefixes={"/services/"},
+        )
+        if endpoint is None:
+            return False
+        try:
+            response = requests.post(
+                endpoint,
+                json={"text": str(message)},
+                headers={"Accept": "text/plain"},
+                allow_redirects=False,
+                verify=True,
+                timeout=request_timeout(),
+            )
+            return response.status_code == 200 and response.text.strip() == "ok"
+        except Exception:
+            # Do not report this exception through Sentry here: SDK local-variable
+            # capture would include the decrypted webhook bearer in this frame.
+            return False
 
     def send(self, message):
-        from apps._tasks.helper.tasks import send_log_to_slack
-
-        send_log_to_slack.delay(url=self.url, message=message)
+        # Deliberately avoid putting a decrypted webhook URL in a Celery message,
+        # where it would become a durable broker credential.
+        return self._post_webhook(message)
 
     def validate(self):
-        from slack_sdk import WebhookClient
-
-        try:
-            # Send Welcome Message on Slack
-            webhook = WebhookClient(self.url)
-            response = webhook.send(
-                text="Hey! This is validation message that your Slack integration is working fine.",
-            )
-            if response.status_code == 200 and response.body == "ok":
-                return True
-            else:
-                return False
-        except Exception as e:
-            capture_exception(e)
-            return False
+        return self._post_webhook(
+            "Hey! This is validation message that your Slack integration is working fine."
+        )
 
 
 class CoreNotificationTelegram(TimeStampedModel):
@@ -243,24 +462,95 @@ class CoreNotificationTelegram(TimeStampedModel):
     class Meta:
         db_table = "core_notification_telegram"
 
-    def send(self, message):
-        from apps._tasks.helper.tasks import send_log_to_telegram
+    def _post_message(self, message):
+        """Send without copying notification plaintext into another queue."""
 
-        send_log_to_telegram.delay(chat_id=self.chat_id, message=message)
+        bot_key = settings.TELEGRAM_BOT_KEY
+        if not bot_key:
+            return False
+        try:
+            result = requests.post(
+                f"https://api.telegram.org/bot{bot_key}/sendMessage",
+                json={"chat_id": self.chat_id, "text": str(message)},
+                headers={"Accept": "application/json"},
+                allow_redirects=False,
+                verify=True,
+                timeout=request_timeout(),
+            )
+            return result.status_code == 200
+        except Exception:
+            # Do not report this exception through Sentry here: SDK local-variable
+            # capture could retain the token-bearing endpoint and message.
+            return False
+
+    def send(self, message):
+        # This method already runs in the logs worker after the opaque CoreLog ID
+        # has been resolved. A second Celery task would put plaintext back into
+        # the shared broker.
+        return self._post_message(message)
 
     def validate(self):
-        try:
-            result = requests.get(
-                f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_KEY}/sendMessage?"
-                f"chat_id={self.chat_id}"
-                f"&text=Hey! This is validation message that your Telegram integration is working fine.",
-                headers={"content-type": "application/json"},
-                verify=True,
-            )
-            if result.status_code == 200:
-                return True
-            else:
-                raise ValueError(result.json().get("description"))
-        except Exception as e:
-            capture_exception(e)
-            return False
+        return self._post_message(
+            "Hey! This is validation message that your Telegram integration is working fine."
+        )
+
+
+class CoreNotificationDelivery(TimeStampedModel):
+    """Durable, opaque notification-channel delivery state.
+
+    The notification text remains in ``CoreLog`` and provider credentials remain
+    in their channel rows. Celery receives only this row's integer primary key.
+    A committed lease fences concurrent workers while the provider request runs
+    outside a database transaction. Provider APIs do not offer a portable
+    idempotency key, so a crash after a successful request but before ``SENT`` is
+    committed can result in an at-least-once duplicate after lease recovery.
+    """
+
+    class ChannelType(models.TextChoices):
+        SLACK = "slack", "Slack"
+        TELEGRAM = "telegram", "Telegram"
+
+    class Status(models.IntegerChoices):
+        PENDING = 0, "Pending"
+        PROCESSING = 1, "Processing"
+        RETRY = 2, "Retry"
+        SENT = 3, "Sent"
+        SKIPPED = 4, "Skipped"
+
+    log = models.ForeignKey(
+        "CoreLog",
+        related_name="notification_deliveries",
+        on_delete=models.CASCADE,
+    )
+    channel_type = models.CharField(max_length=16, choices=ChannelType.choices)
+    # A generic integer reference deliberately avoids copying channel credentials
+    # or recipient identifiers into this outbox. The worker verifies account
+    # ownership again immediately before delivery.
+    channel_id = models.PositiveBigIntegerField()
+    status = models.IntegerField(choices=Status.choices, default=Status.PENDING)
+    attempt_count = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(default=timezone.now)
+    lease_token = models.UUIDField(null=True, blank=True, editable=False)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    # Safe machine codes only. Never persist provider responses or exceptions:
+    # either can contain notification plaintext or bearer credentials.
+    outcome_code = models.CharField(max_length=32, blank=True, default="")
+
+    class Meta:
+        db_table = "core_notification_delivery"
+        constraints = [
+            UniqueConstraint(
+                fields=["log", "channel_type", "channel_id"],
+                name="unique_log_notification_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["status", "next_attempt_at"],
+                name="notification_due_idx",
+            ),
+            models.Index(
+                fields=["status", "lease_expires_at"],
+                name="notification_lease_idx",
+            ),
+        ]

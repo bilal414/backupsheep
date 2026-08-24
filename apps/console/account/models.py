@@ -1,6 +1,6 @@
 import time
 import uuid as uuid
-from django.db import models
+from django.db import models, transaction
 from django.db.models import UniqueConstraint, Q
 from model_utils.models import TimeStampedModel
 from django.contrib.auth.models import Group
@@ -91,11 +91,58 @@ class CoreAccount(TimeStampedModel):
 
     def create_log(self, data=None):
         from apps._tasks.helper.tasks import send_log_to_db
+        from apps.console.log.models import CoreLog
+        from apps.console.notification.models import CoreNotificationDelivery
 
+        data = dict(data or {})
         data["account_id"] = self.id
         data["created"] = int(time.time())
 
-        send_log_to_db(data)
+        def publish_log_id(log_id):
+            try:
+                send_log_to_db.apply_async(args=[log_id])
+            except Exception:
+                # The committed per-channel rows below are the durable witness.
+                # Broker/client exceptions can contain connection credentials, so
+                # do not send them (or this log's plaintext) to observability.
+                return
+
+        with transaction.atomic():
+            log = CoreLog.objects.create(account_id=self.id, data=data)
+
+            # Persist every delivery in the same transaction as the log. Broker
+            # publication is only a wake-up hint: if it is lost after commit, the
+            # periodic outbox sweep can still recover these due rows. No provider
+            # credential, recipient value, or notification text crosses RabbitMQ.
+            if data.get("sender_name") == "BackupSheep - Notification Bot":
+                delivery_rows = [
+                    *(
+                        CoreNotificationDelivery(
+                            log=log,
+                            channel_type=CoreNotificationDelivery.ChannelType.SLACK,
+                            channel_id=channel_id,
+                        )
+                        for channel_id in self.notification_slack.values_list(
+                            "id", flat=True
+                        )
+                    ),
+                    *(
+                        CoreNotificationDelivery(
+                            log=log,
+                            channel_type=CoreNotificationDelivery.ChannelType.TELEGRAM,
+                            channel_id=channel_id,
+                        )
+                        for channel_id in self.notification_telegram.values_list(
+                            "id", flat=True
+                        )
+                    ),
+                ]
+                if delivery_rows:
+                    CoreNotificationDelivery.objects.bulk_create(delivery_rows)
+                    transaction.on_commit(
+                        lambda log_id=log.pk: publish_log_id(log_id)
+                    )
+        return log
 
     def create_storage_log(self, message, node, backup, storage):
         from apps.console.log.models import CoreLog

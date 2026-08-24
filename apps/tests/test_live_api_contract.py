@@ -1,5 +1,3 @@
-from unittest.mock import patch
-
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -39,11 +37,7 @@ class LiveAPIContractTests(BaseTestCase):
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
-    @patch(
-        "apps.api.v1.check.views.auth.create_custom_token",
-        side_effect=ValueError("The default Firebase app does not exist."),
-    )
-    def test_authenticated_login_probe_does_not_require_firebase(self, _create_token):
+    def test_authenticated_login_probe_does_not_mint_privileged_token(self):
         response = self.client.get("/api/v1/check/login/")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -52,16 +46,15 @@ class LiveAPIContractTests(BaseTestCase):
             {"login": True, "firebase_login_token": None},
         )
 
-    @patch(
-        "apps.api.v1.check.views.auth.create_custom_token",
-        return_value=b"firebase-token",
-    )
-    def test_authenticated_login_probe_normalizes_firebase_token(self, _create_token):
+    def test_anonymous_login_probe_preserves_legacy_response_shape(self):
+        self.client.force_authenticate(user=None)
         response = self.client.get("/api/v1/check/login/")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.json()["login"], True)
-        self.assertEqual(response.json()["firebase_login_token"], "firebase-token")
+        self.assertEqual(
+            response.json(),
+            {"login": False, "firebase_login_token": None},
+        )
 
     def test_backup_highcharts_routes_return_chart_data(self):
         for endpoint in BACKUP_CHART_ENDPOINTS:

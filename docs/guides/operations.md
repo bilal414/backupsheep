@@ -22,60 +22,83 @@ job truth.
 
 ## Start, stop and inspect
 
+Build the exact checked-out source once before starting it manually. The stock application
+services set `pull_policy: never`, so Compose will not silently substitute a registry image
+when the reviewed local image is missing:
+
 ```bash
 cd /opt/backupsheep
-docker compose up --detach
-docker compose ps --all
-docker compose logs --tail=100 app migrate
+./backupsheep-compose build db app
+./backupsheep-compose up --detach
+./backupsheep-compose ps --all
+./backupsheep-compose logs --tail=100 app migrate preflight
 ```
+
+That profile-less start is intentionally core-only: PostgreSQL, RabbitMQ, migrations,
+security preflight and the web UI. After reviewing credentials and durable queue/recovery
+state, explicitly start the provider-mutating workers and singleton scheduler:
+
+```bash
+./backupsheep-compose --profile operations up --detach
+./backupsheep-compose --profile operations ps --all
+```
+
+Do not enable the profile merely to make every container green. It can resume queued or
+recoverable provider work. Installer-managed installations should normally use the same
+exact-commit `install.sh --ref ... --enable-operations` command used at installation.
 
 Follow all service logs:
 
 ```bash
-docker compose logs --follow --tail=200
+./backupsheep-compose --profile operations logs --follow --tail=200
 ```
 
 Follow only an execution lane:
 
 ```bash
-docker compose logs --follow --tail=200 worker-database worker-storage
+./backupsheep-compose --profile operations logs --follow --tail=200 worker-database worker-storage
 ```
 
 Stop the stack without deleting volumes:
 
 ```bash
-docker compose stop
+./backupsheep-compose --profile operations stop
 ```
 
-`docker compose down` removes containers and networks but normally retains named volumes.
-Never add `--volumes` during routine operation; it removes PostgreSQL, broker, work and
-Local Storage data.
+Including the profile ensures workers and Beat stop too; profile-less `stop` is only a
+core stop and may leave intentionally enabled operations services running. `./backupsheep-compose
+--profile operations down` removes containers and networks but normally retains named
+volumes. Never add `--volumes` during routine operation; it removes PostgreSQL, broker,
+work, SSH trust and Local Storage data plus the installation-identity sentinel.
 
 ## Dependency checks
 
 ```bash
 curl -fsS http://127.0.0.1:8000/healthz/
-docker compose exec -T db pg_isready -U backupsheep -d backupsheep
-docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping
-docker compose exec -T worker-cloud celery -A backupsheep inspect ping
+./backupsheep-compose exec -T db pg_isready -U backupsheep -d backupsheep
+./backupsheep-compose exec -T rabbitmq rabbitmq-diagnostics -q ping
 ```
 
 The health URL returns static `ok` and is liveness only. PostgreSQL, RabbitMQ and worker
-checks are separate.
+checks are separate. When operations are intentionally enabled, add:
+
+```bash
+./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect ping
+```
 
 To inspect queue pressure:
 
 ```bash
-docker compose exec -T rabbitmq \
+./backupsheep-compose exec -T rabbitmq \
   rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers durable
 ```
 
 To inspect Celery work across all connected workers:
 
 ```bash
-docker compose exec -T worker-cloud celery -A backupsheep inspect active
-docker compose exec -T worker-cloud celery -A backupsheep inspect reserved
-docker compose exec -T worker-cloud celery -A backupsheep inspect scheduled
+./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect active
+./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect reserved
+./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect scheduled
 ```
 
 Celery inspection is transient diagnostic evidence. A missing task there does not mean a
@@ -87,7 +110,7 @@ backup row is complete or lost.
 2. Pause schedules in the console, or stop Beat:
 
    ```bash
-   docker compose stop beat
+   ./backupsheep-compose stop beat
    ```
 
 3. Check active/reserved/scheduled tasks and the console's active backup/restore rows.
@@ -97,6 +120,9 @@ backup row is complete or lost.
 6. Apply the host/application change.
 7. Start the complete stack and verify migrations, dependencies and workers.
 8. Re-enable schedules/Beat and watch the first recovery sweep and scheduled run.
+
+For the stock stack, "complete" means `./backupsheep-compose --profile operations up --detach`;
+a profile-less `up` deliberately leaves all workers and Beat disabled.
 
 If an urgent reboot interrupts work, do not manually trigger the same backup immediately.
 RabbitMQ redelivery and the periodic database recovery tasks will resume durable requests,
@@ -152,7 +178,7 @@ guard.
 Scale storage workers when uploads are the measured bottleneck:
 
 ```bash
-docker compose up --detach --scale worker-storage=4
+./backupsheep-compose --profile operations up --detach --scale worker-storage=4
 ```
 
 Keep CPU/disk-bound database and file concurrency conservative.
@@ -179,13 +205,13 @@ activity entries.
 - Reset a console password from the host when email is unavailable:
 
   ```bash
-  docker compose run --rm app python manage.py changepassword user@example.com
+  ./backupsheep-compose run --rm app python manage.py changepassword user@example.com
   ```
 
 - Create a separate Django superuser only for `/django-admin/`:
 
   ```bash
-  docker compose run --rm app python manage.py createsuperuser
+  ./backupsheep-compose run --rm app python manage.py createsuperuser
   ```
 
 ## Routine evidence to retain

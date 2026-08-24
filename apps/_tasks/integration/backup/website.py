@@ -350,21 +350,57 @@ def _materialize_ssh_private_key(path, private_key):
             os.close(descriptor)
 
 
+def _build_remote_tar_command(*, archive_path, exclude_rules, sources):
+    """Build the remote tar command with an explicit end-of-options boundary.
+
+    Shell quoting alone does not stop GNU tar from interpreting a leading-dash
+    source path as an option. Keep all reviewed tar options before ``--`` and all
+    operator-selected paths after it.
+    """
+    source_operands = " ".join(shlex.quote(str(source)) for source in sources)
+    return (
+        f"tar --create --no-check-device {exclude_rules} "
+        f"--file={shlex.quote(str(archive_path))} -- {source_operands}"
+    )
+
+
 def _build_lftp_script(*, auth, host_url, port, username, password, ssh_key_path,
                        parallel, transfer, mirror):
     """Compose the full lftp command script for one transfer (settings + connect + auth
     + the get/mirror line). Returned as text to feed lftp on stdin."""
+    if (
+        auth.protocol == CoreAuthWebsite.Protocol.FTP
+        and not settings.ALLOW_INSECURE_FTP
+    ):
+        raise NodeBackupFailedError(
+            None,
+            message=(
+                "Plain FTP is disabled because it exposes credentials and backup "
+                "data in transit. Use SFTP or FTPS, or explicitly set "
+                "ALLOW_INSECURE_FTP=true after accepting that risk."
+            ),
+        )
+
     lines = [f"set net:connection-limit {parallel}", *_LFTP_BASE_SETTINGS]
 
     # FTPS TLS certificate verification, per the connection's verify_ssl flag.
-    lines.append(f"set ssl:verify-certificate {'yes' if getattr(auth, 'verify_ssl', True) else 'no'}")
+    verify_ssl = getattr(auth, "verify_ssl", True) is not False
+    lines.append(f"set ssl:verify-certificate {'yes' if verify_ssl else 'no'}")
 
     if auth.protocol == CoreAuthWebsite.Protocol.FTP:
-        lines += ["set ftp:ssl-allow false", "set ftp:ssl-protect-data false"]
-    else:
-        lines += ["set ftp:ssl-allow true", "set ftp:ssl-protect-data true"]
-    if auth.protocol == CoreAuthWebsite.Protocol.FTPS and auth.ftps_use_explicit_ssl:
-        lines.append("set ftps:initial-prot P")
+        lines += [
+            "set ftp:ssl-allow false",
+            "set ftp:ssl-force false",
+            "set ftp:ssl-protect-data false",
+        ]
+    elif auth.protocol == CoreAuthWebsite.Protocol.FTPS:
+        lines += [
+            "set ftp:ssl-allow true",
+            "set ftp:ssl-force true",
+            "set ftp:ssl-protect-data true",
+        ]
+        if auth.ftps_use_explicit_ssl:
+            lines.append("set ftps:initial-prot P")
     if mirror:
         lines += list(_LFTP_MIRROR_SETTINGS)
 
@@ -1304,19 +1340,22 @@ def _snapshot_tar(backup):
         # BackupSheep directory path on user server.
         bs_backup_directory = f"{node.website.tar_temp_backup_dir}/{node.uuid_str}"
         bs_backup_tar = f"{bs_backup_directory}/{backup.uuid_str}.tar"
-        bs_backup_sources = " ".join(shlex.quote(x) for x in sources)
-
         # Create backup directory
-        _stdin, _stdout, _stderr = ssh.exec_command(f"mkdir -p {shlex.quote(bs_backup_directory)}")
+        _stdin, _stdout, _stderr = ssh.exec_command(
+            f"mkdir -p -- {shlex.quote(bs_backup_directory)}"
+        )
         _check_ssh_command(_stdout, _stderr, "backup directory creation")
 
         # Remove any existing backup tar
-        _stdin, _stdout, _stderr = ssh.exec_command(f"rm -rf {shlex.quote(bs_backup_tar)}")
+        _stdin, _stdout, _stderr = ssh.exec_command(
+            f"rm -f -- {shlex.quote(bs_backup_tar)}"
+        )
         _check_ssh_command(_stdout, _stderr, "old archive cleanup")
 
-        command = (
-            f"tar --create --no-check-device {exclude_rules} "
-            f"--file={shlex.quote(bs_backup_tar)} {bs_backup_sources}"
+        command = _build_remote_tar_command(
+            archive_path=bs_backup_tar,
+            exclude_rules=exclude_rules,
+            sources=sources,
         )
         _stdin, _stdout, _stderr = ssh.exec_command(command, timeout=command_timeout)
         _check_ssh_command(_stdout, _stderr, "remote tar creation")

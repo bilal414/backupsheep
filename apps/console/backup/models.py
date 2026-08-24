@@ -1,6 +1,7 @@
 import json
 import hashlib
 import re
+import shutil
 import subprocess
 import time
 import uuid
@@ -56,9 +57,44 @@ from ..vultr import (
 
 
 def _presigned_url_expiry():
-    """Seconds before a generated backup download URL expires (configurable via
-    S3_DOWNLOAD_URL_EXPIRES; default 24h)."""
-    return int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 24 * 3600))
+    """Return the five-minute signed-URL default with a one-hour hard ceiling."""
+    try:
+        configured = int(getattr(settings, "S3_DOWNLOAD_URL_EXPIRES", 5 * 60))
+    except (TypeError, ValueError):
+        configured = 5 * 60
+    return min(max(configured, 1), 60 * 60)
+
+
+def _stop_legacy_backup_container(container_name):
+    """Best-effort cleanup for the retired per-backup Docker execution path.
+
+    Stock containers deliberately receive neither a Docker client nor the daemon
+    socket. Process-managed legacy deployments may still provide the client, but a
+    database value must never become a shell command or an arbitrary container name.
+    """
+    candidate = str(container_name or "").lower()
+    suffix = "-storage" if candidate.endswith("-storage") else ""
+    identifier = candidate[: -len(suffix)] if suffix else candidate
+    try:
+        canonical_identifier = str(uuid.UUID(identifier))
+    except (ValueError, AttributeError, TypeError):
+        return
+    if identifier != canonical_identifier:
+        return
+
+    docker_cli = shutil.which("docker")
+    if not docker_cli:
+        return
+    try:
+        subprocess.run(
+            [docker_cli, "stop", f"{canonical_identifier}{suffix}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
 
 
 class StoragePointLeaseLostError(RuntimeError):
@@ -4553,6 +4589,44 @@ class CoreGoogleCloudBackup(UtilBackup):
         self.google_cloud.node.backup_complete_reset()
 
 
+def _soft_delete_storage_backed_backup(backup, relation_name):
+    """Route every legacy caller through the committed deletion-lease path."""
+
+    model_key = {
+        "stored_website_backups": "website",
+        "stored_database_backups": "database",
+        "stored_wordpress_backups": "wordpress",
+        "stored_basecamp_backups": "basecamp",
+    }[relation_name]
+    with transaction.atomic():
+        locked = backup.__class__.objects.select_for_update().get(pk=backup.pk)
+        if locked.status == locked.Status.DELETE_COMPLETED:
+            backup.status = locked.status
+            return True
+        if locked.status not in (
+            locked.Status.DELETE_REQUESTED,
+            locked.Status.DELETE_IN_PROGRESS,
+        ):
+            metadata = dict(locked.metadata or {})
+            metadata["_deletion_request"] = {
+                "requested_at": timezone.now().isoformat(),
+                "previous_status": int(locked.status),
+                "state": "pending",
+            }
+            locked.metadata = metadata
+            locked.status = locked.Status.DELETE_REQUESTED
+            locked.save(update_fields=["metadata", "status", "modified"])
+
+    # Import locally to avoid the backup-model/task module cycle. The helper
+    # commits a short parent claim, mutates at most one point outside a database
+    # transaction, then commits the reconciled result.
+    from apps._tasks.integration.storage.tasks import _delete_backup_requested_id
+
+    outcome = _delete_backup_requested_id(model_key, backup.pk)
+    backup.refresh_from_db(fields=["status", "metadata"])
+    return outcome.get("result") == "deleted"
+
+
 class CoreWebsiteBackup(UtilBackup):
     UNZIP_REQUEST = Choices("requested", "in_progress", "available", "disable")
     website = models.ForeignKey(
@@ -4594,14 +4668,9 @@ class CoreWebsiteBackup(UtilBackup):
         db_table = "core_website_backup"
 
     def soft_delete(self):
-        deleted = all(
-            stored_website_backup.soft_delete() is not False
-            for stored_website_backup in self.stored_website_backups.all()
+        return _soft_delete_storage_backed_backup(
+            self, "stored_website_backups"
         )
-        if deleted:
-            self.status = self.Status.DELETE_COMPLETED
-            self.save()
-        return deleted
 
     def all_storage_points_uploaded(self):
         return self.stored_website_backups.all().count() == self.stored_website_backups.filter(
@@ -4657,14 +4726,7 @@ class CoreWebsiteBackup(UtilBackup):
         """
         Stop docker container if any
         """
-        execstr = f"sudo docker stop {self.uuid_str}"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
-            timeout=60,
-        )
+        _stop_legacy_backup_container(self.uuid_str)
 
 
 class CoreWebsiteBackupFiles(TimeStampedModel):
@@ -5220,7 +5282,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 if blob.exists():
                     url = blob.generate_signed_url(
                         version="v4",
-                        expiration=timedelta(hours=24),
+                        expiration=timedelta(seconds=_presigned_url_expiry()),
                         method="GET",
                     )
                     return url
@@ -5230,7 +5292,6 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 return None
 
         elif self.storage.type.code == "azure":
-            import time
             import datetime
             from azure.storage.blob import BlobSasPermissions, generate_blob_sas
             from datetime import timedelta
@@ -5239,8 +5300,9 @@ class BaseBackupStoragePoints(TimeStampedModel):
 
             blob_service_client = self.storage.storage_azure.get_client()
 
-            # Create a SAS token that expires in 1 hour
-            sas_expiry = datetime.datetime.utcnow() + timedelta(hours=48)
+            sas_expiry = datetime.datetime.now(
+                datetime.timezone.utc
+            ) + timedelta(seconds=_presigned_url_expiry())
             sas_permissions = BlobSasPermissions(read=True, write=False, delete=False)
             sas_token = generate_blob_sas(
                 account_name=blob_service_client.account_name,
@@ -5264,7 +5326,11 @@ class BaseBackupStoragePoints(TimeStampedModel):
             region_id = self.storage.storage_alibaba.endpoint.split(".")[0].removeprefix("oss-").removesuffix("-internal")
             bucket = oss2.Bucket(auth, f"https://{self.storage.storage_alibaba.endpoint}", self.storage.storage_alibaba.bucket_name, region=region_id)
             return bucket.sign_url(
-                "GET", self.storage_file_id, 3600 * 24, headers={"content-disposition": "attachment"}, slash_safe=True
+                "GET",
+                self.storage_file_id,
+                _presigned_url_expiry(),
+                headers={"content-disposition": "attachment"},
+                slash_safe=True,
             )
 
         elif self.storage.type.code == "tencent":
@@ -5282,7 +5348,7 @@ class BaseBackupStoragePoints(TimeStampedModel):
                 Method='GET',
                 Bucket=self.storage.storage_tencent.bucket_name,
                 Key=self.storage_file_id,
-                Expired=24 * 3600
+                Expired=_presigned_url_expiry(),
             )
         elif self.storage.type.code == "leviia":
             s3_client = bounded_boto3_client(
@@ -5968,40 +6034,15 @@ class BaseBackupStoragePoints(TimeStampedModel):
                         Key=f"{self.storage_file_id}",
                     )
                 elif self.storage.type.code == "local":
-                    import hashlib
-                    import os
                     if not self.storage.storage_local.no_delete:
-                        # storage_file_id is the absolute path written by the local
-                        # upload backend; only ever unlink inside the storage root.
-                        local_root = os.path.realpath(settings.LOCAL_STORAGE_ROOT)
-                        target = os.path.realpath(self.storage_file_id)
-                        if target != local_root and not target.startswith(local_root + os.sep):
-                            raise ValueError("Local storage delete is outside its configured root.")
-                        if os.path.basename(target) != f"{self.backup.uuid_str}.zip":
-                            raise ValueError("Local storage object is not owned by this backup.")
-                        if os.path.exists(target):
-                            expected = self.committed_integrity_identity()
-                            if expected is None:
-                                raise ValueError(
-                                    "Local storage integrity evidence is unavailable; deletion was stopped."
-                                )
-                            digest = hashlib.sha256()
-                            byte_count = 0
-                            with open(target, "rb") as local_object:
-                                while True:
-                                    chunk = local_object.read(1024 * 1024)
-                                    if not chunk:
-                                        break
-                                    digest.update(chunk)
-                                    byte_count += len(chunk)
-                            if (
-                                digest.hexdigest() != expected["sha256"]
-                                or byte_count != expected["size_bytes"]
-                            ):
-                                raise ValueError(
-                                    "Local storage object integrity does not match this backup."
-                                )
-                            os.remove(target)
+                        from apps._tasks.integration.storage.local import (
+                            delete_local_object,
+                        )
+
+                        # The storage task receives only this point's database id.
+                        # Deletion derives an exact root-relative object key from
+                        # persisted ownership evidence and uses no-follow dir fds.
+                        delete_local_object(self)
 
                 self.status = self.Status.DELETE_COMPLETED
                 self.save()
@@ -6131,14 +6172,9 @@ class CoreWordPressBackup(UtilBackup):
         db_table = "core_wordpress_backup"
 
     def soft_delete(self):
-        deleted = all(
-            stored_wordpress_backup.soft_delete() is not False
-            for stored_wordpress_backup in self.stored_wordpress_backups.all()
+        return _soft_delete_storage_backed_backup(
+            self, "stored_wordpress_backups"
         )
-        if deleted:
-            self.status = self.Status.DELETE_COMPLETED
-            self.save()
-        return deleted
 
     def all_storage_points_uploaded(self):
         return self.stored_wordpress_backups.all().count() == self.stored_wordpress_backups.filter(
@@ -6192,58 +6228,37 @@ class CoreWordPressBackup(UtilBackup):
         """
         Stop main docker container if any
         """
-        execstr = f"sudo docker stop {self.uuid_str}"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
-            timeout=60,
-        )
+        _stop_legacy_backup_container(self.uuid_str)
 
         """
         Stop upload docker container if any
         """
-        execstr = f"sudo docker stop {self.uuid_str}-storage"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
-            timeout=60,
-        )
+        _stop_legacy_backup_container(f"{self.uuid_str}-storage")
 
         """
         Delete files from wordpress
         """
-        client = self.wordpress.node.connection.auth_wordpress.get_client()
-        auth = self.wordpress.node.connection.auth_wordpress.get_auth()
+        auth_wordpress = self.wordpress.node.connection.auth_wordpress
         try:
-            result = requests.get(
-                f"{self.wordpress.node.connection.auth_wordpress.url}"
-                f"/?rest_route=/backupsheep/updraftplus/files&backup_uuid={self.uuid_str}"
-                f"&key={self.wordpress.node.connection.auth_wordpress.key}"
-                f"&t={time.time()}",
-                auth=auth,
-                headers=client,
-                verify=True,
+            result = auth_wordpress.request(
+                "files",
+                params={"backup_uuid": self.uuid_str, "t": time.time()},
                 timeout=180,
             )
             if result.status_code == 200:
                 try:
                     backup_files = result.json().get("files", [])
                     for backup_file in backup_files:
+                        if not isinstance(backup_file, str) or not backup_file:
+                            continue
                         # delete the downloaded file from WordPress
-                        r_delete = requests.get(
-                            f"{self.wordpress.node.connection.auth_wordpress.url}"
-                            f"/?rest_route=/backupsheep/updraftplus/delete&backup_file={backup_file}"
-                            f"&backup_uuid={self.uuid_str}"
-                            f"&key={self.wordpress.node.connection.auth_wordpress.key}"
-                            f"&t={time.time()}",
-                            allow_redirects=True,
-                            auth=auth,
-                            headers=client,
-                            verify=True
+                        r_delete = auth_wordpress.request(
+                            "delete",
+                            params={
+                                "backup_file": backup_file,
+                                "backup_uuid": self.uuid_str,
+                                "t": time.time(),
+                            },
                         )
                         if r_delete.status_code == 200:
                             if r_delete.json().get("deleted"):
@@ -6328,14 +6343,9 @@ class CoreBasecampBackup(UtilBackup):
         db_table = "core_basecamp_backup"
 
     def soft_delete(self):
-        deleted = all(
-            stored_basecamp_backup.soft_delete() is not False
-            for stored_basecamp_backup in self.stored_basecamp_backups.all()
+        return _soft_delete_storage_backed_backup(
+            self, "stored_basecamp_backups"
         )
-        if deleted:
-            self.status = self.Status.DELETE_COMPLETED
-            self.save()
-        return deleted
 
     def all_storage_points_uploaded(self):
         return (
@@ -6394,26 +6404,12 @@ class CoreBasecampBackup(UtilBackup):
         """
         Stop main docker container if any
         """
-        execstr = f"sudo docker stop {self.uuid_str}"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
-            timeout=60,
-        )
+        _stop_legacy_backup_container(self.uuid_str)
 
         """
         Stop upload docker container if any
         """
-        execstr = f"sudo docker stop {self.uuid_str}-storage"
-        subprocess.run(
-            execstr,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
-            timeout=60,
-        )
+        _stop_legacy_backup_container(f"{self.uuid_str}-storage")
 
 
 class CoreBasecampBackupStoragePoints(BaseBackupStoragePoints):
@@ -6514,14 +6510,9 @@ class CoreDatabaseBackup(UtilBackup):
 
 
     def soft_delete(self):
-        deleted = all(
-            stored_database_backup.soft_delete() is not False
-            for stored_database_backup in self.stored_database_backups.all()
+        return _soft_delete_storage_backed_backup(
+            self, "stored_database_backups"
         )
-        if deleted:
-            self.status = self.Status.DELETE_COMPLETED
-            self.save()
-        return deleted
 
     @property
     def node(self):

@@ -60,8 +60,16 @@ def _load_private_key(path: str, passphrase=None):
 
 
 def _temporary_private_key(private_key: str) -> str:
-    workdir = os.path.join(settings.BASE_DIR, "_storage")
-    os.makedirs(workdir, mode=0o700, exist_ok=True)
+    # Private keys supplied for a single validation/connection must never land in
+    # the persistent shared backup work volume. Stock containers provide a private,
+    # noexec tmpfs through XDG_RUNTIME_DIR; non-container development falls back to
+    # tempfile's secure O_EXCL file creation in the platform temp directory.
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    workdir = None
+    if runtime_dir:
+        workdir = os.path.join(runtime_dir, "ssh")
+        os.makedirs(workdir, mode=0o700, exist_ok=True)
+        os.chmod(workdir, 0o700)
     descriptor, path = tempfile.mkstemp(prefix="ssh-key-", dir=workdir)
     try:
         os.fchmod(descriptor, 0o600)

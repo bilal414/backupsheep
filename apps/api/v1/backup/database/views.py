@@ -196,6 +196,7 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     serializer_class = CoreDatabaseBackupSerializer
     backup_model = CoreDatabaseBackup
     backup_node_relation = "database"
+    backup_delete_model_key = "database"
     all_fields = [f.name for f in CoreDatabaseBackup._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
@@ -208,8 +209,7 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
-        instance.soft_delete()
-        return Response(status=status.HTTP_204_NO_CONTENT, data={})
+        return self.request_backup_delete(instance)
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, *args, **kwargs):

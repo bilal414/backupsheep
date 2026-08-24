@@ -9,7 +9,7 @@ This repository includes the service configuration files needed to create that t
 | `Worker` | this repository | [`deploy/railway/worker.railway.json`](../deploy/railway/worker.railway.json) |
 | `Beat` | this repository | [`deploy/railway/beat.railway.json`](../deploy/railway/beat.railway.json) |
 | `Postgres` | Railway PostgreSQL template | Railway-managed |
-| `RabbitMQ` | `rabbitmq:4.3.4-management-alpine` | Private Docker-image service with a persistent volume |
+| `RabbitMQ` | `rabbitmq:4.3.5-management-alpine` | Private Docker-image service with a persistent volume |
 
 The worker consumes all queues with concurrency 1, because separate Railway services do
 not share a writable working directory. Use an external object-storage destination for
@@ -20,7 +20,7 @@ backups; **Local Storage** is not suitable for this layout.
 1. In Railway, create a project and add Railway's **PostgreSQL** database service. Name it
    `Postgres`.
 2. Add a **Docker Image** service named `RabbitMQ` using
-   `rabbitmq:4.3.4-management-alpine`. Attach a Railway Volume at
+   `rabbitmq:4.3.5-management-alpine`. Attach a Railway Volume at
    `/var/lib/rabbitmq`; do not generate a public domain. Add these RabbitMQ-only variables:
 
    ```text

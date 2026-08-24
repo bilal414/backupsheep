@@ -8,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 from apps.console.account.models import CoreAccount
+from apps.console.member.models import CoreMemberAccount
 from .filters import CoreAccountFilter
 from .permissions import CoreAccountViewPermissions
 from .serializers import CoreAccountSerializer, CoreAccountWriteSerializer
@@ -41,7 +42,10 @@ class CoreAccountView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         member = self.request.user.member
-        queryset = CoreAccount.objects.filter(members=member).distinct()
+        queryset = CoreAccount.objects.filter(
+            memberships__member=member,
+            memberships__status=CoreMemberAccount.Status.ACTIVE,
+        ).distinct()
         return queryset
 
     @action(detail=True, methods=["post"])
@@ -120,9 +124,17 @@ class CoreAccountView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
         membership_id = self.request.data.get("membership_id")
 
-        if request.user.member.memberships.filter(id=membership_id, primary=False).exists():
+        if request.user.member.memberships.filter(
+            id=membership_id,
+            account=account,
+            primary=False,
+        ).exists():
 
-            membership = request.user.member.memberships.get(id=membership_id, primary=False)
+            membership = request.user.member.memberships.get(
+                id=membership_id,
+                account=account,
+                primary=False,
+            )
 
             # Remove from groups
             for enrollment in membership.account.enrollments.filter():

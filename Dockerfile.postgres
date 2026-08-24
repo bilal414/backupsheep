@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.20.0@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d
+
+# Keep the database runtime on the exact PostgreSQL/glibc generation reviewed for
+# existing clusters. This derived image removes the downloaded gosu binary and uses
+# Debian's security-maintained setpriv implementation if the reviewed entrypoint is
+# ever exercised as root. The shipped image and Compose model both start as postgres.
+FROM postgres:18.6-trixie@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
+
+RUN set -eux; \
+    printf '%s  %s\n' 9c440299ae04a0a79d55b8bf03307036d890a40979d2fb698073c9050d4b20a5 /usr/local/bin/docker-entrypoint.sh \
+        | sha256sum --check --strict -; \
+    test "$(grep -Fc 'exec gosu postgres "$BASH_SOURCE" "$@"' /usr/local/bin/docker-entrypoint.sh)" = 1; \
+    apt-get update; \
+    apt-get install --yes --no-install-recommends \
+        "bsdutils=1:2.41.5-0+deb13u1" \
+        "libblkid1=2.41.5-0+deb13u1" \
+        "liblastlog2-2=2.41.5-0+deb13u1" \
+        "libmount1=2.41.5-0+deb13u1" \
+        "libsmartcols1=2.41.5-0+deb13u1" \
+        "libuuid1=2.41.5-0+deb13u1" \
+        "login=1:4.16.0-2+really2.41.5-0+deb13u1" \
+        "mount=2.41.5-0+deb13u1" \
+        "util-linux=2.41.5-0+deb13u1"; \
+    rm -rf /var/lib/apt/lists/*; \
+    sed -i \
+        's#exec gosu postgres "$BASH_SOURCE" "$@"#exec setpriv --reuid=postgres --regid=postgres --init-groups -- "$BASH_SOURCE" "$@"#' \
+        /usr/local/bin/docker-entrypoint.sh; \
+    rm -f -- /usr/local/bin/gosu; \
+    test "$(grep -Fc 'exec setpriv --reuid=postgres --regid=postgres --init-groups -- "$BASH_SOURCE" "$@"' /usr/local/bin/docker-entrypoint.sh)" = 1; \
+    ! grep -Fq gosu /usr/local/bin/docker-entrypoint.sh; \
+    ! command -v gosu; \
+    test ! -e /usr/local/bin/gosu; \
+    test "$(dpkg-query --show --showformat='${Version}' bsdutils)" = "1:2.41.5-0+deb13u1"; \
+    test "$(dpkg-query --show --showformat='${Version}' login)" = "1:4.16.0-2+really2.41.5-0+deb13u1"; \
+    for package in libblkid1 liblastlog2-2 libmount1 libsmartcols1 libuuid1 mount util-linux; do \
+        test "$(dpkg-query --show --showformat='${Version}' "$package")" = "2.41.5-0+deb13u1"; \
+    done; \
+    test ! -e /var/lib/apt/lists/lock; \
+    test -x /usr/bin/setpriv
+
+# A fresh Docker named volume inherits the image directory ownership, so PostgreSQL
+# can initialize and restart without a root bootstrap or Linux capabilities. An
+# incorrectly owned imported volume fails closed instead of being repaired silently.
+USER 999:999

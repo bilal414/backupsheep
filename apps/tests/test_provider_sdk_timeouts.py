@@ -50,13 +50,29 @@ class ProviderSDKTimeoutPolicyTests(SimpleTestCase):
         PROVIDER_HTTP_READ_TIMEOUT=23,
     )
     @mock.patch("ovh.Client")
-    @mock.patch("apps.console.connection.models.bs_decrypt", return_value="consumer")
+    @mock.patch(
+        "apps.console.connection.models.bs_decrypt",
+        return_value="consumer-key-01234567890123456789",
+    )
     @mock.patch.object(CoreAccount, "get_encryption_key", return_value="key")
     def test_all_ovh_regions_receive_bounded_connect_and_read_timeout(
         self, _encryption_key, _decrypt, ovh_client
     ):
         account = CoreAccount()
         connection = CoreConnection(account=account)
+        endpoint_urls = {
+            "ovh-ca": "https://ca.api.ovh.com/1.0",
+            "ovh-eu": "https://eu.api.ovh.com/1.0",
+            "ovh-us": "https://api.us.ovhcloud.com/1.0",
+        }
+
+        def sdk_client(*, endpoint, **kwargs):
+            return SimpleNamespace(
+                _endpoint=endpoint_urls[endpoint],
+                _session=SimpleNamespace(max_redirects=30),
+            )
+
+        ovh_client.side_effect = sdk_client
 
         for auth_class, endpoint in (
             (CoreAuthOVHCA, "ovh-ca"),

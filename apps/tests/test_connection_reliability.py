@@ -1,5 +1,8 @@
 import errno
+import os
 import socket
+import stat
+import tempfile
 from unittest import mock
 
 import paramiko
@@ -13,7 +16,7 @@ from apps.console.connection.reliability import (
     classify_connection_error,
 )
 from apps.console.connection.models import CoreAuthDatabase
-from apps.console.connection.ssh import open_ssh_client
+from apps.console.connection.ssh import _temporary_private_key, open_ssh_client
 from apps.api.v1.utils.http import TimeoutSession, _retry_policy
 
 
@@ -708,6 +711,22 @@ class DatabaseClientCapabilityTests(SimpleTestCase):
     SSH_KEEPALIVE_SECONDS=10,
 )
 class StrictSSHClientTests(SimpleTestCase):
+    def test_ephemeral_private_key_uses_private_runtime_tmpfs_directory(self):
+        with tempfile.TemporaryDirectory() as runtime_dir, mock.patch.dict(
+            os.environ,
+            {"XDG_RUNTIME_DIR": runtime_dir},
+        ):
+            path = _temporary_private_key("private-key-material")
+            try:
+                self.assertEqual(os.path.dirname(path), os.path.join(runtime_dir, "ssh"))
+                self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+                self.assertEqual(
+                    stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode),
+                    0o700,
+                )
+            finally:
+                os.remove(path)
+
     @mock.patch("apps.console.connection.ssh.configure_host_keys")
     @mock.patch("apps.console.connection.ssh.paramiko.SSHClient")
     def test_password_connect_is_bounded_and_disables_ambient_keys(

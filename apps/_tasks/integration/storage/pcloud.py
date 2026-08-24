@@ -24,6 +24,7 @@ from apps.api.v1.utils.http import request_timeout, requests
 PCLOUD_METADATA_KEY = "pcloud_object"
 CHECKSUM_ALGORITHM = "sha256"
 PCLOUD_DEFAULT_TIMEOUT = 60.0
+PCLOUD_API_HOSTNAMES = frozenset({"api.pcloud.com", "eapi.pcloud.com"})
 SAFE_UPLOAD_FAILURE = (
     "Unable to upload the backup to pCloud because the destination could not be "
     "verified. Please retry or contact an administrator."
@@ -221,10 +222,28 @@ def _endpoint(hostname, method):
     if "://" not in raw:
         raw = f"https://{raw}"
     parsed = urlsplit(raw)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        raise PCloudStorageAdapterError(
+            "CONFIGURATION_INVALID", SAFE_UPLOAD_FAILURE
+        ) from None
+    normalized_hostname = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme != "https"
+        or normalized_hostname not in PCLOUD_API_HOSTNAMES
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed_port is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
         raise PCloudStorageAdapterError("CONFIGURATION_INVALID", SAFE_UPLOAD_FAILURE)
-    base = f"https://{parsed.netloc}{parsed.path.rstrip('/') }"
-    return f"{base}/{method.lstrip('/')}"
+    operation = str(method or "").strip().strip("/")
+    if not operation or "/" in operation or "\\" in operation:
+        raise PCloudStorageAdapterError("CONFIGURATION_INVALID", SAFE_UPLOAD_FAILURE)
+    return f"https://{normalized_hostname}/{operation}"
 
 
 def _provider_error_from_status(status_code):
@@ -301,9 +320,14 @@ def _request_json(storage_config, token, method, operation, *, data=None, files=
     url = _endpoint(storage_config.hostname, operation)
     request = getattr(requests, method.lower())
     request_kwargs = {
-        "params": {"access_token": token},
+        # pCloud supports OAuth bearer authentication in this header. Keeping
+        # the non-expiring token out of the URI prevents it from leaking into
+        # reverse-proxy, provider, browser-history, and exception logs.
+        "headers": {"Authorization": f"Bearer {token}"},
+        "params": {},
         "verify": True,
         "timeout": _pcloud_timeout(),
+        "allow_redirects": False,
     }
     if method.upper() == "GET":
         # pCloud's JSON API expects global parameters in the query string for GET

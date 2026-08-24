@@ -31,6 +31,11 @@ class _LocalStorageConfig:
             raise ValueError("/sensitive/server/storage path escaped")
         return target
 
+    def prepare_directory(self):
+        target = self.resolve_path()
+        os.makedirs(target, mode=0o700, exist_ok=True)
+        return target
+
 
 class _Backup:
     def __init__(self, identifier, events):

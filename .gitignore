@@ -4,6 +4,8 @@
 *.iml
 *.pyc
 /.env
+/.secrets/
+/docker-compose.override.yml
 /node_modules
 /scripts/.upcloud-runtime/
 /docs/security-audit/

@@ -1,35 +1,58 @@
-# Keep secrets, local environments, and build cruft out of the image.
-# Runtime config is injected at runtime via docker-compose `env_file`.
+# Default-deny the build context. Dockerfile copies only the runtime application
+# inputs explicitly, so a new top-level file is excluded until it is reviewed.
+**
+
+# Runtime credentials are never build inputs, even if this allowlist changes.
 .env
-.env.*
-*.env
+.secrets/
+
+# Build definition and dependency input.
+!Dockerfile
+!Dockerfile.postgres
+!.dockerignore
+!requirements.txt
+!requirements.lock
+
+# Runtime bootstrap and the non-secret configuration template consumed by
+# settings.py. A real .env is never a build input.
+!init.sh
+!manage.py
 !.env_sample
-_docs/
 
-# Local Python virtualenvs (host-built, ~1GB, platform-specific)
-.venv
-venv
-env/
-*.egg-info
-__pycache__/
-*.py[cod]
+# Runtime Python packages, templates, and committed static source assets.
+!apps/
+!apps/**
+!backupsheep/
+!backupsheep/**
+!utils/
+!utils/**
 
-# VCS / tooling
-.git
-.gitignore
-.claude
-.idea
-.vscode
-.DS_Store
+# Tests and local interpreter output are not runtime dependencies. Excluding
+# them reduces executable surface and keeps test canaries/fixtures out of layers.
+apps/tests/
+apps/**/tests.py
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
 
-# Frontend build deps (compiled CSS is committed under apps/console/_static)
-node_modules
-
-# Collected/generated static and runtime working dirs (regenerated in-container)
-/static
-_storage
-scripts/.upcloud-runtime/
-
-# Test artifacts and local notes
-_upload_test_files
-NOTES.md
+# Defense in depth for credentials or runtime artifacts accidentally created
+# inside an otherwise allowlisted source directory.
+**/.env
+**/.env.*
+**/*.env
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.kdbx
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+**/*.dump
+**/*.sql
+**/*.log
+**/id_rsa*
+**/id_ed25519*
+**/.aws/
+**/.config/gcloud/
+**/.ssh/
