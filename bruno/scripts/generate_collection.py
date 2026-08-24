@@ -25,6 +25,7 @@ CATEGORIES = {
     "health": ("00 Health", 0),
     "auth": ("01 Authentication", 1),
     "check": ("02 Session", 2),
+    "mobile": ("02 Session", 2),
     "callback": ("03 OAuth Callbacks", 3),
     "members": ("10 Account and Team", 10),
     "accounts": ("10 Account and Team", 10),

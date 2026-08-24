@@ -15,10 +15,10 @@
     ]
   },
   "counts": {
-    "api_operations": 916,
+    "api_operations": 917,
     "health_operations": 1,
-    "total_operations": 917,
-    "unique_paths": 524
+    "total_operations": 918,
+    "unique_paths": 525
   },
   "operations": [
     {
@@ -6572,6 +6572,19 @@
       "safety": "mutation",
       "kind": "machine-api",
       "file": "requests/10 Account and Team/Members/011-post-update-membership.bru"
+    },
+    {
+      "operation_id": "get-api-v1-mobile-bootstrap",
+      "method": "GET",
+      "path": "/api/v1/mobile/bootstrap/",
+      "regex_route": "api/v1/mobile/bootstrap/",
+      "view": "apps.api.v1.mobile.views.MobileBootstrapView",
+      "action": "get",
+      "source": "apps/api/v1/mobile/views.py",
+      "auth": "token",
+      "safety": "safe-read",
+      "kind": "machine-api",
+      "file": "requests/02 Session/002-get-get.bru"
     },
     {
       "operation_id": "get-api-v1-nodes",
