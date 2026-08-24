@@ -26,7 +26,7 @@ from apps._tasks.integration.restore_lease import (
     RestoreLeaseLost,
 )
 from apps.console.backup.models import CoreDatabaseRestore, CoreWebsiteRestore
-from apps.console.connection.models import CoreAuthDatabase
+from apps.console.connection.models import CoreAuthDatabase, CoreAuthWebsite
 from apps.tests.test_restore import RestoreBackendBase
 
 
@@ -72,6 +72,11 @@ class LogicalRestoreCrashSafetyTests(RestoreBackendBase):
     def _website_call_args(backup, restore, record):
         node = backup.website.node
         auth = node.connection.auth_website
+        # Crash/replay behavior is independent of transport policy. Exercise it
+        # over the secure FTP mode so this fixture cannot weaken or bypass the
+        # production default that rejects plaintext FTP.
+        auth.protocol = CoreAuthWebsite.Protocol.FTPS
+        auth.ftps_use_explicit_ssl = True
         website = node.website
         return (
             node,
@@ -80,7 +85,7 @@ class LogicalRestoreCrashSafetyTests(RestoreBackendBase):
             auth,
             record,
             website,
-            f"ftp://{auth.host}",
+            f"ftps://{auth.host}",
             "restore-user",
             "restore-password",
             None,
