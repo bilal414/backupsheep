@@ -1,0 +1,1453 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#102c2b">
+  <meta name="description" content="BackupSheep enterprise recovery manual: architecture, backup and restore workflows, APIs, configuration, retries, security, and operations.">
+  <title>BackupSheep enterprise recovery manual</title>
+  <link rel="icon" type="image/png" href="assets/backupsheep-wordmark.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to documentation</a>
+
+  <svg class="icon-sprite" aria-hidden="true" focusable="false">
+    <symbol id="icon-book" viewBox="0 0 24 24"><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H11v17H7.5A3.5 3.5 0 0 0 4 22V5.5Zm16 0A3.5 3.5 0 0 0 16.5 2H13v17h3.5A3.5 3.5 0 0 1 20 22V5.5Z"/></symbol>
+    <symbol id="icon-map" viewBox="0 0 24 24"><path d="m3 6 5-3 8 3 5-3v15l-5 3-8-3-5 3V6Zm5-3v15m8-12v15"/></symbol>
+    <symbol id="icon-network" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="5" rx="1"/><rect x="2" y="17" width="6" height="5" rx="1"/><rect x="16" y="17" width="6" height="5" rx="1"/><path d="M12 7v5m-7 5v-2.5A2.5 2.5 0 0 1 7.5 12h9a2.5 2.5 0 0 1 2.5 2.5V17"/></symbol>
+    <symbol id="icon-install" viewBox="0 0 24 24"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 19v2h16v-2"/></symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 2 4.5 5v6.5c0 4.7 3 8.8 7.5 10.5 4.5-1.7 7.5-5.8 7.5-10.5V5L12 2Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></symbol>
+    <symbol id="icon-cloud" viewBox="0 0 24 24"><path d="M6.5 19h11a4.5 4.5 0 0 0 .8-8.9A6.5 6.5 0 0 0 5.8 8.7 5.2 5.2 0 0 0 6.5 19Z"/></symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3V6Z"/><path d="m8 15 2 2 5-5"/></symbol>
+    <symbol id="icon-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/></symbol>
+    <symbol id="icon-archive" viewBox="0 0 24 24"><path d="M3 5h18v4H3V5Zm2 4h14v12H5V9Z"/><path d="M9 13h6"/></symbol>
+    <symbol id="icon-storage" viewBox="0 0 24 24"><path d="M4 4h16v6H4V4Zm0 10h16v6H4v-6Z"/><path d="M8 7h.01M8 17h.01m4-10h5m-5 10h5"/></symbol>
+    <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
+    <symbol id="icon-pulse" viewBox="0 0 24 24"><path d="M2 12h4l2-6 4 12 3-9 2 3h5"/></symbol>
+    <symbol id="icon-restore" viewBox="0 0 24 24"><path d="M5 8V3L2 6m3-3 3 3M5 7a8.5 8.5 0 1 1-1 8"/><path d="M12 8v5l3 2"/></symbol>
+    <symbol id="icon-code" viewBox="0 0 24 24"><path d="m8 5-6 7 6 7m8-14 6 7-6 7M14 3l-4 18"/></symbol>
+    <symbol id="icon-team" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 21v-2a6 6 0 0 1 12 0v2m0-6a5 5 0 0 1 6 4.9V21"/></symbol>
+    <symbol id="icon-bell" viewBox="0 0 24 24"><path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5l-2 3Zm5 3h4"/></symbol>
+    <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M3 12h4l2.2-6 4.2 12 2.3-6H21"/></symbol>
+    <symbol id="icon-dr" viewBox="0 0 24 24"><path d="M4 4h16v6H4V4Zm0 10h16v6H4v-6Z"/><path d="m9 17 2 2 4-4M8 7h.01"/></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></symbol>
+    <symbol id="icon-warning" viewBox="0 0 24 24"><path d="M12 3 2 21h20L12 3Z"/><path d="M12 9v5m0 3h.01"/></symbol>
+    <symbol id="icon-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></symbol>
+    <symbol id="icon-proof" viewBox="0 0 24 24"><path d="M4 3h12l4 4v14H4V3Z"/><path d="M16 3v5h5m-13 5 2 2 5-5m-7 8h8"/></symbol>
+    <symbol id="icon-glossary" viewBox="0 0 24 24"><path d="M5 3h14v18H5a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Z"/><path d="M5 3v18m4-13h6m-6 4h6"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+    <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m5 5 14 14M19 5 5 19"/></symbol>
+  </svg>
+
+  <div class="manual-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
+      <div class="brand-panel">
+        <img src="assets/backupsheep-wordmark.png" alt="BackupSheep" class="brand-wordmark">
+        <span class="manual-label">Enterprise recovery manual</span>
+      </div>
+
+      <nav class="manual-nav">
+        <div class="nav-group">
+          <p class="nav-group-label">Orient</p>
+          <a href="#overview" data-route="overview"><svg><use href="#icon-book"/></svg><span>Start here</span></a>
+          <a href="#concepts" data-route="concepts"><svg><use href="#icon-map"/></svg><span>Core concepts</span></a>
+          <a href="#architecture" data-route="architecture"><svg><use href="#icon-network"/></svg><span>Architecture</span></a>
+          <a href="#installation" data-route="installation"><svg><use href="#icon-install"/></svg><span>Install &amp; onboard</span></a>
+          <a href="#security" data-route="security"><svg><use href="#icon-shield"/></svg><span>Security model</span></a>
+        </div>
+
+        <div class="nav-group">
+          <p class="nav-group-label">Protect</p>
+          <a href="#cloud-backups" data-route="cloud-backups"><svg><use href="#icon-cloud"/></svg><span>Cloud snapshots</span></a>
+          <a href="#website-backups" data-route="website-backups"><svg><use href="#icon-folder"/></svg><span>Websites &amp; WordPress</span></a>
+          <a href="#database-backups" data-route="database-backups"><svg><use href="#icon-database"/></svg><span>Databases</span></a>
+          <a href="#data-backups" data-route="data-backups"><svg><use href="#icon-archive"/></svg><span>AWS data &amp; SaaS</span></a>
+          <a href="#storage" data-route="storage"><svg><use href="#icon-storage"/></svg><span>Storage destinations</span></a>
+          <a href="#schedules" data-route="schedules"><svg><use href="#icon-clock"/></svg><span>Schedules &amp; retention</span></a>
+        </div>
+
+        <div class="nav-group">
+          <p class="nav-group-label">Recover</p>
+          <a href="#execution" data-route="execution"><svg><use href="#icon-pulse"/></svg><span>Execution &amp; retries</span></a>
+          <a href="#restores" data-route="restores"><svg><use href="#icon-restore"/></svg><span>Restore workflows</span></a>
+          <a href="#edge-cases" data-route="edge-cases"><svg><use href="#icon-warning"/></svg><span>Failure &amp; edge cases</span></a>
+        </div>
+
+        <div class="nav-group">
+          <p class="nav-group-label">Integrate</p>
+          <a href="#api" data-route="api"><svg><use href="#icon-code"/></svg><span>API explorer</span></a>
+          <a href="#teams" data-route="teams"><svg><use href="#icon-team"/></svg><span>Teams &amp; access</span></a>
+          <a href="#notifications" data-route="notifications"><svg><use href="#icon-bell"/></svg><span>Notifications</span></a>
+        </div>
+
+        <div class="nav-group">
+          <p class="nav-group-label">Operate</p>
+          <a href="#operations" data-route="operations"><svg><use href="#icon-activity"/></svg><span>Operations &amp; signals</span></a>
+          <a href="#disaster-recovery" data-route="disaster-recovery"><svg><use href="#icon-dr"/></svg><span>Control-plane DR</span></a>
+          <a href="#configuration" data-route="configuration"><svg><use href="#icon-settings"/></svg><span>Configuration</span></a>
+        </div>
+
+        <div class="nav-group">
+          <p class="nav-group-label">Reference</p>
+          <a href="#provider-matrix" data-route="provider-matrix"><svg><use href="#icon-grid"/></svg><span>Provider matrix</span></a>
+          <a href="#evidence" data-route="evidence"><svg><use href="#icon-proof"/></svg><span>Evidence &amp; limits</span></a>
+          <a href="#glossary" data-route="glossary"><svg><use href="#icon-glossary"/></svg><span>Glossary</span></a>
+        </div>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span class="status-dot"></span>
+        <div><strong>Self-hosted</strong><small>Your infrastructure, your recovery evidence</small></div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <button class="icon-button mobile-menu" id="mobile-menu" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
+          <svg><use href="#icon-menu"/></svg>
+        </button>
+        <div class="breadcrumb" aria-label="Breadcrumb">
+          <span>Manual</span><svg><use href="#icon-arrow"/></svg><strong id="current-page-name">Start here</strong>
+        </div>
+        <div class="topbar-actions">
+          <button class="search-trigger" id="search-trigger" type="button" aria-haspopup="dialog">
+            <svg><use href="#icon-search"/></svg><span>Search the manual</span><kbd>⌘ K</kbd>
+          </button>
+          <span class="edition-chip">Edition 2026.08</span>
+          <button class="icon-button" id="theme-toggle" type="button" aria-label="Switch color theme">
+            <svg class="theme-icon-light"><use href="#icon-moon"/></svg>
+            <svg class="theme-icon-dark"><use href="#icon-sun"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="readiness-banner" role="note">
+        <span>Self-hostable beta</span>
+        <p>This manual describes current repository behavior, not an enterprise certification or SLA. Complete security remediation and independently retest the exact release before multi-user production use.</p>
+        <a href="#evidence">Review readiness boundaries</a>
+      </div>
+
+      <div class="content-grid">
+        <main class="manual-content" id="main-content" tabindex="-1">
+          <article class="doc-page is-active" data-page="overview" data-title="Start here">
+            <header class="hero blueprint-field">
+              <div class="hero-copy">
+                <p class="eyebrow">Enterprise recovery manual</p>
+                <h1>Know what is protected.<br><em>Prove what can be recovered.</em></h1>
+                <p class="hero-lede">BackupSheep is a self-hosted backup control plane for provider snapshots, data archives, multi-destination copies, and tracked restores. This manual explains the operating contract behind every green badge—and the evidence required before it should be trusted.</p>
+                <div class="hero-actions">
+                  <a class="button primary" href="#concepts">Build the mental model <svg><use href="#icon-arrow"/></svg></a>
+                  <a class="button secondary" href="#restores">Plan a restore rehearsal</a>
+                </div>
+              </div>
+
+              <div class="evidence-rail" aria-label="Backup evidence chain">
+                <div class="rail-heading"><span>Durable evidence chain</span><small>One operation · one correlation ID</small></div>
+                <div class="rail-track">
+                  <span class="rail-line"></span>
+                  <div class="rail-step is-record"><i>01</i><strong>Accept</strong><small>Request</small></div>
+                  <div class="rail-step"><i>02</i><strong>Record</strong><small>Ledger</small></div>
+                  <div class="rail-step"><i>03</i><strong>Dispatch</strong><small>Queue</small></div>
+                  <div class="rail-step"><i>04</i><strong>Protect</strong><small>Source</small></div>
+                  <div class="rail-step"><i>05</i><strong>Verify</strong><small>Artifact</small></div>
+                  <div class="rail-step"><i>06</i><strong>Replicate</strong><small>Copies</small></div>
+                  <div class="rail-step is-proof"><i>07</i><strong>Recover</strong><small>Proof</small></div>
+                </div>
+                <div class="rail-note"><svg><use href="#icon-shield"/></svg><span>A broker task is delivery. PostgreSQL records are the durable operational truth.</span></div>
+              </div>
+            </header>
+
+            <section id="overview-contract" class="section-block">
+              <div class="section-heading">
+                <p class="eyebrow">The operating contract</p>
+                <h2>Four questions every backup must answer</h2>
+                <p>A backup product earns trust by making uncertainty visible. Use these questions during design review, incident response, and recovery rehearsal.</p>
+              </div>
+              <div class="question-grid">
+                <article><span class="question-index">A</span><h3>What was accepted?</h3><p>A durable request, source, policy occurrence, and correlation ID must exist before queue delivery is treated as successful.</p></article>
+                <article><span class="question-index">B</span><h3>What was created?</h3><p>Archive identity, provider resource ID, checksum, byte count, object version, or a reconciliation record—not only a provider display name.</p></article>
+                <article><span class="question-index">C</span><h3>Where are the usable copies?</h3><p>Each destination has its own storage-point state. A partial run identifies the good copies and the copies that need attention.</p></article>
+                <article><span class="question-index">D</span><h3>Has recovery been proven?</h3><p>Only a restore to an isolated target plus independent data verification demonstrates recoverability for that source and path.</p></article>
+              </div>
+            </section>
+
+            <section id="overview-paths" class="section-block">
+              <div class="section-heading split-heading">
+                <div><p class="eyebrow">Choose your path</p><h2>Read by responsibility</h2></div>
+                <p>The same system looks different to a platform owner, recovery operator, security reviewer, and API integrator. These paths converge on the same evidence model.</p>
+              </div>
+              <div class="persona-list">
+                <a href="#installation"><span class="persona-icon"><svg><use href="#icon-install"/></svg></span><div><strong>Platform owner</strong><small>Install, harden, scale, monitor, upgrade, and protect the control plane.</small></div><svg class="arrow"><use href="#icon-arrow"/></svg></a>
+                <a href="#restores"><span class="persona-icon"><svg><use href="#icon-restore"/></svg></span><div><strong>Recovery operator</strong><small>Understand eligible copies, safe targets, resumes, verification, and cutover boundaries.</small></div><svg class="arrow"><use href="#icon-arrow"/></svg></a>
+                <a href="#security"><span class="persona-icon"><svg><use href="#icon-shield"/></svg></span><div><strong>Security reviewer</strong><small>Review tenancy, secrets, network boundaries, destructive scopes, and audit evidence.</small></div><svg class="arrow"><use href="#icon-arrow"/></svg></a>
+                <a href="#api"><span class="persona-icon"><svg><use href="#icon-code"/></svg></span><div><strong>API integrator</strong><small>Search every resolver operation, understand safety classes, and automate durable workflows.</small></div><svg class="arrow"><use href="#icon-arrow"/></svg></a>
+              </div>
+            </section>
+
+            <section id="overview-coverage" class="section-block coverage-band">
+              <div><p class="eyebrow">Repository-derived coverage</p><h2>One manual, three layers of truth</h2><p>Feature guidance explains intended behavior. The generated catalogs map current interfaces. Dated engineering reports retain test evidence without turning a single run into a universal guarantee.</p></div>
+              <dl class="coverage-ledger">
+                <div><dt data-api-total>917</dt><dd>resolver operations indexed</dd></div>
+                <div><dt>26</dt><dd>storage destinations mapped</dd></div>
+                <div><dt data-config-total>171</dt><dd>configuration variables indexed</dd></div>
+                <div><dt>1</dt><dd>restore rehearsal still required</dd></div>
+              </dl>
+            </section>
+
+            <aside class="callout attention">
+              <svg><use href="#icon-warning"/></svg>
+              <div><strong>A completed backup is not a recovery certificate.</strong><p>Connection validation proves credentials at a point in time. Backup completion proves the recorded operation reached its terminal contract. A restore rehearsal proves that a selected copy can reconstruct verified data. Retain all three as separate evidence.</p></div>
+            </aside>
+
+            <div class="page-links">
+              <a href="../README.md">Browse the canonical Markdown library</a>
+              <a href="#evidence">Understand evidence and known limits</a>
+            </div>
+          </article>
+
+          <article class="doc-page" data-page="concepts" data-title="Core concepts">
+            <header class="page-hero">
+              <p class="eyebrow">Foundations</p>
+              <h1>The recovery data model</h1>
+              <p>BackupSheep separates who owns protection, how a source is reached, what is protected, when it runs, what happened, where the copies live, and how recovery proceeds. Keeping these records distinct is what makes partial failure and crash recovery understandable.</p>
+            </header>
+
+            <section id="concepts-map" class="section-block">
+              <div class="concept-map" aria-label="BackupSheep object relationship map">
+                <div class="concept-node owner"><small>Tenancy</small><strong>Account</strong><span>members · groups · settings</span></div>
+                <span class="concept-link"></span>
+                <div class="concept-column">
+                  <div class="concept-node"><small>Access</small><strong>Connection</strong><span>credentials · provider scope</span></div>
+                  <div class="concept-node"><small>Policy</small><strong>Schedule</strong><span>time · retention · destinations</span></div>
+                </div>
+                <span class="concept-link"></span>
+                <div class="concept-node focus"><small>Protected workload</small><strong>Node</strong><span>resource · paths · databases</span></div>
+                <span class="concept-link"></span>
+                <div class="concept-column">
+                  <div class="concept-node evidence"><small>Intent</small><strong>Backup request</strong><span>occurrence · idempotency</span></div>
+                  <div class="concept-node evidence"><small>Outcome</small><strong>Backup + execution</strong><span>phase · attempts · proof</span></div>
+                </div>
+                <span class="concept-link"></span>
+                <div class="concept-column">
+                  <div class="concept-node"><small>Archive copy</small><strong>Storage point</strong><span>destination · checksum · version</span></div>
+                  <div class="concept-node restore"><small>Recovery</small><strong>Restore</strong><span>target · progress · provider result</span></div>
+                </div>
+              </div>
+            </section>
+
+            <section id="concepts-definitions" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Objects and boundaries</p><h2>What each record means</h2></div>
+              <div class="definition-list">
+                <article><h3>Account</h3><p>The tenant boundary for connections, nodes, storage, schedules, activity, notification channels, and memberships. Switching the current account changes scope; it does not move data.</p><span class="tag">Tenant-owned</span></article>
+                <article><h3>Connection</h3><p>Account-scoped encrypted credentials plus provider/source settings. Validation exercises the adapter but does not prove a backup or restore.</p><span class="tag">Secret-bearing</span></article>
+                <article><h3>Node</h3><p>A protected workload: a cloud resource, volume, website, database, WordPress site, or Basecamp selection. Node settings define what the backup engine should include.</p><span class="tag">Protection scope</span></article>
+                <article><h3>Schedule</h3><p>A database-backed policy that binds nodes, timing, destination copies, retention, and notification behavior. An on-demand run still produces the same durable backup records.</p><span class="tag">Policy</span></article>
+                <article><h3>Backup request</h3><p>The accepted intent and dispatch outbox. It survives a publish failure and lets recovery republish work without inventing a second request.</p><span class="tag verified">Durable intent</span></article>
+                <article><h3>Backup &amp; execution</h3><p>The customer-visible run and its operational ledger: correlation, phase, attempts, leases, errors, provider identity, progress, artifact evidence, and reconciliation.</p><span class="tag verified">Durable outcome</span></article>
+                <article><h3>Artifact</h3><p>A verified archive generation with exact filenames, hashes, sizes, and source binding. Provider-native backups instead bind to provider resource evidence.</p><span class="tag verified">Integrity evidence</span></article>
+                <article><h3>Storage point</h3><p>One concrete copy at one destination. It has independent upload, verification, download, retention, and deletion state.</p><span class="tag">Copy ledger</span></article>
+                <article><h3>Restore</h3><p>A separate durable operation with an explicit target, idempotency identity, execution lease, progress, retry/reconciliation state, and terminal outcome. It never consumes the backup.</p><span class="tag restore">Recovery operation</span></article>
+              </div>
+            </section>
+
+            <section id="concepts-status" class="section-block">
+              <div class="section-heading"><p class="eyebrow">State vocabulary</p><h2>Read status as a contract, not decoration</h2></div>
+              <div class="status-lanes">
+                <div><span class="status-pill pending">Pending</span><p>Accepted but not yet owned by a worker. Check durable dispatch state before checking Celery.</p></div>
+                <div><span class="status-pill active">In progress</span><p>A worker holds a renewable lease and should heartbeat while a bounded phase is active.</p></div>
+                <div><span class="status-pill retry">Retrying</span><p>The error is classified as retryable and the next eligible time should be visible.</p></div>
+                <div><span class="status-pill partial">Partial</span><p>At least one destination succeeded and at least one failed. Good copies remain cataloged/downloadable where supported, but built-in website/database restore currently requires Complete.</p></div>
+                <div><span class="status-pill success">Complete</span><p>The implemented terminal contract passed. Restore proof remains a separate requirement.</p></div>
+                <div><span class="status-pill danger">Manual review</span><p>Ownership or outcome is ambiguous. Inspect exact provider identities; do not repeat the mutation by hand.</p></div>
+              </div>
+            </section>
+
+            <aside class="callout info"><svg><use href="#icon-map"/></svg><div><strong>Vocabulary stays stable across UI and API.</strong><p>The console presents these objects as sources, policies, runs, copies, and recovery operations. API names may expose implementation families, but account scope and durable identifiers remain the same.</p></div></aside>
+            <div class="page-links"><a href="../features/core-concepts.md">Canonical concept guide</a><a href="#execution">Execution-state details</a></div>
+          </article>
+
+          <article class="doc-page" data-page="architecture" data-title="Architecture">
+            <header class="page-hero">
+              <p class="eyebrow">Under the hood</p>
+              <h1>A durable control plane with isolated work lanes</h1>
+              <p>Django accepts and scopes work, PostgreSQL preserves truth, RabbitMQ transports messages, Celery workers execute specialized phases, and providers or storage systems hold the protected result. The stock deployment builds one image and runs it in separate roles.</p>
+            </header>
+
+            <section id="architecture-topology" class="section-block">
+              <div class="topology" aria-label="BackupSheep service topology">
+                <div class="topology-zone edge-zone"><span class="zone-label">Access edge</span><div class="topology-node"><svg><use href="#icon-shield"/></svg><strong>TLS reverse proxy</strong><small>Operator supplied</small></div></div>
+                <span class="topology-arrow"></span>
+                <div class="topology-zone control-zone"><span class="zone-label">Control plane</span><div class="topology-node primary"><svg><use href="#icon-grid"/></svg><strong>Django + Gunicorn</strong><small>Console · API · validation</small></div><div class="topology-pair"><div class="topology-node"><svg><use href="#icon-database"/></svg><strong>PostgreSQL</strong><small>Durable truth</small></div><div class="topology-node"><svg><use href="#icon-pulse"/></svg><strong>RabbitMQ</strong><small>Message transport</small></div></div><div class="topology-node slim"><svg><use href="#icon-clock"/></svg><strong>Celery Beat</strong><small>Schedules + recovery sweeps</small></div></div>
+                <span class="topology-arrow"></span>
+                <div class="topology-zone worker-zone"><span class="zone-label">Execution lanes</span><div class="worker-stack"><span>cloud + default</span><span>database</span><span>files</span><span>storage</span><span>logs</span></div></div>
+                <span class="topology-arrow"></span>
+                <div class="topology-zone provider-zone"><span class="zone-label">Data planes</span><div class="topology-node"><svg><use href="#icon-cloud"/></svg><strong>Providers &amp; sources</strong><small>Snapshots · exports · files</small></div><div class="topology-node"><svg><use href="#icon-storage"/></svg><strong>Destinations</strong><small>Local · object · drive</small></div></div>
+              </div>
+              <p class="diagram-caption">Only the reverse proxy needs inbound internet exposure. PostgreSQL and RabbitMQ stay private; workers need outbound access to the sources and destinations assigned to their queues.</p>
+            </section>
+
+            <section id="architecture-components" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Runtime responsibilities</p><h2>Why work is split by queue</h2><p>Provider polling, database dumps, file collection, uploads, and notifications have different resource and failure profiles. Separate lanes keep a slow upload or large dump from starving the web console.</p></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Role</th><th>Queue / command</th><th>Responsibility</th><th>Shared state requirement</th></tr></thead>
+                  <tbody>
+                    <tr><td><strong>app</strong></td><td>Gunicorn :8000</td><td>Console, API, onboarding, validation, static delivery</td><td><code>backup_workdir</code> and Local Storage</td></tr>
+                    <tr><td><strong>worker-cloud</strong></td><td><code>cloud,default</code></td><td>Provider-native snapshots, restores, polling, general tasks</td><td>PostgreSQL, RabbitMQ, Local Storage mount</td></tr>
+                    <tr><td><strong>worker-database</strong></td><td><code>database</code></td><td>MySQL, MariaDB, PostgreSQL dumps and database restores</td><td>Shared work + Local Storage; CPU/disk heavy</td></tr>
+                    <tr><td><strong>worker-files</strong></td><td><code>files</code></td><td>Website, WordPress, and Basecamp collection/restores</td><td>Shared work + Local Storage; CPU/disk heavy</td></tr>
+                    <tr><td><strong>worker-storage</strong></td><td><code>storage</code></td><td>Copy upload, verification, finalization, cleanup, downloads</td><td>Must see the exact artifact bytes</td></tr>
+                    <tr><td><strong>worker-logs</strong></td><td><code>logs</code></td><td>Activity, notification fan-out, local log pruning</td><td>Work mount for run-log maintenance</td></tr>
+                    <tr><td><strong>beat</strong></td><td>database scheduler</td><td>Schedule occurrences, recovery, retention, maintenance</td><td>Keep one ordinary cadence owner</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section id="architecture-persistence" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Persistence map</p><h2>Protect four distinct stores</h2></div>
+                <dl class="stacked-definitions">
+                  <div><dt><code>pgdata</code></dt><dd>Accounts, encrypted credentials, policies, backup/restore rows, leases, provider identities, and recovery evidence.</dd></div>
+                  <div><dt><code>rabbitmq_data</code></dt><dd>Durable queues and persistent delivery. Important for continuity, but recoverable intent lives in PostgreSQL.</dd></div>
+                  <div><dt><code>backup_workdir</code></dt><dd>In-flight archives, restore/run logs, website caches, SSH trust material, and optional managed key.</dd></div>
+                  <div><dt><code>backup_storage</code></dt><dd>Customer backup archives when Local Storage is selected. Treat it as production backup data.</dd></div>
+                </dl>
+              </div>
+              <aside class="boundary-card">
+                <p class="eyebrow">Multi-host invariant</p>
+                <h3>Same bytes. Same path. Every file-touching worker.</h3>
+                <p>Docker named volumes satisfy this on one host. A multi-host deployment needs a shared filesystem for <code>backup_workdir</code> and shared durable storage for <code>/backups</code> when Local Storage is enabled.</p>
+              </aside>
+            </section>
+
+            <section id="architecture-flow" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Archive-producing flow</p><h2>From request to verified copies</h2></div>
+              <ol class="phase-list">
+                <li><span>01</span><div><strong>Accept and commit</strong><p>Create durable request/correlation state before relying on broker publication.</p></div></li>
+                <li><span>02</span><div><strong>Claim and fence</strong><p>The correct queue worker acquires a renewable lease; stale owners cannot write competing terminal state.</p></div></li>
+                <li><span>03</span><div><strong>Collect or snapshot</strong><p>The source adapter performs the bounded source operation and records safe progress.</p></div></li>
+                <li><span>04</span><div><strong>Verify the source result</strong><p>Archive structure/hash/size or exact provider identifiers must satisfy the integration contract.</p></div></li>
+                <li><span>05</span><div><strong>Fan out copies</strong><p>One storage point per requested destination progresses independently through upload and verification.</p></div></li>
+                <li><span>06</span><div><strong>Finalize visibly</strong><p>All success → Complete; mixed outcome → Partial; no usable destination → Upload Failed.</p></div></li>
+              </ol>
+            </section>
+
+            <aside class="callout attention"><svg><use href="#icon-warning"/></svg><div><strong><code>/healthz/</code> is liveness, not readiness.</strong><p>It proves that one web process answered. It does not test PostgreSQL, RabbitMQ, workers, storage, providers, artifact integrity, or restore readiness.</p></div></aside>
+            <div class="page-links"><a href="../reference/architecture.md">Canonical architecture reference</a><a href="../../docker-compose.yml">Inspect the stock service topology</a></div>
+          </article>
+
+          <article class="doc-page" data-page="installation" data-title="Install &amp; onboard">
+            <header class="page-hero">
+              <p class="eyebrow">Platform lifecycle</p>
+              <h1>Install for recovery, not only for startup</h1>
+              <p>A production-ready installation needs stable secrets, durable volumes, private dependencies, TLS at the edge, queue-specific workers, capacity headroom, and an off-host backup of BackupSheep itself.</p>
+            </header>
+
+            <section id="installation-path" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Deployment choices</p><h2>Use the path whose failure modes you can operate</h2></div>
+              <div class="choice-grid">
+                <article class="recommended"><span class="choice-label">Recommended baseline</span><h3>One-host Docker Compose</h3><p>Bundled PostgreSQL, RabbitMQ, app, workers, Beat, and named volumes. Best documented starting point for a self-hosted evaluation or controlled single-host deployment.</p><ul><li>Shared file paths are simple.</li><li>Queue lanes stay isolated.</li><li>Host remains a failure domain.</li></ul></article>
+                <article><span class="choice-label">Managed dependencies</span><h3>Compose + external services</h3><p>Move PostgreSQL and RabbitMQ to managed/private services while retaining workers and shared storage under your control.</p><ul><li>Validate TLS and broker semantics.</li><li>Back up database and configuration independently.</li><li>Keep shared work paths consistent.</li></ul></article>
+                <article><span class="choice-label">Advanced</span><h3>Multi-host workers</h3><p>Scale provider lanes horizontally and introduce shared filesystems for disk-touching workers.</p><ul><li>Keep Beat singleton.</li><li>Measure per-queue backlog first.</li><li>Test fencing under partition/restart.</li></ul></article>
+              </div>
+            </section>
+
+            <section id="installation-checklist" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Preflight gate</p><h2>Decisions to make before first boot</h2></div>
+              <div class="checklist-board">
+                <label><input type="checkbox"><span><strong>Public identity</strong><small>Final DNS name, <code>APP_DOMAIN</code>, protocol, allowed hosts, and proxy ownership agree.</small></span></label>
+                <label><input type="checkbox"><span><strong>Stable key custody</strong><small>A strong <code>DJANGO_SECRET_KEY</code> is generated once, stored securely, and included in DR.</small></span></label>
+                <label><input type="checkbox"><span><strong>Durable mounts</strong><small>PostgreSQL, RabbitMQ, work, and Local Storage paths map to known, monitored disks.</small></span></label>
+                <label><input type="checkbox"><span><strong>Private dependencies</strong><small>Database and broker ports are not internet-accessible; the app is reached through the TLS proxy.</small></span></label>
+                <label><input type="checkbox"><span><strong>Capacity model</strong><small>Largest archive, incremental cache, concurrent jobs, restore staging, and reserve space are budgeted.</small></span></label>
+                <label><input type="checkbox"><span><strong>Control-plane protection</strong><small>Off-host PostgreSQL/configuration backup and a restore rehearsal have owners and schedules.</small></span></label>
+              </div>
+            </section>
+
+            <section id="installation-sequence" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Safe sequence</p><h2>Bring the stack online in observable stages</h2></div>
+              <ol class="runbook-steps">
+                <li><span>1</span><div><h3>Prepare configuration</h3><p>Copy <code>.env_sample</code>, replace required placeholders, set the public URL tuple, and leave unused optional values blank. Never commit <code>.env</code>.</p></div></li>
+                <li><span>2</span><div><h3>Validate service composition</h3><p>Render the Compose configuration and confirm mounts, image, ports, worker concurrency, broker URL, and database target before creating containers.</p></div></li>
+                <li><span>3</span><div><h3>Apply migrations once</h3><p>The one-shot migrate service must finish successfully before app and workers serve the new version.</p></div></li>
+                <li><span>4</span><div><h3>Verify every dependency</h3><p>Check web liveness, PostgreSQL, RabbitMQ, all five queue consumers, filesystem paths, and recent service logs.</p></div></li>
+                <li><span>5</span><div><h3>Complete the five-step wizard</h3><p>Create the owner using the install token, set identity/time, configure email, add storage, and add sources. The wizard cannot be rerun.</p></div></li>
+                <li><span>6</span><div><h3>Prove the product path</h3><p>Validate a dedicated destination, create a disposable source, run an on-demand backup, restore to a new target, verify data, and retain the evidence.</p></div></li>
+              </ol>
+            </section>
+
+            <section id="installation-onboarding" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">First-run identity</p><h2>The install token establishes the first owner</h2></div>
+                <p>The first account created through onboarding becomes the instance owner. If <code>ONBOARDING_INSTALL_TOKEN</code> is blank, the application writes a generated token to the shared work volume. Possession of that token is the first-boot authorization boundary.</p>
+                <ul class="plain-list"><li>Retrieve it through trusted host access.</li><li>Do not expose it in tickets, logs, or screenshots.</li><li>Create a separate Django superuser only if <code>/django-admin/</code> is required.</li><li>Add later console users through account invitations.</li></ul>
+              </div>
+              <aside class="boundary-card danger"><p class="eyebrow">Do not proceed</p><h3>If the sample secret remains</h3><p>Production mode rejects the placeholder Django key. Treat that as a safety gate, not an obstacle to bypass.</p></aside>
+            </section>
+
+            <div class="page-links"><a href="../guides/installation.md">Full installation commands</a><a href="../guides/first-run.md">First-run walkthrough</a><a href="../guides/production.md">Production hardening checklist</a></div>
+          </article>
+
+          <article class="doc-page" data-page="security" data-title="Security model">
+            <header class="page-hero">
+              <p class="eyebrow">Trust boundaries</p>
+              <h1>Credentials unlock recovery—and deserve recovery-grade protection</h1>
+              <p>BackupSheep is self-hosted. The operator owns the network edge, host, database, broker, storage, secrets, monitoring, and recovery process. Application controls reduce risk inside that boundary; they do not replace infrastructure controls.</p>
+            </header>
+
+            <section id="security-rings" class="section-block">
+              <div class="security-rings" aria-label="Security responsibility layers">
+                <div class="ring ring-operator"><span>Operator boundary</span><small>TLS · firewall · host · volumes · backups</small></div>
+                <div class="ring ring-application"><span>Application boundary</span><small>sessions · CSRF · tokens · tenancy · permissions</small></div>
+                <div class="ring ring-secret"><span>Secret boundary</span><small>encrypted fields · stable keys · worker-only use</small></div>
+                <div class="ring ring-operation"><span>Operation boundary</span><small>idempotency · leases · ownership · audit</small></div>
+              </div>
+            </section>
+
+            <section id="security-controls" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Implemented controls</p><h2>Application safeguards and their limits</h2></div>
+              <div class="control-matrix">
+                <article><span class="control-state implemented">Implemented</span><h3>Session + CSRF</h3><p>Browser sessions use Django REST Framework CSRF enforcement for unsafe API requests. The console sends the CSRF cookie in <code>X-CSRFToken</code>.</p></article>
+                <article><span class="control-state limited">Implemented with lifecycle gap</span><h3>Token authentication</h3><p>API clients send <code>Authorization: Token &lt;key&gt;</code>. Current persistent tokens survive browser logout and password reset; revoke or rotate them explicitly.</p></article>
+                <article><span class="control-state review">Release verification required</span><h3>Account scoping</h3><p>Current-account and visible-node scoping is the intended contract. Authorization code is under active remediation; run a complete owner/team/client role matrix against the exact released build.</p></article>
+                <article><span class="control-state unavailable">Do not rely on</span><h3>Multi-factor authentication</h3><p>MFA-labeled API actions exist, but the current member model and login path do not implement an enforceable second factor. Treat MFA as unavailable until implemented and independently tested.</p></article>
+                <article><span class="control-state limited">Application-level protection</span><h3>Encrypted credentials</h3><p>Most source/destination credentials use a per-account key that co-resides with ciphertext in PostgreSQL. Email-provider credentials use material derived from <code>DJANGO_SECRET_KEY</code>. This is not external KMS separation; Slack currently has plaintext exceptions.</p></article>
+                <article><span class="control-state operator">Operator owned</span><h3>TLS termination</h3><p>The app speaks HTTP. A trusted reverse proxy must terminate TLS, overwrite forwarded headers, and keep port 8000 private.</p></article>
+                <article><span class="control-state operator">Operator owned</span><h3>Infrastructure encryption</h3><p>Disk, database, broker, backup-media, and secret-manager encryption are deployment responsibilities.</p></article>
+                <article><span class="control-state operator">Operator owned</span><h3>Central audit and alerting</h3><p>Activity and service logs exist; external retention, SIEM export, dependency metrics, and restore monitoring are not bundled.</p></article>
+              </div>
+            </section>
+
+            <section id="security-secrets" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Secret recovery class</p><h2>What must survive together</h2></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Material</th><th>Why it is sensitive</th><th>Loss impact</th><th>Protection expectation</th></tr></thead>
+                  <tbody>
+                    <tr><td><code>DJANGO_SECRET_KEY</code></td><td>Signs sessions and derives email-credential encryption material</td><td>Sessions invalidate; stored email credentials become unreadable</td><td>Stable, encrypted, versioned secret custody</td></tr>
+                    <tr><td>PostgreSQL</td><td>Contains tenancy, per-account keys, encrypted credentials, policies, provider identities</td><td>Control plane and recovery mapping are lost</td><td>Encrypted off-host backups + isolated restore tests</td></tr>
+                    <tr><td>Provider/source credentials</td><td>Can read data or create/delete billable resources</td><td>Backup/restore stops; account may be exposed</td><td>Least privilege, scoped account/project, planned rotation</td></tr>
+                    <tr><td>SSH trust + optional key</td><td>Authenticates sources and prevents host impersonation</td><td>SFTP/database access fails or trust is weakened</td><td>Reviewed fingerprints; shared protected work volume; mode 0600</td></tr>
+                    <tr><td>API tokens</td><td>Carry the member's current account access</td><td>Unauthorized reads or mutations</td><td>No source control; separate automation identities; revoke on trust change</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section id="security-destructive" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Mutation safety</p><h2>Destructive scope is explicit</h2></div>
+                <ul class="plain-list"><li>Native restores create new provider resources rather than overwrite sources.</li><li>Database console restores default to a deterministic new-database fork.</li><li>Website exact mirror requires a separate deletion choice and can remove target files.</li><li>Retention deletion uses owned provider/storage identity, not a display-name guess.</li><li>Unknown provider outcomes reconcile before any repeat create/delete call.</li><li>S3 Object Lock, legal hold, and <code>no_delete</code> are surfaced as retained/deferred state.</li></ul>
+              </div>
+              <aside class="boundary-card"><p class="eyebrow">SSH invariant</p><h3>Unknown hosts are rejected</h3><p>SFTP/SSH sources require reviewed host keys in <code>SSH_KNOWN_HOSTS_PATH</code>. Approve fingerprints out of band; do not disable verification to make a connection pass.</p></aside>
+            </section>
+
+            <section id="security-hardening" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Minimum production gate</p><h2>Before exposing the console</h2></div>
+              <div class="policy-strip"><span>Debug off</span><span>Exact allowed hosts</span><span>HTTPS + secure cookies</span><span>Private DB/broker</span><span>Restricted console reachability</span><span>Stable secret backup</span><span>Least-privilege providers</span><span>Delegated-role tests</span></div>
+            </section>
+
+            <aside class="callout danger"><svg><use href="#icon-shield"/></svg><div><strong>Do not put raw diagnostics into customer-facing status.</strong><p>Provider responses, command output, authorization headers, signed URLs, filenames, credentials, lease tokens, and arbitrary exceptions can disclose sensitive data. Public contracts use allowlisted error codes, remediation text, retryability, and correlation IDs.</p></div></aside>
+            <div class="page-links"><a href="../../SECURITY.md">Security policy</a><a href="../guides/production.md">Production security checklist</a><a href="../features/teams-tenancy-and-api-access.md">Tenancy and permission details</a></div>
+          </article>
+
+          <article class="doc-page" data-page="cloud-backups" data-title="Cloud snapshots">
+            <header class="page-hero">
+              <p class="eyebrow">Provider-native protection</p>
+              <h1>Cloud backups stay in the connected provider account</h1>
+              <p>For compute, block storage, managed databases, and selected AWS data services, BackupSheep orchestrates native snapshots, images, backups, or recovery points. It records the provider identity and recovery context; it does not download these resources into general storage destinations.</p>
+            </header>
+
+            <section id="cloud-model" class="section-block">
+              <div class="placement-comparison">
+                <article class="native-path"><div class="path-title"><svg><use href="#icon-cloud"/></svg><div><small>Provider-native</small><h2>Snapshot or recovery point</h2></div></div><div class="mini-flow"><span>Node</span><i></i><span>Provider API</span><i></i><span>Owned backup ID</span><i></i><span>New-resource restore</span></div><p>The provider retains the protected data. Schedule destinations do not apply. Retention calls the same provider adapter using stored ownership evidence.</p></article>
+                <article class="archive-path"><div class="path-title"><svg><use href="#icon-archive"/></svg><div><small>Archive-producing</small><h2>Verified file copied offsite</h2></div></div><div class="mini-flow"><span>Node</span><i></i><span>Dump / collect</span><i></i><span>Artifact</span><i></i><span>1…n destinations</span></div><p>Website, logical database, WordPress, and Basecamp jobs create an artifact and require at least one configured storage destination.</p></article>
+              </div>
+            </section>
+
+            <section id="cloud-lifecycle" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Common lifecycle</p><h2>How a native backup works</h2></div>
+              <ol class="phase-list provider-phases">
+                <li><span>01</span><div><strong>Resolve exact source</strong><p>Bind the BackupSheep node to the current provider account, project/region, resource type, and provider identifier.</p></div></li>
+                <li><span>02</span><div><strong>Reject overlap</strong><p>Active statuses and durable request uniqueness prevent a second backup for the same node from starting concurrently.</p></div></li>
+                <li><span>03</span><div><strong>Persist intent</strong><p>Create request, backup, execution, correlation, and ownership marker before crossing a provider mutation boundary.</p></div></li>
+                <li><span>04</span><div><strong>Create once</strong><p>Ask the provider for the snapshot/image/backup using bounded timeouts and integration-specific metadata.</p></div></li>
+                <li><span>05</span><div><strong>Record provider pointer</strong><p>Persist the returned operation, resource, snapshot, job, or recovery-point identity as soon as it is known.</p></div></li>
+                <li><span>06</span><div><strong>Poll without duplicating</strong><p>Read provider status until terminal. Rate limits and temporary failures schedule later polling against the same row.</p></div></li>
+                <li><span>07</span><div><strong>Reconcile ambiguity</strong><p>If a response is lost, inventory by exact marker/account/scope. Zero, multiple, or mismatched candidates stop for review.</p></div></li>
+                <li><span>08</span><div><strong>Finalize evidence</strong><p>Store terminal provider status and identity; notify, log, and apply schedule retention only from the owned result.</p></div></li>
+              </ol>
+            </section>
+
+            <section id="cloud-provider-behavior" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Provider behavior</p><h2>What is protected and how it comes back</h2><p>“Implemented” means a repository path exists. Provider plan, region, IAM, API version, and live restore still need validation in the exact tenant.</p></div>
+              <div class="table-wrap wide-table">
+                <table>
+                  <thead><tr><th>Integration</th><th>Protected resource</th><th>Native result</th><th>Tracked restore</th><th>Critical boundary</th></tr></thead>
+                  <tbody>
+                    <tr><td><strong>DigitalOcean</strong></td><td>Droplet, block volume</td><td>Snapshot</td><td>New Droplet or volume</td><td>Token or deployment OAuth; exact account identity is pinned.</td></tr>
+                    <tr><td><strong>Hetzner Cloud</strong></td><td>Server primary disk</td><td>Server snapshot</td><td>New server</td><td>Attached Volumes and network resources are outside server snapshot scope.</td></tr>
+                    <tr><td><strong>UpCloud</strong></td><td>Server, storage volume</td><td>Template / storage backup</td><td>New volume or reconstructed server</td><td>Server restore is multi-phase; ambiguous topology fails closed.</td></tr>
+                    <tr><td><strong>Vultr</strong></td><td>Instance, block storage</td><td>Snapshot</td><td>New instance or volume</td><td>Ownership reconciliation uses provider IDs and bounded inventory.</td></tr>
+                    <tr><td><strong>Vultr Managed DB</strong></td><td>PostgreSQL, MySQL, MariaDB, Valkey</td><td>Provider backup metadata</td><td>New managed-database fork</td><td>PITR excludes Valkey; unsupported plans are rejected.</td></tr>
+                    <tr><td><strong>Oracle Cloud</strong></td><td>Compute, boot volume, block volume</td><td>Custom image / volume backup</td><td>New instance or volume</td><td>Compartment, availability domain, shape, subnet, and OCIDs are locked.</td></tr>
+                    <tr><td><strong>Google Cloud</strong></td><td>Compute instance, persistent disk</td><td>Machine image / disk snapshot</td><td>New instance or disk</td><td>Instance selection is zonal; machine-image scope differs.</td></tr>
+                    <tr><td><strong>OVH CA / EU / US</strong></td><td>Public Cloud instance, volume</td><td>Image / snapshot</td><td>New provider resource</td><td>Each regional endpoint needs its matching application credentials.</td></tr>
+                    <tr><td><strong>AWS EC2 / EBS</strong></td><td>Instance, EBS volume</td><td>AMI / EBS snapshot</td><td>New instance or volume</td><td>EC2 image behavior can use <code>no_reboot</code>; tags bind ownership.</td></tr>
+                    <tr><td><strong>AWS RDS</strong></td><td>DB instance</td><td>Manual RDS snapshot</td><td>New DB instance</td><td>Target class/network/storage options must be compatible with the snapshot.</td></tr>
+                    <tr><td><strong>Amazon Lightsail</strong></td><td>Instance, disk, relational database</td><td>Native snapshot</td><td>New instance, disk, or database</td><td>Resource types use distinct provider operations and polling paths.</td></tr>
+                    <tr><td><strong>AWS Backup</strong></td><td>Versioned S3, DynamoDB</td><td>Recovery point</td><td>Distinct bucket or table</td><td>Requires vault/IAM prerequisites; see AWS data workflow.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section id="cloud-unknown-outcome" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">The lost-response problem</p><h2>A timeout does not mean “not created”</h2></div>
+                <p>If the network fails after the provider accepts a create call, blindly retrying can create a duplicate snapshot or billable restore target. BackupSheep records mutation intent and attempts to reconcile a uniquely owned candidate before deciding what comes next.</p>
+                <div class="decision-list"><div><span>Exact one candidate</span><p>Adopt its provider ID and continue polling the same execution.</p></div><div><span>No candidate, safe rejection proven</span><p>The adapter may permit the same durable row to retry.</p></div><div><span>Zero with uncertainty, multiple, or mismatch</span><p>Move to manual review; preserve evidence and do not guess.</p></div></div>
+              </div>
+              <aside class="boundary-card danger"><p class="eyebrow">Operator rule</p><h3>Never “help” by creating a similarly named resource</h3><p>Manual provider actions can defeat the ownership marker and duplicate guard. Work from the exact correlation ID, account/project boundary, and persisted provider identifiers.</p></aside>
+            </section>
+
+            <div class="page-links"><a href="../features/backup-sources.md">Source feature guide</a><a href="../reference/provider-matrix.md">Canonical provider matrix</a><a href="#execution">Retry and reconciliation model</a></div>
+          </article>
+
+          <article class="doc-page" data-page="website-backups" data-title="Websites &amp; WordPress">
+            <header class="page-hero">
+              <p class="eyebrow">Archive protection</p>
+              <h1>Website backups turn remote trees into verified, portable archives</h1>
+              <p>BackupSheep connects by FTP, FTPS, or SFTP; applies explicit path and filter rules; collects or remotely packages the selected tree; produces a ZIP plus manifest evidence; and fans the result out to every requested storage destination.</p>
+            </header>
+
+            <section id="website-connection" class="section-block">
+              <div class="protocol-grid">
+                <article><span class="protocol-name">FTP</span><h3>Password transport</h3><p>Use only inside an already protected network boundary. Credentials and data are not encrypted by FTP itself.</p><span class="risk high">High exposure if public</span></article>
+                <article><span class="protocol-name">FTPS</span><h3>Explicit or implicit TLS</h3><p>Certificate verification is enabled by default. Fix trust/name errors instead of disabling verification.</p><span class="risk medium">Certificate-sensitive</span></article>
+                <article><span class="protocol-name">SFTP</span><h3>SSH file transfer</h3><p>Password, supplied private key, or optional operator-managed key. Reviewed host keys are mandatory.</p><span class="risk low">Preferred when available</span></article>
+              </div>
+            </section>
+
+            <section id="website-scope" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Selection contract</p><h2>Scope the tree before scheduling it</h2></div>
+                <ul class="plain-list"><li>Protect all paths or an explicit selected path set.</li><li>Apply include/exclude lists, glob patterns, and regular expressions.</li><li>For tar-mode nodes, exclude version-control ignores/metadata, caches, or existing backup files when appropriate.</li><li>Test the rules against a disposable tree with known included and excluded markers.</li><li>Record source filesystem semantics—case sensitivity, symlinks, permissions, and timestamp behavior.</li></ul>
+              </div>
+              <aside class="boundary-card"><p class="eyebrow">Restore consequence</p><h3>Selection becomes recovery scope</h3><p>A beautifully completed archive cannot restore paths that were never selected. Treat filters as policy, review them after application releases, and verify the restored manifest.</p></aside>
+            </section>
+
+            <section id="website-methods" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Collection methods</p><h2>Full, incremental, and server-side tar</h2></div>
+              <div class="method-compare">
+                <article><span>Full · worker collection</span><h3>Read the selected remote tree</h3><p>The files worker lists and downloads content, inventories it, and builds the archive locally. Simple source permissions; potentially many network round trips.</p><dl><div><dt>Best for</dt><dd>Small/medium trees, no shell access</dd></div><div><dt>Watch</dt><dd>File count, latency, source changes during collection</dd></div></dl></article>
+                <article><span>Incremental source cache</span><h3>Fetch changed content, emit a full archive</h3><p>A persistent per-node cache under <code>backup_workdir</code> reduces source transfer while the final archive still represents a complete selected tree.</p><dl><div><dt>Best for</dt><dd>Large, slowly changing sites</dd></div><div><dt>Watch</dt><dd>Cache disk, reset behavior, cache continuity</dd></div></dl></article>
+                <article><span>SFTP + remote shell</span><h3>Package remotely, then verify locally</h3><p>An eligible full backup can create a temporary remote tar, download it via SFTP, inventory it, build the final ZIP, and clean the temporary remote file.</p><dl><div><dt>Best for</dt><dd>Deep/high-file-count trees</dd></div><div><dt>Watch</dt><dd>Shell/tar permission, remote free space, cleanup</dd></div></dl></article>
+              </div>
+            </section>
+
+            <section id="website-pipeline" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Execution pipeline</p><h2>What happens under the hood</h2></div>
+              <div class="horizontal-flow" aria-label="Website backup flow">
+                <div><i>1</i><strong>Validate</strong><small>protocol · trust · path</small></div><span></span>
+                <div><i>2</i><strong>Inventory</strong><small>scope · rules · metadata</small></div><span></span>
+                <div><i>3</i><strong>Collect</strong><small>files or remote tar</small></div><span></span>
+                <div><i>4</i><strong>Archive</strong><small>ZIP · UTF-8 names</small></div><span></span>
+                <div><i>5</i><strong>Verify</strong><small>manifest · size · hash</small></div><span></span>
+                <div><i>6</i><strong>Copy</strong><small>one storage point each</small></div>
+              </div>
+            </section>
+
+            <section id="website-wordpress" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">WordPress mode</p><h2>Files, database, or both</h2></div>
+                <p>The WordPress connection/plugin workflow can protect the database and files together, database only, or files only. The result is an archive copied to storage destinations.</p>
+                <p class="muted"><strong>Recovery boundary:</strong> the current console supports artifact download but does not expose an automatic WordPress restore workflow. A transfer UI/serializer surface exists elsewhere, but the audited server action/task is incomplete; do not rely on transfer.</p>
+              </div>
+              <aside class="boundary-card attention"><p class="eyebrow">Separate data planes</p><h3>A green connection is not enough</h3><p>Verify that the WordPress workflow can read both the file tree and database content selected by the node. Test a real archive and application-level recovery.</p></aside>
+            </section>
+
+            <section id="website-restore" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Website recovery</p><h2>Overlay is the default; exact mirror is destructive</h2></div>
+              <div class="restore-mode-grid">
+                <article><span class="mode safe">Default</span><h3>Overlay</h3><p>Files in the archive overwrite matching target paths. Unrelated files already on the target remain.</p></article>
+                <article><span class="mode destructive">Explicit confirmation</span><h3>Exact mirror</h3><p>Remote files absent from the backup can be deleted. Take an independent backup, review the path scope, and restore to an isolated target first.</p></article>
+              </div>
+            </section>
+
+            <aside class="callout attention"><svg><use href="#icon-warning"/></svg><div><strong>Large-file-count and huge single-archive behavior remain capacity-sensitive.</strong><p>Budget disk and inodes for work/cache/restore staging, bound source change during collection, and test at your own scale. See the evidence page for historical large-scale gates that are not yet universal guarantees.</p></div></aside>
+            <div class="page-links"><a href="../features/backup-sources.md#website-archives">Canonical website guide</a><a href="../features/restores.md#website-restore">Website restore details</a><a href="#edge-cases">Archive edge cases</a></div>
+          </article>
+
+          <article class="doc-page" data-page="database-backups" data-title="Databases">
+            <header class="page-hero">
+              <p class="eyebrow">Logical database protection</p>
+              <h1>Portable dumps with version-aware tooling and safer fork restores</h1>
+              <p>Database nodes connect directly or through SSH, select databases and optional table scope, run engine-native logical dump tools, validate the artifact, and copy it to multiple destinations. Recovery defaults to new databases rather than overwriting the source.</p>
+            </header>
+
+            <section id="database-engines" class="section-block">
+              <div class="engine-board">
+                <article><span class="engine-mark mysql">my</span><h2>MySQL</h2><p>Model choices 5.5, 5.6, 5.7, 8.0, and 8.4. The image includes current Oracle MySQL tooling; rehearse old server/client combinations.</p></article>
+                <article><span class="engine-mark mariadb">ma</span><h2>MariaDB</h2><p>Model choices 10.1–10.11, 11.4, and 11.8. MariaDB-specific client behavior is used where required.</p></article>
+                <article><span class="engine-mark postgres">pg</span><h2>PostgreSQL</h2><p>Model choices 9–18. The image contains clients 14–18. Direct mode currently works for all/selected tables of the bound database; direct all-/selected-database modes need remediation.</p></article>
+              </div>
+              <aside class="callout info"><svg><use href="#icon-database"/></svg><div><strong>A selectable version is not a bundled binary promise.</strong><p>Authentication plugins, TLS, dump flags, extensions, routines, encodings, privileges, and client/server compatibility vary. Certify the exact pair used in production.</p></div></aside>
+            </section>
+
+            <section id="database-connectivity" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Connection modes</p><h2>Prove both the network path and data privileges</h2></div>
+              <div class="connection-paths">
+                <article><div class="connection-icon"><svg><use href="#icon-database"/></svg></div><h3>Direct</h3><p>Worker reaches the database host/port directly. Optional database TLS settings still apply.</p><ul><li>Bounded connect/statement/lock timeouts</li><li>Source allowlist/firewall required</li><li>No SSH trust layer</li></ul></article>
+                <article><div class="connection-icon"><svg><use href="#icon-network"/></svg></div><h3>SSH tunnel</h3><p>Worker establishes SSH trust and forwards the database connection through the reviewed host.</p><ul><li>Password or key authentication</li><li>Known-host fingerprint required</li><li>Both SSH and database timeouts apply</li></ul></article>
+              </div>
+            </section>
+
+            <section id="database-scope" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Backup scope</p><h2>Database and table selection are policy</h2></div>
+                <ul class="plain-list"><li>Protect one database or all discovered databases.</li><li>Use explicit database/table selection where supported.</li><li>Choose stored-routine inclusion and engine-specific dump options deliberately.</li><li>Exclude system databases and ephemeral schemas unless recovery requires them.</li><li>Revalidate discovery after application migrations or tenant onboarding.</li></ul>
+              </div>
+              <aside class="boundary-card"><p class="eyebrow">Consistency</p><h3>Logical dumps observe a live system</h3><p>Transaction/isolation behavior and application writes affect consistency. Define whether the chosen engine/options meet application-level recovery requirements, especially across multiple databases.</p></aside>
+            </section>
+
+            <section id="database-pipeline" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Execution pipeline</p><h2>Dump, sanitize failure, verify, then replicate</h2></div>
+              <ol class="phase-list compact-phases">
+                <li><span>01</span><div><strong>Validate endpoint and selection</strong><p>Reject unsupported/empty/cross-account selection before a long command starts.</p></div></li>
+                <li><span>02</span><div><strong>Acquire execution lease</strong><p>Bind the files on disk and terminal writes to one durable worker generation.</p></div></li>
+                <li><span>03</span><div><strong>Run engine-native dump</strong><p>Use selected client, safe command construction, bounded runtime, and a private work path.</p></div></li>
+                <li><span>04</span><div><strong>Build and verify archive</strong><p>Confirm expected payload, file metadata, size/hash, and exact artifact-generation binding.</p></div></li>
+                <li><span>05</span><div><strong>Fan out storage copies</strong><p>Upload each storage point independently; preserve good copies when another destination fails.</p></div></li>
+                <li><span>06</span><div><strong>Finalize and clean work files</strong><p>Only after all accepted destination states are terminal and fenced.</p></div></li>
+              </ol>
+              <aside class="callout danger"><svg><use href="#icon-warning"/></svg><div><strong>Current PostgreSQL direct-mode limitation.</strong><p>The API/model can represent all-database or selected-database direct configurations, but the audited direct engine has no matching dump branch and reaches empty-archive failure. Use the implemented bound-database table modes only until fixed and tested; SSH mode has broader selection handling.</p></div></aside>
+            </section>
+
+            <section id="database-restore" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Recovery modes</p><h2>Fork first; overwrite only through explicit API intent</h2></div>
+              <div class="restore-mode-grid three">
+                <article><span class="mode safe">Console default</span><h3>Deterministic fork</h3><p>Derive and lock new database names, prove creation privileges, create targets, import dumps, and retain the exact mapping for safe resume.</p></article>
+                <article><span class="mode caution">API only</span><h3>In-place</h3><p>An explicit target mapping and caller acceptance are required. Existing target data can be changed; this is not exposed by the current console.</p></article>
+                <article><span class="mode neutral">Existing row</span><h3>Resume verification</h3><p>Available only when the durable restore retains exact mapping, ownership marker, artifact digest, and checkpoint evidence. It does not create a new request.</p></article>
+              </div>
+            </section>
+
+            <section id="database-failures" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Common failure classes</p><h2>What the operator should investigate</h2></div>
+              <div class="failure-cards"><article><strong>Connection / TLS</strong><p>Network path, certificate name/chain, authentication plugin, source firewall, tunnel trust.</p></article><article><strong>Privilege</strong><p>Read/lock/routine permissions for backup; CREATE/DROP or CREATEDB for fork restore.</p></article><article><strong>Compatibility</strong><p>Client/server version, flags, extensions, collations, encodings, SQL modes.</p></article><article><strong>Capacity / time</strong><p>Source locks, command timeout, work disk, archive verify budget, destination throughput.</p></article><article><strong>Partial selection</strong><p>New databases/tables added after schedule creation; stale discovery; invalid selection.</p></article><article><strong>Import verification</strong><p>Row counts, constraints, routines, application startup, and data-level marker mismatch.</p></article></div>
+            </section>
+
+            <div class="page-links"><a href="../features/backup-sources.md#logical-database-archives">Canonical database guide</a><a href="../features/restores.md#logical-database-restore">Database restore contract</a><a href="#evidence">Scale evidence and remaining gates</a></div>
+          </article>
+
+          <article class="doc-page" data-page="data-backups" data-title="AWS data &amp; SaaS">
+            <header class="page-hero">
+              <p class="eyebrow">Specialized protection paths</p>
+              <h1>Data services do not all fit the node-to-ZIP pattern</h1>
+              <p>AWS S3/DynamoDB use AWS Backup recovery points; Lightsail bucket replication maintains its own durable per-object ledger; Basecamp creates an offsite export archive. Each has distinct prerequisites and restore boundaries.</p>
+            </header>
+
+            <section id="data-aws" class="section-block">
+              <div class="section-heading"><p class="eyebrow">AWS Backup</p><h2>Versioned S3 buckets and DynamoDB tables</h2></div>
+              <div class="special-flow">
+                <div><span>Source</span><strong>Versioned S3<br>or DynamoDB</strong></div><i></i><div><span>Orchestrator</span><strong>AWS Backup plan<br>and vault</strong></div><i></i><div><span>Evidence</span><strong>Recovery point<br>and job ID</strong></div><i></i><div><span>Recovery</span><strong>Distinct target<br>bucket/table</strong></div>
+              </div>
+              <div class="prereq-grid"><article><h3>S3 backup prerequisites</h3><ul><li>Source bucket versioning enabled.</li><li>Backup vault and IAM permissions available.</li><li>Region/account identity matches the connection.</li></ul></article><article><h3>S3 restore prerequisites</h3><ul><li>Existing, empty, versioned target bucket.</li><li>Target is not the source identity.</li><li>Restore IAM and encryption permissions validated.</li></ul></article><article><h3>DynamoDB recovery</h3><ul><li>Recovery metadata comes from AWS Backup.</li><li>Restore targets a distinct table.</li><li>Validate table configuration and application data after recovery.</li></ul></article></div>
+            </section>
+
+            <section id="data-lightsail" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Lightsail bucket replication</p><h2>A separate, object-level durable workflow</h2><p>This feature is not a normal console node schedule. It tracks configuration, runs, objects/versions, multipart state, leases, and restoration to a chosen target prefix.</p></div>
+              <div class="ledger-visual"><div class="ledger-row header"><span>Run</span><span>Object ledger</span><span>Destination</span><span>Restore ledger</span></div><div class="ledger-row"><span><b>Replication</b><small>interval 1 min–7 days</small></span><span><b>Key + version</b><small>size · checksum · status</small></span><span><b>S3-compatible</b><small>supported subset</small></span><span><b>Target prefix</b><small>per-object progress</small></span></div></div>
+              <p class="muted"><strong>Accepted destinations:</strong> Amazon S3, Wasabi, DigitalOcean Spaces, Filebase, Exoscale, Backblaze B2, Linode, Vultr, UpCloud, Oracle, Scaleway, Cloudflare R2, Leviia, IDrive, IONOS, RackCorp, and IBM. Local Storage, Azure, Google Cloud Storage, OAuth drives, Tencent COS, and Alibaba OSS are excluded from this specialized workflow.</p>
+            </section>
+
+            <section id="data-basecamp" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Basecamp export</p><h2>OAuth snapshot packaged for offsite recovery</h2></div>
+                <p>A Basecamp connection can protect all projects or an explicit project list. The files lane collects API data into an archive and uploads it to selected storage destinations. Some non-200 attachment responses are logged and skipped rather than failing the export, so treat it as a best-effort export rather than manifest-proven completeness.</p>
+                <p><strong>Restore boundary:</strong> no dedicated in-place Basecamp restore is implemented. Treat the artifact as export/recovery material and document the manual reconstruction procedure.</p>
+              </div>
+              <aside class="boundary-card"><p class="eyebrow">OAuth dependency</p><h3>Callback identity is part of the installation</h3><p>Configure the Basecamp application ID/secret and exact public callback URL. Changing domain/protocol can break reconnection and token refresh.</p></aside>
+            </section>
+
+            <section id="data-unavailable" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Catalog honesty</p><h2>Visible tiles are not always usable backup sources</h2></div>
+              <div class="not-supported"><div><strong>Zendesk</strong><span>Coming Soon</span><p>Seeded catalog metadata only; no operational source/backup route.</p></div><div><strong>Slack backup</strong><span>Coming Soon</span><p>No workspace backup workflow. Slack notification delivery is a different implemented feature.</p></div></div>
+            </section>
+
+            <div class="page-links"><a href="../aws-s3-dynamodb-rds-backups.md">AWS data-service guide</a><a href="../lightsail-bucket-replication-and-database-restore.md">Lightsail specialized workflows</a><a href="../features/backup-sources.md#basecamp">Basecamp scope</a></div>
+          </article>
+
+          <article class="doc-page" data-page="storage" data-title="Storage destinations">
+            <header class="page-hero">
+              <p class="eyebrow">Copy placement</p>
+              <h1>One artifact can produce many independently tracked copies</h1>
+              <p>Archive-producing backups create a storage point for every accepted destination. Each copy owns its validation, upload, integrity, download, retention, and deletion state, so one failing destination does not erase evidence of the others.</p>
+            </header>
+
+            <section id="storage-fanout" class="section-block">
+              <div class="fanout-diagram" aria-label="Artifact fan-out to multiple storage destinations">
+                <div class="artifact-core"><svg><use href="#icon-archive"/></svg><strong>Verified artifact</strong><small>generation · size · checksum</small></div>
+                <div class="fanout-lines"><i></i><i></i><i></i></div>
+                <div class="copy-stack"><div><span class="copy-state success">verified</span><strong>Storage point A</strong><small>object ID · ETag/version</small></div><div><span class="copy-state retry">retrying</span><strong>Storage point B</strong><small>lease · next retry</small></div><div><span class="copy-state danger">failed</span><strong>Storage point C</strong><small>safe error · evidence</small></div></div>
+              </div>
+              <div class="result-rules"><div><span class="status-pill success">Complete</span><p>Every requested destination succeeded.</p></div><div><span class="status-pill partial">Partial</span><p>At least one succeeded and at least one failed. Completed copies remain cataloged/downloadable where supported and count for <code>keep_last</code>; automatic website/database restore currently rejects Partial.</p></div><div><span class="status-pill danger">Upload Failed</span><p>No requested destination produced a usable copy.</p></div></div>
+            </section>
+
+            <section id="storage-catalog" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Destination catalog</p><h2>26 implemented destination types</h2></div>
+              <div class="destination-groups">
+                <article><h3>Local filesystem</h3><div class="tag-cloud"><span>Local Storage</span></div><p>Mounted under <code>BS_LOCAL_STORAGE_PATH</code>/<code>LOCAL_STORAGE_ROOT</code>. Convenient, but not independent of host failure.</p></article>
+                <article><h3>S3 &amp; compatible object storage</h3><div class="tag-cloud"><span>Amazon S3</span><span>Backblaze B2</span><span>Wasabi</span><span>DigitalOcean Spaces</span><span>Cloudflare R2</span><span>IDrive e2</span><span>IBM COS</span><span>Oracle</span><span>Scaleway</span><span>Linode</span><span>Vultr</span><span>UpCloud</span><span>Exoscale</span><span>Filebase</span><span>IONOS</span><span>Leviia</span><span>RackCorp</span></div><p>Bucket, endpoint/region, prefix, and scoped credentials vary. Multipart upload and provider normalization share common contracts.</p></article>
+                <article><h3>Native object APIs</h3><div class="tag-cloud"><span>Google Cloud Storage</span><span>Azure Blob</span><span>Tencent COS</span><span>Alibaba OSS</span></div><p>Use provider-native identity and container/bucket semantics; do not assume S3 behavior.</p></article>
+                <article><h3>OAuth drive storage</h3><div class="tag-cloud"><span>Dropbox</span><span>Google Drive</span><span>OneDrive</span><span>pCloud</span></div><p>Deployment-level OAuth app settings plus an account grant. Callback URLs depend on the public URL tuple.</p></article>
+              </div>
+            </section>
+
+            <section id="storage-validation" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Validation</p><h2>Exercise the exact data plane</h2></div>
+                <p>Most object destinations perform a bounded access/write/read/delete probe. Deletion-protected Amazon S3 paths use bucket/Object Lock capability checks so validation does not create an object it cannot remove.</p>
+                <ul class="plain-list"><li>Use an existing dedicated bucket/container and least-privilege credential.</li><li>Confirm account owner, region/endpoint, prefix, and versioning requirements.</li><li>Remember that validation is point-in-time—not a durable readiness guarantee.</li><li>Credential fields are write-only; API reads expose presence, not secret value.</li></ul>
+              </div>
+              <aside class="boundary-card attention"><p class="eyebrow">Vultr example</p><h3>Validation does not create the bucket</h3><p>The bucket must already exist and use a lowercase DNS-safe name in the selected regional endpoint.</p></aside>
+            </section>
+
+            <section id="storage-immutability" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Amazon S3 policy surface</p><h2>Immutability, air-gap designation, and lifecycle</h2></div>
+              <div class="immutability-grid"><article><h3>Object Lock</h3><p>Governance or Compliance mode with a positive retention period. Legal holds and retention dates can defer BackupSheep cleanup.</p></article><article><h3>Expected owner</h3><p>A 12-digit bucket-owner check reduces the risk of sending backups to a similarly named bucket under the wrong account.</p></article><article><h3>Air-gapped policy</h3><p>Requires Compliance mode, positive retention, expected owner, and deletion protection. Real isolation still depends on separate-account IAM/bucket policy.</p></article><article><h3>Lifecycle tiers</h3><p>BackupSheep manages one prefix-scoped rule while preserving unrelated rules. Cold objects may need provider-side thaw before download or restore.</p></article></div>
+            </section>
+
+            <section id="storage-download" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Using a copy</p><h2>Download, transfer, restore, delete</h2></div>
+              <div class="action-ledger"><div><strong>Download</strong><p>Generate a bounded signed URL where supported or stream Local Storage through the app. Links are secrets until they expire.</p></div><div><strong>Transfer — not operational</strong><p>The UI/serializer surface exists, but no complete server action/task was found in the audited code. Do not advertise or depend on it.</p></div><div><strong>Restore</strong><p>Automatic website/database restore requires the parent backup to be Complete and uses a selected storage point; destination adapters do not all provide equal materialization assurance.</p></div><div><strong>Delete</strong><p>Use stored object/version ownership. Object Lock, legal hold, air-gap, or <code>no_delete</code> can retain the remote copy and its catalog state.</p></div></div>
+            </section>
+
+            <div class="page-links"><a href="../features/storage-destinations.md">Canonical destination guide</a><a href="../immutable-backups-and-lifecycle.md">S3 immutability details</a><a href="../reference/provider-matrix.md#storage-destinations">Provider-specific storage notes</a></div>
+          </article>
+
+          <article class="doc-page" data-page="schedules" data-title="Schedules &amp; retention">
+            <header class="page-hero">
+              <p class="eyebrow">Protection policy</p>
+              <h1>Schedules bind timing, scope, copies, and retention</h1>
+              <p>A schedule belongs to one node and creates durable backup requests through the database scheduler and dispatch outbox. On-demand operations use the same execution path without becoming schedule occurrences.</p>
+            </header>
+
+            <section id="schedules-types" class="section-block">
+              <div class="schedule-types"><article><span class="schedule-glyph">↻</span><h2>Fixed rate</h2><p>Positive interval in minutes, hours, or days.</p><small>Console + API</small></article><article><span class="schedule-glyph">⌁</span><h2>Cron</h2><p>Five validated cron fields plus a stored timezone.</p><small>Console + API</small></article><article><span class="schedule-glyph">1×</span><h2>One-time</h2><p>A future timestamp. Existing entries display in console.</p><small>API + model; not offered by console editor</small></article></div>
+            </section>
+
+            <section id="schedules-destination-policy" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Destination policy</p><h2>Placement depends on source type</h2></div>
+                <dl class="stacked-definitions"><div><dt>Archive-producing nodes</dt><dd>Website, logical database, WordPress, and Basecamp schedules require one or more current-account storage destinations.</dd></div><div><dt>Provider-native nodes</dt><dd>Cloud and volume schedules do not take destinations because snapshots/recovery points stay with the provider.</dd></div><div><dt>Required air-gapped copy</dt><dd>An archive schedule can require a selected S3 destination with the enforced air-gap configuration. Failure to validate it stops source work as Storage Validation Failed.</dd></div></dl>
+              </div>
+              <aside class="boundary-card"><p class="eyebrow">Tenant invariant</p><h3>No cross-account destination</h3><p>The serializer rejects destinations outside the current account and checks that the member can see the scheduled node.</p></aside>
+            </section>
+
+            <section id="schedules-retention" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Retention</p><h2><code>keep_last</code> counts usable successful runs</h2></div>
+              <div class="retention-visual"><div class="retained-run"><span>Newest</span><b>Complete</b><small>keep</small></div><div class="retained-run"><span>2</span><b>Partial</b><small>keep — has usable copy</small></div><div class="retained-run"><span>3</span><b>Complete</b><small>keep</small></div><div class="retained-run expired"><span>4</span><b>Complete</b><small>cleanup candidate</small></div><div class="retained-run failed"><span>—</span><b>Failed</b><small>not counted as successful</small></div></div>
+              <ul class="plain-list"><li>Empty means retain all successful runs; a configured value must be positive.</li><li>Complete and Partial archive runs count because both can occupy destination space.</li><li>Native retention deletes old owned provider snapshots through the integration adapter.</li><li>Archive retention asks every storage point to delete its owned object.</li><li>Object Lock, legal hold, air-gap, <code>no_delete</code>, or deletion failure can preserve copies beyond the policy count.</li><li>Legacy compression/encryption policy fields are not active console features; current archives are plain ZIP and encrypted ZIP restore is rejected.</li></ul>
+            </section>
+
+            <section id="schedules-deduplication" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Duplicate convergence</p><h2>Occurrence claim → durable request → per-node overlap guard</h2></div>
+              <div class="dedupe-chain"><div><small>Scheduler</small><strong>Stable occurrence ID</strong></div><i>unique</i><div><small>Outbox</small><strong>Committed request</strong></div><i>republish</i><div><small>Node</small><strong>Active-run guard</strong></div><i>lease</i><div><small>Worker</small><strong>Fenced owner</strong></div></div>
+              <p>Duplicate Beat publication or broker delivery is expected to converge on the existing accepted request. The node refuses a new backup while an earlier run is active. This is a per-node guard, not a global capacity limit.</p>
+            </section>
+
+            <section id="schedules-actions" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Lifecycle actions</p><h2>Pause history; do not erase it</h2></div>
+              <div class="action-ledger"><div><strong>Trigger</strong><p>A caller-supplied request ID is unique with the schedule, making retries converge.</p></div><div><strong>Pause / resume</strong><p>Keep the policy and backup relationships while stopping or restarting future occurrences.</p></div><div><strong>Edit</strong><p>Revalidate timing, visibility, destination account, and required air-gap conditions.</p></div><div><strong>Delete</strong><p>Rejected when attached backup history exists; pause instead to preserve evidence relationships.</p></div></div>
+            </section>
+
+            <aside class="callout danger"><svg><use href="#icon-warning"/></svg><div><strong>Platform-specific scheduler warning.</strong><p>The stock Docker Compose path uses BackupSheep's crash-safe custom scheduler. Some alternate deployment descriptors in this repository currently reference the stock django-celery-beat scheduler and therefore do not provide the same durable occurrence/outbox contract. Treat those paths as needing remediation before enterprise use.</p></div></aside>
+            <div class="page-links"><a href="../features/schedules-and-policies.md">Canonical schedule guide</a><a href="../../backupsheep/scheduler.py">Custom scheduler implementation</a><a href="#execution">Crash recovery details</a></div>
+          </article>
+
+          <article class="doc-page" data-page="execution" data-title="Execution &amp; retries">
+            <header class="page-hero">
+              <p class="eyebrow">Reliability model</p>
+              <h1>Retries are layered, classified, and bound to durable state</h1>
+              <p>BackupSheep does not use one global “retry three times” rule. Dispatch recovery, worker execution, provider HTTP reads, long-running polling, storage upload, and ambiguous mutation reconciliation each have different safety contracts.</p>
+            </header>
+
+            <section id="execution-ledger" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Durable ledger</p><h2>What survives a worker or broker failure</h2></div>
+              <div class="ledger-columns">
+                <article><span class="ledger-index">Request</span><h3>Accepted intent</h3><ul><li>Request / occurrence identity</li><li>Dispatch state and attempts</li><li>Next eligible publish time</li><li>Claim lease and last error</li></ul></article>
+                <article><span class="ledger-index">Execution</span><h3>Owned work</h3><ul><li>Correlation ID and phase</li><li>Worker lease + heartbeat</li><li>Attempt history</li><li>Progress and safe failure</li></ul></article>
+                <article><span class="ledger-index">Provider</span><h3>External outcome</h3><ul><li>Operation/resource identity</li><li>Account/project/region scope</li><li>Ownership marker</li><li>Reconciliation state</li></ul></article>
+                <article><span class="ledger-index">Artifact</span><h3>Recoverable result</h3><ul><li>Generation binding</li><li>Filename, size, digest</li><li>Verification timestamp</li><li>Per-destination copies</li></ul></article>
+              </div>
+            </section>
+
+            <section id="execution-layers" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Retry layers</p><h2>Each layer answers a different question</h2></div>
+              <div class="table-wrap wide-table">
+                <table>
+                  <thead><tr><th>Layer</th><th>Typical trigger</th><th>Default behavior</th><th>Why it is safe—or where it stops</th></tr></thead>
+                  <tbody>
+                    <tr><td><strong>Request dispatch</strong></td><td>Broker unavailable or publish failed</td><td>Durable outbox retries from 60 seconds, capped at 900 seconds</td><td>Republishes the same request identity rather than accepting new intent.</td></tr>
+                    <tr><td><strong>Worker claim</strong></td><td>Worker exits or stops heartbeating</td><td>Execution leases expire; minute recovery sweep can reclaim stale rows</td><td>Fencing tokens prevent the prior owner from writing a competing terminal state.</td></tr>
+                    <tr><td><strong>Source create task</strong></td><td>Classified retryable adapter/source failure</td><td>Many source tasks are configured for up to four Celery retries</td><td>Definite failures may retry; ambiguous provider mutations enter reconciliation first.</td></tr>
+                    <tr><td><strong>Provider HTTP</strong></td><td>Rate limit, connect/read failure, selected 5xx</td><td>Bounded connect/read timeout and up to four safe-method retries with backoff</td><td>Generic policy does not automatically replay unsafe PUT/DELETE; adapters own mutation logic.</td></tr>
+                    <tr><td><strong>Provider polling</strong></td><td>Snapshot/restore remains pending</td><td>Schedule another read poll, commonly 30–120 seconds depending on integration</td><td>Polling reads the same known provider pointer; it does not issue another create.</td></tr>
+                    <tr><td><strong>Storage transfer</strong></td><td>Temporary upload/download issue, rate limit, lease contention</td><td>Integration-specific retry-after, resumable/multipart checkpoint, or later reconciliation</td><td>Storage point, upload lease, part evidence, and exact destination key bind the retry.</td></tr>
+                    <tr><td><strong>Unknown outcome</strong></td><td>Timeout/lost response after external mutation may have crossed boundary</td><td>Inventory/reconcile before repeat mutation</td><td>If unique ownership cannot be proven, stop at manual review.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="diagram-caption">Counts are Celery retry budgets, not availability promises. Provider-specific polling and recovery paths use different bounds; consult the execution status and current adapter before estimating a deadline.</p>
+            </section>
+
+            <section id="execution-decision" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Failure classifier</p><h2>What happens after an error</h2></div>
+              <div class="decision-tree" aria-label="Retry decision tree">
+                <div class="decision-root"><strong>Operation reports an error</strong><small>Preserve safe code + correlation</small></div>
+                <div class="decision-branches">
+                  <article class="branch-fatal"><span>Invalid / unsafe</span><h3>Fail visibly</h3><p>Bad input, unsupported scope, authentication, integrity, or destructive-preflight failure does not improve through blind retry.</p></article>
+                  <article class="branch-retry"><span>Transient and idempotent</span><h3>Retry later</h3><p>Record attempt, retry-after, and next time; keep the same request/execution/copy identity.</p></article>
+                  <article class="branch-reconcile"><span>External outcome unknown</span><h3>Reconcile</h3><p>Read exact provider/storage inventory by persisted marker and scope before deciding.</p></article>
+                </div>
+                <div class="reconcile-outcomes"><span>owned match → continue</span><span>definite rejection + no match → same-row retry if adapter permits</span><span>ambiguous → manual review</span></div>
+              </div>
+            </section>
+
+            <section id="execution-leases" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Lease defaults</p><h2>Short ownership, frequent heartbeat, durable recovery</h2></div>
+              <div class="lease-grid"><article><strong>Backup worker</strong><span>180 s lease</span><small>30 s heartbeat</small></article><article><strong>Restore worker</strong><span>180 s lease</span><small>30 s heartbeat</small></article><article><strong>Storage copy</strong><span>180 s lease</span><small>30 s heartbeat</small></article><article><strong>Request dispatch</strong><span>60 s lease</span><small>recovery batch 100</small></article><article><strong>Backup stale scan</strong><span>900 s</span><small>batch 100</small></article><article><strong>Restore stale scan</strong><span>300 s</span><small>dispatch lease 120 s</small></article></div>
+              <aside class="callout info"><svg><use href="#icon-clock"/></svg><div><strong>Keep heartbeats comfortably below one third of the lease.</strong><p>Changing these values changes crash-detection latency and duplicate-owner risk. Tune only with deterministic restart/partition tests and measured operation timing.</p></div></aside>
+            </section>
+
+            <section id="execution-status" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Public execution contract</p><h2>Useful diagnostics without secret leakage</h2></div>
+              <div class="status-object"><div class="code-head"><span>execution_status</span><small>redacted projection</small></div><pre><code>{
+  "durable": true,
+  "correlation_id": "…",
+  "status": "retrying",
+  "phase": "provider_poll",
+  "attempt_count": 2,
+  "next_retry_at": "…",
+  "progress": { "completed": 42, "total": 100, "unit": "percent" },
+  "last_error_code": "provider_rate_limited",
+  "reconciliation": { "state": "not_required" },
+  "artifact": { "verified": false }
+}</code></pre></div>
+              <p>Exact fields vary by operation and phase. Raw provider bodies, worker lease tokens, commands, credentials, and arbitrary exception text are intentionally excluded.</p>
+            </section>
+
+            <section id="execution-cancel" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Cancellation</p><h2>Cancel the orchestration, verify the external effect</h2></div>
+                <p>A cancellation request marks the durable operation and prevents later phases where the adapter can safely observe it. It cannot rewind a provider mutation already accepted or bytes already sent. Terminal state and cleanup evidence still matter.</p>
+              </div>
+              <aside class="boundary-card danger"><p class="eyebrow">Do not delete the row</p><h3>The ledger is how recovery knows what happened</h3><p>Removing or hand-editing orchestration records can erase the idempotency, ownership, lease, and reconciliation evidence needed to avoid a duplicate.</p></aside>
+            </section>
+
+            <div class="page-links"><a href="../features/executions-and-history.md">Canonical execution guide</a><a href="../reference/environment-variables.md#durable-execution-and-recovery">Recovery settings</a><a href="../../apps/_tasks/backup_dispatch.py">Dispatch/recovery implementation</a></div>
+          </article>
+
+          <article class="doc-page" data-page="restores" data-title="Restore workflows">
+            <header class="page-hero">
+              <p class="eyebrow">Recovery operations</p>
+              <h1>Restore to a deliberate target, verify, then decide on cutover</h1>
+              <p>Each accepted restore becomes a separate durable operation with target parameters, correlation, execution ownership, progress, retry/reconciliation state, and a terminal record. Newer cloud paths add HTTP idempotency; website and logical-database restore requests currently do not. The backup remains intact.</p>
+            </header>
+
+            <section id="restores-preflight" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Universal preflight</p><h2>Six gates before recovery starts</h2></div>
+              <div class="gate-row"><article><span>1</span><h3>Eligible backup</h3><p>Completed provider result; website/database automatic restore currently requires overall Complete plus a selected completed storage point.</p></article><article><span>2</span><h3>Integrity</h3><p>Artifact/provider identity and available checksum/version evidence match.</p></article><article><span>3</span><h3>Target</h3><p>Region, network, capacity, naming, permissions, and billing reviewed.</p></article><article><span>4</span><h3>Destructive scope</h3><p>Overlay, exact mirror, fork, in-place, or new-resource behavior explicit.</p></article><article><span>5</span><h3>Request identity</h3><p>Native cloud restores use idempotency; website/database restore POSTs currently do not and need duplicate-submit control.</p></article><article><span>6</span><h3>Verification</h3><p>Independent data checks and cutover owner are defined in advance.</p></article></div>
+            </section>
+
+            <section id="restores-matrix" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Restore matrix</p><h2>What the implemented path changes</h2></div>
+              <div class="table-wrap wide-table"><table><thead><tr><th>Backup type</th><th>Tracked restore behavior</th><th>Source changed?</th><th>Operator verification</th></tr></thead><tbody>
+                <tr><td><strong>Website archive</strong></td><td>Write selected archive copy to configured website target; overlay or explicit exact mirror</td><td>Matching files overwritten; exact mirror may delete extras</td><td>Manifest, application boot, permissions, content, delete scope</td></tr>
+                <tr><td><strong>MySQL / MariaDB / PostgreSQL</strong></td><td>Console defaults to deterministic new-database fork; API also has explicit in-place mode</td><td>No in fork mode; yes in in-place</td><td>Target mapping, row/data checks, routines, application boot</td></tr>
+                <tr><td><strong>Cloud compute / volume / RDS</strong></td><td>Create a new provider resource from owned snapshot/recovery point</td><td>No</td><td>Provider identity, boot/attach, network, data, billing</td></tr>
+                <tr><td><strong>AWS S3 / DynamoDB</strong></td><td>AWS Backup job to a distinct target bucket/table</td><td>No source overwrite</td><td>Object versions/table data, encryption, policies, application reads</td></tr>
+                <tr><td><strong>Vultr Managed Database</strong></td><td>Create a new provider-managed database fork</td><td>No</td><td>Engine/plan status, connection, schema/data, application test</td></tr>
+                <tr><td><strong>Lightsail bucket replication</strong></td><td>Copy run/object ledger to selected target prefix</td><td>May write under target prefix</td><td>Key/version/size/checksum and target isolation</td></tr>
+                <tr><td><strong>WordPress / Basecamp archive</strong></td><td>Download for manual recovery; no dedicated automatic restore. Transfer surface is incomplete.</td><td>No automatic change</td><td>Document and test the manual reconstruction process</td></tr>
+              </tbody></table></div>
+            </section>
+
+            <section id="restores-archive-guards" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Archive safety</p><h2>Validate before extraction or import</h2></div>
+              <div class="guard-dashboard"><article><span>2,100,000</span><small>maximum archive members</small></article><article><span>2 TiB</span><small>maximum expanded bytes</small></article><article><span>1,000×</span><small>maximum compression ratio</small></article><article><span>512 MiB</span><small>minimum disk reserve</small></article></div>
+              <ul class="plain-list"><li>Reject absolute paths, traversal, unsafe links, excessive member count, expansion, or compression bombs.</li><li>Verify the selected storage copy, artifact binding, manifest, and available checksum before publishing content.</li><li>Stage work under the shared restore/work path; check free bytes and inodes before extraction.</li><li>Limits are safety ceilings, not sizing recommendations. Operators should set lower policy limits where appropriate.</li></ul>
+            </section>
+
+            <section id="restores-idempotency" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Request identity</p><h2>Same key + same payload returns the same restore</h2></div>
+                <p>Durable native restore requests require an <code>Idempotency-Key</code>. Replaying the key with the same canonical payload returns the existing restore. Reusing it with a different payload returns a conflict. A client timeout is not permission to invent a new key.</p>
+              </div>
+              <div class="idempotency-card"><span>Idempotency-Key</span><code>restore-run-2026-08-23-001</code><div><b>same payload</b><i>→ existing row</i></div><div><b>different payload</b><i>→ 409 conflict</i></div></div>
+            </section>
+
+            <section id="restores-resume" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Resume semantics</p><h2>Resume is evidence-gated, not a second restore button</h2></div>
+              <div class="resume-grid"><article><span class="resume-state safe">Read / verify</span><h3>Resume verification</h3><p>Poll or verify the exact known provider job/target or deterministic database mapping on the same restore row.</p></article><article><span class="resume-state caution">Narrow exception</span><h3>Retry same restore</h3><p>Only when an adapter proves the create was definitively rejected and exhaustive inventory proves no matching target. One UpCloud server path exposes this controlled state.</p></article><article><span class="resume-state blocked">Stop</span><h3>Manual review</h3><p>Zero uncertain, multiple, mismatched, or unowned candidates. Preserve the ledger and investigate exact IDs; do not adopt by name.</p></article></div>
+            </section>
+
+            <section id="restores-proof" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Recovery proof</p><h2>Terminal status is only the start of verification</h2></div>
+              <ol class="proof-list"><li><span>Provider / transport</span><p>Target exists at the expected identity, region, account, network, and size.</p></li><li><span>Structural</span><p>Filesystem manifest, database schema, object keys/versions, or volume layout matches scope.</p></li><li><span>Data-level</span><p>Known markers, hashes, row counts, sampled records, and integrity checks pass independently.</p></li><li><span>Application</span><p>The recovered application boots, authenticates, reads/writes as intended, and dependencies resolve.</p></li><li><span>Cutover</span><p>Owner records DNS/routing/credential changes, rollback point, and evidence location.</p></li><li><span>Cleanup</span><p>Delete only uniquely owned rehearsal resources after evidence retention and cost review.</p></li></ol>
+            </section>
+
+            <aside class="callout attention"><svg><use href="#icon-warning"/></svg><div><strong>Restore started/completed/failed notifications do not prove data correctness.</strong><p>They communicate orchestration state. Retain the correlation ID, exact backup/copy/provider IDs, target identity, independent verification result, operator, timestamps, and cleanup outcome.</p></div></aside>
+            <div class="page-links"><a href="../features/restores.md">Canonical restore guide</a><a href="../guides/disaster-recovery.md">Control-plane recovery</a><a href="#edge-cases">Failure handling by stage</a></div>
+          </article>
+
+          <article class="doc-page" data-page="edge-cases" data-title="Failure &amp; edge cases">
+            <header class="page-hero">
+              <p class="eyebrow">Incident field guide</p>
+              <h1>Edge cases are part of the product contract</h1>
+              <p>Use this matrix to decide what evidence to inspect and which action is safe. Preserve the existing durable row and exact external identities before changing anything.</p>
+            </header>
+
+            <section id="edge-principles" class="section-block">
+              <div class="incident-principles"><article><span>01</span><h3>Observe durable state first</h3><p>Record correlation, phase, attempt, retry time, reconciliation, provider/copy IDs.</p></article><article><span>02</span><h3>Separate timeout from failure</h3><p>A lost response can hide an accepted external mutation.</p></article><article><span>03</span><h3>Prove ownership before mutation</h3><p>Names are not identities; scope, markers, IDs, hashes, and versions matter.</p></article><article><span>04</span><h3>Fail closed on ambiguity</h3><p>Manual review is safer than a duplicate create or wrong-resource delete.</p></article></div>
+            </section>
+
+            <section id="edge-matrix" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Failure matrix</p><h2>Symptoms, meaning, and safe response</h2></div>
+              <div class="edge-filter-row" role="group" aria-label="Filter failure matrix"><button class="edge-filter is-active" data-edge-filter="all" type="button">All stages</button><button class="edge-filter" data-edge-filter="dispatch" type="button">Dispatch</button><button class="edge-filter" data-edge-filter="source" type="button">Source</button><button class="edge-filter" data-edge-filter="storage" type="button">Storage</button><button class="edge-filter" data-edge-filter="restore" type="button">Restore</button><button class="edge-filter" data-edge-filter="security" type="button">Security</button></div>
+              <div class="edge-matrix" id="edge-matrix-list">
+                <article data-edge="dispatch"><span>Dispatch</span><h3>Request committed; broker publish failed</h3><p><b>Meaning:</b> intent exists but delivery is uncertain.</p><p><b>Safe response:</b> leave the row; outbox recovery republishes the same request using backoff.</p></article>
+                <article data-edge="dispatch"><span>Dispatch</span><h3>Task absent from Celery inspect</h3><p><b>Meaning:</b> inspect is transient, not job history.</p><p><b>Safe response:</b> check durable request/execution, queue consumers, retry time, and recovery sweep.</p></article>
+                <article data-edge="dispatch"><span>Dispatch</span><h3>Worker dies mid-phase</h3><p><b>Meaning:</b> lease will become stale; external outcome may or may not exist.</p><p><b>Safe response:</b> let stale recovery claim the same row; reconcile before repeating mutations.</p></article>
+                <article data-edge="dispatch"><span>Dispatch</span><h3>Two schedule deliveries</h3><p><b>Meaning:</b> duplicate delivery is expected under failure.</p><p><b>Safe response:</b> occurrence/request uniqueness should converge; investigate only if two durable backups exist.</p></article>
+                <article data-edge="source"><span>Provider</span><h3>Create call timed out</h3><p><b>Meaning:</b> provider may have accepted it.</p><p><b>Safe response:</b> inventory exact account/region/marker; never issue a manual second create.</p></article>
+                <article data-edge="source"><span>Provider</span><h3>Rate limit or temporary 5xx</h3><p><b>Meaning:</b> operation may be retryable or poll should pause.</p><p><b>Safe response:</b> honor bounded retry-after on the same execution; verify mutation outcome first.</p></article>
+                <article data-edge="source"><span>Website</span><h3>Unknown SSH host key</h3><p><b>Meaning:</b> source identity is untrusted.</p><p><b>Safe response:</b> obtain fingerprint out of band and update the reviewed known-hosts file.</p></article>
+                <article data-edge="source"><span>Website</span><h3>Source changes during collection</h3><p><b>Meaning:</b> archive may represent mixed points in time.</p><p><b>Safe response:</b> quiesce app or use source-level consistency strategy; verify restored application.</p></article>
+                <article data-edge="source"><span>Database</span><h3>Client/server incompatibility</h3><p><b>Meaning:</b> model version choice does not guarantee a matching binary or flags.</p><p><b>Safe response:</b> certify exact client/server/auth/TLS pair; do not mask dump errors.</p></article>
+                <article data-edge="source"><span>Capacity</span><h3>Work disk or inode exhaustion</h3><p><b>Meaning:</b> dump/cache/archive/restore staging cannot progress safely.</p><p><b>Safe response:</b> preserve active files and rows; expand exact owned storage, then use normal retry/recovery.</p></article>
+                <article data-edge="storage"><span>Storage</span><h3>One destination fails</h3><p><b>Meaning:</b> good storage points may still exist.</p><p><b>Safe response:</b> expect Partial when at least one succeeds; fix/retry the failed copy without deleting good evidence.</p></article>
+                <article data-edge="storage"><span>Storage</span><h3>Multipart upload stalls</h3><p><b>Meaning:</b> no-progress threshold or lease/retry may engage; remote parts may remain.</p><p><b>Safe response:</b> inspect checkpoint/lease and exact upload ID; use owned reconciliation/cleanup only.</p></article>
+                <article data-edge="storage"><span>Immutability</span><h3>Object Lock blocks cleanup</h3><p><b>Meaning:</b> provider retention/hold is authoritative.</p><p><b>Safe response:</b> retain catalog state; scheduled protected-delete retry can revisit when eligible.</p></article>
+                <article data-edge="storage"><span>Cold tier</span><h3>Object cannot download</h3><p><b>Meaning:</b> provider lifecycle moved it to a retrieval-delayed class.</p><p><b>Safe response:</b> request provider-side restore/thaw, then retry the same concrete storage point.</p></article>
+                <article data-edge="restore"><span>Archive</span><h3>Path traversal / expansion limit</h3><p><b>Meaning:</b> archive violates a safety guard or is corrupt/unexpected.</p><p><b>Safe response:</b> fail before extraction; investigate source artifact and policy, never relax limits blindly.</p></article>
+                <article data-edge="restore"><span>Database</span><h3>Fork target exists unexpectedly</h3><p><b>Meaning:</b> prior attempt may have crossed creation boundary or target is not owned.</p><p><b>Safe response:</b> compare locked mapping/marker/checkpoint; do not drop or adopt by name.</p></article>
+                <article data-edge="restore"><span>Website</span><h3>Exact mirror would delete files</h3><p><b>Meaning:</b> target contains paths absent from the backup.</p><p><b>Safe response:</b> preview/review scope, take independent backup, and require explicit destructive approval.</p></article>
+                <article data-edge="restore"><span>Provider restore</span><h3>Multiple marker matches</h3><p><b>Meaning:</b> unique ownership cannot be established.</p><p><b>Safe response:</b> manual review; preserve all candidates and exact inventory evidence.</p></article>
+                <article data-edge="security"><span>Access</span><h3>Delegated role sees too much</h3><p><b>Meaning:</b> group/node/permission semantics or release code do not meet least privilege.</p><p><b>Safe response:</b> remove external access, retain audit evidence, fix and rerun full role matrix.</p></article>
+                <article data-edge="security"><span>Token</span><h3>User logged out or reset password</h3><p><b>Meaning:</b> persistent API token may remain valid.</p><p><b>Safe response:</b> revoke/rotate token explicitly; do not treat session logout as token revocation.</p></article>
+                <article data-edge="security"><span>OAuth</span><h3>Callback/state cannot be proven</h3><p><b>Meaning:</b> connection authorization may not be safely bound to the initiating session.</p><p><b>Safe response:</b> do not enable that OAuth path for untrusted multi-user use until state validation is implemented/tested.</p></article>
+              </div>
+            </section>
+
+            <section id="edge-escalation" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Escalation packet</p><h2>Capture evidence without leaking secrets</h2></div>
+              <div class="evidence-packet"><span>Backup/restore/request IDs</span><span>Correlation ID</span><span>Safe error code</span><span>Status + phase</span><span>Attempt + retry time</span><span>Reconciliation state</span><span>Provider account/region + exact resource IDs</span><span>Storage point/object/version IDs</span><span>Relevant timestamps</span><span>Queue consumer/backlog snapshot</span><span>Capacity snapshot</span><span>Redacted logs</span></div>
+              <p class="muted">Exclude credentials, tokens, signed URLs, private keys, raw provider responses, customer data, arbitrary command output, and lease tokens from ordinary support packets.</p>
+            </section>
+
+            <div class="page-links"><a href="../guides/troubleshooting.md">Symptom-driven troubleshooting</a><a href="../guides/operations.md#handling-an-apparently-stuck-job">Stuck-job runbook</a><a href="#evidence">Known scale/readiness limits</a></div>
+          </article>
+
+          <article class="doc-page" data-page="api" data-title="API explorer">
+            <header class="page-hero">
+              <p class="eyebrow">REST API v1</p>
+              <h1>Search every resolver operation—and understand its risk before calling it</h1>
+              <p>The explorer below is generated from the Django resolver-backed Bruno manifest. It indexes method, path, action, view, implementation source, runnable request file, and a safety classification for every recorded operation.</p>
+              <p class="catalog-provenance" data-api-provenance>Loading catalog provenance…</p>
+            </header>
+
+            <section id="api-contract" class="section-block">
+              <div class="api-contract-grid">
+                <article><span>Base path</span><code>/api/v1/</code><p>JSON by default; account-scoped object IDs are not provider IDs.</p></article>
+                <article><span>Automation auth</span><code>Authorization: Token …</code><p>Persistent DRF token. Logout/password reset do not currently revoke it automatically.</p></article>
+                <article><span>Browser auth</span><code>Session + X-CSRFToken</code><p>Unsafe session-authenticated calls require Django's CSRF contract.</p></article>
+                <article><span>Durable mutations</span><code>Idempotency-Key: …</code><p>Use a unique stable key for supported backup/restore requests; a timeout is not failure proof.</p></article>
+              </div>
+            </section>
+
+            <section id="api-quickstart" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Minimal sequence</p><h2>Authenticate, inspect scope, then discover IDs</h2></div>
+                <ol class="plain-steps"><li><strong>POST login.</strong> Obtain the member token over HTTPS and store it outside source control.</li><li><strong>GET login context.</strong> Confirm the current account and membership before querying objects.</li><li><strong>List before mutating.</strong> Resolve BackupSheep object IDs through current-account endpoints; never pass a provider ID where an application ID is expected.</li><li><strong>Validate deliberately.</strong> Some validation/callback routes contact external services or mutate state; read the safety class and Bruno guard.</li><li><strong>Poll durable state.</strong> Read the returned resource/execution instead of treating the initial HTTP response as completion.</li></ol>
+              </div>
+              <div class="status-object compact-code"><div class="code-head"><span>Example authentication</span><button class="copy-code" type="button" aria-label="Copy authentication example"><svg><use href="#icon-copy"/></svg></button></div><pre><code>curl --request POST \
+  "https://backup.example.com/api/v1/auth/login/" \
+  --header "Content-Type: application/json" \
+  --data '{
+    "email": "operator@example.com",
+    "password": "&lt;read securely&gt;"
+  }'
+
+# Send the returned token on later calls:
+Authorization: Token &lt;api-key&gt;</code></pre></div>
+            </section>
+
+            <section id="api-safety" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Safety classes</p><h2>HTTP method alone does not tell you enough</h2></div>
+              <div class="safety-legend"><article data-safety-card="safe-read"><span>safe-read</span><b data-safety-count="safe-read">395</b><p>Expected account-scoped read without external mutation.</p></article><article data-safety-card="stateful-get"><span>stateful-get</span><b data-safety-count="stateful-get">61</b><p>GET route with session, callback, provider, or other stateful behavior. Review before use.</p></article><article data-safety-card="live-read"><span>live-read</span><b data-safety-count="live-read">1</b><p>Reads live external state and can consume quota or expose provider timing.</p></article><article data-safety-card="download"><span>download</span><b data-safety-count="download">10</b><p>Returns/redirects to backup or log material; URLs and content are sensitive.</p></article><article data-safety-card="mutation"><span>mutation</span><b data-safety-count="mutation">449</b><p>Changes BackupSheep, source, destination, provider, or notification state.</p></article><article data-safety-card="safe-auth"><span>safe-auth</span><b data-safety-count="safe-auth">1</b><p>Authentication operation with its own credential-handling boundary.</p></article></div>
+              <aside class="callout danger"><svg><use href="#icon-warning"/></svg><div><strong>Do not run the whole Bruno collection against production.</strong><p>The collection contains hundreds of mutating operations, and some GET/callback/validation routes are stateful. Set mutation guards only for a disposable, owned test environment.</p></div></aside>
+            </section>
+
+            <section id="api-authorization" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Authorization boundary</p><h2>Test the exact release and delegated role</h2></div>
+                <p>The intended contract combines current-account querysets, node visibility, and mapped group permissions. The current branch includes active authorization remediation, but legacy account/member/group/invite/notification writes and unmapped actions still require explicit least-privilege review.</p>
+                <ul class="plain-list"><li>Use a separate automation member; do not reuse the primary owner token.</li><li>Test list, retrieve, create, update, delete, custom actions, and cross-account IDs.</li><li>Verify inactive/removed membership behavior and token revocation.</li><li>Keep the API behind additional network/access controls until the role matrix passes.</li></ul>
+              </div>
+              <aside class="boundary-card danger"><p class="eyebrow">Enterprise gate</p><h3>Membership is not management authorization</h3><p>Do not assume every legacy settings/team endpoint enforces owner or fine-grained group permission merely because its queryset is account-scoped.</p></aside>
+            </section>
+
+            <section id="api-route-status" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Support classification</p><h2>A resolver route is inventory—not a support promise</h2><p>The generated catalog proves that Django exposes a method/path pair and that a corresponding Bruno file exists. It does not prove a valid request schema, successful response, least-privilege authorization, idempotency, or safe provider behavior.</p></div>
+              <div class="storage-matrix-grid">
+                <article><span>Supported workflow</span><h3>Purpose-built actions</h3><p>Examples include node backup initiation, durable cloud restore, provider-specific connection/storage creation, and execution-status reads. Use the documented action contract.</p></article>
+                <article><span>Legacy / internal</span><h3>Router-exposed CRUD</h3><p>Generic backup writes and aggregate connection creation are exposed but are not reliable public workflow entry points. Prefer purpose-built family/action routes.</p></article>
+                <article><span>Browser callback</span><h3>OAuth redirects</h3><p>Callback routes may require an authenticated browser session, mutate credentials, and redirect instead of returning an ordinary JSON response.</p></article>
+                <article><span>Live provider probe</span><h3>Discovery and validation</h3><p>Some GET endpoints contact providers, consume quota, or create authorization material. The generated safety label is a review aid, not an authorization boundary.</p></article>
+                <article><span>Known defect</span><h3>Do not automate</h3><p>Operations listed in the known-gap table below require remediation and release-specific tests before enterprise use.</p></article>
+                <article><span>Proposed route</span><h3>Working-tree only</h3><p>When the provenance badge reports uncommitted API changes, those operations are not part of the stable committed API.</p></article>
+              </div>
+            </section>
+
+            <section id="api-auth-details" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Authentication exceptions</p><h2>Most routes require identity; a small set does not</h2></div>
+                <ul class="plain-list"><li><code>/healthz/</code> is public liveness text and does not prove dependency readiness.</li><li><code>POST /api/v1/auth/login/</code> and password-reset operations are public and throttled.</li><li><code>GET /api/v1/auth/logout/</code> is public and state-changing; it ends the browser session but does not revoke the API token.</li><li><code>/api/v1/check/login/</code> accepts optional authentication.</li><li><code>/api/v1/utils/test/</code> is public.</li><li>Unauthenticated failures may be <code>401</code> or <code>403</code> depending on the authenticator path; clients must handle both.</li></ul>
+              </div>
+              <aside class="boundary-card danger"><p class="eyebrow">Token boundary</p><h3>No expiry, scope, or automatic revocation</h3><p>Current DRF tokens are persistent. Store them as secrets, dedicate them to one automation identity, restrict network reachability, rotate them deliberately, and verify revocation after offboarding.</p></aside>
+            </section>
+
+            <section id="api-idempotency" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Request replay contract</p><h2>Idempotency is endpoint-specific</h2><p>Do not attach a header everywhere and assume duplicate safety. Preserve the original key and payload, then follow the semantics below.</p></div>
+              <div class="table-wrap wide-table"><table><thead><tr><th>Workflow</th><th>Key contract</th><th>Duplicate behavior</th><th>Important boundary</th></tr></thead><tbody>
+                <tr><td><strong>Node on-demand backup</strong></td><td><code>Idempotency-Key</code> header or body request ID</td><td>Reuses the durable request</td><td>No request-body fingerprint: reusing a key with changed notes/destinations silently refers to the original request.</td></tr>
+                <tr><td><strong>Cloud/node restore</strong></td><td>Stable key + normalized payload fingerprint</td><td>Same body replays <code>200</code>; new request <code>201</code>; changed body <code>409</code></td><td>Strongest current HTTP replay contract; retain correlation and exact target evidence.</td></tr>
+                <tr><td><strong>Vultr managed DB restore</strong></td><td>Header or body key required</td><td>Replay <code>200</code>; conflict <code>409</code>; new <code>201</code></td><td>Provider plan/engine and PITR boundaries still apply.</td></tr>
+                <tr><td><strong>Lightsail bucket run / restore</strong></td><td>Optional key; generated when absent</td><td>Active/new <code>202</code>; completed replay <code>200</code></td><td>Replication run has no body fingerprint; restore detects a changed source/prefix.</td></tr>
+                <tr><td><strong>Schedule trigger</strong></td><td>Body <code>request_id</code>; header ignored</td><td>Duplicate normally returns <code>400</code>, not the prior response</td><td>A concurrent duplicate can race validation; treat this as duplicate rejection, not full HTTP idempotency.</td></tr>
+                <tr><td><strong>Website / logical DB restore</strong></td><td>None</td><td>Each retry can create another restore row</td><td>Do not automatically resend after timeout. Read durable history and reconcile first.</td></tr>
+              </tbody></table></div>
+            </section>
+
+            <section id="api-known-gaps" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Known contract gaps</p><h2>Routes that need remediation before enterprise automation</h2></div>
+              <div class="table-wrap wide-table"><table><thead><tr><th>Surface</th><th>Current behavior</th><th>Enterprise disposition</th></tr></thead><tbody>
+                <tr><td><strong>Backup-family <code>retry</code></strong></td><td>Republishes the same scheduled task ID, while terminal duplicate protection makes the worker no-op.</td><td>Known defect; use normal recovery/reconciliation or initiate a reviewed new backup.</td></tr>
+                <tr><td><strong>Generic member CRUD</strong></td><td>Write serializer references membership fields on the member model and can fail during serializer construction.</td><td>Do not use until fixed and covered by success/error/schema tests.</td></tr>
+                <tr><td><strong>Generic backup CRUD</strong></td><td>Exposes internal bookkeeping fields and does not initiate the supported durable workflow.</td><td>Legacy/internal; use node/schedule initiation and purpose-built restore actions.</td></tr>
+                <tr><td><strong>Aggregate connection create</strong></td><td>Required account/integration fields are read-only in the aggregate serializer.</td><td>Use the provider-specific connection route.</td></tr>
+                <tr><td><strong>Generic account create</strong></td><td>Can create an account without creating the caller's membership.</td><td>Do not automate until ownership/membership creation is atomic.</td></tr>
+                <tr><td><strong>Serializer exposure</strong></td><td>Some member, Slack/email notification, backup, storage-copy, and website/WordPress responses expose secret or internal coordination fields.</td><td>Restrict API access and sanitize serializers before delegated/customer use.</td></tr>
+                <tr><td><strong>Date filters</strong></td><td>Shared filters expect <code>dateFrom</code>/<code>dateTo</code> in <code>DD-Mon-YYYY</code>; malformed values may produce <code>500</code>.</td><td>Validate client-side; remediate server error mapping before declaring a stable contract.</td></tr>
+                <tr><td><strong>Cancel / delete completion</strong></td><td><code>202</code>/<code>204</code> can record local intent while provider/storage cleanup continues or is deferred.</td><td>Poll durable state and prove provider-side outcome; HTTP acceptance is not cleanup proof.</td></tr>
+              </tbody></table></div>
+              <aside class="callout attention"><svg><use href="#icon-warning"/></svg><div><strong>Bruno currently validates resolver coverage, not semantic correctness.</strong><p>Generated bodies may be empty, default assertions accept any status below 500, and authorization/schema/idempotency/provider effects are not contract-tested by route coverage alone.</p></div></aside>
+            </section>
+
+            <section id="api-explorer" class="section-block explorer-section">
+              <div class="section-heading split-heading"><div><p class="eyebrow">Generated reference</p><h2><span data-api-total>917</span> operations across <span data-api-paths>524</span> paths</h2></div><p>Open a source file for implementation context or the corresponding Bruno request for an executable starting point. Generated examples still require serializer/permission review.</p></div>
+
+              <div class="explorer-toolbar">
+                <label class="explorer-search"><svg><use href="#icon-search"/></svg><span class="sr-only">Search API operations</span><input type="search" id="api-search" placeholder="Search path, action, view, source…"></label>
+                <label><span>Method</span><select id="api-method-filter"><option value="all">All methods</option><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select></label>
+                <label><span>Safety</span><select id="api-safety-filter"><option value="all">All safety classes</option></select></label>
+                <label><span>Family</span><select id="api-family-filter"><option value="all">All endpoint families</option></select></label>
+              </div>
+              <div class="explorer-meta"><span id="api-result-count" aria-live="polite">Loading operation catalog…</span><button type="button" id="api-reset">Reset filters</button></div>
+              <div class="api-results" id="api-results"></div>
+              <button class="button secondary load-more" id="api-load-more" type="button" hidden>Show more operations</button>
+            </section>
+
+            <section id="api-families" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Workflow families</p><h2>High-level route map</h2></div>
+              <div class="family-grid"><article><code>auth · check · members · accounts · groups · invites</code><h3>Identity and tenancy</h3></article><article><code>connections/*</code><h3>Source credentials, discovery, validation</h3></article><article><code>nodes · clouds · volumes · websites · databases · saas</code><h3>Protected workloads</h3></article><article><code>schedules · backups/*</code><h3>Policies, requests, history, downloads, restores</h3></article><article><code>storage/*</code><h3>26 destination families, copies, usage; transfer route surface is incomplete</h3></article><article><code>notifications-* · logs · stats · utils · callback</code><h3>Operations and supporting workflows</h3></article></div>
+            </section>
+
+            <div class="page-links"><a href="../api/README.md">REST API overview</a><a href="../api/conventions.md">Conventions and safety</a><a href="../../bruno/README.md">Bruno collection instructions</a></div>
+          </article>
+
+          <article class="doc-page" data-page="teams" data-title="Teams &amp; access">
+            <header class="page-hero">
+              <p class="eyebrow">Tenancy and delegation</p>
+              <h1>Accounts define ownership; groups combine visibility and actions</h1>
+              <p>A member can belong to multiple accounts, with one current account driving API/console scope. The owner sees the whole account. Non-owner access is built from group node visibility and permission unions—but the exact release must pass a delegated-role security matrix before enterprise use.</p>
+            </header>
+
+            <section id="teams-scope" class="section-block">
+              <div class="tenancy-visual"><div class="member-core"><svg><use href="#icon-team"/></svg><strong>Member</strong><small>one identity · persistent token</small></div><div class="account-branches"><article><span>Current</span><h3>Account A</h3><p>Console/API scope</p><div class="group-pills"><i>Team group</i><i>Client group</i></div></article><article><span>Membership</span><h3>Account B</h3><p>Switch explicitly</p><div class="group-pills"><i>Operations</i></div></article></div></div>
+              <p class="diagram-caption">Switching the current account changes the member's active scope. It does not move connections, nodes, storage, schedules, logs, or notification channels between accounts.</p>
+            </section>
+
+            <section id="teams-visibility" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Node visibility</p><h2>An empty group node list means all nodes</h2></div>
+                <ul class="plain-list"><li>The primary owner sees every node in the current account.</li><li>A non-owner sees the union of nodes selected across their current-account groups.</li><li>If any group has no selected nodes, that group is unrestricted and grants all-node visibility.</li><li>A non-owner in no groups sees no nodes.</li></ul>
+              </div>
+              <aside class="boundary-card danger"><p class="eyebrow">Client-group trap</p><h3>Empty does not mean none</h3><p>Always select explicit nodes for a restricted Client group, then test through the delegated member's own session/token.</p></aside>
+            </section>
+
+            <section id="teams-permissions" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Mapped operational permissions</p><h2>Grant the smallest action set</h2></div>
+              <div class="permission-grid"><article><code>backup_create</code><p>On-demand backup and supported restore/resume actions where mapped.</p></article><article><code>backup_download</code><p>Download completed backup copies.</p></article><article><code>backup_delete</code><p>Delete backup rows/copies where adapter safety permits.</p></article><article><code>schedule_changes</code><p>Create, edit, trigger, pause, resume, delete schedules.</p></article><article><code>node_changes</code><p>Create, update, pause/resume, delete nodes.</p></article><article><code>integration_changes</code><p>Create, update, validate, delete source connections.</p></article><article><code>storage_changes</code><p>Create, update, validate, delete destinations.</p></article></div>
+              <aside class="callout attention"><svg><use href="#icon-warning"/></svg><div><strong>Action mapping coverage is not yet a completed security guarantee.</strong><p>Custom update/cancel/retry/restore actions and legacy management endpoints need endpoint-by-endpoint verification. Treat unknown/unmapped unsafe actions as a release blocker, not as implicitly denied.</p></div></aside>
+            </section>
+
+            <section id="teams-invites" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Invitation lifecycle</p><h2>Seven-day enrollment links</h2></div>
+              <div class="invite-flow"><div><strong>Create</strong><small>email · timezone · groups · notification flags</small></div><i></i><div><strong>Deliver</strong><small>link valid for 7 days</small></div><i></i><div><strong>Accept</strong><small>matching new/existing identity</small></div><i></i><div><strong>Membership</strong><small>current account access</small></div></div>
+              <p>Resending a pending invitation restarts its window. Cancellation makes the link unusable. Accepted, cancelled, expired, unknown, or email-mismatched paths must not enroll a member.</p>
+            </section>
+
+            <section id="teams-release-test" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Release role matrix</p><h2>Minimum tests before multi-user access</h2></div>
+              <div class="role-table"><div class="role-row header"><span>Role</span><span>Expected nodes</span><span>Expected reads</span><span>Expected mutations</span><span>Negative tests</span></div><div class="role-row"><span>Owner</span><span>All account</span><span>All account</span><span>All account</span><span>Cross-account IDs</span></div><div class="role-row"><span>Ops team</span><span>Explicit union</span><span>Only required</span><span>Mapped permissions</span><span>Unmapped actions, other nodes</span></div><div class="role-row"><span>Client</span><span>Explicit subset</span><span>Minimum</span><span>Usually none / selected</span><span>Empty-group semantics, team admin</span></div><div class="role-row"><span>Removed/inactive</span><span>None</span><span>None</span><span>None</span><span>Old session + persistent token</span></div></div>
+            </section>
+
+            <div class="page-links"><a href="../features/teams-tenancy-and-api-access.md">Canonical teams guide</a><a href="#security">Security readiness</a><a href="#api-authorization">API authorization boundary</a></div>
+          </article>
+
+          <article class="doc-page" data-page="notifications" data-title="Notifications">
+            <header class="page-hero">
+              <p class="eyebrow">Operational communication</p>
+              <h1>Notifications report orchestration; the ledger remains authoritative</h1>
+              <p>BackupSheep writes account activity and can deliver transactional email, Slack, and Telegram messages. Delivery failure is isolated from backup/restore terminal state so a notification outage cannot turn a successful backup into a failed one.</p>
+            </header>
+
+            <section id="notifications-events" class="section-block">
+              <div class="event-map"><div class="event-source"><svg><use href="#icon-pulse"/></svg><strong>Backup / restore event</strong><small>safe code · correlation · account</small></div><div class="event-lines"><i></i><i></i><i></i><i></i></div><div class="event-targets"><article><span>Always</span><h3>Activity log</h3><p>Account-scoped operational record</p></article><article><span>Configured</span><h3>Email</h3><p>Selected recipients and templates</p></article><article><span>Connected</span><h3>Slack</h3><p>Incoming webhook fan-out</p></article><article><span>Connected</span><h3>Telegram</h3><p>Bot-to-chat fan-out</p></article></div></div>
+            </section>
+
+            <section id="notifications-matrix" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Event behavior</p><h2>What is communicated</h2></div>
+              <div class="table-wrap"><table><thead><tr><th>Event</th><th>Email recipient path</th><th>Activity / channel behavior</th></tr></thead><tbody><tr><td>Backup complete</td><td>Account + node + membership success controls; primary owner included</td><td>Activity; eligible notification-bot fan-out</td></tr><tr><td>Backup failed / could not start</td><td>Account + node + membership failure controls; primary owner included</td><td>Safe error and correlation, not raw provider exception</td></tr><tr><td>Storage validation/upload failed</td><td>Failure path</td><td>Destination context is operationally sensitive</td></tr><tr><td>Archive Partial</td><td>Not the normal all-destinations-success email path</td><td>Activity records successful/failed destination outcome</td></tr><tr><td>Restore started / failed</td><td>Failure-recipient list</td><td>Activity + configured channels</td></tr><tr><td>Restore complete</td><td>Success-recipient list</td><td>Still requires independent data verification</td></tr><tr><td>Invite / verify / reset</td><td>Direct account message</td><td>Depends on configured transactional email</td></tr></tbody></table></div>
+            </section>
+
+            <section id="notifications-email" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Transactional email</p><h2>Mailgun, Postmark, or Amazon SES</h2></div>
+              <div class="provider-cards"><article><strong>Postmark</strong><p>Server API token, sending domain/address, API endpoint.</p></article><article><strong>Mailgun</strong><p>Domain, sender, API key, regional/base API URL.</p></article><article><strong>Amazon SES</strong><p>Region/endpoint and scoped access credentials.</p></article></div>
+              <p>The onboarding flow stores selected provider configuration. Keep <code>DJANGO_SECRET_KEY</code> stable because it derives protection for stored email credentials. If email is unavailable, password recovery requires a reviewed host-side operator procedure.</p>
+            </section>
+
+            <section id="notifications-channels" class="section-block split-section">
+              <div>
+                <div class="section-heading"><p class="eyebrow">Slack and Telegram</p><h2>Account-wide fan-out</h2></div>
+                <ul class="plain-list"><li>Slack uses an OAuth/incoming-webhook connection and offers a live validation message.</li><li>Telegram uses the deployment bot token plus an account channel/chat ID and offers a live validation message.</li><li>Every connected channel for the account is active; there are no per-event enabled switches.</li><li>One channel failure is caught so it does not block delivery to the others or change the backup result.</li><li>Notification permission codenames are not current per-group subscription controls.</li></ul>
+              </div>
+              <aside class="boundary-card danger"><p class="eyebrow">Credential readiness gap</p><h3>Restrict channel administration</h3><p>Current Slack secret-bearing fields and legacy notification authorization need remediation/retest before delegated multi-user use. Treat database backups and any API response review as sensitive.</p></aside>
+            </section>
+
+            <section id="notifications-safe-errors" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Public-safe failure contract</p><h2>Send enough to act, not enough to leak</h2></div>
+              <div class="safe-message"><div><span>Include</span><p>Stable error category · concise remediation · retryability · correlation ID · bounded resource context</p></div><div><span>Exclude</span><p>Credentials · authorization headers · raw provider body · command output · arbitrary exception · signed URL · customer content</p></div></div>
+            </section>
+
+            <div class="page-links"><a href="../features/notifications.md">Canonical notification guide</a><a href="#operations">Activity and monitoring</a><a href="#security">Secret boundaries</a></div>
+          </article>
+
+          <article class="doc-page" data-page="operations" data-title="Operations &amp; signals">
+            <header class="page-hero">
+              <p class="eyebrow">Operator runbook</p>
+              <h1>Monitor the path to recovery, not only the web process</h1>
+              <p>Operational health combines service dependencies, queue consumers, durable job state, artifact/copy evidence, capacity, and restore rehearsals. No single green signal proves recoverability.</p>
+            </header>
+
+            <section id="operations-signal-stack" class="section-block">
+              <div class="signal-stack" aria-label="BackupSheep observability hierarchy">
+                <div class="signal-tier recovery"><span>Strongest evidence</span><strong>Independent restore rehearsal</strong><small>known marker · isolated target · data verification</small></div>
+                <div class="signal-tier artifact"><strong>Artifact and copy evidence</strong><small>digest · bytes · object/version ID · verification time</small></div>
+                <div class="signal-tier durable"><strong>Durable execution state</strong><small>correlation · phase · retry · progress · reconciliation</small></div>
+                <div class="signal-tier dependency"><strong>Dependencies and queues</strong><small>PostgreSQL · RabbitMQ · consumers · capacity</small></div>
+                <div class="signal-tier liveness"><span>Weakest evidence</span><strong>Web liveness</strong><small><code>GET /healthz/</code> returned <code>ok</code></small></div>
+              </div>
+            </section>
+
+            <section id="operations-daily" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Daily operator view</p><h2>Look for drift before it becomes an RPO breach</h2></div>
+              <div class="ops-checks"><article><span>Runs</span><h3>Active, retrying, failed</h3><p>Review phase age, next retry, attempt, and manual-review states.</p></article><article><span>Policies</span><h3>Expected vs actual</h3><p>Find schedules that stopped producing a success inside interval + grace.</p></article><article><span>Copies</span><h3>Required destinations</h3><p>Surface Partial, upload failure, unverified copy, and Object Lock cleanup state.</p></article><article><span>Capacity</span><h3>Bytes and inodes</h3><p>Project exhaustion for database, broker, work/cache, Local Storage, and Docker data.</p></article><article><span>Queues</span><h3>Backlog and consumers</h3><p>Track depth, oldest-message age, unacknowledged work, and consumers per lane.</p></article><article><span>Recovery</span><h3>Rehearsal freshness</h3><p>Alert when no verified restore exists inside the workload's policy window.</p></article></div>
+            </section>
+
+            <section id="operations-probes" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Probe matrix</p><h2>What each check actually proves</h2></div>
+              <div class="table-wrap"><table><thead><tr><th>Check</th><th>Positive result proves</th><th>It does not prove</th></tr></thead><tbody><tr><td><code>GET /healthz/</code></td><td>One web process handled an HTTP request</td><td>DB, broker, workers, providers, storage, readiness</td></tr><tr><td><code>docker compose ps --all</code></td><td>Container health/restart and migration exit state</td><td>Functional source or restore path</td></tr><tr><td><code>pg_isready</code></td><td>PostgreSQL accepts a connection</td><td>Schema correctness, capacity, backup currency</td></tr><tr><td>RabbitMQ diagnostics</td><td>Broker responds; queue inspection adds consumers/backlog</td><td>Durable job completion</td></tr><tr><td>Celery inspect</td><td>Currently connected worker/task snapshot</td><td>Durable history or absence of accepted work</td></tr><tr><td>Execution API/console</td><td>Persisted orchestration status and safe evidence</td><td>Independent data correctness</td></tr><tr><td>Restore rehearsal</td><td>That selected path recovered verified data at that time</td><td>All sources/providers/future runs</td></tr></tbody></table></div>
+            </section>
+
+            <section id="operations-alerts" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Initial alert policy</p><h2>Start here, then tune from measured job timing</h2></div>
+              <div class="alert-board"><article class="critical"><span>Critical</span><p>Public HTTPS/app liveness fails twice</p></article><article class="critical"><span>Critical</span><p>PostgreSQL or RabbitMQ unavailable</p></article><article class="critical"><span>Critical</span><p>Required queue has zero consumers</p></article><article class="critical"><span>Critical review</span><p>Execution enters <code>manual_review</code></p></article><article class="warning"><span>Warning → critical</span><p>Filesystem below 15% free or exhaustion before maintenance</p></article><article class="warning"><span>Warning</span><p>Queue depth rises continuously for 15 minutes</p></article><article class="warning"><span>Policy dependent</span><p>Backup/restore failure or overdue retry</p></article><article class="critical"><span>Governance breach</span><p>Control-plane backup or restore rehearsal exceeds policy</p></article></div>
+            </section>
+
+            <section id="operations-queues" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Queue triage</p><h2>Backlog points to the constrained lane</h2></div>
+              <div class="queue-lanes"><article><code>cloud / default</code><p>Provider snapshot/restore polling and general work. Check outbound provider access and rate limits.</p></article><article><code>database</code><p>Logical dumps/restores. Check source network, client version, locks, CPU, work disk.</p></article><article><code>files</code><p>Website/WordPress/Basecamp collection. Check SSH trust, file count, cache, source free space.</p></article><article><code>storage</code><p>Upload/download/finalization. A rising backlog with healthy dump lanes indicates destination throughput pressure.</p></article><article><code>logs</code><p>Activity, notifications, pruning. Lag should not rewrite backup terminal state.</p></article></div>
+              <p>Scale the measured bottleneck. Keep database/files concurrency conservative. Stock sample defaults are cloud/database/files/storage/logs = <strong>4 / 1 / 1 / 2 / 2</strong>, all with prefetch multiplier 1.</p>
+            </section>
+
+            <section id="operations-maintenance" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Planned maintenance</p><h2>Pause intake, preserve state, observe recovery</h2></div>
+              <ol class="runbook-steps compact"><li><span>1</span><div><h3>Control new work</h3><p>Pause schedules or stop Beat; communicate the window.</p></div></li><li><span>2</span><div><h3>Inventory active work</h3><p>Check durable rows plus active/reserved/scheduled queue views.</p></div></li><li><span>3</span><div><h3>Reach safe boundaries</h3><p>Allow provider mutation, dump, upload, or restore phases to finish where possible.</p></div></li><li><span>4</span><div><h3>Back up control plane</h3><p>Verified PostgreSQL dump, protected configuration, exact revision/override record.</p></div></li><li><span>5</span><div><h3>Change and verify</h3><p>Migrations, dependencies, every queue consumer, mounts, liveness, logs.</p></div></li><li><span>6</span><div><h3>Resume and watch</h3><p>Start Beat/schedules and observe recovery sweeps plus first scheduled occurrence.</p></div></li></ol>
+            </section>
+
+            <section id="operations-maintenance-cadence" class="section-block split-section">
+              <div><div class="section-heading"><p class="eyebrow">Built-in cadence</p><h2>Scheduler-owned maintenance</h2></div><dl class="stacked-definitions"><div><dt>Every minute</dt><dd>Durable request/backup/restore recovery plus supported replication synchronization/recovery.</dd></div><div><dt>03:00 UTC</dt><dd>Local run-log pruning.</dd></div><div><dt>03:30 UTC</dt><dd>Database activity-log pruning.</dd></div><div><dt>Every six hours</dt><dd>Retry eligible S3 Object Lock-protected deletes.</dd></div></dl></div><aside class="boundary-card"><p class="eyebrow">Timezone</p><h3>Scheduler runs in UTC</h3><p>User/member timezones affect presentation and cron interpretation, while the process maintenance cadence remains UTC.</p></aside>
+            </section>
+
+            <aside class="callout info"><svg><use href="#icon-activity"/></svg><div><strong>Prometheus, Grafana, and synthetic recovery are not bundled.</strong><p>Integrate the signals above into your monitoring platform. Centralize container/run/activity logs before local retention expires, and redact sensitive content.</p></div></aside>
+            <div class="page-links"><a href="../guides/operations.md">Full operations runbook</a><a href="../guides/observability.md">Observability guide and commands</a><a href="#disaster-recovery">Control-plane recovery</a></div>
+          </article>
+
+          <article class="doc-page" data-page="disaster-recovery" data-title="Control-plane DR">
+            <header class="page-hero">
+              <p class="eyebrow">Protect the protector</p>
+              <h1>Remote snapshots are not enough if the control plane is lost</h1>
+              <p>Without PostgreSQL and stable secrets, BackupSheep loses account relationships, encrypted credentials, schedules, durable executions, storage mappings, provider identities, and recovery evidence—even if some remote objects still exist.</p>
+            </header>
+
+            <section id="dr-objectives" class="section-block">
+              <div class="objective-board"><article><span>Control-plane RPO</span><h2>How much configuration and execution history can be lost?</h2><p>Drives PostgreSQL dump/PITR frequency and evidence retention.</p></article><article><span>Control-plane RTO</span><h2>How quickly must scheduling and recovery operations return?</h2><p>Drives image/revision availability, secret access, infrastructure automation, and rehearsal.</p></article><article><span>In-flight policy</span><h2>What happens to work interrupted at disaster time?</h2><p>Defines whether work-volume snapshots are required and how provider reconciliation is authorized.</p></article></div>
+            </section>
+
+            <section id="dr-protection-set" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Recovery set</p><h2>Protect these materials outside the host/failure domain</h2></div>
+              <div class="table-wrap wide-table"><table><thead><tr><th>Material</th><th>Contains</th><th>Recommended protection</th></tr></thead><tbody><tr><td><strong>PostgreSQL</strong></td><td>Tenancy, per-account keys, credentials, policies, backup/restore ledgers, provider/copy evidence</td><td>Frequent encrypted logical dumps and/or managed PITR; isolated restore tests</td></tr><tr><td><strong><code>.env</code> / secret object</strong></td><td>Django key, DB/broker credentials, OAuth applications, runtime behavior</td><td>Encrypted, access-audited, versioned secret custody</td></tr><tr><td><strong>Deployment metadata</strong></td><td>Exact Git/image revision, Compose overrides, TLS proxy, firewall, mount mapping</td><td>Versioned infrastructure record outside the host</td></tr><tr><td><strong><code>backup_storage</code></strong></td><td>All Local Storage customer archives</td><td>Independent filesystem snapshot/backup; never the only copy</td></tr><tr><td><strong>Critical work material</strong></td><td>SSH known hosts/key, incremental caches, install token, in-flight files/logs</td><td>Always protect trust/key material; snapshot active work if RTO policy requires it</td></tr><tr><td><strong>External inventory</strong></td><td>Provider snapshots and offsite archive objects</td><td>Independent inventory plus exact ID/correlation mapping and restore rehearsal</td></tr></tbody></table></div>
+            </section>
+
+            <section id="dr-broker" class="section-block split-section">
+              <div><div class="section-heading"><p class="eyebrow">RabbitMQ boundary</p><h2>Transport is important, but not authoritative</h2></div><p>The broker persists queued messages, while the database outbox and recovery sweeps retain accepted intent. During disaster recovery, prefer a clean compatible broker unless an application-consistent broker-volume restore has been tested.</p></div><aside class="boundary-card"><p class="eyebrow">Never infer completion</p><h3>Missing queue message ≠ lost or complete job</h3><p>Reconcile durable request/execution state and provider/storage evidence after control-plane recovery.</p></aside>
+            </section>
+
+            <section id="dr-restore-sequence" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Replacement-host sequence</p><h2>Recover closed, verify, then reopen</h2></div>
+              <ol class="runbook-steps"><li><span>1</span><div><h3>Prepare matching software and paths</h3><p>Pin the intended revision/image; recreate proxy, network, mounts, database/broker versions, and protected secrets.</p></div></li><li><span>2</span><div><h3>Start dependencies only</h3><p>Bring up PostgreSQL and a compatible clean broker on private networks.</p></div></li><li><span>3</span><div><h3>Restore PostgreSQL</h3><p>Restore into an empty target and validate archive/schema before the app accepts traffic.</p></div></li><li><span>4</span><div><h3>Start migrations, app, and workers</h3><p>Apply only expected migrations; verify every lane and shared path.</p></div></li><li><span>5</span><div><h3>Keep schedules controlled</h3><p>Inspect active/stale executions and provider identities before allowing recovery sweeps or new work.</p></div></li><li><span>6</span><div><h3>Reconcile and rehearse</h3><p>Resolve in-flight outcomes by exact evidence, validate a destination, restore a known backup, then reopen access.</p></div></li></ol>
+            </section>
+
+            <section id="dr-lost-secrets" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Loss scenarios</p><h2>Some keys cannot be reconstructed</h2></div>
+              <div class="loss-grid"><article><h3>Lost Django key</h3><p>Sessions invalidate and stored email-provider credentials protected from that key become unreadable. Restore the exact key from custody or reconfigure affected secrets.</p></article><article><h3>Lost database / account key material</h3><p>Encrypted source/destination credentials may not be recoverable from ciphertext. Re-enter and revalidate every integration.</p></article><article><h3>Lost onboarding token</h3><p>Relevant only before initial owner creation. After onboarding, use account membership and reviewed host-side password administration.</p></article><article><h3>Lost provider mapping</h3><p>Do not adopt resources by name. Reconstruct only from independent exact IDs/tags/markers and reviewed ownership evidence.</p></article></div>
+            </section>
+
+            <section id="dr-upgrades" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Upgrade and rollback</p><h2>A code rollback may not be a data rollback</h2></div>
+              <div class="upgrade-track"><div><span>Preflight</span><p>Dirty tree, exact branch/revision, release notes, capacity, active work, backups</p></div><i></i><div><span>Protect</span><p>Verified DB dump, configuration copy, override/proxy/revision record</p></div><i></i><div><span>Apply</span><p>Pull/build, one-shot migrate, app/workers/Beat</p></div><i></i><div><span>Verify</span><p>Dependencies, consumers, UI/API, recovery sweep, test backup</p></div><i></i><div><span>Rollback plan</span><p>Compatibility analysis, DB restore decision, immutable evidence</p></div></div>
+              <p>Database migrations can be irreversible or incompatible with an older image. Define the database rollback/restore plan before upgrading; never assume switching the container tag is sufficient.</p>
+            </section>
+
+            <div class="page-links"><a href="../guides/disaster-recovery.md">Full disaster-recovery runbook</a><a href="../guides/upgrades.md">Upgrade and rollback guide</a><a href="#operations">Monitoring and maintenance</a></div>
+          </article>
+
+          <article class="doc-page" data-page="configuration" data-title="Configuration">
+            <header class="page-hero">
+              <p class="eyebrow">Runtime reference</p>
+              <h1>Configuration changes failure behavior</h1>
+              <p>The catalog combines public sample variables with environment reads in Django settings. Secrets are masked; test/support-only knobs are labeled. Review values as a coherent system—timeouts, leases, concurrency, disk, and provider behavior interact.</p>
+            </header>
+
+            <section id="configuration-invariants" class="section-block">
+              <div class="config-invariants"><article><span>Public URL tuple</span><h3>Host, protocol, redirects, cookies, callbacks</h3><p><code>APP_DOMAIN</code>, <code>APP_PROTOCOL</code>, <code>DJANGO_ALLOWED_HOSTS</code>, and <code>DJANGO_HTTPS</code> must describe the same trusted edge.</p></article><article><span>Stable secret tuple</span><h3>Django key, database, secret custody</h3><p>Back up <code>DJANGO_SECRET_KEY</code> with the database and deployment secrets; rotation has data-access consequences.</p></article><article><span>Lease tuple</span><h3>Lease, heartbeat, stale threshold, recovery cadence</h3><p>Heartbeat must remain well below lease expiry; stale recovery must allow legitimate long phases to heartbeat.</p></article><article><span>Capacity tuple</span><h3>Concurrency, prefetch, archive size, work disk</h3><p>Higher worker counts multiply source load, temporary disk, open files, memory, and destination throughput.</p></article></div>
+            </section>
+
+            <section id="configuration-workflow" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Safe change workflow</p><h2>Change, render, restart, prove</h2></div>
+              <ol class="horizontal-steps"><li><span>1</span><p><strong>Classify</strong> secret vs behavior vs capacity</p></li><li><span>2</span><p><strong>Record</strong> prior value without exposing it</p></li><li><span>3</span><p><strong>Render</strong> effective service configuration</p></li><li><span>4</span><p><strong>Restart</strong> only affected roles where safe</p></li><li><span>5</span><p><strong>Verify</strong> dependencies, queues, behavior, rollback</p></li></ol>
+            </section>
+
+            <section id="configuration-concurrency" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Stock capacity baseline</p><h2>Conservative single-host defaults</h2></div>
+              <div class="concurrency-chart"><article style="--level: 4"><span>cloud</span><i></i><b>4</b><small>prefetch 1</small></article><article style="--level: 1"><span>database</span><i></i><b>1</b><small>prefetch 1</small></article><article style="--level: 1"><span>files</span><i></i><b>1</b><small>prefetch 1</small></article><article style="--level: 2"><span>storage</span><i></i><b>2</b><small>prefetch 1</small></article><article style="--level: 2"><span>logs</span><i></i><b>2</b><small>prefetch 1</small></article></div>
+              <p class="muted">Older prose in this repository listed higher worker values. The chart follows current <code>.env_sample</code> and stock Compose defaults. Scale one measured lane at a time.</p>
+            </section>
+
+            <section id="configuration-explorer" class="section-block explorer-section">
+              <div class="section-heading split-heading"><div><p class="eyebrow">Generated reference</p><h2><span data-config-total>171</span> environment reads indexed</h2></div><p>The source column distinguishes normal operator sample variables from settings-only support/test controls. The catalog never reads <code>.env</code>.</p></div>
+              <div class="explorer-toolbar config-toolbar"><label class="explorer-search"><svg><use href="#icon-search"/></svg><span class="sr-only">Search configuration variables</span><input type="search" id="config-search" placeholder="Search name, purpose, category…"></label><label><span>Category</span><select id="config-category-filter"><option value="all">All categories</option></select></label><label><span>Scope</span><select id="config-scope-filter"><option value="all">All variables</option><option value="required">Required</option><option value="sensitive">Sensitive</option><option value="settings-only">Settings-only</option></select></label></div>
+              <div class="explorer-meta"><span id="config-result-count" aria-live="polite">Loading configuration catalog…</span><button type="button" id="config-reset">Reset filters</button></div>
+              <div class="config-results" id="config-results"></div>
+              <button class="button secondary load-more" id="config-load-more" type="button" hidden>Show more variables</button>
+            </section>
+
+            <section id="configuration-guardrails" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Guardrails</p><h2>Values that deserve change-control review</h2></div>
+              <div class="guardrail-list"><article><code>DJANGO_SECRET_KEY</code><p>Must be strong and stable. Treat replacement as a recovery/migration event.</p></article><article><code>DJANGO_DEBUG / ALLOWED_HOSTS / HTTPS</code><p>Directly affect public information exposure, Host validation, cookies, redirects, and HSTS.</p></article><article><code>BACKUP_* / RESTORE_* leases</code><p>Can create premature takeover or slow crash recovery when tuned poorly.</p></article><article><code>PROVIDER_HTTP_* retries</code><p>Safe-method policy still must not become blind external mutation replay.</p></article><article><code>RESTORE_MAX_*</code><p>Archive-bomb safety ceilings. Raising them increases resource exposure.</p></article><article><code>FAULT_*</code><p>Test-only injection controls. Keep disabled/unset in production.</p></article></div>
+            </section>
+
+            <div class="page-links"><a href="../guides/configuration.md">Configuration workflow</a><a href="../reference/environment-variables.md">Canonical environment reference</a><a href="../../.env_sample">Current operator sample</a></div>
+          </article>
+
+          <article class="doc-page" data-page="provider-matrix" data-title="Provider matrix">
+            <header class="page-hero">
+              <p class="eyebrow">Capability reference</p>
+              <h1>Provider, source, destination, and restore boundaries</h1>
+              <p>This matrix describes repository paths—not blanket certification across every provider region, plan, API version, account policy, source version, or destination tier. Validate the exact combination you operate.</p>
+            </header>
+
+            <section id="matrix-sources" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Protected sources</p><h2>Placement and recovery model</h2></div>
+              <div class="table-wrap wide-table"><table class="matrix-table"><thead><tr><th>Source</th><th>Backup method</th><th>Where result lives</th><th>Built-in recovery</th><th>Status / boundary</th></tr></thead><tbody>
+                <tr><td>DigitalOcean Droplet / volume</td><td>Provider snapshot</td><td>DigitalOcean account</td><td>New Droplet / volume</td><td><span class="matrix-state implemented">Implemented</span> exact tenant/provider validation required</td></tr>
+                <tr><td>Hetzner server</td><td>Primary-disk snapshot</td><td>Hetzner project</td><td>New server</td><td><span class="matrix-state limited">Limited scope</span> no attached Volumes/network resources</td></tr>
+                <tr><td>UpCloud server / storage</td><td>Template / storage backup</td><td>UpCloud account</td><td>New storage / reconstructed server</td><td><span class="matrix-state implemented">Implemented</span> topology constraints fail closed</td></tr>
+                <tr><td>Vultr instance / block</td><td>Provider snapshot</td><td>Vultr account</td><td>New instance / volume</td><td><span class="matrix-state implemented">Implemented</span> exact ownership reconciliation</td></tr>
+                <tr><td>Vultr managed database</td><td>Provider-managed backup metadata</td><td>Vultr platform</td><td>New DB fork</td><td><span class="matrix-state limited">Plan/engine limits</span> PITR excludes Valkey</td></tr>
+                <tr><td>Oracle compute / boot / block</td><td>Image / volume backup</td><td>OCI tenancy</td><td>New instance / volume</td><td><span class="matrix-state implemented">Implemented</span> compartment/AD/network locked</td></tr>
+                <tr><td>Google compute / disk</td><td>Machine image / disk snapshot</td><td>GCP project</td><td>New instance / disk</td><td><span class="matrix-state implemented">Implemented</span> project/zone boundaries</td></tr>
+                <tr><td>OVH CA / EU / US instance / volume</td><td>Image / snapshot</td><td>Matching OVH region</td><td>New provider resource</td><td><span class="matrix-state implemented">Implemented</span> regional app credentials required</td></tr>
+                <tr><td>AWS EC2 / EBS</td><td>AMI / EBS snapshot</td><td>AWS account/region</td><td>New instance / volume</td><td><span class="matrix-state implemented">Implemented</span> IAM/tag/region validation</td></tr>
+                <tr><td>AWS RDS</td><td>Manual DB snapshot</td><td>AWS account/region</td><td>New RDS instance</td><td><span class="matrix-state implemented">Implemented</span> target option compatibility</td></tr>
+                <tr><td>AWS versioned S3 / DynamoDB</td><td>AWS Backup recovery point</td><td>Backup vault</td><td>Distinct bucket / table</td><td><span class="matrix-state limited">Prerequisite-heavy</span> vault/IAM/versioning/target rules</td></tr>
+                <tr><td>Lightsail instance / disk / relational DB</td><td>Provider snapshot</td><td>AWS Lightsail</td><td>New instance / disk / DB</td><td><span class="matrix-state implemented">Implemented</span> distinct resource paths</td></tr>
+                <tr><td>Website</td><td>FTP/FTPS/SFTP collect or SFTP tar → ZIP</td><td>1…n storage destinations</td><td>Overlay / exact mirror</td><td><span class="matrix-state limited">Complete only</span> built-in restore rejects Partial backups</td></tr>
+                <tr><td>MySQL / MariaDB</td><td>Logical dump → archive</td><td>1…n storage destinations</td><td>Fork default; API in-place</td><td><span class="matrix-state implemented">Implemented</span> certify exact server/client/privileges</td></tr>
+                <tr><td>PostgreSQL</td><td>Logical dump → archive</td><td>1…n storage destinations</td><td>Fork default; API in-place</td><td><span class="matrix-state attention">Known mode gap</span> direct non-table modes need remediation</td></tr>
+                <tr><td>WordPress</td><td>Plugin/API files/database archive</td><td>1…n storage destinations</td><td>Manual from downloaded artifact</td><td><span class="matrix-state limited">No automatic restore</span></td></tr>
+                <tr><td>Basecamp</td><td>OAuth API export archive</td><td>1…n storage destinations</td><td>Manual from downloaded artifact</td><td><span class="matrix-state limited">No automatic restore</span></td></tr>
+                <tr><td>Lightsail bucket replication</td><td>Per-object/version copy ledger</td><td>Supported S3-compatible subset</td><td>Target prefix copy</td><td><span class="matrix-state specialized">Specialized API</span> not a normal node schedule</td></tr>
+                <tr><td>Zendesk / Slack source</td><td>None</td><td>—</td><td>—</td><td><span class="matrix-state unavailable">Coming Soon / unavailable</span></td></tr>
+              </tbody></table></div>
+            </section>
+
+            <section id="matrix-storage" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Storage destinations</p><h2>Connection and integrity characteristics</h2></div>
+              <div class="storage-matrix-grid">
+                <article><span>Filesystem</span><h3>Local Storage</h3><p>Mounted path, local stream/download, optional <code>no_delete</code>. Same-host failure domain unless externalized.</p></article>
+                <article><span>Amazon-specific</span><h3>Amazon S3</h3><p>Expected owner, version evidence, presigned download, Object Lock, legal hold, lifecycle tiers, air-gap designation.</p></article>
+                <article><span>S3-compatible</span><h3>B2 · Wasabi · Spaces · R2 · IDrive · IBM · Oracle · Scaleway · Linode · Vultr · UpCloud · Exoscale · Filebase · IONOS · Leviia · RackCorp</h3><p>Shared multipart/integrity patterns with provider-specific endpoint and error behavior.</p></article>
+                <article><span>Native object API</span><h3>Google Cloud · Azure · Tencent · Alibaba</h3><p>Provider-native credential/container semantics; not interchangeable with S3 configuration.</p></article>
+                <article><span>OAuth drive</span><h3>Dropbox · Google Drive · OneDrive · pCloud</h3><p>Deployment OAuth app + account grant, chunked/provider-specific upload, callback URL dependency.</p></article>
+              </div>
+              <aside class="callout attention"><svg><use href="#icon-warning"/></svg><div><strong>Restore/download implementations are not uniform across all 26 destinations.</strong><p>Exact authenticated materialization is implemented for Amazon S3, DigitalOcean Spaces, Azure Blob, Dropbox, Google Cloud Storage, Google Drive, OneDrive, pCloud, IDrive, Oracle, UpCloud, and Vultr. The other 14 destinations use legacy download-URL materialization. Certify the exact source × destination × restore combination rather than assuming upload support implies automated restore support.</p></div></aside>
+            </section>
+
+            <section id="matrix-certification" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Per-combination acceptance</p><h2>Minimum certification record</h2></div>
+              <ol class="horizontal-steps"><li><span>1</span><p><strong>Identity</strong> account/project/region + credential scope</p></li><li><span>2</span><p><strong>Validate</strong> exact source and destination</p></li><li><span>3</span><p><strong>Protect</strong> disposable uniquely marked workload</p></li><li><span>4</span><p><strong>Verify</strong> every required copy/provider result</p></li><li><span>5</span><p><strong>Restore</strong> to new isolated target</p></li><li><span>6</span><p><strong>Prove</strong> data independently and clean owned resources</p></li></ol>
+            </section>
+
+            <div class="page-links"><a href="../reference/provider-matrix.md">Canonical provider reference</a><a href="#evidence">Evidence levels and open gates</a><a href="#restores">Restore workflows</a></div>
+          </article>
+
+          <article class="doc-page" data-page="evidence" data-title="Evidence &amp; limits">
+            <header class="page-hero">
+              <p class="eyebrow">Readiness posture</p>
+              <h1>Separate implementation, testing, live evidence, and certification</h1>
+              <p>BackupSheep is a self-hostable beta. The repository contains meaningful reliability engineering and dated live-test evidence, but no enterprise certification, SLA, or universal provider/scale guarantee is established by this documentation.</p>
+            </header>
+
+            <section id="evidence-ladder" class="section-block">
+              <div class="evidence-ladder"><article><span>1</span><h3>Implemented</h3><p>A route/model/task/adapter exists.</p></article><article><span>2</span><h3>Offline tested</h3><p>Unit/integration tests exercise mocks, state machines, faults, or local services.</p></article><article><span>3</span><h3>Live exercised</h3><p>A dated report records one provider/source run under documented conditions.</p></article><article><span>4</span><h3>Restore verified</h3><p>A selected backup recovered into an isolated target and data checks passed.</p></article><article><span>5</span><h3>Release certified</h3><p>Exact release, tenant, versions, scale, security, DR, and repeated evidence meet policy.</p></article></div>
+              <p class="diagram-caption">A higher rung does not automatically apply to every provider region, plan, account policy, resource type, data size, destination, or future release.</p>
+            </section>
+
+            <section id="evidence-readiness" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Current enterprise gates</p><h2>Do not claim production enterprise readiness until these close</h2></div>
+              <div class="readiness-ledger">
+                <article class="blocker"><span>Blocker</span><h3>Security and delegated authorization</h3><p>Complete remediation and independent retest of legacy management authorization, action maps, membership state, token lifecycle, OAuth state binding, MFA, and secret exposure. Run cross-account/role negative tests on the final commit.</p></article>
+                <article class="blocker"><span>Blocker</span><h3>Restore coverage truth</h3><p>Certify every advertised source × destination restore path. Built-in website/database restore currently requires overall Complete; Partial copies are not accepted. Only a subset of destinations has exact authenticated materialization.</p></article>
+                <article class="blocker"><span>Blocker</span><h3>PostgreSQL direct-mode selection</h3><p>Current direct all-/selected-database modes can produce an empty-archive failure; table-selection mode is the implemented direct path. Fix and test before general PostgreSQL claims.</p></article>
+                <article class="open"><span>Open</span><h3>Local restore idempotency</h3><p>Website and logical database restore creation do not currently have the native restore request-idempotency/target-active guard. Repeated POSTs can create separate restore rows.</p></article>
+                <article class="open"><span>Open</span><h3>Transfer-to-storage action</h3><p>A transfer UI/serializer surface exists, but no complete server action/task was found in the audited path. Treat transfer as unavailable until implemented and tested.</p></article>
+                <article class="open"><span>Open</span><h3>Archive encryption</h3><p>A legacy schedule field exists, but the backup pipeline writes plain ZIP archives and restore rejects encrypted ZIP members. Do not advertise application-level archive encryption.</p></article>
+                <article class="open"><span>Open</span><h3>Alternate scheduler descriptors</h3><p>Render, Heroku, and Railway descriptors currently use the stock database scheduler rather than BackupSheep's durable occurrence/outbox scheduler. The stock Compose path is the reliable documented baseline.</p></article>
+                <article class="open"><span>Open</span><h3>Large-scale acceptance</h3><p>Historical current-artifact database/small-site/Unicode gates passed, while the 100 GB single-archive and 2,000,000-file paths retained unresolved failures or incomplete remediation gates.</p></article>
+              </div>
+            </section>
+
+            <section id="evidence-observed" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Dated engineering evidence</p><h2>Useful reports, bounded claims</h2></div>
+              <div class="report-list"><a href="../large-backup-acceptance-20260816.md"><span>2026-08-16</span><div><strong>Large backup acceptance</strong><p>Partial Pass: verified restores at meaningful database/website sizes; open huge-archive/high-file-count gates.</p></div></a><a href="../website-database-backup-acceptance-remediation-plan-20260818.md"><span>2026-08-18</span><div><strong>Website/database remediation ledger</strong><p>Current-artifact PostgreSQL, MariaDB, small website exact mirror, Unicode, counters, and input validation evidence; remaining matrix and scale work.</p></div></a><a href="../provider-live-e2e-pause-handoff-20260815.md"><span>2026-08-15</span><div><strong>Provider live-E2E handoff</strong><p>Safety-gated provider work, ownership rules, proven results, cleanup, and open providers.</p></div></a><a href="../multi-provider-ui-parallel-backup-e2e-report-20260818.md"><span>2026-08-18</span><div><strong>Parallel provider UI exercise</strong><p>Dated UI/provider observations; not a universal support certification.</p></div></a></div>
+            </section>
+
+            <section id="evidence-claim-policy" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Claim policy</p><h2>Language that keeps enterprise buyers informed</h2></div>
+              <div class="claim-compare"><article><span>Use</span><p>“Implemented in the current repository.”</p><p>“Verified in the dated test under these conditions.”</p><p>“Creates a new target; exact tenant rehearsal required.”</p><p>“Partial contains a completed copy, but built-in restore currently rejects Partial.”</p></article><article><span>Avoid</span><p>“Fully supported everywhere.”</p><p>“Zero data loss.”</p><p>“One-click recovery guaranteed.”</p><p>“Enterprise-ready” without security, DR, scale, and release evidence.</p></article></div>
+            </section>
+
+            <section id="evidence-release-gate" class="section-block">
+              <div class="section-heading"><p class="eyebrow">Release evidence package</p><h2>What to retain for an enterprise-approved build</h2></div>
+              <div class="evidence-packet"><span>Exact commit/image digest</span><span>Clean dependency/security scan</span><span>Role + cross-account test matrix</span><span>Route/catalog drift validation</span><span>Configuration diff and secret review</span><span>Source × destination restore matrix</span><span>Scale and fault-injection results</span><span>Control-plane DR rehearsal</span><span>Upgrade + rollback rehearsal</span><span>Provider IDs and cleanup ledgers</span><span>Known limitations with owners</span><span>Independent sign-off</span></div>
+            </section>
+
+            <aside class="callout danger"><svg><use href="#icon-warning"/></svg><div><strong>Security assessment details should remain controlled.</strong><p>This public manual states the readiness outcome and remediation gates without publishing exploit procedures, secret-bearing evidence, or confidential infrastructure details.</p></div></aside>
+            <div class="page-links"><a href="../README.md#engineering-evidence-and-historical-reports">Historical evidence index</a><a href="#provider-matrix">Capability matrix</a><a href="#operations">Operational proof model</a></div>
+          </article>
+
+          <article class="doc-page" data-page="glossary" data-title="Glossary">
+            <header class="page-hero">
+              <p class="eyebrow">Shared vocabulary</p>
+              <h1>Terms used across the manual</h1>
+              <p>Use these definitions in runbooks, tickets, support packets, acceptance reports, and API integrations so “backup,” “copy,” “execution,” and “restore” do not collapse into one ambiguous status.</p>
+            </header>
+
+            <section id="glossary-terms" class="section-block">
+              <dl class="glossary-list">
+                <div><dt>Account</dt><dd>The tenant boundary that owns product configuration and activity.</dd></div>
+                <div><dt>Artifact</dt><dd>A concrete archive generation bound to a source execution with recorded filenames, bytes, digests, and verification.</dd></div>
+                <div><dt>Backup</dt><dd>The customer-visible record of one protection run. It is distinct from its request, execution, artifact, and copies.</dd></div>
+                <div><dt>Backup request</dt><dd>Durably accepted intent plus dispatch/outbox state.</dd></div>
+                <div><dt>Connection</dt><dd>Account-scoped credentials and settings used to reach a source or provider.</dd></div>
+                <div><dt>Correlation ID</dt><dd>A stable, non-secret identifier connecting public status to secured operational diagnostics.</dd></div>
+                <div><dt>Destination</dt><dd>A configured location capable of storing archive copies.</dd></div>
+                <div><dt>Execution</dt><dd>The durable operational ledger for phase, ownership, attempts, retry, progress, provider identity, and reconciliation.</dd></div>
+                <div><dt>Fencing token</dt><dd>A generation/ownership value that prevents a stale worker from persisting competing state after losing its lease.</dd></div>
+                <div><dt>Fork restore</dt><dd>A logical database restore into deterministic new database names rather than overwriting source data.</dd></div>
+                <div><dt>Idempotency key</dt><dd>A caller identity that makes replay of the same supported mutation converge on the existing durable request.</dd></div>
+                <div><dt>Lease</dt><dd>Time-bounded permission for one worker to own a phase; renewed by heartbeat.</dd></div>
+                <div><dt>Manual review</dt><dd>A fail-closed terminal/holding state used when exact external ownership or outcome cannot be proven safely.</dd></div>
+                <div><dt>Node</dt><dd>A protected workload or resource selected through a connection.</dd></div>
+                <div><dt>Occurrence</dt><dd>One computed scheduled firing, with a stable identity used to converge duplicate scheduler delivery.</dd></div>
+                <div><dt>Overlay restore</dt><dd>Write archive files over matching target paths while preserving unrelated target files.</dd></div>
+                <div><dt>Exact-mirror restore</dt><dd>Make the target match the backup scope, including deletion of files absent from the archive; destructive.</dd></div>
+                <div><dt>Partial</dt><dd>An archive backup where at least one destination succeeded and at least one failed. The good copy is retained, but current website/database built-in restore requires overall Complete.</dd></div>
+                <div><dt>Provider-native backup</dt><dd>A snapshot, image, recovery point, or managed backup that remains in the connected provider account.</dd></div>
+                <div><dt>Reconciliation</dt><dd>Read-only or bounded discovery that determines whether an external mutation with an unknown response produced an exact owned result.</dd></div>
+                <div><dt>Recovery point objective (RPO)</dt><dd>The maximum acceptable age/loss window of recoverable data or control-plane state.</dd></div>
+                <div><dt>Recovery time objective (RTO)</dt><dd>The target time to restore a required service or control plane.</dd></div>
+                <div><dt>Restore rehearsal</dt><dd>A controlled recovery to an isolated target followed by independent data/application verification and owned cleanup.</dd></div>
+                <div><dt>Schedule</dt><dd>A database-backed timing, placement, and retention policy for one node.</dd></div>
+                <div><dt>Storage point</dt><dd>One independently tracked copy of an archive at one destination.</dd></div>
+                <div><dt>Verification</dt><dd>Evidence that a result satisfies a bounded integrity/identity contract; not synonymous with full application recovery.</dd></div>
+              </dl>
+            </section>
+
+            <div class="page-links"><a href="#concepts">Core concept map</a><a href="#execution">Execution vocabulary</a><a href="#evidence">Evidence levels</a></div>
+          </article>
+        </main>
+
+        <aside class="page-toc" aria-label="On this page">
+          <p>On this page</p>
+          <nav id="page-toc"></nav>
+          <div class="toc-foot"><span>Need exact implementation detail?</span><a href="../README.md">Open the source-linked library</a></div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <div class="nav-scrim" id="nav-scrim" hidden></div>
+
+  <dialog class="search-dialog" id="search-dialog" aria-labelledby="search-title">
+    <div class="search-box">
+      <svg><use href="#icon-search"/></svg>
+      <label class="sr-only" id="search-title" for="global-search">Search the manual</label>
+      <input id="global-search" type="search" placeholder="Search workflows, providers, APIs, configuration…" autocomplete="off">
+      <button type="button" id="search-close" aria-label="Close search"><svg><use href="#icon-close"/></svg></button>
+    </div>
+    <div class="search-summary" id="search-summary" aria-live="polite">Type to search the complete manual.</div>
+    <div class="search-results" id="search-results"></div>
+    <div class="search-help"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="generated/catalog.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

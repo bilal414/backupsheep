@@ -8,6 +8,16 @@ BackupSheep is a self-hosted backup orchestrator. A healthy installation is only
 starting point: validate each integration and storage destination, complete a backup,
 and rehearse a restore before relying on it for recovery.
 
+## Enterprise recovery manual
+
+Open the [visual enterprise recovery manual](enterprise/index.html) for the complete,
+searchable product guide. It covers architecture, every backup family, storage and
+restore behavior, retry/reconciliation policy, API operations, configuration variables,
+security boundaries, operational runbooks, edge cases, and evidence requirements.
+
+The manual's API and configuration catalogs are generated from repository sources so
+drift can be detected during documentation validation.
+
 ## New users
 
 1. [Install BackupSheep](guides/installation.md).
