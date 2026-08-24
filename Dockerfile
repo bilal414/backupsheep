@@ -339,6 +339,25 @@ COPY --link --chown=0:0 backupsheep /code/backupsheep
 COPY --link --chown=0:0 utils /code/utils
 COPY --link --chown=0:0 --chmod=0555 init.sh /usr/local/bin/init.sh
 
+# Git records executability, not the complete checkout mode. A source tree created
+# under umask 0077 therefore reaches BuildKit with mode-0600 modules and mode-0700
+# packages. Normalize the copied inputs before the first unprivileged import. Keep
+# the empty static destination private and writable only for the collectstatic step;
+# the final hardening layer below makes its generated contents immutable.
+RUN set -eux; \
+    if find /code -xdev -type l -print -quit | grep -q .; then \
+        echo "Refusing symlinks in the runtime application inputs." >&2; \
+        exit 1; \
+    fi; \
+    test -z "$(find /code/static -mindepth 1 -print -quit)"; \
+    find /code -xdev \
+        \( -path /code/_storage -o -path /code/static \) -prune -o \
+        -type d -exec chmod 0555 {} +; \
+    find /code -xdev \
+        \( -path /code/_storage -o -path /code/static \) -prune -o \
+        -type f -exec chmod 0444 {} +; \
+    install -d -o backupsheep -g backupsheep -m 0700 /code/static
+
 # Collect static assets as the final unprivileged identity. The step has no
 # network and uses only explicitly non-production placeholder configuration, so
 # a build cannot depend on a live database or leak an operator's runtime secret.

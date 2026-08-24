@@ -192,6 +192,9 @@ class RuntimeImageHardeningTests(TestCase):
 
     def test_static_assets_are_built_offline_as_non_root(self):
         collect = "python manage.py collectstatic --noinput --clear"
+        input_normalization = (
+            "\\( -path /code/_storage -o -path /code/static \\) -prune -o"
+        )
         self.assertIn("RUN --network=none", self.runtime)
         self.assertIn(
             "--mount=type=tmpfs,target=/code/_storage",
@@ -199,6 +202,15 @@ class RuntimeImageHardeningTests(TestCase):
         )
         self.assertIn("DJANGO_SERVER=test", self.runtime)
         self.assertIn(collect, self.runtime)
+        self.assertIn(input_normalization, self.runtime)
+        self.assertIn(
+            "install -d -o backupsheep -g backupsheep -m 0700 /code/static",
+            self.runtime,
+        )
+        self.assertLess(
+            self.runtime.index(input_normalization),
+            self.runtime.index("USER 10001:10001\nRUN --network=none"),
+        )
         self.assertLess(
             self.runtime.index("USER 10001:10001\nRUN --network=none"),
             self.runtime.index(collect),
