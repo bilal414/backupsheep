@@ -4,7 +4,7 @@ from unittest import mock
 from django.conf import settings
 from django.http import HttpResponse
 from django.template.loader import render_to_string
-from django.test import Client
+from django.test import Client, override_settings
 from rest_framework.authtoken.models import Token
 
 from apps.console.invite.models import CoreInvite
@@ -67,6 +67,21 @@ class AuthPageIsolationTests(BaseTestCase):
         attributes, body = scripts[0]
         self.assertRegex(attributes, r'src="/static/console/js/auth(?:\.[^/\"]+)?\.js"')
         self.assertEqual(body.strip(), "")
+
+    @override_settings(ALLOWED_HOSTS=["allowed.example"], DEBUG=False)
+    def test_invalid_host_fails_closed_as_bad_request(self):
+        response = self.client.get(
+            "/healthz/",
+            HTTP_HOST="attacker.invalid",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(
+            response.headers["Content-Security-Policy"],
+            BrowserSecurityHeadersMiddleware.AUTH_CONTENT_SECURITY_POLICY,
+        )
+        self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
 
     def test_login_reset_and_invite_pages_are_third_party_isolated(self):
         invite = CoreInvite.objects.create(
