@@ -8,6 +8,7 @@ from django.test import Client, override_settings
 from rest_framework.authtoken.models import Token
 
 from apps.console.invite.models import CoreInvite
+from apps.console.log.models import CoreLog
 from apps.console.member.totp import totp_for_counter
 from apps.console.setting.models import CoreSiteSettings
 from apps.tests.base import BaseTestCase
@@ -172,6 +173,13 @@ class BrowserSessionLoginTests(BaseTestCase):
         self.assertNotIn("api_key", response.json())
         self.assertIn("_auth_user_id", self.browser.session)
         self.assertFalse(Token.objects.filter(user=self.user).exists())
+        self.assertEqual(
+            CoreLog.objects.filter(
+                account=self.account,
+                type=CoreLog.Type.AUTH,
+            ).count(),
+            1,
+        )
 
     def test_browser_marker_fails_closed_without_same_origin_or_csrf_proof(self):
         csrf_token = self._csrf()

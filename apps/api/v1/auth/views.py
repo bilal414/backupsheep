@@ -9,6 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.console.log.models import record_user_logged_in
 from apps.console.member.models import CoreMember
 
 from .serializers import *
@@ -126,6 +127,10 @@ class APIAuthLogin(APIView):
                 if not created and token_is_expired(token):
                     token.delete()
                     token = Token.objects.create(user=member.user)
+                # Native clients intentionally do not call Django's login(), so
+                # they do not emit user_logged_in. Preserve security audit coverage
+                # without creating a browser session or firing session-only hooks.
+                record_user_logged_in(request, member.user)
                 content = {"api_key": token.key}
         else:
             raise ExceptionDefault(detail=serializer.errors)

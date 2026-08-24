@@ -132,17 +132,16 @@ def _request_ip(request):
     return request.META.get("REMOTE_ADDR")
 
 
-@receiver(user_logged_in)
-def log_user_logged_in(sender, request, user, **kwargs):
-    """Record successful logins as AUTH activity. Must never break auth."""
+def record_user_logged_in(request, user):
+    """Record a successful session or native-token login without breaking auth."""
     try:
         member = getattr(user, "member", None)
         if member is None:
-            return
+            return None
         account = member.get_current_account()
         if account is None:
-            return
-        CoreLog.record(
+            return None
+        return CoreLog.record(
             account,
             CoreLog.Type.AUTH,
             {
@@ -153,7 +152,13 @@ def log_user_logged_in(sender, request, user, **kwargs):
             },
         )
     except Exception:
-        pass
+        return None
+
+
+@receiver(user_logged_in)
+def log_user_logged_in(sender, request, user, **kwargs):
+    """Record successful Django session logins as AUTH activity."""
+    record_user_logged_in(request, user)
 
 
 @receiver(user_login_failed)

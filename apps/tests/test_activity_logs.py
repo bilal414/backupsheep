@@ -292,6 +292,13 @@ class AuthSignalLogTests(BaseTestCase):
         self.assertEqual(log.data["action"], "login")
         self.assertEqual(log.data["actor_email"], self.user.email)
         self.assertTrue(log.data.get("ip"))
+        self.assertEqual(
+            CoreLog.objects.filter(
+                account=self.account,
+                type=CoreLog.Type.AUTH,
+            ).count(),
+            1,
+        )
 
     def test_failed_login_known_email_writes_auth_log(self):
         r = self.client.post("/api/v1/auth/login/",
