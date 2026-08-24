@@ -191,6 +191,10 @@ class ProductionTransportSettingsSubprocessTests(SimpleTestCase):
     CONFIG_KEYS = {
         "BACKUPSHEEP_SECRETS",
         "DATABASE_URL",
+        "DJANGO_SECRET_KEY_FILE",
+        "DB_PASSWORD_FILE",
+        "RABBITMQ_PASSWORD_FILE",
+        "ONBOARDING_INSTALL_TOKEN_SECRET_FILE",
         "DB_SSLMODE",
         "DB_SSLROOTCERT",
         "PGHOST",
