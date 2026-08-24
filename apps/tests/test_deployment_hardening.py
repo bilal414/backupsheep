@@ -63,8 +63,12 @@ class DeploymentHardeningContractTests(TestCase):
             self.compose,
         )
         self.assertIn(
+            'su-exec rabbitmq rabbitmqctl -q authenticate_user', self.compose
+        )
+        self.assertIn('$$(cat /run/secrets/rabbitmq_password)', self.compose)
+        self.assertNotIn(
             '["CMD", "su-exec", "rabbitmq", "rabbitmq-diagnostics", "-q", "ping"]',
-            self.compose,
+            self.service_block("rabbitmq"),
         )
         self.assertIn("start_period: 30s", self.compose)
         self.assertNotIn("guest:guest", self.compose)

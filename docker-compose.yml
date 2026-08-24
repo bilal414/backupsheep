@@ -276,10 +276,11 @@ services:
     cpus: "${RABBITMQ_CPU_LIMIT:-1.0}"
     stop_grace_period: "${RABBITMQ_STOP_GRACE_PERIOD:-3m}"
     healthcheck:
-      # The official image starts as root and then drops privileges. Run the CLI as the
-      # broker user so an early probe cannot create a root-owned Erlang cookie and crash
-      # a still-booting node.
-      test: ["CMD", "su-exec", "rabbitmq", "rabbitmq-diagnostics", "-q", "ping"]
+      # A node ping can succeed before the restored authentication database is ready.
+      # Prove the dedicated file-backed credential as the broker user so dependent
+      # services cannot race that recovery, and so the probe cannot create a root-owned
+      # Erlang cookie. Neither the secret nor command output is persisted in health logs.
+      test: ["CMD-SHELL", "su-exec rabbitmq rabbitmqctl -q authenticate_user \"$${RABBITMQ_DEFAULT_USER}\" \"$$(cat /run/secrets/rabbitmq_password)\" >/dev/null 2>&1"]
       interval: 5s
       timeout: 5s
       retries: 10
