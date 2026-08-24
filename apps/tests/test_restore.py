@@ -1208,7 +1208,17 @@ class RestoreBackendBase(BaseTestCase):
 
     def _website_backup(self, *, all_paths=False, paths=None,
                         status=UtilBackup.Status.COMPLETE):
-        node = factories.make_website_node(self.account, self.member)
+        # Restore behavior is independent of the legacy plaintext-FTP fixture
+        # default. Use explicit FTPS here so restore tests exercise the secure
+        # production path without enabling ALLOW_INSECURE_FTP.
+        node = factories.make_website_node(
+            self.account,
+            self.member,
+            protocol=CoreAuthWebsite.Protocol.FTPS,
+        )
+        auth = node.connection.auth_website
+        auth.ftps_use_explicit_ssl = True
+        auth.save(update_fields=["ftps_use_explicit_ssl", "modified"])
         website = node.website
         website.all_paths = all_paths
         website.paths = paths
