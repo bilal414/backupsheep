@@ -287,6 +287,16 @@ function backupsheep_v2_files(WP_REST_Request $request)
     return backupsheep_v2_response(array('files' => $files));
 }
 
+/** Return one generic response for missing files and run/file mismatches. */
+function backupsheep_v2_file_not_found()
+{
+    return new WP_Error(
+        'backupsheep_v2_file_not_found',
+        __('The backup file was not found.', 'backupsheep'),
+        array('status' => 404)
+    );
+}
+
 /** Resolve an exact regular file that remains inside UpdraftPlus's backup directory. */
 function backupsheep_v2_backup_file($payload)
 {
@@ -315,20 +325,63 @@ function backupsheep_v2_backup_file($payload)
         || !is_file($path)
         || strpos($path, $directory . DIRECTORY_SEPARATOR) !== 0
     ) {
-        return new WP_Error(
-            'backupsheep_v2_file_not_found',
-            __('The backup file was not found.', 'backupsheep'),
-            array('status' => 404)
-        );
+        return backupsheep_v2_file_not_found();
     }
     return array('name' => $raw, 'path' => $path);
 }
 
+/**
+ * Confirm that a resolved file is an exact member of one UpdraftPlus backup run.
+ *
+ * Matching both the requested basename and resolved path prevents an authenticated
+ * request from using an alias to reach another historical file in the backup
+ * directory. The only permitted files are the run's exact logfile and the exact
+ * UUID-scoped set returned by the same glob contract as the files endpoint.
+ */
+function backupsheep_v2_backup_owns_file($file, $backup_uuid)
+{
+    $updraft = backupsheep_v2_updraftplus();
+    if (is_wp_error($updraft)) {
+        return $updraft;
+    }
+
+    $candidates = array((string) $updraft->get_logfile_name($backup_uuid));
+    $matches = glob(rtrim($updraft->backups_dir_location(), '/\\') . '/*_' . $backup_uuid . '-*');
+    if (is_array($matches)) {
+        $candidates = array_merge($candidates, $matches);
+    }
+
+    foreach ($candidates as $candidate) {
+        $candidate_path = realpath((string) $candidate);
+        if (
+            basename((string) $candidate) === $file['name']
+            && $candidate_path !== false
+            && $candidate_path === $file['path']
+            && is_file($candidate_path)
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function backupsheep_v2_download(WP_REST_Request $request)
 {
-    $file = backupsheep_v2_backup_file(backupsheep_v2_payload($request));
+    $payload = backupsheep_v2_payload($request);
+    $backup_uuid = backupsheep_v2_backup_uuid($payload);
+    if (is_wp_error($backup_uuid)) {
+        return $backup_uuid;
+    }
+    $file = backupsheep_v2_backup_file($payload);
     if (is_wp_error($file)) {
         return $file;
+    }
+    $owned = backupsheep_v2_backup_owns_file($file, $backup_uuid);
+    if (is_wp_error($owned)) {
+        return $owned;
+    }
+    if (!$owned) {
+        return backupsheep_v2_file_not_found();
     }
     while (ob_get_level() > 0) {
         ob_end_clean();

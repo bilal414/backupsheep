@@ -22,6 +22,7 @@ from apps.api.v1.utils.oauth_security import (
     OAUTH_STATE_SESSION_KEY,
     OAUTH_STATE_TTL_SECONDS,
     consume_oauth_state,
+    get_or_issue_oauth_state,
     issue_oauth_state,
     validated_https_endpoint,
 )
@@ -74,6 +75,174 @@ class OAuthStateSecurityTests(SimpleTestCase):
                 member=self.member,
                 account=self.account,
             )
+        )
+
+    def test_get_render_reuses_live_bound_state_but_explicit_restart_rotates_it(self):
+        first = get_or_issue_oauth_state(
+            self.request,
+            provider="dropbox",
+            member=self.member,
+            account=self.account,
+            use_pkce=True,
+        )
+        rendered_again = get_or_issue_oauth_state(
+            self.request,
+            provider="dropbox",
+            member=self.member,
+            account=self.account,
+            use_pkce=True,
+        )
+        self.assertEqual(rendered_again, first)
+
+        restarted = issue_oauth_state(
+            self.request,
+            provider="dropbox",
+            member=self.member,
+            account=self.account,
+            use_pkce=True,
+        )
+        self.assertNotEqual(restarted["state"], first["state"])
+        self.assertNotEqual(restarted["code_verifier"], first["code_verifier"])
+        self.assertEqual(
+            self.request.session[OAUTH_STATE_SESSION_KEY]["dropbox"], restarted
+        )
+
+    def test_get_render_replaces_only_expired_misbound_or_pkce_incompatible_state(self):
+        cases = ("expired", "member", "account", "pkce")
+        for case in cases:
+            with self.subTest(case=case):
+                request = SimpleNamespace(session={})
+                original = issue_oauth_state(
+                    request,
+                    provider="dropbox",
+                    member=self.member,
+                    account=self.account,
+                    use_pkce=True,
+                )
+                record = request.session[OAUTH_STATE_SESSION_KEY]["dropbox"]
+                if case == "expired":
+                    record["issued_at"] = time.time() - OAUTH_STATE_TTL_SECONDS - 1
+                elif case == "member":
+                    record["member_id"] = "different-member"
+                elif case == "account":
+                    record["account_id"] = "different-account"
+                else:
+                    record.pop("code_verifier")
+
+                replacement = get_or_issue_oauth_state(
+                    request,
+                    provider="dropbox",
+                    member=self.member,
+                    account=self.account,
+                    use_pkce=True,
+                )
+                self.assertNotEqual(replacement["state"], original["state"])
+
+    def test_legacy_provider_state_is_adopted_without_rotation_and_retired(self):
+        legacy_key = "legacy_provider_state"
+        legacy = {
+            "state": "legacy-state",
+            "member_id": str(self.member.pk),
+            "account_id": str(self.account.pk),
+            "issued_at": time.time(),
+        }
+        request = SimpleNamespace(session={legacy_key: dict(legacy)})
+        adopted = get_or_issue_oauth_state(
+            request,
+            provider="pcloud",
+            member=self.member,
+            account=self.account,
+            legacy_session_key=legacy_key,
+        )
+        self.assertEqual(adopted["state"], legacy["state"])
+        self.assertEqual(adopted["provider"], "pcloud")
+        self.assertNotIn(legacy_key, request.session)
+        self.assertEqual(
+            request.session[OAUTH_STATE_SESSION_KEY]["pcloud"], adopted
+        )
+
+        consumed = consume_oauth_state(
+            request,
+            provider="pcloud",
+            received_state=legacy["state"],
+            member=self.member,
+            account=self.account,
+            legacy_session_key=legacy_key,
+        )
+        self.assertEqual(consumed, adopted)
+
+    def test_explicit_restart_rejects_legacy_without_consuming_current_state(self):
+        legacy_key = "legacy_provider_state"
+        request = SimpleNamespace(
+            session={
+                legacy_key: {
+                    "state": "superseded-state",
+                    "member_id": str(self.member.pk),
+                    "account_id": str(self.account.pk),
+                    "issued_at": time.time(),
+                }
+            }
+        )
+        current = issue_oauth_state(
+            request,
+            provider="pcloud",
+            member=self.member,
+            account=self.account,
+        )
+        self.assertIsNone(
+            consume_oauth_state(
+                request,
+                provider="pcloud",
+                received_state="superseded-state",
+                member=self.member,
+                account=self.account,
+                legacy_session_key=legacy_key,
+            )
+        )
+        self.assertIn(legacy_key, request.session)
+        self.assertEqual(
+            consume_oauth_state(
+                request,
+                provider="pcloud",
+                received_state=current["state"],
+                member=self.member,
+                account=self.account,
+                legacy_session_key=legacy_key,
+            ),
+            current,
+        )
+        self.assertNotIn(legacy_key, request.session)
+
+    def test_unknown_cross_site_state_cannot_cancel_pending_authorization(self):
+        current = issue_oauth_state(
+            self.request,
+            provider="dropbox",
+            member=self.member,
+            account=self.account,
+            use_pkce=True,
+        )
+
+        self.assertIsNone(
+            consume_oauth_state(
+                self.request,
+                provider="dropbox",
+                received_state="attacker-controlled-state",
+                member=self.member,
+                account=self.account,
+            )
+        )
+        self.assertEqual(
+            self.request.session[OAUTH_STATE_SESSION_KEY]["dropbox"], current
+        )
+        self.assertEqual(
+            consume_oauth_state(
+                self.request,
+                provider="dropbox",
+                received_state=current["state"],
+                member=self.member,
+                account=self.account,
+            ),
+            current,
         )
 
     def test_state_rejects_member_account_provider_mismatch_and_expiry(self):
@@ -193,6 +362,10 @@ class OAuthStateSecurityTests(SimpleTestCase):
     BASECAMP_CLIENT_ID="basecamp-client",
     BASECAMP_CLIENT_SECRET="basecamp-secret-marker",
     BASECAMP_REDIRECT_URL="/api/v1/callback/basecamp",
+    BASECAMP_INTEGRATION_ENABLED=True,
+    BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+    BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE="legacy-only",
+    BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
     MS_OAUTH_TOKEN_URL="https://login.microsoftonline.com/common/oauth2/v2.0/token",
     MS_CLIENT_ID="ms-client",
     MS_CLIENT_SECRET_VALUE="ms-secret-marker",

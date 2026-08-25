@@ -645,8 +645,9 @@ class CoreDatabaseBackupView(VisibleNodeBackupMixin, viewsets.ModelViewSet):
     @action(detail=True)
     def download_transfer_log(self, request, pk=None):
         backup = self.get_object()
-        # Self-hosted builds keep run logs on the local _storage volume (pruned by
-        # delete_old_logs); the historical remote-log-bucket retrieval below is dead SaaS
+        # Self-hosted builds keep database run logs on the database lane's private
+        # _storage volume (pruned by delete_old_database_logs); the historical
+        # remote-log-bucket retrieval below is dead SaaS
         # infrastructure referencing settings that no longer exist. Return a clean message
         # instead of crashing. (See docs/troubleshooting.md.)
         return Response(

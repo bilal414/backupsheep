@@ -1,0 +1,95 @@
+# CI-only assertions layered over the stock deployment model.  The application,
+# PostgreSQL, egress and RabbitMQ service definitions still come from the production
+# Compose file; this overlay only removes the host listener and supplies an observable
+# readiness check for the one worker exercised by the gate.
+services:
+  app-egress-guard:
+    ports: !reset []
+
+  app:
+    env_file: !reset []
+    environment:
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
+
+  db-provision:
+    env_file: !reset []
+
+  migrate:
+    env_file: !reset []
+
+  db-seal:
+    env_file: !reset []
+
+  preflight:
+    env_file: !reset []
+    environment:
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
+
+  worker-cloud:
+    env_file: !reset []
+    environment:
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
+    healthcheck:
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+# A fresh hosted runner normally has ample default address pools, but relying on
+# daemon-global allocation makes the security gate flaky on a reused runner.  These
+# non-routed CI-only subnets preserve the production one-network-per-trust-edge model
+# without changing Docker daemon configuration.
+networks:
+  app-database:
+    ipam: {config: [{subnet: 10.253.240.0/28}]}
+  app-broker:
+    ipam: {config: [{subnet: 10.253.240.16/28}]}
+  migrate-database:
+    ipam: {config: [{subnet: 10.253.240.32/28}]}
+  cloud-database:
+    ipam: {config: [{subnet: 10.253.240.48/28}]}
+  cloud-broker:
+    ipam: {config: [{subnet: 10.253.240.64/28}]}
+  database-database:
+    ipam: {config: [{subnet: 10.253.240.80/28}]}
+  database-broker:
+    ipam: {config: [{subnet: 10.253.240.96/28}]}
+  files-database:
+    ipam: {config: [{subnet: 10.253.240.112/28}]}
+  files-broker:
+    ipam: {config: [{subnet: 10.253.240.128/28}]}
+  storage-database:
+    ipam: {config: [{subnet: 10.253.240.144/28}]}
+  storage-broker:
+    ipam: {config: [{subnet: 10.253.240.160/28}]}
+  logs-database:
+    ipam: {config: [{subnet: 10.253.240.176/28}]}
+  logs-broker:
+    ipam: {config: [{subnet: 10.253.240.192/28}]}
+  beat-database:
+    ipam: {config: [{subnet: 10.253.240.208/28}]}
+  beat-broker:
+    ipam: {config: [{subnet: 10.253.240.224/28}]}
+  preflight-database:
+    ipam: {config: [{subnet: 10.253.240.240/28}]}
+  preflight-broker:
+    ipam: {config: [{subnet: 10.253.241.0/28}]}
+  provision-database:
+    ipam: {config: [{subnet: 10.253.241.16/28}]}
+  provision-broker:
+    ipam: {config: [{subnet: 10.253.241.32/28}]}
+  app-egress:
+    ipam: {config: [{subnet: 10.253.241.48/28}]}
+  cloud-egress:
+    ipam: {config: [{subnet: 10.253.241.64/28}]}
+  database-egress:
+    ipam: {config: [{subnet: 10.253.241.80/28}]}
+  files-egress:
+    ipam: {config: [{subnet: 10.253.241.96/28}]}
+  storage-egress:
+    ipam: {config: [{subnet: 10.253.241.112/28}]}
+  logs-egress:
+    ipam: {config: [{subnet: 10.253.241.128/28}]}

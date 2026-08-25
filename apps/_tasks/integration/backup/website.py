@@ -41,6 +41,7 @@ on); turn it off per-connection for hosts with self-signed/mismatched certs.
 """
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -68,7 +69,14 @@ from apps._tasks.integration.backup._archive import (
 )
 from apps.api.v1.utils.api_helpers import bs_decrypt, mkdir_p, create_directory_v2, ensure_disk_space
 from apps.console.connection.models import CoreAuthWebsite
-from apps.console.connection.ssh import managed_private_key_path
+from apps.console.connection.ssh import (
+    STRICT_AUTH_KEY_ALGORITHMS,
+    STRICT_CIPHERS,
+    STRICT_KEX_ALGORITHMS,
+    STRICT_MACS,
+    managed_private_key_path,
+    materialize_temporary_private_key,
+)
 from apps._tasks.helper.tasks import delete_from_disk
 from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 
@@ -136,12 +144,33 @@ def _lftp_quote(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _lftp_url_host(value):
+    """Bracket canonical IPv6 literals so lftp receives an unambiguous URI."""
+
+    host = str(value or "")
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if isinstance(parsed, ipaddress.IPv6Address):
+        return f"[{parsed.compressed}]"
+    return parsed.compressed
+
+
 def _redact(text, username, password):
     out = text or ""
-    if password:
-        out = out.replace(password, "******")
-    if username:
-        out = out.replace(username, "******")
+    # lftp escapes quotes and backslashes inside its generated command script.
+    # Redact both the original credential and that rendered form so diagnostics
+    # cannot leak a credential merely because it contains either character.
+    for credential in (password, username):
+        if not credential:
+            continue
+        value = str(credential)
+        rendered = value.replace("\r", "").replace("\n", "")
+        rendered = rendered.replace("\\", "\\\\").replace('"', '\\"')
+        for secret in sorted({value, rendered}, key=len, reverse=True):
+            if secret:
+                out = out.replace(secret, "******")
     return out.replace("_storage/", "")
 
 
@@ -265,6 +294,18 @@ def _normalize_ssh_key(path, passphrase):
     for key_cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
         try:
             key = key_cls.from_private_key_file(path, password=passphrase)
+            descriptor = os.open(
+                normalized_path,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            os.close(descriptor)
+            # Paramiko opens the existing inode with truncation. Pre-creating it
+            # privately means unencrypted key bytes are never present at a wider
+            # umask-derived mode, even briefly.
             key.write_private_key_file(normalized_path)
             os.chmod(normalized_path, 0o600)
             # Do not replace the source until the staged result can be parsed
@@ -321,33 +362,10 @@ def _normalize_ssh_key(path, passphrase):
         ) from error
 
 
-def _materialize_ssh_private_key(path, private_key):
-    """Write decrypted key material in the format required by system OpenSSH.
+def _materialize_ssh_private_key(private_key):
+    """Stage a customer key only in the worker's verified ephemeral runtime."""
 
-    Text fields and serializers commonly remove the final newline from an
-    OpenSSH private key. Paramiko accepts that representation, but the system
-    ``ssh`` process used by lftp rejects it with ``error in libcrypto``. Keep
-    line endings canonical, restore exactly one terminal newline, and create the
-    file with owner-only permissions before any external process can observe it.
-    """
-    material = (private_key or "").replace("\r\n", "\n").replace("\r", "\n")
-    if material:
-        material = material.rstrip("\n") + "\n"
-
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as key_file:
-            descriptor = None
-            key_file.write(material)
-            key_file.flush()
-            os.fsync(key_file.fileno())
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
+    return materialize_temporary_private_key(private_key)
 
 
 def _build_remote_tar_command(*, archive_path, exclude_rules, sources):
@@ -405,20 +423,46 @@ def _build_lftp_script(*, auth, host_url, port, username, password, ssh_key_path
         lines += list(_LFTP_MIRROR_SETTINGS)
 
     if auth.protocol == CoreAuthWebsite.Protocol.SFTP:
-        # Every SFTP auth mode must use the same reviewed host-key file as Paramiko
-        # validation. Without this, a connection can validate in the web process and
-        # then fail (or trust a different key) in lftp on the files worker.
-        known_hosts_path = shlex.quote(settings.SSH_KNOWN_HOSTS_PATH)
+        # Use one private, tenant-scoped approval snapshot. Ignore every global or
+        # user SSH config/trust file so another tenant or stale image entry cannot
+        # authorize a different server identity.
+        approved_known_hosts = str(
+            getattr(auth, "_approved_known_hosts_path", "") or ""
+        )
+        approved_algorithm = str(
+            getattr(auth, "_approved_host_key_algorithm", "") or ""
+        )
+        if not approved_known_hosts or not approved_algorithm:
+            raise ValueError("An exact SFTP host-key approval snapshot is required")
+        known_hosts_path = shlex.quote(approved_known_hosts)
         connect_parts = [
-            f"ssh -a -x -o StrictHostKeyChecking=yes "
+            f"ssh -F /dev/null -a -x -o IdentityAgent=none "
+            f"-o VerifyHostKeyDNS=no -o CheckHostIP=no "
+            f"-o CanonicalizeHostname=no -o StrictHostKeyChecking=yes "
             f"-o UserKnownHostsFile={known_hosts_path} "
+            f"-o GlobalKnownHostsFile=/dev/null "
+            f"-o UpdateHostKeys=no "
+            f"-o HostKeyAlgorithms={shlex.quote(approved_algorithm)} "
+            f"-o PubkeyAcceptedAlgorithms={shlex.quote(','.join(STRICT_AUTH_KEY_ALGORITHMS))} "
+            f"-o KexAlgorithms={shlex.quote(','.join(STRICT_KEX_ALGORITHMS))} "
+            f"-o Ciphers={shlex.quote(','.join(STRICT_CIPHERS))} "
+            f"-o MACs={shlex.quote(','.join(STRICT_MACS))} "
             f"-o ConnectTimeout={int(getattr(settings, 'SSH_CONNECT_TIMEOUT', 15))} "
             f"-o ServerAliveInterval={int(getattr(settings, 'SSH_KEEPALIVE_SECONDS', 30))} "
             f"-p {int(port)} -l {shlex.quote(username)}"
         ]
         if ssh_key_path:
             connect_parts.append(
-                f"-o IdentitiesOnly=yes -i {shlex.quote(ssh_key_path)}"
+                f"-o IdentitiesOnly=yes -o PreferredAuthentications=publickey "
+                f"-o PasswordAuthentication=no "
+                f"-o KbdInteractiveAuthentication=no "
+                f"-i {shlex.quote(ssh_key_path)}"
+            )
+        else:
+            connect_parts.append(
+                "-o IdentitiesOnly=yes -o PubkeyAuthentication=no "
+                "-o PreferredAuthentications=password "
+                "-o KbdInteractiveAuthentication=no"
             )
         connect = " ".join(connect_parts)
         lines.append(f"set sftp:connect-program {_lftp_quote(connect)}")
@@ -435,7 +479,7 @@ def _build_lftp_script(*, auth, host_url, port, username, password, ssh_key_path
 
 
 def _write_log(backup, text):
-    """Append to the backup's shared run log (_storage/{uuid}.log)."""
+    """Append to the backup's files-lane-private run log."""
     with open(f"_storage/{backup.uuid}.log", "a+") as log_file:
         log_file.write(text)
 
@@ -986,6 +1030,7 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
     username = bs_decrypt(auth.username, encryption_key) or ""
     password = bs_decrypt(auth.password, encryption_key) or ""
     ssh_key_path = None
+    approved_known_hosts_path = None
     temporary_ssh_key = False
     lock_file = None
 
@@ -993,7 +1038,7 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
         protocol = auth.get_protocol_display().lower()  # ftp / sftp / ftps
         if auth.protocol == CoreAuthWebsite.Protocol.FTPS and auth.ftps_use_explicit_ssl:
             protocol = "ftp"  # explicit FTPS connects as ftp:// then upgrades
-        host_url = f"{protocol}://{auth.host}"
+        host_url = f"{protocol}://{_lftp_url_host(auth.host)}"
 
         parallel = website.parallel or 3
         verbose = "--verbose=3" if website.verbose else ""
@@ -1089,17 +1134,19 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
                 incremental=incremental,
             )
             auth.check_connection()
+            if auth.protocol == CoreAuthWebsite.Protocol.SFTP:
+                approved_known_hosts_path = auth.materialize_lftp_known_hosts()
 
             if auth.use_public_key:
-                ssh_key_path = managed_private_key_path()
+                ssh_key_path = managed_private_key_path(
+                    account_id=auth.connection.account_id
+                )
             elif auth.use_private_key:
                 # lftp starts the system ssh from its own process context. Use an
                 # absolute path so a relative `_storage/...` key cannot resolve
                 # against an unexpected working directory and fail authentication.
-                ssh_key_path = os.path.abspath(f"_storage/ssh_{backup.uuid}")
-                _materialize_ssh_private_key(
-                    ssh_key_path,
-                    bs_decrypt(auth.private_key, encryption_key),
+                ssh_key_path = _materialize_ssh_private_key(
+                    bs_decrypt(auth.private_key, encryption_key)
                 )
                 _normalize_ssh_key(ssh_key_path, password)
                 temporary_ssh_key = True
@@ -1151,7 +1198,9 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
                     transfer=transfer, mirror=mirror,
                 )
                 _write_log(backup, f"\nPath: {source['path']} -> {target}\n")
-                _write_log(backup, _redact(script, username, password) + "\n")
+                # The executable lftp script contains credentials. Never write
+                # it to the durable run log, even through a redaction filter.
+                _write_log(backup, "LFTP transfer command prepared (credentials withheld).\n")
 
                 def run_lftp(current_script):
                     try:
@@ -1272,6 +1321,8 @@ def _snapshot_lftp(backup, *, base_dir, incremental):
     finally:
         if temporary_ssh_key and ssh_key_path and os.path.exists(ssh_key_path):
             os.remove(ssh_key_path)
+        if approved_known_hosts_path and os.path.exists(approved_known_hosts_path):
+            os.remove(approved_known_hosts_path)
 
 
 def _snapshot_tar(backup):

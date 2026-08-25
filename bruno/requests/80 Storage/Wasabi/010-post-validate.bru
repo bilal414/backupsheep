@@ -1,0 +1,41 @@
+meta {
+  name: POST /api/v1/storage/wasabi/{{resourceId}}/validate/
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{baseUrl}}/api/v1/storage/wasabi/{{resourceId}}/validate/
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Token {{apiToken}}
+  Content-Type: application/json
+}
+
+body:json {
+  {}
+}
+
+script:pre-request {
+  if (String(bru.getEnvVar("allowMutations")) !== "true") {
+    throw new Error("Blocked by default: set allowMutations=true only after reviewing this exact request.");
+  }
+}
+
+tests {
+  test("request does not fail with an unhandled server error", function () {
+    expect(res.getStatus()).to.be.below(500);
+  });
+}
+
+docs {
+  Operation ID: `post-api-v1-storage-wasabi-resourceid-validate`
+
+  Requires `Authorization: Token <key>`. State-changing request; blocked unless `allowMutations=true`.
+
+  Django action: `apps.api.v1.storage.wasabi.views.CoreStorageWasabiView.validate`
+  Source: `apps/api/v1/storage/wasabi/views.py`
+}

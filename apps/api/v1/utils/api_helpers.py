@@ -833,10 +833,11 @@ def upload_snar_file(file_path, object_name, replace=None):
 def aws_s3_upload_log_file(file_path, object_name=None):
     """No-op in the self-hosted build.
 
-    Backup run logs and artefacts stay on the container's local _storage volume and are
-    pruned by the `delete_old_logs` task after LOG_RETENTION_DAYS; they are never uploaded
-    to any external (AWS/GCS) bucket. Kept as a no-op so the ~dozen backup helpers that
-    call it fire-and-forget need no changes.
+    Backup run logs and artefacts stay in the owning files, database, or storage
+    lane's private _storage volume. The lane-specific `delete_old_logs`,
+    `delete_old_database_logs`, or `delete_old_storage_logs` task prunes them after
+    LOG_RETENTION_DAYS; they are never uploaded to an external AWS/GCS bucket. Kept
+    as a no-op so existing backup helpers need no changes.
     """
     return
 

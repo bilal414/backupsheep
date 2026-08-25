@@ -48,7 +48,7 @@ class CoreNotificationSlackView(viewsets.ModelViewSet):
         queryset = CoreNotificationSlack.objects.filter(query_partners)
         return queryset
 
-    @action(detail=True)
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         slack_notification = self.get_object()
         team_name = slack_notification.team_name
@@ -93,7 +93,7 @@ class CoreNotificationTelegramView(viewsets.ModelViewSet):
         queryset = CoreNotificationTelegram.objects.filter(query_partners)
         return queryset
 
-    @action(detail=True)
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         telegram_notification = self.get_object()
         try:

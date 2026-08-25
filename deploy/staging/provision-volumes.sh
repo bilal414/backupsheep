@@ -25,7 +25,7 @@ esac
 
 intent="${BACKUPSHEEP_STAGING_LAYOUT_INTENT:-}"
 case "$intent" in
-  new-empty-v2|migrate-empty-legacy-v2) ;;
+  new-empty-v3|migrate-empty-legacy-v3) ;;
   *) fail "the staging layout intent is missing or unsupported." ;;
 esac
 
@@ -52,7 +52,7 @@ if [ "${DJANGO_SERVER:-prod}" = prod ]; then
 fi
 
 expected_witness="$(
-  printf '%s' "BackupSheep/staging-layout/v2|${installation_id}|${intent}" \
+  printf '%s' "BackupSheep/staging-layout/v3|${installation_id}|${intent}" \
     | sha256sum | awk '{print $1}'
 )"
 [ "$witness" = "$expected_witness" ] \
@@ -74,15 +74,14 @@ database_transfer_root="${provision_root}/database-transfer"
 files_transfer_root="${provision_root}/files-transfer"
 restore_transfer_root="${provision_root}/restore-transfer"
 backup_storage_root="${provision_root}/backup-storage"
-ssh_trust_root="${provision_root}/ssh-trust"
 legacy_root="${provision_root}/legacy"
 witness_root="${provision_root}/witness"
-witness_file="${witness_root}/layout-v2"
+witness_file="${witness_root}/layout-v3"
 
 for path in \
   "$database_root" "$files_root" "$storage_root" \
   "$database_transfer_root" "$files_transfer_root" "$restore_transfer_root" \
-  "$backup_storage_root" "$ssh_trust_root" \
+  "$backup_storage_root" \
   "$legacy_root" "$witness_root"; do
   [ -d "$path" ] && [ ! -L "$path" ] \
     || fail "${path} is missing, a symbolic link, or not a directory."
@@ -119,7 +118,7 @@ if [ "${DJANGO_SERVER:-prod}" = prod ]; then
   for path in \
     "$database_root" "$files_root" "$storage_root" \
     "$database_transfer_root" "$files_transfer_root" "$restore_transfer_root" \
-    "$backup_storage_root" "$ssh_trust_root" \
+    "$backup_storage_root" \
     "$legacy_root" "$witness_root"; do
     awk -v wanted="$path" '$5 == wanted { found=1 } END { exit !found }' /proc/self/mountinfo \
       || fail "${path} is not a dedicated container mount."
@@ -131,7 +130,7 @@ directory_is_empty() {
 }
 
 record="$(cat <<EOF
-schema=2
+schema=3
 installation_id=${installation_id}
 intent=${intent}
 database=10002:10002:0700
@@ -141,7 +140,6 @@ database_transfer=0:10989:3771
 files_transfer=0:10991:3771
 restore_transfer=0:10995:3771
 backup_storage=10004:10004:0700
-ssh_trust=10001:10997:2750
 legacy=empty
 EOF
 )"
@@ -180,47 +178,6 @@ validate_backup_storage_tree() {
   esac
 }
 
-validate_ssh_trust_tree() {
-  accepted_state="$1"
-  if find "$ssh_trust_root" -xdev -mindepth 1 -maxdepth 1 \
-      \( ! -type f -o \( ! -name known_hosts -a ! -name known_hosts.lock \) \) \
-      -print -quit | grep -q .; then
-    fail "the SSH trust volume contains an unknown, linked, or special path."
-  fi
-  if find "$ssh_trust_root" -xdev -mindepth 1 -maxdepth 1 \
-      -type f -links +1 -print -quit | grep -q .; then
-    fail "the SSH trust volume contains a hard-linked file."
-  fi
-  case "$accepted_state" in
-    migrated)
-      if find "$ssh_trust_root" -xdev -mindepth 1 -maxdepth 1 \
-          \( ! -uid 10001 -o ! -gid 10997 \) -print -quit | grep -q .; then
-        fail "the witnessed SSH trust volume contains foreign ownership."
-      fi
-      [ ! -e "$ssh_trust_root/known_hosts" ] \
-        || [ "$(stat -c '%a' "$ssh_trust_root/known_hosts")" = 640 ] \
-        || fail "the witnessed known_hosts mode is unsafe."
-      ;;
-    legacy-or-retry)
-      if find "$ssh_trust_root" -xdev -mindepth 1 -maxdepth 1 \
-          ! \( -uid 10001 -a \( -gid 10001 -o -gid 10997 \) \) \
-          -print -quit | grep -q .; then
-        fail "the SSH trust volume has ambiguous ownership."
-      fi
-      if [ -e "$ssh_trust_root/known_hosts" ]; then
-        known_hosts_mode="$(stat -c '%a' "$ssh_trust_root/known_hosts")"
-        case "$known_hosts_mode" in 400|440|444|600|640) ;; *)
-          fail "the legacy known_hosts mode is unsafe." ;;
-        esac
-      fi
-      ;;
-    *) fail "internal SSH trust validation state is invalid." ;;
-  esac
-  [ ! -e "$ssh_trust_root/known_hosts.lock" ] \
-    || [ "$(stat -c '%a' "$ssh_trust_root/known_hosts.lock")" = 600 ] \
-    || fail "the SSH trust lock mode is unsafe."
-}
-
 verify_root() {
   path="$1"
   uid="$2"
@@ -246,10 +203,8 @@ if [ -e "$witness_file" ]; then
   verify_root "$files_transfer_root" 0 10991 3771
   verify_root "$restore_transfer_root" 0 10995 3771
   verify_root "$backup_storage_root" 10004 10004 700
-  verify_root "$ssh_trust_root" 10001 10997 2750
   verify_root "$witness_root" 0 0 700
   validate_backup_storage_tree migrated
-  validate_ssh_trust_tree migrated
   directory_is_empty "$legacy_root" \
     || fail "the legacy shared work volume is no longer empty."
   exit 0
@@ -265,13 +220,12 @@ for path in \
 done
 directory_is_empty "$legacy_root" \
   || fail "the legacy shared work volume contains ambiguous plaintext."
-if [ "$intent" = new-empty-v2 ]; then
+if [ "$intent" = new-empty-v3 ]; then
   directory_is_empty "$backup_storage_root" \
     || fail "a new installation cannot adopt a populated local backup-storage volume."
 else
   validate_backup_storage_tree legacy-or-retry
 fi
-validate_ssh_trust_tree legacy-or-retry
 
 # Validation is complete before the first mutation.  A crash between these
 # operations is safe to retry because every data volume remains empty until the
@@ -290,14 +244,10 @@ chown 0:10995 "$restore_transfer_root"
 chmod 3771 "$restore_transfer_root"
 find "$backup_storage_root" -xdev -exec chown 10004:10004 {} +
 chmod 0700 "$backup_storage_root"
-find "$ssh_trust_root" -xdev -exec chown 10001:10997 {} +
-chmod 2750 "$ssh_trust_root"
-[ ! -e "$ssh_trust_root/known_hosts" ] || chmod 0640 "$ssh_trust_root/known_hosts"
-[ ! -e "$ssh_trust_root/known_hosts.lock" ] || chmod 0600 "$ssh_trust_root/known_hosts.lock"
 chown 0:0 "$witness_root"
 chmod 0700 "$witness_root"
 
-temporary_witness="${witness_root}/.layout-v2.$$"
+temporary_witness="${witness_root}/.layout-v3.$$"
 printf '%s\n' "$record" > "$temporary_witness"
 chown 0:0 "$temporary_witness"
 chmod 0400 "$temporary_witness"
@@ -311,7 +261,5 @@ verify_root "$files_transfer_root" 0 10991 3771
 verify_root "$restore_transfer_root" 0 10995 3771
 verify_root "$backup_storage_root" 10004 10004 700
 validate_backup_storage_tree migrated
-verify_root "$ssh_trust_root" 10001 10997 2750
-validate_ssh_trust_tree migrated
 [ "$(stat -c '%u:%g:%a:%h' "$witness_file")" = "0:0:400:1" ] \
   || fail "the durable layout witness was not committed safely."

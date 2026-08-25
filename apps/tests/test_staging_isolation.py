@@ -87,7 +87,6 @@ class StagingIsolationTests(SimpleTestCase):
                 "RESTORE_READER_GIDS",
                 {"database": self.gid, "files": self.gid},
             ),
-            mock.patch.object(staging, "SSH_TRUST_READER_GID", self.gid),
             mock.patch.object(staging, "ROLE_IDENTITIES", self.identities),
             mock.patch.object(os, "getgroups", return_value=[self.gid]),
         ]

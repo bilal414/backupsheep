@@ -11,6 +11,7 @@ from apps.api.v1.backup.serializers import RestoreExecutionStatusMixin
 from apps.console.node.models import (
     CoreNode,
 )
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 class CoreNodeSerializer(serializers.ModelSerializer):
@@ -25,6 +26,18 @@ class CoreNodeSerializer(serializers.ModelSerializer):
         model = CoreNode
         fields = "__all__"
         datatables_always_serialize = ("id",)
+
+    def validate(self, data):
+        # Existing rows stay readable and can still be paused/deleted, but a
+        # generic PATCH must not reactivate a recovery-incomplete source.
+        if (
+            self.instance is not None
+            and data.get("status") == CoreNode.Status.ACTIVE
+        ):
+            require_source_backup_creation(
+                self.instance.connection.integration.code
+            )
+        return data
 
     @staticmethod
     def get_status_display(obj):
@@ -192,6 +205,7 @@ class CoreSaaSNodeWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "You don't have access to this node."
             )
+        require_source_backup_creation(connection.integration.code)
         return data
 
 

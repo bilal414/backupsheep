@@ -18,7 +18,9 @@ validated against a live production account.
 | --- | --- |
 | [Operations](operations.md) | Daily checks, job control, scaling, retention and safe service intervention |
 | [Upgrades](upgrades.md) | Staging, backing up, migrating, verifying and rolling back a release |
-| [PostgreSQL identity generation 2](database-identity-migration.md) | One-time, rollback-gated conversion of a legacy bundled database login into bootstrap, migrator and runtime identities |
+| [PostgreSQL Alpine/ICU storage migration](postgres-runtime-migration.md) | One-time fail-closed logical move from retained Debian/UID-999 `pgdata` to the distinct Alpine/UID-70 ICU volume |
+| [PostgreSQL identity generation 3](database-identity-migration.md) | One-time, rollback-gated conversion of a legacy bundled database into bootstrap, migrator and exact per-lane ACL/RLS identities |
+| [RabbitMQ identity and task authentication](rabbitmq-identity-migration.md) | Per-lane broker credentials/ACLs and generation-3 signed task rotation |
 | [Disaster recovery](disaster-recovery.md) | Protecting and restoring the BackupSheep control plane itself |
 | [Observability](observability.md) | Liveness, dependencies, durable job state, logs, alerts and restore rehearsals |
 | [Troubleshooting](troubleshooting.md) | Startup, proxy, worker, backup, restore, source and storage failures |
@@ -35,9 +37,9 @@ validated against a live production account.
 Commands assume the repository or install directory is the current directory and require
 Docker Engine 28.0.0+ with Docker Compose 2.33.1+ (`docker compose`). Replace
 `/opt/backupsheep`, hostnames, account IDs, resource IDs and backup paths with values you
-have resolved for the target deployment. Manual deployments explicitly build `app`
-because the stock application roles use `pull_policy: never`. Profile-less starts are
-core-only; commands that authorize provider workers and Beat include
+have resolved for the target deployment. Manual deployments explicitly build `db`, `app`
+and `app-egress-guard` because those three local image families use `pull_policy: never`.
+Profile-less starts are core-only; commands that authorize provider workers and Beat include
 `--profile operations`.
 
 Deployment commands use the shipped `./backupsheep-compose` wrapper, not raw Compose. It
@@ -55,9 +57,9 @@ exact path before the Compose command, for example:
 
 Use that same explicit flag on every later command in the maintenance shell. The only
 other accepted extra file is the repository's pinned RabbitMQ compatibility overlay in
-its dedicated migration runbook. The verified installer intentionally accepts no local
-override at all; use the reviewed manual-deployment path when one is required. The
-wrapper also refuses `down`/`rm` volume deletion unless the same command includes its
+its dedicated migration runbook. The verified installer accepts an override only through
+its exact `--approved-compose-file` path/ownership/model gate; it never auto-loads one.
+The wrapper also refuses `down`/`rm` volume deletion unless the same command includes its
 separate `--allow-data-deletion` wrapper flag; that flag is authorization, not proof that
 the selected volumes are disposable.
 

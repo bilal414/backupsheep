@@ -135,7 +135,7 @@ class IOSAPIContractTests(BaseTestCase):
         connection = factories.make_connection(self.account, self.member)
 
         with patch.object(CoreStorage, "validate", return_value=True):
-            storage_response = self.client.get(
+            storage_response = self.client.post(
                 f"/api/v1/storage/{storage.id}/validate/"
             )
         self.assertEqual(storage_response.status_code, status.HTTP_200_OK)
@@ -143,12 +143,20 @@ class IOSAPIContractTests(BaseTestCase):
         self.assertIsInstance(storage_response.json()["message"], str)
 
         with patch.object(CoreConnection, "validate", return_value=False):
-            connection_response = self.client.get(
+            connection_response = self.client.post(
                 f"/api/v1/connections/{connection.id}/validate/"
             )
         self.assertEqual(connection_response.status_code, status.HTTP_200_OK)
         self.assertEqual(connection_response.json()["success"], False)
         self.assertIsInstance(connection_response.json()["message"], str)
+        self.assertEqual(
+            self.client.get(f"/api/v1/storage/{storage.id}/validate/").status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+        self.assertEqual(
+            self.client.get(f"/api/v1/connections/{connection.id}/validate/").status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
 
         connections_response = self.client.get("/api/v1/connections/")
         self.assertEqual(connections_response.status_code, status.HTTP_200_OK)
@@ -161,13 +169,13 @@ class IOSAPIContractTests(BaseTestCase):
         other_storage = factories.make_storage(other_account, other_member)
         other_connection = factories.make_connection(other_account, other_member)
         self.assertEqual(
-            self.client.get(
+            self.client.post(
                 f"/api/v1/storage/{other_storage.id}/validate/"
             ).status_code,
             status.HTTP_404_NOT_FOUND,
         )
         self.assertEqual(
-            self.client.get(
+            self.client.post(
                 f"/api/v1/connections/{other_connection.id}/validate/"
             ).status_code,
             status.HTTP_404_NOT_FOUND,
@@ -175,11 +183,11 @@ class IOSAPIContractTests(BaseTestCase):
 
         self.client.force_authenticate(user=None)
         self.assertIn(
-            self.client.get(f"/api/v1/storage/{storage.id}/validate/").status_code,
+            self.client.post(f"/api/v1/storage/{storage.id}/validate/").status_code,
             (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
         self.assertIn(
-            self.client.get(f"/api/v1/connections/{connection.id}/validate/").status_code,
+            self.client.post(f"/api/v1/connections/{connection.id}/validate/").status_code,
             (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
 

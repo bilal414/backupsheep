@@ -7,27 +7,47 @@ the `signed-release` environment and set
 
 ## Trust and promotion model
 
-The workflow separates three permission domains:
+The release is an ordered, fail-closed chain:
+`release_regression` -> `build_scan` -> `sign_promote` -> `publish_evidence`.
+Each job must succeed before the next one can run, and the four jobs have separate
+permission boundaries:
 
-1. `build_scan` can read source and write GHCR packages, but it has no OIDC token.
-   It builds only into the explicit `*-quarantine` repositories.
-2. `sign_promote` is protected by the `signed-release` environment. It installs
+1. `release_regression` calls the repository's reusable
+   `supply-chain-security.yml` workflow against the exact tagged commit with only
+   `contents: read`. It reruns the dependency audits, manifest and egress-policy
+   validation, production image builds, and application/security regression suite.
+   It has no package, OIDC, or release-publication permission and publishes no
+   candidate image. A failure prevents `build_scan` from starting.
+2. `build_scan` also has only `contents: read`. It builds and scans private local
+   OCI layouts, records their digest-bound evidence, and uploads the candidate
+   workflow artifact. It has neither package-write nor OIDC permission and cannot
+   publish to a registry.
+3. `sign_promote` is protected by the `signed-release` environment. It installs
    hash-verified Cosign and ORAS binaries, revalidates all downloaded evidence,
-   signs quarantine digests, and verifies them online. Only then does it copy the
-   exact OCI index digest to an official SemVer tag. It signs the official digest
-   separately and reruns the complete online verifier.
-3. `publish_evidence` can write GitHub release contents but cannot write packages
+   and is the only job with package-write and OIDC permission. After approval it
+   pushes the exact verified layouts only to the explicit `*-quarantine`
+   repositories, signs those digests, and verifies them online. Only then does it
+   copy the exact OCI index digest to an official SemVer tag. It signs the official
+   digest separately and reruns the complete online verifier.
+4. `publish_evidence` can write GitHub release contents but cannot write packages
    or request an OIDC token. It verifies the signed archive before publishing it.
 
-A rejected candidate therefore remains in quarantine and never gets an official
-repository tag. The official repositories receive no run tag, candidate tag, or
-other mutable staging reference. Promotion refuses an existing SemVer tag and
-treats authentication, network, TLS, and unexpected registry errors as failures,
-not as evidence that a tag is absent.
+No candidate is built or published unless the read-only regression gate passes.
+A candidate rejected by `build_scan` never reaches a registry. After quarantine
+verification, the workflow copies each exact index to a commit/run-bound `staged-*`
+tag in its official repository so the official digest can be signed and verified.
+Those non-SemVer staging tags can remain after an interrupted run, but no official
+SemVer tag is written until final verification succeeds. Promotion refuses a
+mismatched existing tag and treats authentication, network, TLS, and unexpected
+registry errors as failures, not as evidence that a tag is absent. Regression success
+is necessary but is not release proof: the digest-bound build, scan, signing,
+promotion, and evidence gates must also succeed.
 
-The release set is atomic and contains three separately scanned and signed images:
-the application, its PostgreSQL runtime, and the no-secret egress guard. A missing
-or unverifiable image blocks promotion of the entire release set.
+The release set is completeness-gated and resumable, and contains three separately
+scanned and signed images: the application, its PostgreSQL runtime, and the no-secret
+egress guard. An interruption can leave a partial set of exact SemVer tags; a rerun
+verifies every existing digest and publishes only the missing exact tags. A missing or
+unverifiable image blocks completion and release-evidence publication.
 
 ## Immutable inputs and real provenance
 
@@ -115,19 +135,22 @@ Repository code cannot enforce these external controls. Before opt-in:
 - restrict Actions to reviewed full-commit-pinned actions;
 - create/authorize both quarantine GHCR packages and official packages for the
   workflow token, while denying unnecessary human write access;
-- configure quarantine lifecycle retention so rejected candidates are eventually
-  removed without deleting official digests or referrers;
+- configure lifecycle retention for rejected quarantine candidates and orphaned
+  commit/run-bound official `staged-*` tags, without deleting a digest or referrer
+  reachable from an official SemVer release;
 - protect official package/tag deletion through organization policy and audit it;
 - make the release workflow a required release status; and
 - mirror GitHub release evidence to organization-controlled immutable storage if
   policy requires retention beyond the life of the repository or GitHub account.
 
 Run one protected pre-release tag as a controlled acceptance test before production
-use. Confirm GitHub OIDC issuance, GHCR referrer behavior, ORAS graph copying,
-BuildKit's complete `mode=max` fields for all three Dockerfiles, Cosign bundle
-verification, official tag refusal on replay, and GitHub release asset publication.
-This checked-in foundation does not itself configure those GitHub/GHCR controls and
-has not published or deployed a release.
+use. Confirm the read-only `release_regression` job completes before `build_scan`
+and cannot publish packages or release contents. Then confirm GitHub OIDC issuance,
+GHCR referrer behavior, ORAS graph copying, BuildKit's complete `mode=max` fields
+for all three Dockerfiles, Cosign bundle verification, official tag refusal on
+replay, and GitHub release asset publication. This checked-in foundation does not
+itself configure those GitHub/GHCR controls and has not published or deployed a
+release.
 
 ## WordPress connector publication hook
 

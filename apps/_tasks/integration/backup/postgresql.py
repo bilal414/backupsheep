@@ -24,7 +24,7 @@ zipped to ``_storage/{uuid}.zip`` and the dump directory is deleted; on any
 failure everything is deleted and NodeBackupFailedError is raised. A
 disk-space preflight (~2x the node's most recent COMPLETE backup, 1 GiB
 floor) runs before anything is dumped so a huge database fails fast instead of
-filling the shared _storage volume mid-run.
+filling the private database workdir mid-run.
 """
 
 import subprocess
@@ -64,9 +64,11 @@ def _pgpass_escape(value):
 def _sftp_write_remote_file(ssh, remote_name, content):
     sftp = ssh.open_sftp()
     try:
-        with sftp.open(remote_name, "w") as fh:
+        with sftp.open(remote_name, "x") as fh:
+            # Refuse a pre-positioned file or symlink, then restrict the empty
+            # inode before publishing any pgpass credential bytes.
+            sftp.chmod(remote_name, 0o600)
             fh.write(content)
-        sftp.chmod(remote_name, 0o600)
     finally:
         sftp.close()
 
@@ -186,8 +188,8 @@ def snapshot_postgresql(backup):
     log_file.write(f"Attempt Number: {backup.attempt_no} \n")
 
     try:
-        # Disk-space preflight: a huge dump must not fill the shared _storage
-        # volume mid-run. Estimate ~2x the node's most recent COMPLETE backup
+        # Disk-space preflight: a huge dump must not fill the private database
+        # workdir mid-run. Estimate ~2x the node's most recent COMPLETE backup
         # (dump files plus the final zip), floored at 1 GiB.
         last = (
             backup.__class__.objects.filter(

@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.api.v1.utils.api_permissions import member_has_perm
+from backupsheep.source_recovery_policy import available_backup_endpoints
 
 
 class MobileBootstrapView(APIView):
@@ -120,7 +121,9 @@ class MobileBootstrapView(APIView):
                         "database",
                         "saas",
                     ],
-                    "backup_endpoints": list(self.BACKUP_ENDPOINTS),
+                    "backup_endpoints": available_backup_endpoints(
+                        self.BACKUP_ENDPOINTS
+                    ),
                     "notification_channels": ["email", "slack", "telegram"],
                     "mutation_contracts": {
                         "on_demand_backup_idempotency": True,

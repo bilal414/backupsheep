@@ -46,7 +46,7 @@ Non-owner permissions are the union of the member's group permissions:
 | Permission | Mapped capability |
 | --- | --- |
 | `backup_create` | Start on-demand backup and supported restore/resume actions |
-| `backup_download` | Download backup copies |
+| `backup_download` | Authorize a download-capable route; current BSE1 artifacts still fail closed because direct plaintext export is disabled |
 | `backup_delete` | Delete backup records/copies |
 | `schedule_changes` | Create, edit, trigger, pause, resume, or delete schedules |
 | `node_changes` | Create, modify, pause/resume, or delete nodes |

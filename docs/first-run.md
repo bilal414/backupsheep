@@ -10,6 +10,7 @@ trusted host access. Read the token from the protected host file, not container 
 or install logs:
 
 ```bash
+cd "$HOME/.local/share/backupsheep"  # or the exact --install-dir you selected
 cat .secrets/onboarding_token
 ```
 
@@ -39,7 +40,7 @@ confirm the settings before continuing. Credentials are stored encrypted (keyed 
 
 > **If you disable email**, password-reset emails cannot be delivered. A locked-out admin
 > then has to reset the password from the server:
-> `./backupsheep-compose run --rm app python manage.py changepassword <email>`. Keep that in mind,
+> `./backupsheep-compose run --rm --no-deps app python manage.py changepassword <email>`. Keep that in mind,
 > or configure a provider. See [Troubleshooting](troubleshooting.md).
 
 ### 4. Storage destination
@@ -47,7 +48,8 @@ Pick where backups are stored. Each provider tile opens the storage-setup screen
 tab; configure it and come back. You can add more destinations any time. (Object-storage
 providers like S3/B2/Wasabi just need keys + bucket; OAuth providers like Dropbox/Google
 Drive/OneDrive/pCloud need their app credentials in `.env` first — see
-[Providers](providers.md).)
+[Providers](providers.md).) Local Storage objects are BSE1 ciphertext; stock Compose
+mounts `/backups` only in `worker-storage`.
 
 ### 5. Sources
 Connect your first thing to back up — a cloud account, server, database, or website —
@@ -59,7 +61,7 @@ on the dashboard.
 
 Profile-less Compose still has no workers or scheduler at this point. After reviewing
 credentials and any durable queued/recoverable state, explicitly enable provider
-operations with `./backupsheep-compose --profile operations up --detach`.
+operations with the exact [paired lifecycle commands](../deploy/egress/README.md#paired-lifecycle-commands).
 
 ## Admin accounts explained
 
@@ -77,7 +79,7 @@ can't use the console — they're separate roles. Most operators only ever need 
 admin. Create a superuser only if you want Django's admin site:
 
 ```bash
-./backupsheep-compose run --rm app python manage.py createsuperuser
+./backupsheep-compose run --rm --no-deps app python manage.py createsuperuser
 ```
 
 ## Re-running setup

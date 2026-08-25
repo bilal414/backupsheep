@@ -16,8 +16,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release_regression:
+    name: Re-run the exact security regression for this tag
+    if: >-
+      github.repository == 'bilal414/backupsheep' &&
+      vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'
+    uses: ./.github/workflows/supply-chain-security.yml
+    permissions:
+      contents: read
+
   build_scan:
     name: Build and scan quarantine digests
+    needs: release_regression
     if: >-
       github.repository == 'bilal414/backupsheep' &&
       vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'

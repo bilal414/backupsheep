@@ -1,6 +1,7 @@
 name: Supply-chain security
 
 on:
+  workflow_call:
   pull_request:
   push:
     branches: [main, develop]
@@ -25,7 +26,20 @@ jobs:
     env:
       BACKUPSHEEP_COMPOSE_PROJECT_NAME: "backupsheep-ci"
       BACKUPSHEEP_INSTALLATION_ID: "0000000000000000000000000000000000000000000000000000000000000001"
-      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "2"
+      BACKUPSHEEP_POSTGRES_STORAGE_GENERATION: "18-alpine-icu-v1-pending-fresh"
+      BACKUPSHEEP_POSTGRES_STORAGE_INTENT: "new-empty-v1"
+      BACKUPSHEEP_POSTGRES_STORAGE_WITNESS: "1501348f46b304da7ea2b91a3442625c0826eb372a8f362491a09fe2cd4546f6"
+      BACKUPSHEEP_DATABASE_IDENTITY_GENERATION: "3"
+      BACKUPSHEEP_CELERY_SECURITY_GENERATION: "3"
+      BACKUPSHEEP_CELERY_SIGNING_KEY_GENERATION: "1"
+      BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION: "2"
+      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "4.3"
+      BACKUPSHEEP_EGRESS_POLICY_GENERATION: "2"
+      BACKUPSHEEP_STAGING_LAYOUT_INTENT: "new-empty-v3"
+      BACKUPSHEEP_STAGING_LAYOUT_WITNESS: "421e9ec501ca8cdcf91e0dcbc9c25b462a5f3569bc1a3ec214e8a8b19ffb571f"
+      BACKUPSHEEP_ARTIFACT_KMS_KEY_ID: "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001"
+      BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS: "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001"
+      BACKUPSHEEP_ARTIFACT_KMS_REGION: "us-east-1"
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -58,10 +72,715 @@ jobs:
           sed -i "s/^DJANGO_SECRET_KEY=.*/DJANGO_SECRET_KEY='ci-only-not-a-secret'/" .env
           sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD='ci-only-not-a-secret'/" .env
           sed -i "s/^RABBITMQ_PASSWORD=.*/RABBITMQ_PASSWORD='ci-only-not-a-secret'/" .env
-          bash -n install.sh init.sh startup.sh
+          bash -n install.sh init.sh startup.sh deploy/postgres/migrate-runtime.sh deploy/staging/provision-volumes.sh deploy/staging/test-provision-volumes.sh deploy/staging/test-cross-uid.sh
+          sh -n deploy/postgres/entrypoint.sh deploy/postgres/storage-witness.sh
           node -e 'for (const f of ["package.json", "package-lock.json", "app.json", "deploy/railway/web.railway.json", "deploy/railway/worker.railway.json", "deploy/railway/beat.railway.json"]) JSON.parse(require("fs").readFileSync(f, "utf8"))'
           docker compose config --quiet
           docker build --check .
           python -m unittest apps.tests.test_deployment_hardening -v
           test ! -e apps/console/_static/console/package.json
           test ! -e apps/console/_static/console/package-lock.json
+
+      - name: Exercise staging provisioner fail-closed harness
+        env:
+          STAGING_HARNESS_IMAGE: "python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4"
+        run: |
+          docker run --rm --user 0:0 --entrypoint /bin/sh \
+            --mount "type=bind,src=${GITHUB_WORKSPACE}/deploy/staging,dst=/test,readonly" \
+            "$STAGING_HARNESS_IMAGE" \
+            /test/test-provision-volumes.sh /test/provision-volumes.sh
+          docker run --rm --user 0:0 --entrypoint /bin/sh \
+            --tmpfs /volumes:rw,nosuid,nodev,noexec,size=64m \
+            --mount "type=bind,src=${GITHUB_WORKSPACE}/deploy/staging,dst=/test,readonly" \
+            "$STAGING_HARNESS_IMAGE" -ceu '
+              for name in database files storage database-transfer files-transfer restore-transfer backup-storage legacy witness; do
+                mkdir "/volumes/${name}"
+              done
+              installation_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+              intent=migrate-empty-legacy-v3
+              witness_output="$(printf "%s" "BackupSheep/staging-layout/v3|${installation_id}|${intent}" | sha256sum)"
+              witness="${witness_output%% *}"
+              env \
+                DJANGO_SERVER=test \
+                BACKUPSHEEP_INSTALLATION_ID="${installation_id}" \
+                BACKUPSHEEP_STAGING_LAYOUT_INTENT="${intent}" \
+                BACKUPSHEEP_STAGING_LAYOUT_WITNESS="${witness}" \
+                BACKUPSHEEP_STAGING_PROVISION_ROOT=/volumes \
+                BACKUPSHEEP_STAGING_MIN_FREE_BYTES=0 \
+                /test/provision-volumes.sh
+              /test/test-cross-uid.sh
+            '
+
+      - name: Exercise exact-peer egress policy
+        run: |
+          docker build --file Dockerfile.egress --tag backupsheep-egress:ci .
+          ./deploy/egress/test-policy.sh backupsheep-egress:ci
+
+  static-python-security:
+    name: Pinned Python static-analysis gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Run pinned Bandit and fail-closed source policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --no-cache-dir bandit==1.9.4
+          bandit_exit=0
+          python -m bandit -q -r apps backupsheep scripts \
+            -x apps/tests -f json -ll -o "$RUNNER_TEMP/bandit.json" \
+            || bandit_exit=$?
+          if [ "$bandit_exit" -ne 0 ] && [ "$bandit_exit" -ne 1 ]; then
+            printf '%s\n' "Bandit failed with scanner status $bandit_exit." >&2
+            exit "$bandit_exit"
+          fi
+          python scripts/validate_static_security.py \
+            --report "$RUNNER_TEMP/bandit.json" \
+            --policy deploy/static-analysis-policy.json \
+            --repository-root "$GITHUB_WORKSPACE"
+
+  application-security-regression:
+    name: Full application/security regression gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      TEST_APP_IMAGE: "backupsheep-ci-app:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_POSTGRES_IMAGE: "backupsheep-ci-postgres:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_EGRESS_IMAGE: "backupsheep-ci-egress:${{ github.repository_id }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_NETWORK: "backupsheep-ci-net-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_POSTGRES_CONTAINER: "backupsheep-ci-postgres-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_APPLICATION_CONTAINER: "backupsheep-ci-tests-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_TOPOLOGY_PROJECT: "bs-ci-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      TEST_OWNERSHIP_VALUE: "${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}"
+      CI_SCAN_TOOL_DIR: "${{ runner.temp }}/backupsheep-ci-scan-tools"
+      CI_SCAN_DIR: "${{ runner.temp }}/backupsheep-ci-image-evidence"
+    steps:
+      - name: Check out the exact source under test
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Build the production application, PostgreSQL, and egress images
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          git diff --quiet
+          git diff --cached --quiet
+          if [ -e "$GITHUB_WORKSPACE/.env" ] || [ -L "$GITHUB_WORKSPACE/.env" ]; then
+            printf '%s\n' 'Refusing to load a checkout .env in the regression gate.' >&2
+            exit 1
+          fi
+          if [ -e "$GITHUB_WORKSPACE/_storage" ] || [ -L "$GITHUB_WORKSPACE/_storage" ]; then
+            printf '%s\n' 'Refusing a pre-existing checkout _storage path.' >&2
+            exit 1
+          fi
+          for container in "$TEST_APPLICATION_CONTAINER" "$TEST_POSTGRES_CONTAINER"; do
+            if docker container inspect "$container" >/dev/null 2>&1; then
+              printf '%s\n' "Refusing a pre-existing CI container-name collision: $container" >&2
+              exit 1
+            fi
+          done
+          if docker network inspect "$TEST_NETWORK" >/dev/null 2>&1; then
+            printf '%s\n' "Refusing a pre-existing CI network-name collision: $TEST_NETWORK" >&2
+            exit 1
+          fi
+          for image in "$TEST_APP_IMAGE" "$TEST_POSTGRES_IMAGE" "$TEST_EGRESS_IMAGE"; do
+            if docker image inspect "$image" >/dev/null 2>&1; then
+              printf '%s\n' "Refusing a pre-existing CI image-tag collision: $image" >&2
+              exit 1
+            fi
+          done
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile --tag "$TEST_APP_IMAGE" .
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile.postgres --tag "$TEST_POSTGRES_IMAGE" .
+          docker build --pull --no-cache \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --file Dockerfile.egress --tag "$TEST_EGRESS_IMAGE" .
+          test "$(docker image inspect --format '{{.Architecture}}' "$TEST_APP_IMAGE")" = amd64
+
+      - name: Install hash-verified Syft 1.51.0 and Trivy 0.74.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/install_release_tools.py \
+            --policy deploy/release-policy.json \
+            --destination "$CI_SCAN_TOOL_DIR" \
+            --tool syft \
+            --tool trivy
+          "$CI_SCAN_TOOL_DIR/syft" version | grep -Eq '1\.51\.0'
+          "$CI_SCAN_TOOL_DIR/trivy" --version | grep -Eq '0\.74\.0'
+          grep -qx '{}' "$CI_SCAN_TOOL_DIR/empty-syft.yaml"
+          grep -qx '{}' "$CI_SCAN_TOOL_DIR/empty-trivy.yaml"
+          test ! -s "$CI_SCAN_TOOL_DIR/empty-trivy.ignore"
+
+      - name: Generate SBOMs and reject HIGH or CRITICAL findings in exact images
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          umask 077
+
+          ci_image_ownership_label() {
+            local image_id="$1"
+            local marker='__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+            local framed='' payload='' declared='' value=''
+            local LC_ALL=C
+            framed="$(
+              docker image inspect --format \
+                "{{with index .Config.Labels \"com.backupsheep.ci-run\"}}{{len .}}:{{.}}{{else}}0:{{end}}${marker}" \
+                "$image_id"
+            )" || return 1
+            [[ "$framed" == *"$marker" ]] || return 1
+            payload="${framed%"$marker"}"
+            [[ "$payload" == *:* ]] || return 1
+            declared="${payload%%:*}"
+            value="${payload#*:}"
+            [[ "$declared" =~ ^(0|[1-9][0-9]{0,6})$ ]] || return 1
+            (( 10#$declared <= 1048576 )) || return 1
+            (( ${#value} == 10#$declared )) || return 1
+            [[ "$value" != *[[:cntrl:]]* ]] || return 1
+            printf '%s' "$value"
+          }
+
+          if [ -e "$CI_SCAN_DIR" ] || [ -L "$CI_SCAN_DIR" ]; then
+            printf '%s\n' 'Refusing a pre-existing exact-image evidence path.' >&2
+            exit 1
+          fi
+          install -d -m 0700 "$CI_SCAN_DIR"
+          cleanup_archives() {
+            find "$CI_SCAN_DIR" -maxdepth 1 -type f -name '*.tar' -delete
+          }
+          trap cleanup_archives EXIT HUP INT TERM
+
+          while IFS=$'\t' read -r image_kind image_ref; do
+            image_id="$(docker image inspect --format '{{.Id}}' "$image_ref")"
+            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+            owner="$(ci_image_ownership_label "$image_id")"
+            [[ "$owner" == "$TEST_OWNERSHIP_VALUE" ]]
+            archive="$CI_SCAN_DIR/${image_kind}.tar"
+            syft_report="$CI_SCAN_DIR/${image_kind}.syft.json"
+            trivy_report="$CI_SCAN_DIR/${image_kind}.trivy.json"
+            summary="$CI_SCAN_DIR/${image_kind}.summary.json"
+
+            docker image save --output "$archive" "$image_id"
+            chmod 0600 "$archive"
+            SYFT_CHECK_FOR_APP_UPDATE=false \
+              "$CI_SCAN_TOOL_DIR/syft" \
+                --config "$CI_SCAN_TOOL_DIR/empty-syft.yaml" \
+                scan "docker-archive:$archive" \
+                --output "syft-json=$syft_report"
+
+            trivy_status=0
+            XDG_CACHE_HOME="$RUNNER_TEMP/backupsheep-ci-trivy-cache" \
+              TRIVY_SKIP_VERSION_CHECK=true \
+              "$CI_SCAN_TOOL_DIR/trivy" \
+                --config "$CI_SCAN_TOOL_DIR/empty-trivy.yaml" image \
+                --input "$archive" \
+                --ignorefile "$CI_SCAN_TOOL_DIR/empty-trivy.ignore" \
+                --quiet \
+                --scanners vuln \
+                --pkg-types os,library \
+                --list-all-pkgs \
+                --severity HIGH,CRITICAL \
+                --exit-code 1 \
+                --timeout 30m \
+                --format json \
+                --output "$trivy_report" \
+              || trivy_status=$?
+
+            python3 deploy/ci/validate-image-scan.py \
+              --image-kind "$image_kind" \
+              --image-id "$image_id" \
+              --archive "$archive" \
+              --syft "$syft_report" \
+              --trivy "$trivy_report" \
+              --summary "$summary"
+            [[ "$trivy_status" -eq 0 ]]
+            chmod 0600 "$syft_report" "$trivy_report" "$summary"
+            rm -- "$archive"
+          done <<EOF
+          app	$TEST_APP_IMAGE
+          postgres	$TEST_POSTGRES_IMAGE
+          egress	$TEST_EGRESS_IMAGE
+          EOF
+
+          trap - EXIT HUP INT TERM
+          cleanup_archives
+
+      - name: Retain exact-image SBOM and vulnerability evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: security-image-evidence-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CI_SCAN_DIR }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Run the full application and security suite offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          umask 077
+
+          ci_ownership_label() {
+            local resource_type="$1" resource_id="$2"
+            local marker='__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+            local label_root='' framed='' payload='' declared='' value=''
+            local LC_ALL=C
+            case "$resource_type" in
+              container|image) label_root='.Config.Labels' ;;
+              network) label_root='.Labels' ;;
+              *) return 1 ;;
+            esac
+            framed="$(
+              docker "$resource_type" inspect --format \
+                "{{with index ${label_root} \"com.backupsheep.ci-run\"}}{{len .}}:{{.}}{{else}}0:{{end}}${marker}" \
+                "$resource_id"
+            )" || return 1
+            [[ "$framed" == *"$marker" ]] || return 1
+            payload="${framed%"$marker"}"
+            [[ "$payload" == *:* ]] || return 1
+            declared="${payload%%:*}"
+            value="${payload#*:}"
+            [[ "$declared" =~ ^(0|[1-9][0-9]{0,6})$ ]] || return 1
+            (( 10#$declared <= 1048576 )) || return 1
+            (( ${#value} == 10#$declared )) || return 1
+            [[ "$value" != *[[:cntrl:]]* ]] || return 1
+            printf '%s' "$value"
+          }
+          owned_container() {
+            local value=''
+            value="$(ci_ownership_label container "$1" 2>/dev/null)" \
+              && [ "$value" = "$TEST_OWNERSHIP_VALUE" ]
+          }
+          owned_network() {
+            local value=''
+            value="$(ci_ownership_label network "$1" 2>/dev/null)" \
+              && [ "$value" = "$TEST_OWNERSHIP_VALUE" ]
+          }
+          smoke_secret_dir=''
+          cleanup_containers() {
+            if owned_container "$TEST_APPLICATION_CONTAINER"; then
+              docker rm --force "$TEST_APPLICATION_CONTAINER" >/dev/null 2>&1 || true
+            fi
+            if owned_container "$TEST_POSTGRES_CONTAINER"; then
+              docker rm --force "$TEST_POSTGRES_CONTAINER" >/dev/null 2>&1 || true
+            fi
+            if owned_network "$TEST_NETWORK"; then
+              docker network rm "$TEST_NETWORK" >/dev/null 2>&1 || true
+            fi
+            if [ -n "$smoke_secret_dir" ] && [ -d "$smoke_secret_dir" ]; then
+              find "$smoke_secret_dir" -mindepth 1 -maxdepth 1 -type f -delete
+              rmdir "$smoke_secret_dir" >/dev/null 2>&1 || true
+            fi
+          }
+          on_signal() {
+            exit 130
+          }
+          trap cleanup_containers EXIT
+          trap on_signal HUP INT TERM
+
+          database_name=backupsheep_test
+          database_user=backupsheep_test
+          database_password="$(openssl rand -hex 32)"
+          django_secret="$(openssl rand -hex 64)"
+          if [ -e "$GITHUB_WORKSPACE/.env" ] || [ -L "$GITHUB_WORKSPACE/.env" ]; then
+            printf '%s\n' 'Refusing to load a checkout .env in the regression gate.' >&2
+            exit 1
+          fi
+          if [ -e "$GITHUB_WORKSPACE/_storage" ] || [ -L "$GITHUB_WORKSPACE/_storage" ]; then
+            printf '%s\n' 'Refusing a pre-existing checkout _storage path.' >&2
+            exit 1
+          fi
+          install -d -m 0700 "$GITHUB_WORKSPACE/_storage"
+          printf '%s\n' "$TEST_OWNERSHIP_VALUE" \
+            > "$GITHUB_WORKSPACE/_storage/.backupsheep-ci-owner"
+          chmod 0600 "$GITHUB_WORKSPACE/_storage/.backupsheep-ci-owner"
+
+          docker network create --driver bridge --internal \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            "$TEST_NETWORK" >/dev/null
+          docker run --detach \
+            --name "$TEST_POSTGRES_CONTAINER" \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --network "$TEST_NETWORK" \
+            --network-alias database \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --pids-limit 256 \
+            --memory 2g \
+            --memory-swap 2g \
+            --cpus 1.5 \
+            --shm-size 256m \
+            --tmpfs /var/lib/postgresql:rw,noexec,nosuid,nodev,size=2g,mode=0700,uid=70,gid=70 \
+            --tmpfs /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=0775,uid=70,gid=70 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777 \
+            --env POSTGRES_DB="$database_name" \
+            --env POSTGRES_USER="$database_user" \
+            --env POSTGRES_PASSWORD="$database_password" \
+            --env POSTGRES_INITDB_ARGS="--locale-provider=icu --icu-locale=und --encoding=UTF8 --auth-host=scram-sha-256 --auth-local=scram-sha-256" \
+            --entrypoint /usr/local/bin/docker-entrypoint.sh \
+            "$TEST_POSTGRES_IMAGE" postgres >/dev/null
+
+          database_ready=false
+          for _attempt in $(seq 1 60); do
+            if docker exec \
+              --env PGPASSWORD="$database_password" \
+              "$TEST_POSTGRES_CONTAINER" \
+              psql --no-password --host=127.0.0.1 \
+                --username="$database_user" --dbname="$database_name" \
+                --tuples-only --no-align --command='SELECT 1' \
+                | grep -qx '1'; then
+              database_ready=true
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "$TEST_POSTGRES_CONTAINER")" != true ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$database_ready" != true ]; then
+            docker logs --tail 200 "$TEST_POSTGRES_CONTAINER" >&2
+            exit 1
+          fi
+
+          docker create \
+            --name "$TEST_APPLICATION_CONTAINER" \
+            --label "com.backupsheep.ci-run=$TEST_OWNERSHIP_VALUE" \
+            --network "$TEST_NETWORK" \
+            --read-only \
+            --init \
+            --user 10001:10001 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --pids-limit 2048 \
+            --memory 5g \
+            --memory-swap 5g \
+            --cpus 3 \
+            --ulimit core=0:0 \
+            --ulimit nofile=8192:8192 \
+            --tmpfs /code/_storage:rw,noexec,nosuid,nodev,size=4g,mode=0700,uid=10001,gid=10001 \
+            --tmpfs /run/backupsheep:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=10001,gid=10001 \
+            --tmpfs /run/backupsheep-test-tmp:rw,exec,nosuid,nodev,size=2g,mode=0700,uid=10001,gid=10001 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=2g,mode=1777 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/apps/tests,target=/code/apps/tests,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/apps/console/onboarding/tests.py,target=/code/apps/console/onboarding/tests.py,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/.github,target=/code/.github,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/bruno,target=/code/bruno,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/deploy,target=/code/deploy,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/docs,target=/code/docs,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/integrations,target=/code/integrations,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/scripts,target=/code/scripts,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/.dockerignore,target=/code/.dockerignore,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/.gitignore,target=/code/.gitignore,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/CONTRIBUTING.md,target=/code/CONTRIBUTING.md,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile,target=/code/Dockerfile,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.egress,target=/code/Dockerfile.egress,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.egress.dockerignore,target=/code/Dockerfile.egress.dockerignore,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/Dockerfile.postgres,target=/code/Dockerfile.postgres,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/LICENSE,target=/code/LICENSE,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/README.md,target=/code/README.md,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/SECURITY.md,target=/code/SECURITY.md,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/app.json,target=/code/app.json,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/backupsheep-compose,target=/code/backupsheep-compose,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/docker-compose.yml,target=/code/docker-compose.yml,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/heroku.yml,target=/code/heroku.yml,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/init.sh,target=/code/init.sh,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/install.sh,target=/code/install.sh,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/package-lock.json,target=/code/package-lock.json,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/package.json,target=/code/package.json,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/render.yaml,target=/code/render.yaml,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/requirements.lock,target=/code/requirements.lock,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/requirements.txt,target=/code/requirements.txt,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/startup.sh,target=/code/startup.sh,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tailwind.config.js,target=/code/tailwind.config.js,readonly" \
+            --workdir /code \
+            --env PYTHONPATH=/code \
+            --env TMPDIR=/run/backupsheep-test-tmp \
+            --env DJANGO_SETTINGS_MODULE=backupsheep.settings \
+            --env DJANGO_SERVER=test \
+            --env DJANGO_DEBUG=false \
+            --env DJANGO_ALLOWED_HOSTS=localhost,testserver \
+            --env DJANGO_SECRET_KEY="$django_secret" \
+            --env DB_NAME="$database_name" \
+            --env DB_USER="$database_user" \
+            --env DB_PASSWORD="$database_password" \
+            --env DB_HOST=database \
+            --env DB_PORT=5432 \
+            --env DATABASE_URL= \
+            --env BACKUPSHEEP_INSTALLATION_ID=0000000000000000000000000000000000000000000000000000000000000002 \
+            --env BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=legacy-only \
+            --env BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=false \
+            --env BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=true \
+            --env BACKUPSHEEP_ARTIFACT_KEY_PROVIDER=local-development \
+            --env AWS_EC2_METADATA_DISABLED=true \
+            --entrypoint /bin/sh \
+            "$TEST_APP_IMAGE" -ceu '
+              test "$(id -u):$(id -g)" = "10001:10001"
+              test ! -w /code/manage.py
+              test -w /code/_storage
+              test ! -e /usr/bin/pebble
+              assert_package() {
+                test "$(dpkg-query -W -f="\${Version}" "$1")" = "$2"
+              }
+              assert_source() {
+                test "$(dpkg-query -W -f="\${source:Package} \${source:Version}" "$1")" = "$2 $3"
+              }
+              assert_owner() {
+                test "$(dpkg-query -S "$2" | cut -d: -f1)" = "$1"
+              }
+              assert_package backupsheep-mariadb-dump 11.8.6-5ubuntu0.1+backupsheep1
+              assert_source backupsheep-mariadb-dump mariadb 1:11.8.6-5ubuntu0.1
+              assert_owner backupsheep-mariadb-dump /usr/bin/mariadb-dump
+              for forbidden_package in perl perl-base perl-modules-5.40; do
+                package_status="$(
+                  dpkg-query -W -f="\${db:Status-Abbrev}" \
+                    "$forbidden_package" 2>/dev/null || true
+                )"
+                if test "$package_status" = "ii"; then
+                  printf "%s\n" "Unexpected Perl package: $forbidden_package" >&2
+                  exit 1
+                fi
+              done
+              mariadb_binary_sha256="$(sha256sum /usr/bin/mariadb-dump)"
+              mariadb_binary_sha256="${mariadb_binary_sha256%% *}"
+              grep -Fq "\"binary_sha256\":\"${mariadb_binary_sha256}\"" \
+                /usr/share/backupsheep/provenance/mariadb-dump.json
+              for metadata in \
+                "14 14.24-1.pgdg13+2 2a17bc01dd3c4345d4ac85b084a11d7fb74265aead805e75cf0a296552f0f42e 61983f6ae42ee31c3e3477cfed77d7a42c58956e7abbfeed06e4c6e176042454" \
+                "15 15.19-1.pgdg13+2 718b5a25eb99db5ee37b165ebeeefea50ecf993c9cde1db26eb401e6bbe0be08 ec63ed182c6f3719e6b820bdf44a854597574af0a683d1a49e3cc81f68e3d855" \
+                "16 16.15-1.pgdg13+2 82e1dfb1c8f6aed02811c43bff4ead374343ebafe61bca9af3662fc75a83a4b7 3c2bff97c4547d2106e2fd0f9ba2738d1d0a217baf84ea228f1d411d1f0fa620" \
+                "17 17.11-1.pgdg13+2 c36408bb62178bc9193c113da65e30fc6a5237648de5e9db1ea594214df9ae4b e2ca95d99073796d6dc4578282cd1f1789f81507b17c97158f024ef05d43eff0" \
+                "18 18.6-1.pgdg13+2 9af40c99f7074f8ff3798155af2f07f1a4e1e3bd4edce44ef928c1e03aea620e 17e395f57433689ac3f8ed6cbeb631cf91dbb4e21d10573d4cc7b7f1f36a8f4b"; do
+                set -- $metadata
+                pg_major="$1"
+                pg_version="$2"
+                expected_archive_sha256="$3"
+                expected_payload_sha256="$4"
+                package="backupsheep-postgresql-client-${pg_major}"
+                provenance="/usr/share/backupsheep/provenance/postgresql-client-${pg_major}.json"
+                assert_package "$package" "${pg_version}+backupsheep1"
+                assert_source "$package" "postgresql-${pg_major}" "$pg_version"
+                grep -Fq "\"source_archive_sha256\":\"${expected_archive_sha256}\"" "$provenance"
+                grep -Fq "\"payload_sha256\":\"${expected_payload_sha256}\"" "$provenance"
+                payload_sha256="$(
+                  cd "/usr/lib/postgresql/${pg_major}"
+                  find . -type f -print0 \
+                    | LC_ALL=C sort -z \
+                    | xargs -0 sha256sum \
+                    | sha256sum
+                )"
+                payload_sha256="${payload_sha256%% *}"
+                test "$payload_sha256" = "$expected_payload_sha256"
+                for executable in pg_dump pg_restore psql; do
+                  assert_owner "$package" "/usr/lib/postgresql/${pg_major}/bin/${executable}"
+                done
+              done
+              assert_package backupsheep-oracle-mysql-client 8.4.11+backupsheep1
+              assert_source backupsheep-oracle-mysql-client mysql-community 8.4.11
+              oracle_provenance=/usr/share/backupsheep/provenance/oracle-mysql-client.json
+              grep -Fq "\"source_archive_sha256\":\"94e204cc94dede3746d2773fa5818f28f555cd8368c75ca0612eac124e6f3e58\"" "$oracle_provenance"
+              grep -Fq "\"source_signature_sha256\":\"23bcbef86b5125deceef25726a39f165094448c48e5263ba8e8fd89a90f9c17a\"" "$oracle_provenance"
+              oracle_payload_sha256="$(
+                cd /opt/mysql
+                find . -type f -print0 \
+                  | LC_ALL=C sort -z \
+                  | xargs -0 sha256sum \
+                  | sha256sum
+              )"
+              oracle_payload_sha256="${oracle_payload_sha256%% *}"
+              test "$oracle_payload_sha256" = "91f3d13d4d651794a4f746d9503605641d129cf700a7abaa6793768851383346"
+              grep -Fq "\"payload_sha256\":\"${oracle_payload_sha256}\"" "$oracle_provenance"
+              for executable in mysql mysqldump; do
+                assert_owner backupsheep-oracle-mysql-client "/opt/mysql/bin/${executable}"
+              done
+              test -z "$(dpkg --audit 2>/dev/null)"
+              python -c "import bz2,ctypes,curses,dbm.gnu,decimal,lzma,readline,sqlite3,ssl,uuid,zlib"
+              python manage.py test \
+                apps.tests.test_installer_security \
+                apps.tests.test_compose_wrapper_security \
+                apps.tests.test_docker_preflight_command \
+                --noinput
+              python bruno/scripts/validate_collection.py
+              python docs/enterprise/tools/validate_docs.py
+              python manage.py test apps.tests apps.console.onboarding --noinput
+            ' >/dev/null
+
+          # Only tests and source-contract fixtures are mounted read-only. Runtime
+          # application modules remain the exact immutable files built into the
+          # production image; the checkout root, .env and _storage are never mounted.
+          docker start --attach "$TEST_APPLICATION_CONTAINER"
+
+          # Exercise the production image's own /code tree through its real
+          # entrypoint and immutable-runtime checks. This deliberately uses a
+          # read-only root, private init/PID namespace, zero capabilities,
+          # file-backed secrets, finite cgroups, and production BSE1 settings.
+          # `migrate --plan` is non-mutating and is one of the entrypoint's
+          # reviewed one-shot exceptions to the already-tested live preflight.
+          smoke_secret_dir="$(mktemp -d "$RUNNER_TEMP/backupsheep-runtime-smoke.XXXXXXXX")"
+          printf '%s' "$django_secret" > "$smoke_secret_dir/django_secret_key"
+          printf '%s' "$database_password" > "$smoke_secret_dir/db_app_password"
+          printf '%s' "$(openssl rand -hex 32)" > "$smoke_secret_dir/rabbitmq_app_password"
+          ssh-keygen -q -t ed25519 -N '' -C '' \
+            -f "$smoke_secret_dir/celery_signing_app_private_key"
+          public_key="$(awk 'NF >= 2 {print $1 " " $2; exit}' \
+            "$smoke_secret_dir/celery_signing_app_private_key.pub")"
+          case "$public_key" in
+            'ssh-ed25519 '*) ;;
+            *) printf '%s\n' 'Failed to derive an Ed25519 public key.' >&2; exit 1 ;;
+          esac
+          printf '%s' '{"version":2,"installation_id":"0000000000000000000000000000000000000000000000000000000000000002","generation":1,"keys":{' \
+            > "$smoke_secret_dir/celery_trusted_public_keys"
+          separator=''
+          for lane in app beat cloud database files storage logs; do
+            printf '%s"%s":"%s"' "$separator" "$lane" "$public_key" \
+              >> "$smoke_secret_dir/celery_trusted_public_keys"
+            separator=','
+          done
+          printf '%s' '}}' >> "$smoke_secret_dir/celery_trusted_public_keys"
+          rm -- "$smoke_secret_dir/celery_signing_app_private_key.pub"
+          chmod 0444 "$smoke_secret_dir"/*
+
+          docker run --rm \
+            --network "$TEST_NETWORK" \
+            --read-only --init --user 10001:10001 \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --pids-limit 256 --memory 1g --memory-swap 1g --cpus 1 \
+            --tmpfs /run/backupsheep:rw,noexec,nosuid,nodev,size=32m,mode=0700,uid=10001,gid=10001 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777 \
+            --mount "type=bind,source=$smoke_secret_dir/django_secret_key,target=/run/secrets/django_secret_key,readonly" \
+            --mount "type=bind,source=$smoke_secret_dir/db_app_password,target=/run/secrets/db_app_password,readonly" \
+            --mount "type=bind,source=$smoke_secret_dir/rabbitmq_app_password,target=/run/secrets/rabbitmq_app_password,readonly" \
+            --mount "type=bind,source=$smoke_secret_dir/celery_signing_app_private_key,target=/run/secrets/celery_signing_app_private_key,readonly" \
+            --mount "type=bind,source=$smoke_secret_dir/celery_trusted_public_keys,target=/run/secrets/celery_trusted_public_keys,readonly" \
+            --env DJANGO_SETTINGS_MODULE=backupsheep.settings \
+            --env DJANGO_SERVER=prod --env DJANGO_DEBUG=false \
+            --env DJANGO_ALLOWED_HOSTS=localhost --env DJANGO_HTTPS=true \
+            --env APP_PROTOCOL=https:// --env APP_DOMAIN=localhost \
+            --env DJANGO_SECRET_KEY= \
+            --env DJANGO_SECRET_KEY_FILE=/run/secrets/django_secret_key \
+            --env BACKUPSHEEP_RUNTIME_ROLE=web \
+            --env BACKUPSHEEP_DATABASE_LANE=app \
+            --env DB_NAME="$database_name" --env DB_USER="$database_user" \
+            --env DB_PASSWORD= --env DB_PASSWORD_FILE=/run/secrets/db_app_password \
+            --env DB_HOST=database --env DB_PORT=5432 --env DATABASE_URL= \
+            --env RABBITMQ_HOST=rabbitmq --env RABBITMQ_PORT=5672 \
+            --env RABBITMQ_USER=backupsheep_app --env RABBITMQ_PASSWORD= \
+            --env RABBITMQ_PASSWORD_FILE=/run/secrets/rabbitmq_app_password \
+            --env BACKUPSHEEP_INSTALLATION_ID=0000000000000000000000000000000000000000000000000000000000000002 \
+            --env BACKUPSHEEP_DATABASE_IDENTITY_GENERATION=3 \
+            --env BACKUPSHEEP_CELERY_SECURITY_REQUIRED=true \
+            --env BACKUPSHEEP_CELERY_SECURITY_GENERATION=3 \
+            --env BACKUPSHEEP_CELERY_LANE=app \
+            --env CELERY_SIGNING_PRIVATE_KEY_FILE=/run/secrets/celery_signing_app_private_key \
+            --env CELERY_TRUSTED_PUBLIC_KEYS_FILE=/run/secrets/celery_trusted_public_keys \
+            --env BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE=bse1 \
+            --env BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=true \
+            --env BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=false \
+            --env BACKUPSHEEP_ARTIFACT_KEY_PROVIDER=aws-kms \
+            --env BACKUPSHEEP_ARTIFACT_KMS_KEY_ID=arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001 \
+            --env BACKUPSHEEP_ARTIFACT_KMS_REGION=us-east-1 \
+            --env BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS=arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000001 \
+            --env AWS_EC2_METADATA_DISABLED=true \
+            --env AWS_EC2_METADATA_V1_DISABLED=true \
+            --env AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true \
+            "$TEST_APP_IMAGE" python manage.py migrate --plan >/dev/null
+          find "$smoke_secret_dir" -mindepth 1 -maxdepth 1 -type f -delete
+          rmdir "$smoke_secret_dir"
+          smoke_secret_dir=''
+
+      - name: Exercise the isolated production web and worker topology
+        shell: bash
+        run: deploy/ci/run-security-topology.sh
+
+      - name: Attack the exact built egress-policy image
+        shell: bash
+        run: deploy/egress/test-policy.sh "$TEST_EGRESS_IMAGE"
+
+      - name: Remove exact regression-gate resources
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          export LC_ALL=C
+          ci_ownership_label() {
+            local resource_type="$1" resource_id="$2"
+            local marker='__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__'
+            local label_root='' framed='' payload='' declared='' value=''
+            local LC_ALL=C
+            case "$resource_type" in
+              container|image) label_root='.Config.Labels' ;;
+              network) label_root='.Labels' ;;
+              *) return 1 ;;
+            esac
+            framed="$(
+              docker "$resource_type" inspect --format \
+                "{{with index ${label_root} \"com.backupsheep.ci-run\"}}{{len .}}:{{.}}{{else}}0:{{end}}${marker}" \
+                "$resource_id"
+            )" || return 1
+            [[ "$framed" == *"$marker" ]] || return 1
+            payload="${framed%"$marker"}"
+            [[ "$payload" == *:* ]] || return 1
+            declared="${payload%%:*}"
+            value="${payload#*:}"
+            [[ "$declared" =~ ^(0|[1-9][0-9]{0,6})$ ]] || return 1
+            (( 10#$declared <= 1048576 )) || return 1
+            (( ${#value} == 10#$declared )) || return 1
+            [[ "$value" != *[[:cntrl:]]* ]] || return 1
+            printf '%s' "$value"
+          }
+          owned_container() {
+            local value=''
+            value="$(ci_ownership_label container "$1" 2>/dev/null)" \
+              && [ "$value" = "$TEST_OWNERSHIP_VALUE" ]
+          }
+          owned_network() {
+            local value=''
+            value="$(ci_ownership_label network "$1" 2>/dev/null)" \
+              && [ "$value" = "$TEST_OWNERSHIP_VALUE" ]
+          }
+          owned_image() {
+            local value=''
+            value="$(ci_ownership_label image "$1" 2>/dev/null)" \
+              && [ "$value" = "$TEST_OWNERSHIP_VALUE" ]
+          }
+          if owned_container "$TEST_APPLICATION_CONTAINER"; then
+            docker rm --force "$TEST_APPLICATION_CONTAINER" >/dev/null 2>&1 || true
+          fi
+          if owned_container "$TEST_POSTGRES_CONTAINER"; then
+            docker rm --force "$TEST_POSTGRES_CONTAINER" >/dev/null 2>&1 || true
+          fi
+          if owned_network "$TEST_NETWORK"; then
+            docker network rm "$TEST_NETWORK" >/dev/null 2>&1 || true
+          fi
+          if owned_image "$TEST_APP_IMAGE"; then
+            docker image rm --force "$TEST_APP_IMAGE" >/dev/null 2>&1 || true
+          fi
+          if owned_image "$TEST_POSTGRES_IMAGE"; then
+            docker image rm --force "$TEST_POSTGRES_IMAGE" >/dev/null 2>&1 || true
+          fi
+          if owned_image "$TEST_EGRESS_IMAGE"; then
+            docker image rm --force "$TEST_EGRESS_IMAGE" >/dev/null 2>&1 || true
+          fi
+          storage_owner="$GITHUB_WORKSPACE/_storage/.backupsheep-ci-owner"
+          if [ -f "$storage_owner" ] && [ ! -L "$storage_owner" ] \
+            && [ "$(cat "$storage_owner")" = "$TEST_OWNERSHIP_VALUE" ]; then
+            rm -- "$storage_owner"
+            rmdir "$GITHUB_WORKSPACE/_storage" >/dev/null 2>&1 || true
+          fi

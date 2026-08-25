@@ -4154,6 +4154,12 @@ class CoreAuthBasecamp(TimeStampedModel):
         db_table = "core_auth_basecamp"
 
     def get_client(self):
+        # Refuse before decrypting OAuth credentials. Enterprise/BSE1 installs do
+        # not have a complete Basecamp recovery path, and the non-enterprise
+        # compatibility path must be explicitly enabled.
+        from backupsheep.source_recovery_policy import require_source_backup_creation
+
+        require_source_backup_creation("basecamp")
         encryption_key = self.connection.account.get_encryption_key()
 
         access_token = bs_decrypt(self.access_token, encryption_key)
@@ -4170,7 +4176,11 @@ class CoreAuthBasecamp(TimeStampedModel):
         from django.conf import settings
         from datetime import datetime
         from apps.api.v1.utils.oauth_security import validated_https_endpoint
+        from backupsheep.source_recovery_policy import require_source_backup_creation
 
+        # A disabled source must not keep decrypting or refreshing OAuth
+        # credentials in the background. Existing rows remain readable.
+        require_source_backup_creation("basecamp")
         encryption_key = self.connection.account.get_encryption_key()
 
         refresh_token = bs_decrypt(self.refresh_token, encryption_key)

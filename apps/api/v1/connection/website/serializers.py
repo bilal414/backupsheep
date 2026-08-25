@@ -2,6 +2,7 @@ import pytz
 from django.db import transaction
 from django.utils.timezone import get_current_timezone
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 
 from apps.console.account.models import CoreAccount
 from apps.api.v1.utils.api_helpers import (
@@ -21,9 +22,14 @@ from apps.api.v1.connection.serializer_helpers import (
     safe_connection_validation_error,
 )
 from apps.console.connection.managed_ssh import (
+    _active_request_permission,
+    acquire_managed_ssh_mutation_lock,
+    assert_managed_ssh_single_account,
     create_managed_ssh_operation,
+    ManagedSSHOperationError,
     managed_public_key_fingerprint,
 )
+from apps.console.connection.ssh import normalize_ssh_host
 
 
 class CoreAuthWebsiteReadSerializer(serializers.ModelSerializer):
@@ -280,6 +286,23 @@ class CoreAuthWebsiteWriteSerializer(serializers.ModelSerializer):
             errors["password"] = [
                 "A password or passphrase cannot be supplied with public-key authentication."
             ]
+        legacy_rsa = bool(
+            data.get(
+                "flag_use_sha1_key_verification",
+                getattr(existing, "flag_use_sha1_key_verification", False),
+            )
+        )
+        if mode == "public_key" and legacy_rsa:
+            errors["flag_use_sha1_key_verification"] = [
+                "Legacy RSA/SHA-1 is not permitted with the managed SSH key."
+            ]
+        if mode == "public_key":
+            try:
+                assert_managed_ssh_single_account(
+                    self.context["request"].user.member.get_current_account().pk
+                )
+            except ManagedSSHOperationError as error:
+                errors["use_public_key"] = [str(error)]
 
         if "password" in data and data.get("password"):
             if "'" in data["password"] or '"' in data["password"]:
@@ -287,6 +310,16 @@ class CoreAuthWebsiteWriteSerializer(serializers.ModelSerializer):
 
         if errors:
             raise serializers.ValidationError(errors)
+
+        if protocol == CoreAuthWebsite.Protocol.SFTP:
+            try:
+                data["host"] = normalize_ssh_host(
+                    data.get("host", getattr(existing, "host", None))
+                )
+            except (TypeError, ValueError):
+                raise serializers.ValidationError(
+                    {"host": ["A valid canonical SSH host is required."]}
+                ) from None
 
         connection_data = {}
         for field_name in (
@@ -303,6 +336,7 @@ class CoreAuthWebsiteWriteSerializer(serializers.ModelSerializer):
             )
         connection_data.update(
             {
+                "_account_id": self.context["request"].user.member.get_current_account().pk,
                 "username": username,
                 "password": password if mode != "public_key" else None,
                 "private_key": private_key if mode == "private_key" else None,
@@ -316,10 +350,7 @@ class CoreAuthWebsiteWriteSerializer(serializers.ModelSerializer):
                 # The web container deliberately has no managed private key. Its
                 # syntax/binding is checked here; a files-lane worker performs the
                 # network validation after the durable rows commit.
-                managed_public_key_fingerprint()
-            else:
-                auth = CoreAuthWebsite()
-                auth.check_connection(data=connection_data)
+                managed_public_key_fingerprint(source_lane="files")
         except Exception as error:
             raise safe_connection_validation_error(error, stage="website") from None
 
@@ -360,38 +391,98 @@ class CoreWebsiteConnectionWriteSerializer(
     class Meta:
         model = CoreConnection
         fields = "__all__"
+        read_only_fields = (
+            "status",
+            "old_status",
+            "notification",
+            "managed_ssh_generation",
+        )
+
+    def _requesting_member(self):
+        request = self.context.get("request")
+        member = getattr(getattr(request, "user", None), "member", None)
+        if member is None or not getattr(member, "pk", None):
+            raise serializers.ValidationError(
+                {"detail": "A requesting member is required for managed SSH."}
+            )
+        return member
+
+    @staticmethod
+    def _lock_request_permission(account_id, member_id):
+        try:
+            return _active_request_permission(account_id, member_id)
+        except ManagedSSHOperationError:
+            raise PermissionDenied(
+                "Integration-change permission is required."
+            ) from None
 
     @transaction.atomic
     def create(self, validated_data):
+        acquire_managed_ssh_mutation_lock()
+        requesting_member = self._requesting_member()
+        account = CoreAccount.objects.select_for_update().get(
+            pk=validated_data["account"].pk
+        )
+        self._lock_request_permission(account.pk, requesting_member.pk)
+        validated_data["account"] = account
         auth_website = validated_data.pop("auth_website", [])
         managed_key = bool(auth_website.get("use_public_key"))
-        if managed_key:
-            validated_data["status"] = CoreConnection.Status.PENDING
+        validated_data["status"] = CoreConnection.Status.PENDING
         instance = CoreConnection.objects.create(**validated_data)
         auth_website["connection"] = instance
         CoreAuthWebsite.objects.create(**auth_website)
         if managed_key:
-            self.managed_ssh_operation = create_managed_ssh_operation(
-                instance,
-                "validate",
-            )
+            try:
+                self.managed_ssh_operation = create_managed_ssh_operation(
+                    instance,
+                    "validate",
+                    requested_by_member=requesting_member,
+                )
+            except Exception as error:
+                raise safe_connection_validation_error(
+                    error, stage="managed_ssh_intent"
+                ) from None
         return instance
 
     @transaction.atomic
     def update(self, instance, validated_data):
+        acquire_managed_ssh_mutation_lock()
+        requesting_member = self._requesting_member()
+        account = CoreAccount.objects.select_for_update().get(pk=instance.account_id)
+        self._lock_request_permission(account.pk, requesting_member.pk)
+        instance = CoreConnection.objects.select_for_update().get(
+            pk=instance.pk,
+            account=account,
+        )
+        locked_auth = CoreAuthWebsite.objects.select_for_update().get(
+            connection=instance
+        )
+        instance._state.fields_cache["auth_website"] = locked_auth
         if validated_data.get("location"):
             if instance.location != validated_data["location"]:
                 instance.update_scheduled_backup_locations(validated_data["location"])
         auth_website = validated_data.pop("auth_website", [])
-        managed_key = bool(auth_website.get("use_public_key"))
-        if managed_key:
+        if auth_website:
             validated_data["status"] = CoreConnection.Status.PENDING
         if len(auth_website) > 0:
             super().update(instance.auth_website, auth_website)
-        instance = super().update(instance, validated_data)
-        if managed_key:
-            self.managed_ssh_operation = create_managed_ssh_operation(
-                instance,
-                "validate",
+            # The website auth fence can advance the connection generation and
+            # force PENDING. Refresh every trigger-owned field before DRF saves
+            # the parent model so its stale in-memory snapshot cannot clobber or
+            # illegally replay that generation.
+            instance.refresh_from_db(
+                fields=("managed_ssh_generation", "status", "modified")
             )
+        instance = super().update(instance, validated_data)
+        if auth_website and bool(locked_auth.use_public_key):
+            try:
+                self.managed_ssh_operation = create_managed_ssh_operation(
+                    instance,
+                    "validate",
+                    requested_by_member=requesting_member,
+                )
+            except Exception as error:
+                raise safe_connection_validation_error(
+                    error, stage="managed_ssh_intent"
+                ) from None
         return instance

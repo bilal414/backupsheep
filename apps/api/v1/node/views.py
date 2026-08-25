@@ -50,6 +50,7 @@ from apps._tasks.helper.tasks import (
     delete_local_node_requested,
     reset_incremental_cache,
 )
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 def _log_activity(request, log_type, data):
@@ -434,6 +435,7 @@ class CoreNodeView(viewsets.ModelViewSet):
         "resume": "node_changes",
         "delete": "node_changes",
         "reset_incremental": "node_changes",
+        "validate": "backup_create",
         "take_snapshot": "backup_create",
         "restore_backup": "backup_create",
         "resume_restore": "backup_create",
@@ -497,6 +499,7 @@ class CoreNodeView(viewsets.ModelViewSet):
         )
 
         node = self.get_object()
+        require_source_backup_creation(node.connection.integration.code)
         notes = self.request.data.get("notes")
         storage_point_ids = self.request.data.get("storage_point_ids")
 
@@ -1363,6 +1366,7 @@ class CoreNodeView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def resume(self, request, pk=None):
         node = self.get_object()
+        require_source_backup_creation(node.connection.integration.code)
         node.status = CoreNode.Status.ACTIVE
         node.save()
         _log_activity(
@@ -1443,9 +1447,13 @@ class CoreNodeView(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def reset_incremental(self, request, pk=None):
         node = self.get_object()
-        # The HTTP role has read-only access to staged backup data. Dispatch the
-        # exact cache mutation to the storage worker, whose queue is the authorized
-        # local-artifact boundary.
+        if node.type != CoreNode.Type.WEBSITE:
+            return Response(
+                {"detail": "Incremental cache reset is available only for website nodes."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # The HTTP role has no source workdir. Dispatch the exact cache mutation to
+        # the files worker, which exclusively owns the website mirror and its lock.
         reset_incremental_cache.apply_async(args=[node.pk])
         _log_activity(
             request,
@@ -1464,13 +1472,13 @@ class CoreNodeView(viewsets.ModelViewSet):
             {
                 "detail": (
                     "Incremental cache reset scheduled. Your next backup will be "
-                    "a full backup after the storage worker applies it."
+                    "a full backup after the files worker applies it."
                 )
             },
             status=status.HTTP_200_OK,
         )
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         try:
             validation = self.get_object().validate()

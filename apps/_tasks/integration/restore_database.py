@@ -1352,9 +1352,12 @@ def _sftp_write(ssh, remote_name, content, *, restore=None, backup=None):
         _sftp_channel(sftp, COMMAND_TIMEOUT)
         if restore is not None:
             _ensure_restore_fence(restore)
-        with sftp.open(remote_name, "w") as output:
+        with sftp.open(remote_name, "x") as output:
+            # Refuse a pre-positioned file or symlink, then restrict the empty
+            # inode before any credential bytes become observable. SFTP has no
+            # portable atomic create-with-mode operation.
+            sftp.chmod(remote_name, 0o600)
             output.write(content)
-        sftp.chmod(remote_name, 0o600)
         if restore is not None:
             _ensure_restore_fence(restore)
     finally:

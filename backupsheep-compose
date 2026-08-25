@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 # Execute the reviewed BackupSheep Compose model without ambient interpolation.
 set -euo pipefail
+umask 077
+# Keep every security grammar byte-oriented and immune to locale-specific range
+# collation (for example, locales where [a-z] also matches uppercase bytes).
+export LC_ALL=C
 
 die() {
     printf '%s\n' "BackupSheep Compose refused: $*" >&2
     exit 64
+}
+
+valid_compose_project_name() {
+    local value="$1"
+    local LC_ALL=C
+    [[ "$value" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]
 }
 
 script_path="${BASH_SOURCE[0]}"
@@ -15,6 +25,10 @@ env_file="${root_dir}/.env"
 base_file="${root_dir}/docker-compose.yml"
 default_override="${root_dir}/docker-compose.override.yml"
 rabbitmq_upgrade="${root_dir}/deploy/rabbitmq/upgrade-4.2.9.compose.yml"
+mutation_lock_dir="${root_dir}.backupsheep-mutation-lock"
+mutation_lock_owner_file="${mutation_lock_dir}/owner"
+mutation_lock_token=""
+mutation_lock_held=false
 
 file_uid() {
     stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1"
@@ -30,6 +44,67 @@ file_links() {
 
 file_size() {
     stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1"
+}
+
+release_mutation_lock() {
+    local release_failed=false
+
+    [[ "$mutation_lock_held" == true ]] || return 0
+    if [[ ! -d "$mutation_lock_dir" || -L "$mutation_lock_dir" \
+          || "$(file_uid "$mutation_lock_dir")" != "$EUID" \
+          || "$(file_mode "$mutation_lock_dir")" != "700" \
+          || ! -f "$mutation_lock_owner_file" || -L "$mutation_lock_owner_file" \
+          || "$(file_uid "$mutation_lock_owner_file")" != "$EUID" \
+          || "$(file_mode "$mutation_lock_owner_file")" != "600" \
+          || "$(file_links "$mutation_lock_owner_file")" != "1" \
+          || "$(<"$mutation_lock_owner_file")" != "$mutation_lock_token" ]]; then
+        release_failed=true
+    elif ! rm -f -- "$mutation_lock_owner_file" \
+        || ! rmdir -- "$mutation_lock_dir"; then
+        release_failed=true
+    fi
+    mutation_lock_held=false
+    if [[ "$release_failed" == true ]]; then
+        printf '%s\n' \
+            "BackupSheep Compose warning: the mutation lock could not be released safely; inspect ${mutation_lock_dir} before another mutation." >&2
+        return 1
+    fi
+    return 0
+}
+
+finish_wrapper() {
+    local original_status=$?
+    trap - EXIT
+    if ! release_mutation_lock; then
+        exit 74
+    fi
+    exit "$original_status"
+}
+
+acquire_mutation_lock() {
+    command -v mkdir >/dev/null 2>&1 && command -v rmdir >/dev/null 2>&1 \
+        || die "mkdir and rmdir are required for the portable mutation lock."
+    if ! mkdir "$mutation_lock_dir" 2>/dev/null; then
+        die "another installer/wrapper mutation is active, or a stale fail-closed lock remains at ${mutation_lock_dir}. Verify that no BackupSheep mutation is running before removing that exact lock manually."
+    fi
+    mutation_lock_held=true
+    trap finish_wrapper EXIT
+    mutation_lock_token="version=1;tool=backupsheep-compose;pid=$$;uid=${EUID}"
+    chmod 0700 "$mutation_lock_dir" \
+        || die "could not protect the new mutation lock directory."
+    if ! printf '%s\n' "$mutation_lock_token" > "$mutation_lock_owner_file" \
+        || ! chmod 0600 "$mutation_lock_owner_file"; then
+        die "could not publish the mutation-lock ownership witness."
+    fi
+    [[ -d "$mutation_lock_dir" && ! -L "$mutation_lock_dir" \
+        && "$(file_uid "$mutation_lock_dir")" == "$EUID" \
+        && "$(file_mode "$mutation_lock_dir")" == "700" \
+        && -f "$mutation_lock_owner_file" && ! -L "$mutation_lock_owner_file" \
+        && "$(file_uid "$mutation_lock_owner_file")" == "$EUID" \
+        && "$(file_mode "$mutation_lock_owner_file")" == "600" \
+        && "$(file_links "$mutation_lock_owner_file")" == "1" \
+        && "$(<"$mutation_lock_owner_file")" == "$mutation_lock_token" ]] \
+        || die "the new mutation-lock ownership witness failed validation."
 }
 
 validate_private_file() {
@@ -57,6 +132,9 @@ validate_private_file "$base_file" "docker-compose.yml"
 [[ "$(file_mode "$env_file")" == "600" ]] \
     || die ".env must have mode 0600."
 
+if IFS= read -r -d '' _nul_probe < "$env_file"; then
+    die ".env contains a NUL byte."
+fi
 ! grep -q $'\r' "$env_file" || die ".env contains carriage returns."
 awk '
     /^[[:space:]]*($|#)/ { next }
@@ -71,13 +149,12 @@ awk '
     || die ".env contains a forbidden Docker/Compose control or replacement variable."
 
 project_raw="$(awk -F= '$1 == "BACKUPSHEEP_COMPOSE_PROJECT_NAME" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
-if [[ "$project_raw" == \'*\' && "$project_raw" == *\' ]]; then
-    project_name="${project_raw#\'}"
-    project_name="${project_name%\'}"
-else
-    project_name="$project_raw"
-fi
-[[ "$project_name" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] \
+case "$project_raw" in
+    \'*\') project_name="${project_raw#\'}"; project_name="${project_name%\'}" ;;
+    \"*\") project_name="${project_raw#\"}"; project_name="${project_name%\"}" ;;
+    *) project_name="$project_raw" ;;
+esac
+valid_compose_project_name "$project_name" \
     || die "BACKUPSHEEP_COMPOSE_PROJECT_NAME must be a non-empty reviewed lowercase project name."
 
 installation_raw="$(awk -F= '$1 == "BACKUPSHEEP_INSTALLATION_ID" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
@@ -89,6 +166,15 @@ esac
 [[ "$installation_id" =~ ^[0-9a-f]{64}$ ]] \
     || die "BACKUPSHEEP_INSTALLATION_ID must be one stable 64-character lowercase hexadecimal value."
 
+egress_generation_raw="$(awk -F= '$1 == "BACKUPSHEEP_EGRESS_POLICY_GENERATION" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
+case "$egress_generation_raw" in
+    \'*\') egress_generation="${egress_generation_raw#\'}"; egress_generation="${egress_generation%\'}" ;;
+    \"*\") egress_generation="${egress_generation_raw#\"}"; egress_generation="${egress_generation%\"}" ;;
+    *) egress_generation="$egress_generation_raw" ;;
+esac
+[[ "$egress_generation" == "2" ]] \
+    || die "BACKUPSHEEP_EGRESS_POLICY_GENERATION must be the reviewed fail-closed value 2. Run the installer egress migration first."
+
 rabbitmq_generation_raw="$(awk -F= '$1 == "BACKUPSHEEP_RABBITMQ_DATA_GENERATION" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
 case "$rabbitmq_generation_raw" in
     \'*\') rabbitmq_generation="${rabbitmq_generation_raw#\'}"; rabbitmq_generation="${rabbitmq_generation%\'}" ;;
@@ -97,6 +183,39 @@ case "$rabbitmq_generation_raw" in
 esac
 [[ -z "$rabbitmq_generation" || "$rabbitmq_generation" == "4.3" ]] \
     || die "BACKUPSHEEP_RABBITMQ_DATA_GENERATION must be blank or the installer-proven value 4.3."
+
+postgres_storage_generation_raw="$(awk -F= '$1 == "BACKUPSHEEP_POSTGRES_STORAGE_GENERATION" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
+postgres_storage_intent_raw="$(awk -F= '$1 == "BACKUPSHEEP_POSTGRES_STORAGE_INTENT" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
+postgres_storage_witness_raw="$(awk -F= '$1 == "BACKUPSHEEP_POSTGRES_STORAGE_WITNESS" { print substr($0, index($0, "=") + 1); exit }' "$env_file")"
+unquote_env_value() {
+    local raw="$1"
+    case "$raw" in
+        \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+        \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+    esac
+    printf '%s' "$raw"
+}
+postgres_storage_generation="$(unquote_env_value "$postgres_storage_generation_raw")"
+postgres_storage_intent="$(unquote_env_value "$postgres_storage_intent_raw")"
+postgres_storage_witness="$(unquote_env_value "$postgres_storage_witness_raw")"
+case "${postgres_storage_generation}:${postgres_storage_intent}" in
+    18-alpine-icu-v1:new-empty-v1|18-alpine-icu-v1:migrated-debian-v1|\
+    18-alpine-icu-v1-pending-fresh:new-empty-v1|\
+    18-alpine-icu-v1-pending-upgrade:migrated-debian-v1) ;;
+    *) die "PostgreSQL storage generation and intent are absent or inconsistent; run install.sh." ;;
+esac
+[[ "$postgres_storage_witness" =~ ^[0-9a-f]{64}$ ]] \
+    || die "BACKUPSHEEP_POSTGRES_STORAGE_WITNESS must be the installer-derived 64-character value."
+postgres_witness_material="BackupSheep/postgres-storage/v1|${installation_id}|${project_name}|postgres_data_v1|18-alpine-icu-v1|icu=und|${postgres_storage_intent}"
+if command -v sha256sum >/dev/null 2>&1; then
+    expected_postgres_storage_witness="$(printf '%s' "$postgres_witness_material" | sha256sum | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+    expected_postgres_storage_witness="$(printf '%s' "$postgres_witness_material" | shasum -a 256 | awk '{print $1}')"
+else
+    die "sha256sum or shasum is required to validate the PostgreSQL storage witness."
+fi
+[[ "$postgres_storage_witness" == "$expected_postgres_storage_witness" ]] \
+    || die "BACKUPSHEEP_POSTGRES_STORAGE_WITNESS does not match this installation and reviewed storage runtime."
 
 compose_files=(-f "$base_file")
 approved_default=false
@@ -273,6 +392,11 @@ case "$compose_subcommand" in
         ;;
 esac
 
+if [[ "$mutating_command" == true \
+      && "$postgres_storage_generation" == "18-alpine-icu-v1-pending-upgrade" ]]; then
+    die "the Debian PostgreSQL migration is pending; only install.sh --migrate-postgres-runtime may create or open the new storage generation."
+fi
+
 if [[ "$compose_subcommand" == "pull" || "$compose_subcommand" == "push" || \
       "$compose_subcommand" == "publish" || "$compose_subcommand" == "commit" || \
       "$compose_subcommand" == "cp" || "$compose_subcommand" == "watch" ]]; then
@@ -338,29 +462,6 @@ if [[ "$volume_deletion_requested" == true ]]; then
     (( ${#compose_files[@]} == 2 )) \
         || die "volume deletion is refused while an approved Compose overlay is active."
 fi
-
-validate_reviewed_host_volume() {
-    local specification="$1"
-    local source_path="${specification%%:*}"
-    local remainder="${specification#*:}"
-    local target_path="${remainder%%:*}"
-    local mount_mode="${remainder#*:}"
-    local source_parent=""
-
-    [[ "$source_path" == /* && "$target_path" == "/migration/known_hosts" && "$mount_mode" == "ro" ]] \
-        || die "the reviewed runtime override accepts only the read-only SSH known-hosts migration mount."
-    [[ -f "$source_path" && ! -L "$source_path" ]] \
-        || die "the SSH known-hosts migration source must be a regular, non-symlink file."
-    source_parent="$(cd -- "$(dirname -- "$source_path")" && pwd -P)" \
-        || die "could not resolve the SSH known-hosts migration source."
-    [[ "$source_parent" == "${root_dir}/.backupsheep-ssh-migration."* ]] \
-        || die "the SSH known-hosts migration source must be in this checkout's private migration directory."
-    [[ -d "$source_parent" && ! -L "$source_parent" && \
-       "$(file_uid "$source_parent")" == "$EUID" && \
-       "$(file_mode "$source_parent")" == "700" ]] \
-        || die "the SSH known-hosts migration directory must be private and owned by the invoking user."
-    validate_private_file "$source_path" "SSH known-hosts migration source"
-}
 
 set_env_value_atomically() {
     local key="$1"
@@ -439,6 +540,9 @@ fi
 
 selected_services=()
 up_no_dependencies=false
+up_force_recreate=false
+up_broad_project=false
+egress_pair_recreation_requested=false
 record_selected_service() {
     local service_name="$1"
     case "$service_name" in
@@ -492,9 +596,14 @@ if [[ "$compose_subcommand" == "up" || "$compose_subcommand" == "create" ]]; the
                     continue
                     ;;
                 --abort-on-container-exit|--abort-on-container-failure|--always-recreate-deps|\
-                --attach-dependencies|--build|-d|--detach|--force-recreate|--menu|\
+                --attach-dependencies|--build|-d|--detach|--menu|\
                 --no-build|--no-color|--no-log-prefix|--no-recreate|--no-start|--quiet-build|\
                 --quiet-pull|-V|--renew-anon-volumes|--timestamps|--wait|-w|--watch|-y|--yes)
+                    argument_index=$((argument_index + 1))
+                    continue
+                    ;;
+                --force-recreate)
+                    up_force_recreate=true
                     argument_index=$((argument_index + 1))
                     continue
                     ;;
@@ -535,6 +644,92 @@ if [[ "$compose_subcommand" == "up" || "$compose_subcommand" == "create" ]]; the
         esac
         argument_index=$((argument_index + 1))
     done
+fi
+
+service_was_selected() {
+    local wanted="$1"
+    local selected=""
+    (( ${#selected_services[@]} > 0 )) || return 1
+    for selected in "${selected_services[@]}"; do
+        [[ "$selected" == "$wanted" ]] && return 0
+    done
+    return 1
+}
+
+if [[ "$compose_subcommand" == "up" ]]; then
+    (( ${#selected_services[@]} > 0 )) || up_broad_project=true
+
+    guard_pair_selected=false
+    for pair in \
+        app-egress-guard:app \
+        cloud-egress-guard:worker-cloud \
+        database-egress-guard:worker-database \
+        files-egress-guard:worker-files \
+        storage-egress-guard:worker-storage \
+        logs-egress-guard:worker-logs; do
+        guard="${pair%%:*}"
+        workload="${pair#*:}"
+        guard_selected=false
+        workload_selected=false
+        service_was_selected "$guard" && guard_selected=true
+        service_was_selected "$workload" && workload_selected=true
+        if [[ "$guard_selected" == true ]]; then
+            [[ "$workload_selected" == true ]] \
+                || die "${guard} may be changed only with its paired workload ${workload}."
+            guard_pair_selected=true
+        elif [[ "$workload_selected" == true ]]; then
+            die "${workload} may be changed only with its paired guard ${guard} through --force-recreate --no-deps."
+        fi
+    done
+
+    if [[ "$guard_pair_selected" == true ]]; then
+        egress_pair_recreation_requested=true
+        [[ "$up_force_recreate" == true && "$up_no_dependencies" == true ]] \
+            || die "an egress guard/workload pair requires both --force-recreate and --no-deps."
+        for selected in "${selected_services[@]}"; do
+            case "$selected" in
+                app-egress-guard|app|cloud-egress-guard|worker-cloud|\
+                database-egress-guard|worker-database|files-egress-guard|worker-files|\
+                storage-egress-guard|worker-storage|logs-egress-guard|worker-logs)
+                    ;;
+                *) die "a paired egress recreation cannot also recreate ${selected}." ;;
+            esac
+        done
+    elif [[ "$up_force_recreate" == true ]]; then
+        die "--force-recreate is reserved for an exact egress guard/workload pair."
+    fi
+elif [[ "$compose_subcommand" == "create" ]]; then
+    (( ${#selected_services[@]} > 0 )) \
+        || die "create requires an explicit reviewed non-egress service set."
+    for selected in "${selected_services[@]}"; do
+        case "$selected" in
+            app-egress-guard|app|cloud-egress-guard|worker-cloud|\
+            database-egress-guard|worker-database|files-egress-guard|worker-files|\
+            storage-egress-guard|worker-storage|logs-egress-guard|worker-logs)
+                die "egress guards and their workloads must be created through an explicit paired up --force-recreate --no-deps operation."
+                ;;
+        esac
+    done
+fi
+
+if [[ "$compose_subcommand" == "kill" || "$compose_subcommand" == "pause" || \
+      "$compose_subcommand" == "stop" || "$compose_subcommand" == "rm" ]]; then
+    lifecycle_target_seen=false
+    for argument in "${compose_arguments[@]:$((subcommand_index + 1))}"; do
+        case "$argument" in
+            app-egress-guard|cloud-egress-guard|database-egress-guard|\
+            files-egress-guard|storage-egress-guard|logs-egress-guard)
+                die "${compose_subcommand} may not target an egress guard; use down for the complete stack or force-recreate the exact guard/workload pair."
+                ;;
+            db|rabbitmq-volume-init|rabbitmq|rabbitmq-provision|staging-provision|\
+            db-provision|migrate|db-seal|preflight|app|worker-cloud|worker-database|\
+            worker-files|worker-storage|worker-logs|beat)
+                lifecycle_target_seen=true
+                ;;
+        esac
+    done
+    [[ "$lifecycle_target_seen" == true ]] \
+        || die "${compose_subcommand} requires an explicit reviewed non-guard service set."
 fi
 
 lifecycle_services=()
@@ -606,13 +801,19 @@ if [[ "$compose_subcommand" == "exec" ]]; then
         esac
     done
     [[ -n "$exec_service" ]] || die "exec requires an explicit reviewed service."
+    case "$exec_service" in
+        app-egress-guard|cloud-egress-guard|database-egress-guard|\
+        files-egress-guard|storage-egress-guard|logs-egress-guard)
+            die "exec is forbidden for egress guards; their policy and PID 1 are immutable through this wrapper."
+            ;;
+    esac
 
     # The vendor images start as root for ownership repair. An exec otherwise
     # inherits that configured user even after PID 1 drops privilege, so force
     # every stateful diagnostic to the vendor server identity.
     stateful_exec_user=""
     case "$exec_service" in
-        db) stateful_exec_user="999:999" ;;
+        db) stateful_exec_user="70:70" ;;
         rabbitmq) stateful_exec_user="rabbitmq" ;;
     esac
     if [[ -n "$stateful_exec_user" ]]; then
@@ -622,6 +823,17 @@ if [[ "$compose_subcommand" == "exec" ]]; then
             "${compose_arguments[@]:$((subcommand_index + 1))}"
         )
     fi
+fi
+
+if [[ "$compose_subcommand" == "attach" ]]; then
+    for argument in "${compose_arguments[@]:$((subcommand_index + 1))}"; do
+        case "$argument" in
+            app-egress-guard|cloud-egress-guard|database-egress-guard|\
+            files-egress-guard|storage-egress-guard|logs-egress-guard)
+                die "attach is forbidden for egress guards because signal proxying could terminate guard PID 1 independently."
+                ;;
+        esac
+    done
 fi
 
 runtime_override_seen=false
@@ -690,6 +902,14 @@ if [[ "$compose_subcommand" == "run" ]]; then
           "$run_service_index" -ge $((${#compose_arguments[@]} - 1)) ]]; then
         die "run requires an explicit one-off command for this application service."
     fi
+    [[ "$run_remove_requested" == true ]] \
+        || die "every reviewed run must be disposable and include --rm."
+    case "$run_service" in
+        app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs)
+            [[ "$run_no_dependencies_requested" == true ]] \
+                || die "an egress-backed run must include --no-deps so it cannot start or resume a guard."
+            ;;
+    esac
 
     capability_count=0
     cap_chown=false
@@ -768,8 +988,7 @@ if [[ "$compose_subcommand" == "run" ]]; then
                 user_override_seen=true
                 ;;
             --volume|--volume=*|-v|-v?*)
-                validate_reviewed_host_volume "$override_value"
-                volume_override_seen=true
+                die "host volume overrides are not supported; legacy SSH trust must be re-approved through the account-scoped ledger."
                 ;;
         esac
         argument_index=$((argument_index + 1))
@@ -783,12 +1002,6 @@ if [[ "$compose_subcommand" == "run" ]]; then
            "$run_remove_requested" == true && "$run_no_dependencies_requested" == true && \
            "${compose_arguments[$((run_service_index + 1))]-}" == "-ceu" ]] \
             || die "root/capability overrides are restricted to the exact worker-storage ownership migration."
-    elif [[ "$volume_override_seen" == true ]]; then
-        [[ "$run_service" == "app" && "$entrypoint_override" == "/bin/sh" && \
-           "$environment_override_seen" == false && "$run_remove_requested" == true && \
-           "$run_no_dependencies_requested" == true && \
-           "${compose_arguments[$((run_service_index + 1))]-}" == "-ceu" ]] \
-            || die "the host-file override is restricted to the exact app SSH-trust migration."
     elif [[ "$environment_override_seen" == true || "$entrypoint_override" == "python" ]]; then
         [[ "$run_service" == "app" || "$run_service" == "worker-cloud" ]] \
             || die "offline test overrides are restricted to app or worker-cloud."
@@ -881,6 +1094,7 @@ docker_bin="$(command -v docker || true)"
 
 safe_environment=(
     /usr/bin/env -i
+    "LC_ALL=C"
     "HOME=${HOME-}"
     "PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}"
     "COMPOSE_BAKE=false"
@@ -945,25 +1159,47 @@ docker_resource_label() {
     local resource_type="$1"
     local resource_id="$2"
     local label_name="$3"
+    local frame_marker="__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__"
+    local label_root=""
+    local framed_value=""
+    local framed_payload=""
+    local declared_length=""
+    local label_value=""
+    local LC_ALL=C
+
+    case "$resource_type" in
+        container) label_root='.Config.Labels' ;;
+        network|volume) label_root='.Labels' ;;
+        *) die "unknown Docker resource type during ownership validation." ;;
+    esac
 
     case "$resource_type" in
         container)
-            "${docker_command[@]}" inspect --format \
-                "{{with index .Config.Labels \"${label_name}\"}}{{.}}{{end}}" \
-                "$resource_id"
+            framed_value="$(
+                "${docker_command[@]}" inspect --format \
+                    "{{with index ${label_root} \"${label_name}\"}}{{len .}}:{{.}}{{else}}0:{{end}}${frame_marker}" \
+                    "$resource_id"
+            )" || return 1
             ;;
-        network)
-            "${docker_command[@]}" network inspect --format \
-                "{{with index .Labels \"${label_name}\"}}{{.}}{{end}}" \
-                "$resource_id"
+        network|volume)
+            framed_value="$(
+                "${docker_command[@]}" "$resource_type" inspect --format \
+                    "{{with index ${label_root} \"${label_name}\"}}{{len .}}:{{.}}{{else}}0:{{end}}${frame_marker}" \
+                    "$resource_id"
+            )" || return 1
             ;;
-        volume)
-            "${docker_command[@]}" volume inspect --format \
-                "{{with index .Labels \"${label_name}\"}}{{.}}{{end}}" \
-                "$resource_id"
-            ;;
-        *) die "unknown Docker resource type during ownership validation." ;;
     esac
+
+    [[ "$framed_value" == *"$frame_marker" ]] || return 1
+    framed_payload="${framed_value%"$frame_marker"}"
+    [[ "$framed_payload" == *:* ]] || return 1
+    declared_length="${framed_payload%%:*}"
+    label_value="${framed_payload#*:}"
+    [[ "$declared_length" =~ ^(0|[1-9][0-9]{0,6})$ ]] || return 1
+    (( 10#$declared_length <= 1048576 )) || return 1
+    (( ${#label_value} == 10#$declared_length )) || return 1
+    [[ "$label_value" != *[[:cntrl:]]* ]] || return 1
+    printf '%s' "$label_value"
 }
 
 docker_resource_name() {
@@ -1051,7 +1287,13 @@ validate_compose_project_ownership() {
     local volume_map=""
     local all_network_names=""
     local all_volume_names=""
+    local retired_ssh_trust_name="${project_name}_ssh_trust"
+    local retired_ssh_trust_attachments=""
+    local retired_pgdata_name="${project_name}_pgdata"
+    local retired_pgdata_attachments=""
     local resource_project=""
+    local is_retired_ssh_trust=false
+    local is_retired_pgdata=false
     local container_count=0
     local network_count=0
     local volume_count=0
@@ -1128,7 +1370,7 @@ validate_compose_project_ownership() {
     # Prove every physical name, including unlabeled collisions omitted from the
     # project-filtered inventory.
     while IFS='|' read -r logical_name physical_name external_resource; do
-        grep -Fxq "$physical_name" <<< "$all_network_names" || continue
+        grep -Fxq -- "$physical_name" <<< "$all_network_names" || continue
         resource_project="$(docker_resource_label network "$physical_name" com.docker.compose.project)" \
             || die "could not inspect Docker network ${physical_name}."
         resource_installation_id="$(docker_resource_label network "$physical_name" com.docker.compose.network)" \
@@ -1137,7 +1379,7 @@ validate_compose_project_ownership() {
             || die "Docker network ${physical_name} collides with this model but is not owned by it."
     done <<< "$network_map"
     while IFS='|' read -r logical_name physical_name external_resource; do
-        grep -Fxq "$physical_name" <<< "$all_volume_names" || continue
+        grep -Fxq -- "$physical_name" <<< "$all_volume_names" || continue
         resource_project="$(docker_resource_label volume "$physical_name" com.docker.compose.project)" \
             || die "could not inspect Docker volume ${physical_name}."
         resource_installation_id="$(docker_resource_label volume "$physical_name" com.docker.compose.volume)" \
@@ -1145,6 +1387,26 @@ validate_compose_project_ownership() {
         [[ "$resource_project" == "$project_name" && "$resource_installation_id" == "$logical_name" ]] \
             || die "Docker volume ${physical_name} collides with this model but is not owned by it."
     done <<< "$volume_map"
+    # ssh_trust is deliberately absent from the current model. Inspect its old
+    # canonical physical name separately so an unlabeled/foreign collision can
+    # never pass as inert rollback evidence.
+    if grep -Fxq -- "$retired_ssh_trust_name" <<< "$all_volume_names"; then
+        resource_project="$(docker_resource_label volume "$retired_ssh_trust_name" com.docker.compose.project)" \
+            || die "could not inspect retired Docker volume ${retired_ssh_trust_name}."
+        logical_name="$(docker_resource_label volume "$retired_ssh_trust_name" com.docker.compose.volume)" \
+            || die "could not inspect retired Docker volume ${retired_ssh_trust_name}."
+        [[ "$resource_project" == "$project_name" && "$logical_name" == "ssh_trust" ]] \
+            || die "Docker volume ${retired_ssh_trust_name} collides with the retired BackupSheep trust volume but is not owned by it."
+    fi
+    if grep -Fxq -- "$retired_pgdata_name" <<< "$all_volume_names"; then
+        resource_project="$(docker_resource_label volume "$retired_pgdata_name" com.docker.compose.project)" \
+            || die "could not inspect retired Docker volume ${retired_pgdata_name}."
+        logical_name="$(docker_resource_label volume "$retired_pgdata_name" com.docker.compose.volume)" \
+            || die "could not inspect retired Docker volume ${retired_pgdata_name}."
+        [[ "$resource_project" == "$project_name" && "$logical_name" == "pgdata" \
+            && "$postgres_storage_intent" == "migrated-debian-v1" ]] \
+            || die "Docker volume ${retired_pgdata_name} collides with retired PostgreSQL rollback storage but is not owned by it."
+    fi
 
     if (( container_count == 0 && network_count == 0 && volume_count == 0 )); then
         [[ "$require_existing_sentinel" == false ]] \
@@ -1201,7 +1463,7 @@ validate_compose_project_ownership() {
                 [[ "$config_files" == "$base_config_files" ]] \
                     || die "Compose project ${project_name} has a container owned by a different model."
             fi
-            grep -Fxq "$logical_name" <<< "$available_services" \
+            grep -Fxq -- "$logical_name" <<< "$available_services" \
                 || die "Compose project ${project_name} has an unexpected service container: ${logical_name}."
             resource_installation_id="$(docker_resource_label container "$resource_id" com.backupsheep.installation-id)" \
                 || die "could not inspect a Compose container installation identity."
@@ -1251,7 +1513,7 @@ validate_compose_project_ownership() {
         for resource_id in "${network_ids[@]}"; do
             logical_name="$(docker_resource_label network "$resource_id" com.docker.compose.network)" \
                 || die "could not inspect a Compose network logical name."
-            grep -Fxq "$logical_name" <<< "$available_networks" \
+            grep -Fxq -- "$logical_name" <<< "$available_networks" \
                 || die "Compose project ${project_name} has an unexpected network: ${logical_name}."
             resource_name="$(docker_resource_name network "$resource_id")" \
                 || die "could not inspect a Compose network name."
@@ -1272,12 +1534,50 @@ validate_compose_project_ownership() {
         for resource_id in "${volume_ids[@]}"; do
             logical_name="$(docker_resource_label volume "$resource_id" com.docker.compose.volume)" \
                 || die "could not inspect a Compose volume logical name."
-            grep -Fxq "$logical_name" <<< "$available_volumes" \
-                || die "Compose project ${project_name} has an unexpected volume: ${logical_name}."
+            is_retired_ssh_trust=false
+            is_retired_pgdata=false
+            if ! grep -Fxq -- "$logical_name" <<< "$available_volumes"; then
+                # Preserve the exact develop-era global trust volume as detached
+                # rollback evidence. No reviewed service can mount it, and this
+                # wrapper rejects every host/named-volume runtime override.
+                case "$logical_name" in
+                    ssh_trust) is_retired_ssh_trust=true ;;
+                    pgdata)
+                        [[ "$postgres_storage_intent" == "migrated-debian-v1" ]] \
+                            || die "retired pgdata is valid only after the explicit PostgreSQL migration."
+                        is_retired_pgdata=true
+                        ;;
+                    *) die "Compose project ${project_name} has an unexpected volume: ${logical_name}." ;;
+                esac
+                (( identity_volume_count == 1 )) \
+                    || die "a retired Compose volume requires exactly one matching installation-identity sentinel."
+            fi
             resource_name="$(docker_resource_name volume "$resource_id")" \
                 || die "could not inspect a Compose volume name."
             [[ "$resource_name" == "${project_name}_${logical_name}" ]] \
                 || die "Compose volume ${logical_name} has a non-canonical physical name."
+            if [[ "$is_retired_ssh_trust" == true ]]; then
+                resource_project="$(docker_resource_label volume "$resource_id" com.docker.compose.project)" \
+                    || die "could not inspect retired Compose volume ssh_trust."
+                [[ "$resource_project" == "$project_name" ]] \
+                    || die "the retired Compose volume ssh_trust is not owned by project ${project_name}."
+                retired_ssh_trust_attachments="$("${docker_command[@]}" ps --all --quiet \
+                    --filter "volume=${resource_name}")" \
+                    || die "could not prove that retired Compose volume ssh_trust is detached."
+                [[ -z "$retired_ssh_trust_attachments" ]] \
+                    || die "the retired Compose volume ssh_trust still has attached containers; remove every running or stopped legacy container before retrying."
+            fi
+            if [[ "$is_retired_pgdata" == true ]]; then
+                resource_project="$(docker_resource_label volume "$resource_id" com.docker.compose.project)" \
+                    || die "could not inspect retired Compose volume pgdata."
+                [[ "$resource_project" == "$project_name" ]] \
+                    || die "retired Compose volume pgdata is not owned by project ${project_name}."
+                retired_pgdata_attachments="$("${docker_command[@]}" ps --all --quiet \
+                    --filter "volume=${resource_name}")" \
+                    || die "could not prove retired Compose volume pgdata is detached."
+                [[ -z "$retired_pgdata_attachments" ]] \
+                    || die "retired Compose volume pgdata must remain detached from every container."
+            fi
             resource_installation_id="$(docker_resource_label volume "$resource_id" com.backupsheep.installation-id)" \
                 || die "could not inspect a Compose volume installation identity."
             if [[ -z "$resource_installation_id" ]]; then
@@ -1362,6 +1662,136 @@ attest_pinned_rabbitmq_container_image() {
     [[ "$container_image_ref" == "$expected_image_ref" \
         && "$container_image_id" == "$expected_image_id" ]] \
         || die "the RabbitMQ container is not running the exact digest-pinned reviewed image."
+}
+
+single_reviewed_service_image() {
+    local image_listing="$1"
+    local image_ref=""
+    local candidate_image_ref=""
+    local image_count=0
+
+    while IFS= read -r candidate_image_ref; do
+        [[ -n "$candidate_image_ref" ]] || continue
+        image_count=$((image_count + 1))
+        (( image_count == 1 )) || return 1
+        image_ref="$candidate_image_ref"
+    done <<< "$image_listing"
+    (( image_count == 1 )) || return 1
+    [[ ${#image_ref} -le 512 \
+        && "$image_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ ]] \
+        || return 1
+    printf '%s\n' "$image_ref"
+}
+
+attest_current_egress_guard_for_run() {
+    local workload_service="$1"
+    local guard_service=""
+    local expected_image_listing=""
+    local expected_image_ref=""
+    local expected_image_id=""
+    local container_listing=""
+    local container_id=""
+    local candidate_service=""
+    local guard_container_id=""
+    local guard_count=0
+    local container_image_ref=""
+    local container_image_id=""
+    local container_state=""
+    local container_health=""
+    local restart_policy=""
+
+    case "$workload_service" in
+        app) guard_service=app-egress-guard ;;
+        worker-cloud) guard_service=cloud-egress-guard ;;
+        worker-database) guard_service=database-egress-guard ;;
+        worker-files) guard_service=files-egress-guard ;;
+        worker-storage) guard_service=storage-egress-guard ;;
+        worker-logs) guard_service=logs-egress-guard ;;
+        *) die "internal egress-backed run service inventory is invalid." ;;
+    esac
+
+    expected_image_listing="$(
+        "${compose_command[@]}" --profile operations config --images "$guard_service"
+    )" || die "could not resolve the current ${guard_service} image."
+    expected_image_ref="$(single_reviewed_service_image "$expected_image_listing")" \
+        || die "${guard_service} must resolve to exactly one reviewed local image reference."
+    expected_image_id="$(
+        "${docker_command[@]}" image inspect --format '{{.Id}}' "$expected_image_ref"
+    )" || die "the current ${guard_service} image is not present for attestation."
+    [[ "$expected_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || die "the current ${guard_service} image returned a malformed local image ID."
+
+    container_listing="$(
+        "${docker_command[@]}" ps --all --quiet \
+            --filter "label=com.docker.compose.project=${project_name}"
+    )" || die "could not inventory the current ${guard_service} container."
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        candidate_service="$(docker_resource_label \
+            container "$container_id" com.docker.compose.service)" \
+            || die "could not inspect an egress guard service label."
+        [[ "$candidate_service" == "$guard_service" ]] || continue
+        guard_count=$((guard_count + 1))
+        guard_container_id="$container_id"
+    done <<< "$container_listing"
+    (( guard_count == 1 )) \
+        || die "an egress-backed run requires exactly one existing ${guard_service} container."
+
+    container_image_ref="$(
+        "${docker_command[@]}" inspect --format '{{.Config.Image}}' "$guard_container_id"
+    )" || die "could not inspect the current ${guard_service} image reference."
+    container_image_id="$(
+        "${docker_command[@]}" inspect --format '{{.Image}}' "$guard_container_id"
+    )" || die "could not inspect the current ${guard_service} image ID."
+    container_state="$(
+        "${docker_command[@]}" inspect --format '{{.State.Status}}' "$guard_container_id"
+    )" || die "could not inspect the current ${guard_service} state."
+    container_health="$(
+        "${docker_command[@]}" inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$guard_container_id"
+    )" || die "could not inspect the current ${guard_service} health."
+    restart_policy="$(
+        "${docker_command[@]}" inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$guard_container_id"
+    )" || die "could not inspect the current ${guard_service} restart policy."
+    [[ "$container_image_ref" == "$expected_image_ref" \
+        && "$container_image_id" == "$expected_image_id" ]] \
+        || die "${guard_service} is not running the exact current local egress image."
+    [[ "$container_state" == "running" && "$container_health" == "healthy" ]] \
+        || die "${guard_service} must already be running and healthy; recreate its exact pair first."
+    [[ "$restart_policy" == "no" ]] \
+        || die "${guard_service} does not have the required no-restart lifecycle."
+    "${docker_command[@]}" exec "$guard_container_id" \
+        /usr/local/bin/backupsheep-egress-healthcheck >/dev/null 2>&1 \
+        || die "${guard_service} failed its fresh kernel-lease healthcheck."
+}
+
+refuse_existing_egress_oneoffs() {
+    local container_listing=""
+    local container_id=""
+    local oneoff_label=""
+    local service_name=""
+
+    container_listing="$(
+        "${docker_command[@]}" ps --all --quiet \
+            --filter "label=com.docker.compose.project=${project_name}"
+    )" || die "could not inventory Compose one-off containers before changing an egress lifecycle."
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        oneoff_label="$(docker_resource_label \
+            container "$container_id" com.docker.compose.oneoff)" \
+            || die "could not inspect a Compose one-off lifecycle label."
+        case "$oneoff_label" in
+            True|true|TRUE|1) ;;
+            *) continue ;;
+        esac
+        service_name="$(docker_resource_label \
+            container "$container_id" com.docker.compose.service)" \
+            || die "could not inspect a Compose one-off service label."
+        case "$service_name" in
+            app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs)
+                die "an egress-backed Compose one-off for ${service_name} still exists. Inspect, stop, and remove that exact one-off before running another one-off, removing the stack, or recreating its guard/workload pair."
+                ;;
+        esac
+    done <<< "$container_listing"
 }
 
 validate_enabled_rabbitmq_feature_flags() {
@@ -1580,11 +2010,58 @@ verify_and_record_completed_rabbitmq_43_transition() {
     die "RabbitMQ did not become running and healthy after the 4.3 transition; the generation witness remains blank."
 }
 
+# Serialize every real mutation across this wrapper and install.sh. The atomic
+# directory works on both GNU/Linux and macOS without a flock package. A crash can
+# deliberately leave a stale fail-closed lock; it is never guessed away from a PID.
+# Read-only commands and structural Compose dry-runs remain concurrent.
+if [[ "$mutating_command" == true && "$dry_run_requested" == false ]]; then
+    acquire_mutation_lock
+fi
+
 # Validate the same fully rendered model immediately before every read or mutation.
 "${compose_command[@]}" config --quiet
 if [[ "$mutating_command" == true ]]; then
     validate_compose_project_ownership "$volume_deletion_requested"
     validate_rabbitmq_data_generation
+fi
+if [[ "$dry_run_requested" == false ]]; then
+    if [[ "$compose_subcommand" == "down" \
+          || "$egress_pair_recreation_requested" == true ]]; then
+        refuse_existing_egress_oneoffs
+    elif [[ "$compose_subcommand" == "run" ]]; then
+        case "$run_service" in
+            app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs)
+                refuse_existing_egress_oneoffs
+                ;;
+        esac
+    fi
+fi
+if [[ "$compose_subcommand" == "run" && "$dry_run_requested" == false ]]; then
+    case "$run_service" in
+        app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs)
+            attest_current_egress_guard_for_run "$run_service"
+            ;;
+    esac
+fi
+if [[ "$compose_subcommand" == "up" && "$up_broad_project" == true \
+      && "$dry_run_requested" == false ]]; then
+    existing_project_containers="$(
+        "${docker_command[@]}" ps --all --quiet \
+            --filter "label=com.docker.compose.project=${project_name}"
+    )" || die "could not inventory an existing egress lifecycle before broad up."
+    while IFS= read -r existing_container; do
+        [[ -n "$existing_container" ]] || continue
+        existing_service="$(docker_resource_label \
+            container "$existing_container" com.docker.compose.service)" \
+            || die "could not inspect an existing egress lifecycle before broad up."
+        case "$existing_service" in
+            app-egress-guard|app|cloud-egress-guard|worker-cloud|\
+            database-egress-guard|worker-database|files-egress-guard|worker-files|\
+            storage-egress-guard|worker-storage|logs-egress-guard|worker-logs)
+                die "broad up cannot change an existing egress lifecycle; force-recreate each exact guard/workload pair with --no-deps."
+                ;;
+        esac
+    done <<< "$existing_project_containers"
 fi
 "${compose_command[@]}" "${compose_arguments[@]}"
 if [[ "$rabbitmq_transition_target" == "4.3" ]]; then

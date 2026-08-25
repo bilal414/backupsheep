@@ -132,6 +132,43 @@ class WordPressCredentialModelTests(BaseTestCase):
     @mock.patch(
         "apps.api.v1.utils.wordpress_transport.resolve_wordpress_target"
     )
+    def test_download_request_signs_backup_file_and_uuid_in_canonical_body(
+        self, resolve_target, pinned_get
+    ):
+        target = SimpleNamespace(pinned_url="https://8.8.8.8:443/subsite/")
+        resolve_target.return_value = target
+        pinned_get.return_value = SimpleNamespace(status_code=200)
+        row = self.make_auth()
+
+        row.request(
+            "download",
+            params={
+                "backup_file": "backup_2026-08-25_backup-123-db.gz",
+                "backup_uuid": "backup-123",
+                "t": 123,
+            },
+            stream=True,
+        )
+
+        pinned_get.assert_called_once()
+        self.assertEqual(pinned_get.call_args.kwargs["route"], "download")
+        self.assertEqual(
+            pinned_get.call_args.kwargs["body"],
+            b'{"backup_file":"backup_2026-08-25_backup-123-db.gz",'
+            b'"backup_uuid":"backup-123","t":123}',
+        )
+        self.assertTrue(pinned_get.call_args.kwargs["stream"])
+        self.assertRegex(
+            pinned_get.call_args.kwargs["headers"][WORDPRESS_SIGNATURE_HEADER],
+            r"^[0-9a-f]{64}$",
+        )
+
+    @mock.patch(
+        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_request"
+    )
+    @mock.patch(
+        "apps.api.v1.utils.wordpress_transport.resolve_wordpress_target"
+    )
     def test_untrusted_url_ambient_data_and_query_credentials_fail_before_network(
         self, resolve_target, pinned_get
     ):
@@ -217,7 +254,7 @@ class WordPressProtocolKillSwitchTests(BaseTestCase):
         with mock.patch.object(
             self.auth, "_decrypt_secret", wraps=self.auth._decrypt_secret
         ) as decrypt:
-            with self.assertRaisesRegex(ValueError, "protocol v2"):
+            with self.assertRaisesRegex(ValueError, "complete recovery workflow"):
                 self.auth.request("validate")
 
         resolve_target.assert_not_called()
@@ -263,6 +300,12 @@ class WordPressProtocolValidationTests(BaseTestCase):
             self.assertTrue(self.auth.validate(check_errors=True))
 
 
+@override_settings(
+    BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+    BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE="legacy-only",
+    BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+    WORDPRESS_INTEGRATION_ENABLED=True,
+)
 class WordPressIntegrationKeyTests(SimpleTestCase):
     def test_generated_key_is_a_high_entropy_url_safe_string(self):
         first = CoreWordPressView().generate_key(None).data["key"]

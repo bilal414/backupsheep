@@ -9,6 +9,7 @@ from django.conf import settings
 from apps.api.v1.utils.http import requests
 from sentry_sdk import capture_exception
 from apps._tasks.integration.backup.errors import safe_backup_failure
+from backupsheep.source_recovery_policy import require_source_backup_creation
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.backup._archive import create_zip
 from apps.api.v1.utils.api_helpers import aws_s3_upload_log_file
@@ -532,6 +533,7 @@ def _response_json_object(response):
 
 
 def snapshot_basecamp(backup):
+    require_source_backup_creation("basecamp")
     node = backup.basecamp.node
     encryption_key = node.connection.account.get_encryption_key()
     account = node.connection.account

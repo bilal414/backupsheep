@@ -69,7 +69,7 @@ class CoreStorageAWSS3View(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         regions = CoreAWSRegion.objects.filter().values()
         return Response(regions)
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         try:
             storage = self.get_object()

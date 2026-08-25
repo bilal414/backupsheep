@@ -64,8 +64,11 @@ The API is account-aware and permission-aware:
 
 - Requests and responses normally use JSON.
 - The API also accepts multipart bodies where a view needs them.
-- Download endpoints return a file response or redirect to a time-limited object URL,
-  depending on the storage backend.
+- Archive download routes remain in the v1 surface, but the stock enterprise artifact
+  pipeline refuses direct download of BSE1 ciphertext. Do not expect a file response or
+  provider URL for a current archive; use its authenticated restore action. Other file
+  endpoints and explicitly enabled legacy-artifact deployments can have different
+  response behavior.
 - List endpoints are not globally paginated. Some console requests use DataTables
   query parameters and may receive its table-shaped response.
 - Datetimes are serialized by Django REST Framework. Human-readable `*_display`

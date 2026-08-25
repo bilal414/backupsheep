@@ -23,15 +23,15 @@ schedules, and filtered activity log.
 secret, bucket, endpoint/region; OAuth: connect via the provider). You can add several;
 each backup can be pushed to more than one destination. See [Providers](providers.md).
 
-**Local Storage** needs no credentials: backups are kept as plain zip files under the
-server's local storage root (`/backups` in the Compose stack — see
-[Configuration](configuration.md#local-storage-backup-destination-optional)). The
-optional *Path* field scopes the destination to a subdirectory of that root. Downloads
-of local backups are streamed through the BackupSheep app itself (no pre-signed URL,
-since there is no external provider), so downloading large backups ties up an app
-worker for the duration. Deleting a backup normally removes its file from disk; enable
-*Keep backups on delete* (`no_delete`) to leave the zips in place and only drop
-BackupSheep's record of them.
+**Local Storage** needs no provider credentials: it keeps authenticated BSE1 ciphertext
+artifacts under the server's local storage root (`/backups` in the Compose stack — see
+[Configuration](configuration.md#local-storage-backup-destination-optional)). Only the
+storage worker mounts that path; the app and source workers do not. The optional *Path*
+field scopes the destination to a relative subdirectory of that root. Direct browser/ZIP
+download is disabled for encrypted artifacts, including Local Storage copies; use the
+authenticated restore workflow instead. Deleting a backup normally removes its object
+from disk; enable *Keep backups on delete* (`no_delete`) to leave the ciphertext object
+in place and only drop BackupSheep's record of it.
 
 ## 2. Connect a source
 
@@ -66,11 +66,12 @@ Website (file) nodes support two backup modes:
 
 - **Incremental (recommended)** — the first backup downloads everything; later backups
   only download new/changed files over FTP/FTPS/SFTP. A per-node snapshot cache lives in
-  `_storage/website_cache/`, but every backup is still a complete, restorable zip. Files
-  deleted on the server propagate to the next backup. The cache rebuilds itself
-  automatically if connection or path settings change; use the reset action on the node
-  page to force a full re-download. The cache needs local disk roughly equal to the site
-  size.
+  the files worker's private `/code/_storage/website_cache/` tree, but every backup is
+  still a complete, restorable encrypted artifact. Files deleted on the server propagate
+  to the next backup. The cache rebuilds itself automatically if connection or path
+  settings change; use the reset action on the node page to force a full re-download.
+  The cache needs capacity in the files lane roughly equal to the site size and is not
+  visible to app, database, storage, cloud, logs or Beat.
 - **Full** — re-downloads all files on every backup (the previous behavior).
 
 ## 4. Retention
@@ -79,11 +80,13 @@ Attach a **retention policy** to keep a chosen number of daily / weekly / monthl
 After each run, older backups beyond the policy are pruned automatically (cloud snapshots
 are deleted via the provider API; offsite copies are deleted from storage).
 
-## 5. Restore / download
+## 5. Restore and the direct-download boundary
 
 **One-click restores (website + database).** Open the node, find the backup, and click
-**Restore**. Pick the storage copy to restore from, confirm, and BackupSheep fetches the
-zip and puts the data back:
+**Restore**. Pick the storage copy to restore from and confirm. The storage worker stages
+the BSE1 ciphertext into the reverse-transfer fence for the exact destination lane; the
+database or files worker authenticates and decrypts it inside its private work volume,
+then puts the data back:
 
 - **Website** — the files are pushed back onto the server, overwriting files that
   differ. Enable *Delete files on the server that are not present in this backup* for an
@@ -94,13 +97,14 @@ zip and puts the data back:
   (`--skip-opt`) may need an empty database to import into.
 
 Restores are tracked runs: the modal shows live status and recent restore history, and a
-redacted run log is kept at `_storage/restore_<backup-uuid>.log`. A restore never deletes
-or alters the backup itself, and cold (Glacier/Deep Archive) copies must be thawed with
-the storage provider first.
+redacted run log is kept in the owning database or files worker's private
+`/code/_storage` volume. A restore never deletes or alters the backup itself, and cold
+(Glacier/Deep Archive) copies must be thawed with the storage provider first.
 
-**Download instead.** The **Download** button generates a time-limited URL from the
-storage destination (Local Storage backups stream through the BackupSheep app), so you
-can restore manually: import the SQL dump into your database / extract the files.
+**Direct download.** Browser/ZIP download is disabled for BSE1 artifacts, including
+Local Storage copies; BackupSheep does not expose their provider URLs or stream their
+ciphertext through the app as a ZIP. Use the authenticated **Restore** action. A separate
+authenticated plaintext-export workflow is not part of the current stock deployment.
 
 - **Cloud snapshots** — restore from the snapshot through your cloud provider (e.g. create
   a new droplet/instance/volume from it), the same as any provider snapshot.
@@ -138,8 +142,10 @@ Who gets what is decided in three layers:
 
 ## Monitoring runs & logs
 
-Each backup records a status and a run log. Logs are kept on the local `_storage` volume
-and pruned after `LOG_RETENTION_DAYS` (default 30) by the daily `delete_old_logs` task.
+Each backup records a status and a run log. Logs stay in the owning files, database or
+storage worker's private `_storage` volume. Lane-specific daily tasks prune files at
+03:00, database at 03:05 and destination-upload logs at 03:10 after
+`LOG_RETENTION_DAYS` (default 30); `CoreLog` rows are pruned separately at 03:30.
 
 > **Known limitation:** the per-backup "transfer log" / "directory-tree log" *download*
 > buttons are not available in the self-hosted build (they were tied to SaaS-hosted log

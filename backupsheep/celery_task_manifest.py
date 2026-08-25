@@ -120,9 +120,15 @@ TASK_POLICIES: dict[str, TaskPolicy] = {
         "storage", ("database", "files", "storage"), "restore_ciphertext"
     ),
     "reset_incremental_cache": _policy(
-        "storage", ("app", "storage"), "node_cache_cleanup"
+        "files", ("app", "files"), "node_cache_cleanup"
     ),
     "delete_old_logs": _policy(
+        "files", ("beat", "files"), "retention_sweep"
+    ),
+    "delete_old_database_logs": _policy(
+        "database", ("beat", "database"), "retention_sweep"
+    ),
+    "delete_old_storage_logs": _policy(
         "storage", ("beat", "storage"), "retention_sweep"
     ),
     "validate_local_storage": _policy(

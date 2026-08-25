@@ -3,6 +3,7 @@ import os
 import secrets
 from sentry_sdk import capture_exception
 from apps._tasks.integration.backup.errors import safe_backup_failure
+from backupsheep.source_recovery_policy import require_source_backup_creation
 from apps._tasks.exceptions import NodeBackupFailedError
 from apps._tasks.integration.backup._archive import create_zip
 from apps.api.v1.utils.api_helpers import check_string_in_file, aws_s3_upload_log_file
@@ -33,6 +34,7 @@ _WORDPRESS_FAILURE_STATUSES = frozenset({
 })
 
 def snapshot_wordpress(backup):
+    require_source_backup_creation("wordpress")
     node = backup.wordpress.node
     auth_wordpress = node.connection.auth_wordpress
 
@@ -123,6 +125,7 @@ def snapshot_wordpress(backup):
                         "download",
                         params={
                             "backup_file": updraft_log_file,
+                            "backup_uuid": backup.uuid_str,
                             "t": time.time(),
                         },
                         stream=True,
@@ -195,7 +198,11 @@ def snapshot_wordpress(backup):
             log_file.write(f"Downloading WordPress file: {backup_file}.\n")
             r = auth_wordpress.request(
                 "download",
-                params={"backup_file": backup_file, "t": time.time()},
+                params={
+                    "backup_file": backup_file,
+                    "backup_uuid": backup.uuid_str,
+                    "t": time.time(),
+                },
                 stream=True,
             )
             r.raise_for_status()

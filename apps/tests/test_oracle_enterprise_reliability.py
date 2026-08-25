@@ -873,7 +873,15 @@ class OracleEnterpriseReliabilityTests(BaseTestCase):
         ) as soft_delete, mock.patch.object(
             helper_tasks.reconcile_oracle_backup_deletion, "apply_async"
         ) as schedule:
-            helper_tasks.clean_delete_failed_backups.apply()
+            helper_tasks.clean_delete_failed_backups(
+                SimpleNamespace(
+                    retry=mock.Mock(
+                        side_effect=AssertionError(
+                            "retired cleanup helper unexpectedly requested a retry"
+                        )
+                    )
+                )
+            )
 
         soft_delete.assert_not_called()
         schedule.assert_not_called()
@@ -1781,7 +1789,18 @@ class OracleDeleteCleanupRoutingConcurrencyTests(TransactionTestCase):
     def _run_task(task):
         close_old_connections()
         try:
-            task.apply()
+            if hasattr(task, "apply"):
+                task.apply()
+            else:
+                task(
+                    SimpleNamespace(
+                        retry=mock.Mock(
+                            side_effect=AssertionError(
+                                "retired cleanup helper unexpectedly requested a retry"
+                            )
+                        )
+                    )
+                )
         finally:
             close_old_connections()
 

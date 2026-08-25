@@ -13,8 +13,26 @@ fail() {
   exit 1
 }
 
-# Do not inherit executable-search or interpreter startup hooks from an env file.
-# Runtime configuration is data; it must not silently become pre-entrypoint code.
+# The stock namespace policy is the only outbound mediation layer. A process-level
+# proxy or alternate CA hook could redirect credentials before application controls
+# see the destination, so reject hand-written overrides and then remove the hooks.
+for ambient_transport_hook in \
+  "${HTTP_PROXY:-}" \
+  "${HTTPS_PROXY:-}" \
+  "${ALL_PROXY:-}" \
+  "${NO_PROXY:-}" \
+  "${http_proxy:-}" \
+  "${https_proxy:-}" \
+  "${all_proxy:-}" \
+  "${no_proxy:-}" \
+  "${REQUESTS_CA_BUNDLE:-}" \
+  "${CURL_CA_BUNDLE:-}"; do
+  [ -z "$ambient_transport_hook" ] \
+    || fail "ambient proxy and CA-bundle hooks are forbidden."
+done
+
+# Do not inherit executable-search or interpreter startup hooks. Runtime
+# configuration is data; it must not silently become pre-entrypoint code.
 unset \
   BASH_ENV \
   ENV \
@@ -26,7 +44,18 @@ unset \
   PYTHONHOME \
   PYTHONINSPECT \
   PYTHONSTARTUP \
-  SSLKEYLOGFILE
+  SSLKEYLOGFILE \
+  HTTP_PROXY \
+  HTTPS_PROXY \
+  ALL_PROXY \
+  NO_PROXY \
+  http_proxy \
+  https_proxy \
+  all_proxy \
+  no_proxy \
+  REQUESTS_CA_BUNDLE \
+  CURL_CA_BUNDLE \
+  ambient_transport_hook
 PATH='/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin'
 PYTHONPATH='/code'
 PYTHONNOUSERSITE='1'
@@ -62,12 +91,10 @@ files_transfer_reader_gid='10992'
 restore_writer_gid='10995'
 restore_database_reader_gid='10994'
 restore_files_reader_gid='10993'
-ssh_trust_gid='10997'
 requires_database_transfer_writer='no'
 requires_database_transfer_reader='no'
 requires_files_transfer_writer='no'
 requires_files_transfer_reader='no'
-requires_ssh_trust_reader='no'
 requires_restore_writer='no'
 requires_restore_database_reader='no'
 requires_restore_files_reader='no'
@@ -77,14 +104,12 @@ case "$runtime_role" in
     expected_uid='10002'; expected_gid='10002'
     requires_database_transfer_writer='yes'
     requires_database_transfer_reader='yes'
-    requires_ssh_trust_reader='yes'
     requires_restore_database_reader='yes'
     ;;
   files)
     expected_uid='10003'; expected_gid='10003'
     requires_files_transfer_writer='yes'
     requires_files_transfer_reader='yes'
-    requires_ssh_trust_reader='yes'
     requires_restore_files_reader='yes'
     ;;
   storage)
@@ -108,7 +133,6 @@ has_database_transfer_writer='no'
 has_database_transfer_reader='no'
 has_files_transfer_writer='no'
 has_files_transfer_reader='no'
-has_ssh_trust_reader='no'
 has_restore_writer='no'
 has_restore_database_reader='no'
 has_restore_files_reader='no'
@@ -122,7 +146,6 @@ for runtime_gid in $(id -G); do
     "$restore_writer_gid") has_restore_writer='yes' ;;
     "$restore_database_reader_gid") has_restore_database_reader='yes' ;;
     "$restore_files_reader_gid") has_restore_files_reader='yes' ;;
-    "$ssh_trust_gid") has_ssh_trust_reader='yes' ;;
     *) fail "runtime identity has an unreviewed supplementary group." ;;
   esac
 done
@@ -134,14 +157,124 @@ done
   || fail "the $runtime_role role has an unsafe files-transfer writer group."
 [ "$has_files_transfer_reader" = "$requires_files_transfer_reader" ] \
   || fail "the $runtime_role role has an unsafe files-transfer reader group."
-[ "$has_ssh_trust_reader" = "$requires_ssh_trust_reader" ] \
-  || fail "the $runtime_role role has an unsafe SSH trust-group assignment."
 [ "$has_restore_writer" = "$requires_restore_writer" ] \
   || fail "the $runtime_role role has an unsafe restore writer-group assignment."
 [ "$has_restore_database_reader" = "$requires_restore_database_reader" ] \
   || fail "the $runtime_role role has an unsafe database-restore reader-group assignment."
 [ "$has_restore_files_reader" = "$requires_restore_files_reader" ] \
   || fail "the $runtime_role role has an unsafe files-restore reader-group assignment."
+
+# Compose explicitly allowlists deployment-wide OAuth/email configuration and restores
+# a family only for its actual consumer. Enforce that contract again inside the image
+# so a hand-written override cannot silently give a compromised worker another key.
+# Values are never printed on failure.
+reject_credential_group() {
+  rejected_group="$1"
+  shift
+  for rejected_value in "$@"; do
+    [ -z "$rejected_value" ] \
+      || fail "$runtime_role must not receive $rejected_group credentials."
+  done
+  unset rejected_group rejected_value
+}
+
+allow_log_archive_credentials='no'
+allow_notification_credentials='no'
+allow_cloud_provider_credentials='no'
+allow_basecamp_credentials='no'
+allow_storage_provider_credentials='no'
+case "$runtime_role" in
+  web)
+    allow_log_archive_credentials='yes'
+    allow_notification_credentials='yes'
+    allow_cloud_provider_credentials='yes'
+    allow_basecamp_credentials='yes'
+    allow_storage_provider_credentials='yes'
+    ;;
+  cloud) allow_cloud_provider_credentials='yes' ;;
+  files) allow_basecamp_credentials='yes' ;;
+  storage) allow_storage_provider_credentials='yes' ;;
+  logs) allow_notification_credentials='yes' ;;
+esac
+
+if [ "$allow_log_archive_credentials" != 'yes' ]; then
+  reject_credential_group 'log-archive' \
+    "${S3_ACCESS_KEY_ID:-}" \
+    "${S3_SECRET_ACCESS_KEY:-}" \
+    "${S3_STORAGE_BUCKET_NAME:-}" \
+    "${S3_ENDPOINT_URL:-}" \
+    "${S3_SIGNATURE_VERSION:-}" \
+    "${AWS_S3_ACCESS_KEY:-}" \
+    "${AWS_S3_SECRET_ACCESS_KEY:-}" \
+    "${AWS_S3_LOGS_BUCKET:-}" \
+    "${AWS_S3_LOGS_ENDPOINT:-}" \
+    "${AWS_S3_LOGS_REGION:-}" \
+    "${LOGS_S3_ACCESS_KEY_ID:-}" \
+    "${LOGS_S3_SECRET_ACCESS_KEY:-}" \
+    "${LOGS_S3_BUCKET:-}" \
+    "${LOGS_S3_ENDPOINT:-}"
+fi
+if [ "$allow_notification_credentials" != 'yes' ]; then
+  reject_credential_group 'email/notification' \
+    "${POSTMARK_API_KEY:-}" \
+    "${POSTMARK_DOMAIN:-}" \
+    "${POSTMARK_EMAIL:-}" \
+    "${POSTMARK_API_URL:-}" \
+    "${SES_REGION_NAME:-}" \
+    "${SES_REGION_ENDPOINT:-}" \
+    "${SES_ACCESS_KEY_ID:-}" \
+    "${SES_SECRET_ACCESS_KEY:-}" \
+    "${AWS_SES_REGION_NAME:-}" \
+    "${AWS_SES_REGION_ENDPOINT:-}" \
+    "${AWS_SES_ACCESS_KEY_ID:-}" \
+    "${AWS_SES_SECRET_ACCESS_KEY:-}" \
+    "${MAILGUN_DOMAIN:-}" \
+    "${MAILGUN_EMAIL:-}" \
+    "${MAILGUN_API_KEY:-}" \
+    "${MAILGUN_API_URL:-}" \
+    "${EMAIL_PROVIDER:-}" \
+    "${SLACK_TOKEN_URL:-}" \
+    "${SLACK_CLIENT_ID:-}" \
+    "${SLACK_CLIENT_SECRET:-}" \
+    "${TELEGRAM_BOT_KEY:-}"
+fi
+if [ "$allow_cloud_provider_credentials" != 'yes' ]; then
+  reject_credential_group 'cloud-provider application' \
+    "${DIGITALOCEAN_APP_CLIENT_ID:-}" \
+    "${DIGITALOCEAN_APP_CLIENT_SECRET:-}" \
+    "${OVH_CA_APP_KEY:-}" \
+    "${OVH_CA_APP_SECRET:-}" \
+    "${OVH_EU_APP_KEY:-}" \
+    "${OVH_EU_APP_SECRET:-}" \
+    "${OVH_US_APP_KEY:-}" \
+    "${OVH_US_APP_SECRET:-}"
+fi
+if [ "$allow_basecamp_credentials" != 'yes' ]; then
+  reject_credential_group 'Basecamp application' \
+    "${BASECAMP_CLIENT_ID:-}" \
+    "${BASECAMP_CLIENT_SECRET:-}"
+fi
+if [ "$allow_storage_provider_credentials" != 'yes' ]; then
+  reject_credential_group 'storage-provider application' \
+    "${DROPBOX_APP_KEY:-}" \
+    "${DROPBOX_APP_SECRET:-}" \
+    "${PCLOUD_CLIENT_ID:-}" \
+    "${PCLOUD_CLIENT_SECRET:-}" \
+    "${MS_CLIENT_ID:-}" \
+    "${MS_OBJECT_ID:-}" \
+    "${MS_TENANT_ID:-}" \
+    "${MS_APPLICATION_ID:-}" \
+    "${MS_CLIENT_SECRET_VALUE:-}" \
+    "${MS_CLIENT_SECRET_ID:-}" \
+    "${GOOGLE_CLIENT_ID:-}" \
+    "${GOOGLE_CLIENT_SECRET:-}"
+fi
+unset \
+  allow_log_archive_credentials \
+  allow_notification_credentials \
+  allow_cloud_provider_credentials \
+  allow_basecamp_credentials \
+  allow_storage_provider_credentials
 
 # The stock enterprise path uses distinct file-backed AWS credentials for the
 # database and files source/restore lanes. Ambient environment, web identity,
@@ -293,8 +426,7 @@ case "$runtime_role" in
     verify_owned_directory /code/_storage "$expected_uid" "$expected_gid" 700
     verify_owned_directory /var/lib/backupsheep/transfer/database 0 "$database_transfer_writer_gid" 3771
     verify_owned_directory /var/lib/backupsheep/restore-transfer 0 "$restore_writer_gid" 3771
-    require_mount /var/lib/backupsheep/ssh-trust any ro
-    verify_owned_directory /var/lib/backupsheep/ssh-trust 10001 "$ssh_trust_gid" 2750
+    reject_dedicated_mount /var/lib/backupsheep/ssh-trust
     reject_dedicated_mount /var/lib/backupsheep/transfer/files
     reject_dedicated_mount /backups
     ;;
@@ -305,8 +437,7 @@ case "$runtime_role" in
     verify_owned_directory /code/_storage "$expected_uid" "$expected_gid" 700
     verify_owned_directory /var/lib/backupsheep/transfer/files 0 "$files_transfer_writer_gid" 3771
     verify_owned_directory /var/lib/backupsheep/restore-transfer 0 "$restore_writer_gid" 3771
-    require_mount /var/lib/backupsheep/ssh-trust any ro
-    verify_owned_directory /var/lib/backupsheep/ssh-trust 10001 "$ssh_trust_gid" 2750
+    reject_dedicated_mount /var/lib/backupsheep/ssh-trust
     reject_dedicated_mount /var/lib/backupsheep/transfer/database
     reject_dedicated_mount /backups
     ;;
@@ -324,8 +455,7 @@ case "$runtime_role" in
     reject_dedicated_mount /var/lib/backupsheep/ssh-trust
     ;;
   web)
-    require_mount /var/lib/backupsheep/ssh-trust any rw
-    verify_owned_directory /var/lib/backupsheep/ssh-trust 10001 "$ssh_trust_gid" 2750
+    reject_dedicated_mount /var/lib/backupsheep/ssh-trust
     reject_dedicated_mount /code/_storage
     reject_dedicated_mount /var/lib/backupsheep/transfer/database
     reject_dedicated_mount /var/lib/backupsheep/transfer/files
@@ -450,6 +580,34 @@ prepare_private_dir /run/backupsheep
 [ ! -L /tmp ] || fail "/tmp must not be a symbolic link."
 [ -d /tmp ] && [ -w /tmp ] || fail "/tmp must be a writable tmpfs."
 
+# A container restart can preserve its tmpfs contents. Never let a readiness witness
+# from the previous Celery process satisfy the new process's healthcheck. The
+# authenticated worker_ready signal recreates this file atomically only after the new
+# AMQP consumer is live; PID 1 exiting still stops the container.
+case "$runtime_role" in
+  cloud|database|files|storage|logs)
+    worker_ready_file=/run/backupsheep/celery-ready
+    if [ -e "$worker_ready_file" ] || [ -L "$worker_ready_file" ]; then
+      [ ! -d "$worker_ready_file" ] \
+        || fail "the stale worker readiness witness is not a file."
+      rm -f -- "$worker_ready_file" \
+        || fail "could not remove the stale worker readiness witness."
+    fi
+    # A crash between the exclusive temporary-file create and atomic replace can
+    # also leave the PID-named staging file in this private tmpfs. Clear only that
+    # fixed prefix so a restarted process cannot be denied readiness indefinitely.
+    for worker_ready_temporary in /run/backupsheep/.celery-ready.*; do
+      if [ -e "$worker_ready_temporary" ] || [ -L "$worker_ready_temporary" ]; then
+        [ ! -d "$worker_ready_temporary" ] \
+          || fail "a stale worker readiness staging path is not a file."
+        rm -f -- "$worker_ready_temporary" \
+          || fail "could not remove a stale worker readiness staging file."
+      fi
+    done
+    unset worker_ready_file worker_ready_temporary
+    ;;
+esac
+
 mkdir -p \
   "$XDG_CACHE_HOME" \
   "$XDG_CONFIG_HOME" \
@@ -461,31 +619,65 @@ chmod 0700 \
   /run/backupsheep/gunicorn \
   /run/backupsheep/ssh
 
-# Compose secrets are deliberately host-readable only through an owner-only
-# directory, but Docker bind-mounts their files as root-owned mode 0444. OpenSSH
-# rejects a private key with that mode. Copy a configured key into this role's
-# private tmpfs, validate it without a passphrase prompt, and expose only the 0600
-# copy to Django/SSH. The source stays immutable and never enters a named volume.
-managed_key_source='/run/secrets/ssh_managed_private_key'
-managed_key_target='/run/backupsheep/ssh/managed_private_key'
-SSH_MANAGED_PRIVATE_KEY_PATH=''
-managed_public_key="${SSH_MANAGED_PUBLIC_KEY:-}"
-managed_public_identity=''
-if [ -n "$managed_public_key" ]; then
-  managed_public_identity="$(
-    printf '%s\n' "$managed_public_key" \
+# Docker bind-mounts secret sources as root-owned mode 0444. Copy only this source
+# lane's Ed25519 identity into its private tmpfs and expose the 0600 copy to SSH.
+# Public values are normalized to exactly "ssh-ed25519 base64" so comments can
+# never become shell/UI injection material.
+canonical_managed_public_identity() {
+  raw_public_key="$1"
+  setting_name="$2"
+  [ -n "$raw_public_key" ] || return 0
+  identity="$({
+    printf '%s\n' "$raw_public_key" \
       | awk '
           NR == 1 && (NF == 2 || NF == 3) {
-            if ($1 !~ /^[A-Za-z0-9@._+-]+$/ || $2 !~ /^[A-Za-z0-9+\/=]+$/) exit 1
+            if ($1 != "ssh-ed25519" || $2 !~ /^[A-Za-z0-9+\/=]+$/) exit 1
             print $1 " " $2
             next
           }
           { exit 1 }
           END { if (NR != 1) exit 1 }
         '
-  )" || fail "SSH_MANAGED_PUBLIC_KEY must contain one canonical OpenSSH public key."
+  })" || fail "$setting_name must contain one Ed25519 OpenSSH public key."
+  key_description="$(printf '%s\n' "$identity" | ssh-keygen -lf - 2>/dev/null)" \
+    || fail "$setting_name contains a malformed Ed25519 public key."
+  case "$key_description" in
+    *'(ED25519)') ;;
+    *) fail "$setting_name must contain an Ed25519 public key." ;;
+  esac
+  printf '%s' "$identity"
+}
+
+database_public_identity="$(canonical_managed_public_identity \
+  "${SSH_MANAGED_DATABASE_PUBLIC_KEY:-}" SSH_MANAGED_DATABASE_PUBLIC_KEY)"
+files_public_identity="$(canonical_managed_public_identity \
+  "${SSH_MANAGED_FILES_PUBLIC_KEY:-}" SSH_MANAGED_FILES_PUBLIC_KEY)"
+if [ -n "$database_public_identity" ] || [ -n "$files_public_identity" ]; then
+  [ -n "$database_public_identity" ] && [ -n "$files_public_identity" ] \
+    || fail "both managed SSH lane public keys must be configured together."
+  [ "$database_public_identity" != "$files_public_identity" ] \
+    || fail "database and files managed SSH identities must be different."
 fi
-if [ -e "$managed_key_source" ]; then
+SSH_MANAGED_DATABASE_PUBLIC_KEY="$database_public_identity"
+SSH_MANAGED_FILES_PUBLIC_KEY="$files_public_identity"
+SSH_MANAGED_PUBLIC_KEY=''
+export SSH_MANAGED_DATABASE_PUBLIC_KEY SSH_MANAGED_FILES_PUBLIC_KEY SSH_MANAGED_PUBLIC_KEY
+
+managed_key_source=''
+managed_public_identity=''
+case "$runtime_role" in
+  database)
+    managed_key_source='/run/secrets/ssh_managed_database_private_key'
+    managed_public_identity="$database_public_identity"
+    ;;
+  files)
+    managed_key_source='/run/secrets/ssh_managed_files_private_key'
+    managed_public_identity="$files_public_identity"
+    ;;
+esac
+managed_key_target='/run/backupsheep/ssh/managed_private_key'
+SSH_MANAGED_PRIVATE_KEY_PATH=''
+if [ -n "$managed_key_source" ] && [ -e "$managed_key_source" ]; then
   [ -f "$managed_key_source" ] && [ ! -L "$managed_key_source" ] \
     || fail "the managed SSH private-key secret must be a regular file."
   managed_key_size="$(wc -c < "$managed_key_source")"
@@ -495,27 +687,27 @@ if [ -e "$managed_key_source" ]; then
   [ "$managed_key_size" -le 65536 ] \
     || fail "the managed SSH private-key secret exceeds 64 KiB."
   if [ "$managed_key_size" -gt 0 ]; then
-    case "$runtime_role" in
-      database|files) ;;
-      *) fail "this runtime role is not authorized to receive the managed SSH private key." ;;
-    esac
     [ -n "$managed_public_identity" ] \
-      || fail "a managed SSH private key requires SSH_MANAGED_PUBLIC_KEY."
+      || fail "a managed SSH private key requires its lane public key."
     cp "$managed_key_source" "$managed_key_target" \
       || fail "could not stage the managed SSH private key."
     chmod 0600 "$managed_key_target" \
       || fail "could not protect the managed SSH private key."
     derived_public_identity="$(ssh-keygen -y -P '' -f "$managed_key_target" 2>/dev/null)" \
       || fail "the managed SSH private-key secret is invalid or passphrase-protected."
+    case "$derived_public_identity" in
+      ssh-ed25519' '*) ;;
+      *) fail "the managed SSH private-key secret must be Ed25519." ;;
+    esac
     [ "$derived_public_identity" = "$managed_public_identity" ] \
-      || fail "the managed SSH private key does not match SSH_MANAGED_PUBLIC_KEY."
+      || fail "the managed SSH private key does not match its lane public key."
     SSH_MANAGED_PRIVATE_KEY_PATH="$managed_key_target"
   fi
 fi
 case "$runtime_role" in
   database|files)
     [ -z "$managed_public_identity" ] || [ -n "$SSH_MANAGED_PRIVATE_KEY_PATH" ] \
-      || fail "SSH_MANAGED_PUBLIC_KEY requires a non-empty managed key secret in this worker."
+      || fail "the lane public key requires a non-empty managed key secret in this worker."
     ;;
 esac
 export SSH_MANAGED_PRIVATE_KEY_PATH

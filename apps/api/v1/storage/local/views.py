@@ -74,7 +74,7 @@ class CoreStorageLocalView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             status=status.HTTP_202_ACCEPTED,
         )
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         storage = self.get_object()
         # The API records intent only. The RW worker resolves the configured path

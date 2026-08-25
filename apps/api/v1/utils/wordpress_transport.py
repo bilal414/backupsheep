@@ -71,15 +71,21 @@ def require_wordpress_protocol_v2():
 
     The historical public plugin accepts a query-string bearer key and performs
     state-changing GET requests.  The Python client must not silently fall back to
-    that contract merely to keep an old integration working.  Existing backup
-    artifacts remain accessible; only calls to the unsafe source protocol stop.
+    that contract merely to keep an old integration working. Existing records remain
+    inspectable; source calls run only in the explicitly eligible compatibility mode.
     """
 
-    if not getattr(settings, "WORDPRESS_INTEGRATION_ENABLED", False):
+    from backupsheep.source_recovery_policy import (
+        SourceRecoveryUnavailable,
+        require_source_backup_creation,
+    )
+
+    try:
+        require_source_backup_creation("wordpress")
+    except SourceRecoveryUnavailable as error:
         raise WordPressTransportError(
-            "WordPress backups are disabled until the authenticated protocol v2 "
-            "plugin is installed and explicitly enabled"
-        )
+            str(error.detail)
+        ) from None
 
 
 def _canonical_wordpress_v2_body(payload):

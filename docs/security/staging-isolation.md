@@ -26,12 +26,16 @@ be read, replaced, or deleted by another worker UID. Long-running roles remain
 non-root, drop every capability, use no-new-privileges, and have a read-only root
 filesystem.
 
-SSH host trust is the only other cross-identity file. It uses a separate reader
-group `10997`: web owns the setgid `ssh_trust` root and updates `known_hosts`
-atomically at mode `0640`; database/files mount it read-only and join `10997`;
-storage, logs, Beat, migration and cloud roles neither mount it nor join the group.
-The API rejects unsafe directory ownership/mode, links, foreign ownership and any
-non-canonical file mode instead of repairing live drift.
+The root staging provisioner is a networkless, restart-disabled one-shot. It drops every
+capability except `CHOWN`, `FOWNER`, `DAC_OVERRIDE`, and `FSETID`; the last is required
+only to preserve the reviewed setgid bit when ownership and mode `3771` are applied to a
+fresh transfer root. No long-running or networked role receives those capabilities.
+
+SSH host trust is not a cross-identity filesystem. Exact account-scoped approvals
+and append-only approval/replacement/revocation events live in PostgreSQL. A
+database/files operation receives only its current approval material in a transient
+mode-`0600` file below that worker's private runtime; the file is removed after use.
+Stock Compose has no shared trust volume or global `known_hosts` file.
 
 ## BSE1 transfer contract
 
@@ -164,10 +168,10 @@ service. It requires a 64-hex witness derived from the stable installation ID an
 explicit intent:
 
 ```text
-sha256("BackupSheep/staging-layout/v2|<installation-id>|<intent>")
+sha256("BackupSheep/staging-layout/v3|<installation-id>|<intent>")
 ```
 
-Allowed intents are `new-empty-v2` and `migrate-empty-legacy-v2`. The provisioner
+Allowed intents are `new-empty-v3` and `migrate-empty-legacy-v3`. The provisioner
 first proves that every target is a dedicated mount and all new work/transfer
 volumes, including both source-specific forward volumes and the reverse restore-
 transfer volume, are empty. For migration,
@@ -179,11 +183,17 @@ and then changes that tree to `10004:10004`. It assigns exact root ownership/mod
 and commits a root-only durable witness in `staging_layout_witness`. Reruns verify
 rather than repair witnessed state.
 
-The same one-shot migrates only the bounded SSH trust inventory (`known_hosts` and
-its lock): both must be single-link regular files owned by the historical web UID
-with an allowlisted private/read-only mode. It assigns trust GID `10997`, directory
-mode `2750`, `known_hosts` mode `0640`, and leaves the writer-only lock at `0600`.
-Unknown files, links, special files or foreign ownership block the migration.
+The v2 witness and layout were prerelease-only and are not accepted as v3 evidence.
+An operator must select the explicit v3 migration intent; the installer will not
+silently reinterpret an old witness. A develop-era, canonical project-owned
+`ssh_trust` volume is accepted only after the normal exact ownership, physical-name
+and label checks succeed. It is then preserved detached as rollback evidence: the
+v3 provisioner has no trust path or trust group, stock Compose does not mount it,
+and the wrapper rejects every `--volume` override. Its global `known_hosts` inventory
+is never imported into the account-scoped approval ledger. After migration,
+operators independently verify and explicitly reapprove every exact
+account/host/port/key before enabling SSH work. Any noncanonical, foreign or
+ambiguously owned trust volume fails closed.
 
 The one-shot also checks a configurable minimum free-byte and free-inode reserve on
 every new work, transfer and local-storage mount before changing ownership. The

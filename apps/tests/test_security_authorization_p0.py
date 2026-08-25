@@ -332,7 +332,11 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
         return point, node
 
     def test_local_download_requires_permission_and_visible_node(self):
-        with tempfile.TemporaryDirectory() as root, override_settings(LOCAL_STORAGE_ROOT=root):
+        with tempfile.TemporaryDirectory() as root, override_settings(
+            LOCAL_STORAGE_ROOT=root,
+            BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE=True,
+            BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE=False,
+        ):
             point, node = self._local_point(root)
             self.current_group.nodes.add(node)
             url = f"/api/v1/storage/local/file/{point.pk}/"
@@ -351,6 +355,19 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
     def _set_pcloud_state(self, browser, state="expected-state"):
         session = browser.session
         session[PCLOUD_OAUTH_STATE_SESSION_KEY] = {
+            "pcloud": {
+                "state": state,
+                "provider": "pcloud",
+                "member_id": str(self.member.pk),
+                "account_id": str(self.account.pk),
+                "issued_at": time.time(),
+            }
+        }
+        session.save()
+
+    def _set_legacy_pcloud_state(self, browser, state="legacy-expected-state"):
+        session = browser.session
+        session["pcloud_oauth_state"] = {
             "state": state,
             "member_id": self.member.pk,
             "account_id": self.account.pk,
@@ -369,16 +386,34 @@ class SecurityAuthorizationP0Tests(BaseTestCase):
         self.assertEqual(response.status_code, 302)
         post.assert_not_called()
 
+    @override_settings(PCLOUD_CLIENT_SECRET="pcloud-client-secret-marker")
+    def test_pcloud_callback_accepts_one_live_pre_upgrade_state(self):
+        browser = Client()
+        browser.force_login(self.user)
+        self._set_legacy_pcloud_state(browser)
+        token_response = mock.MagicMock(status_code=400)
+        with mock.patch(
+            "apps.api.v1.callback.views.requests.post", return_value=token_response
+        ) as post:
+            response = browser.get(
+                "/api/v1/callback/pcloud/?state=legacy-expected-state&code=code&hostname=api.pcloud.com"
+            )
+        self.assertEqual(response.status_code, 302)
+        post.assert_called_once()
+        self.assertNotIn("pcloud_oauth_state", browser.session)
+
     def test_pcloud_callback_rejects_expired_state_before_network(self):
         browser = Client()
         browser.force_login(self.user)
         self._set_pcloud_state(browser)
         session = browser.session
-        state = session[PCLOUD_OAUTH_STATE_SESSION_KEY]
+        pending = session[PCLOUD_OAUTH_STATE_SESSION_KEY]
+        state = pending["pcloud"]
         state["issued_at"] = (
             time.time() - PCLOUD_OAUTH_STATE_TTL_SECONDS - 1
         )
-        session[PCLOUD_OAUTH_STATE_SESSION_KEY] = state
+        pending["pcloud"] = state
+        session[PCLOUD_OAUTH_STATE_SESSION_KEY] = pending
         session.save()
         with mock.patch("apps.api.v1.callback.views.requests.post") as post:
             response = browser.get(

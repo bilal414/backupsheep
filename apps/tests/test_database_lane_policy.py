@@ -21,6 +21,7 @@ from backupsheep.database_lane_policy import (
     MANAGED_SSH_RETENTION_ROUTINE,
     MANAGED_SSH_ROUTINES,
     MANAGED_SSH_SINGLE_ACCOUNT_ROUTINE,
+    MIGRATION_TABLE,
     REPLAY_TABLE,
     RESULT_TABLES,
     RLS_COMMAND_POLICY,
@@ -37,6 +38,22 @@ from backupsheep.database_lane_policy import (
 
 
 class DatabaseLanePolicyTests(SimpleTestCase):
+    def test_every_startup_lane_can_only_read_the_migration_ledger(self):
+        for lane in (
+            "preflight",
+            "beat",
+            "cloud",
+            "database",
+            "files",
+            "storage",
+            "logs",
+        ):
+            with self.subTest(lane=lane):
+                self.assertEqual(
+                    LANE_TABLE_POLICY[lane][MIGRATION_TABLE],
+                    frozenset({"SELECT"}),
+                )
+
     def test_ssh_revoke_capability_witness_is_not_granted_to_any_runtime_lane(self):
         for lane, policy in LANE_TABLE_POLICY.items():
             with self.subTest(lane=lane):

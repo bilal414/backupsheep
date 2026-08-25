@@ -14,16 +14,16 @@ provisioner="${1:-/usr/local/bin/backupsheep-provision-staging-volumes}"
 }
 
 installation_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-intent='migrate-empty-legacy-v2'
+intent='migrate-empty-legacy-v3'
 witness="$(
-  printf '%s' "BackupSheep/staging-layout/v2|${installation_id}|${intent}" \
+  printf '%s' "BackupSheep/staging-layout/v3|${installation_id}|${intent}" \
     | sha256sum | awk '{print $1}'
 )"
 
 new_case() {
   root="$1"
   mkdir -p "$root"
-  for name in database files storage database-transfer files-transfer restore-transfer backup-storage ssh-trust legacy witness; do
+  for name in database files storage database-transfer files-transfer restore-transfer backup-storage legacy witness; do
     mkdir "$root/$name"
   done
 }
@@ -51,7 +51,6 @@ run_case "$valid_root"
 [ "$(stat -c '%u:%g:%a' "$valid_root/files-transfer")" = 0:10991:3771 ]
 [ "$(stat -c '%u:%g:%a' "$valid_root/restore-transfer")" = 0:10995:3771 ]
 [ "$(stat -c '%u:%g:%a' "$valid_root/backup-storage")" = 10004:10004:700 ]
-[ "$(stat -c '%u:%g:%a' "$valid_root/ssh-trust")" = 10001:10997:2750 ]
 
 wrong_root="${root_base}/wrong-witness"
 new_case "$wrong_root"
@@ -96,14 +95,6 @@ chown 10001:10001 "$storage_root/backup-storage/object.bse1"
 chmod 0600 "$storage_root/backup-storage/object.bse1"
 run_case "$storage_root"
 [ "$(stat -c '%u:%g:%a' "$storage_root/backup-storage/object.bse1")" = 10004:10004:600 ]
-
-trust_root="${root_base}/legacy-trust"
-new_case "$trust_root"
-printf '%s\n' 'host ssh-ed25519 AAAATEST' > "$trust_root/ssh-trust/known_hosts"
-chown 10001:10001 "$trust_root/ssh-trust/known_hosts"
-chmod 0600 "$trust_root/ssh-trust/known_hosts"
-run_case "$trust_root"
-[ "$(stat -c '%u:%g:%a' "$trust_root/ssh-trust/known_hosts")" = 10001:10997:640 ]
 
 chmod 0750 "$valid_root/database"
 if run_case "$valid_root" >/dev/null 2>&1; then

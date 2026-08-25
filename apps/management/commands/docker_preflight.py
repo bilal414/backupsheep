@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import hmac
 import importlib
 import os
-import re
 import resource
 import stat
 import tempfile
@@ -42,6 +42,16 @@ from backupsheep.database_lane_policy import LANES as DATABASE_LANES
 
 
 EXPECTED_UID = 10001
+EXPECTED_UID_BY_ROLE = {
+    "web": 10001,
+    "database": 10002,
+    "files": 10003,
+    "storage": 10004,
+    "logs": 10005,
+    "beat": 10006,
+    "migration": 10007,
+    "cloud": 10008,
+}
 REQUIRED_SECRET_FILE_ENV = {
     "DJANGO_SECRET_KEY": "/run/secrets/django_secret_key",
 }
@@ -55,6 +65,8 @@ def _assert_stock_configuration_sources(*, environment, runtime_settings, secret
         errors.append("DJANGO_SETTINGS_MODULE does not select backupsheep.settings")
     if environment.get("BACKUPSHEEP_SECRETS"):
         errors.append("BACKUPSHEEP_SECRETS replaces the reviewed stock configuration")
+    if environment.get("BACKUPSHEEP_EGRESS_POLICY_GENERATION") != "2":
+        errors.append("fail-closed egress policy generation 2 is not active")
 
     expected_django = secret_values.get("DJANGO_SECRET_KEY", "")
     expected_database = secret_values.get("DB_PASSWORD", "")
@@ -181,11 +193,13 @@ def _proc_status_values(text: str) -> dict[str, str]:
     return values
 
 
-def _assert_process_boundary(*, uid: int, proc_status: str, root_flags: int, core_limit):
+def _assert_process_boundary(
+    *, uid: int, proc_status: str, root_flags: int, core_limit, expected_uid=EXPECTED_UID
+):
     errors = []
     status_values = _proc_status_values(proc_status)
-    if uid != EXPECTED_UID:
-        errors.append(f"runtime UID must be {EXPECTED_UID}, observed {uid}")
+    if uid != expected_uid:
+        errors.append(f"runtime UID must be {expected_uid}, observed {uid}")
     for capability_set in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
         try:
             capabilities = int(status_values.get(capability_set, "invalid"), 16)
@@ -269,16 +283,18 @@ def _assert_secure_tmpfs(path: Path, mountinfo: str):
     raise CommandError(f"Required runtime path {path} is not a distinct mount")
 
 
-def _assert_private_writable_tmpfs(path: Path, mountinfo: str):
+def _assert_private_writable_tmpfs(
+    path: Path, mountinfo: str, *, expected_uid=EXPECTED_UID
+):
     try:
         metadata = path.stat()
     except OSError as error:
         raise CommandError(f"Required tmpfs path {path} is unavailable: {error}") from error
     if not stat.S_ISDIR(metadata.st_mode):
         raise CommandError(f"Required tmpfs path {path} is not a directory")
-    if path == Path("/run/backupsheep") and metadata.st_uid != EXPECTED_UID:
+    if path == Path("/run/backupsheep") and metadata.st_uid != expected_uid:
         raise CommandError(
-            f"Required tmpfs path {path} must be owned by UID {EXPECTED_UID}"
+            f"Required tmpfs path {path} must be owned by UID {expected_uid}"
         )
     if path == Path("/run/backupsheep") and stat.S_IMODE(metadata.st_mode) != 0o700:
         raise CommandError("/run/backupsheep must have mode 0700")
@@ -323,6 +339,89 @@ def _assert_runtime_database_identity(*, cursor, environment, runtime_settings):
         )
     except ProvisioningError as error:
         raise CommandError(f"Docker security preflight failed: {error}") from error
+
+
+def _assert_managed_ssh_identity(*, environment, runtime_settings):
+    """Prove split public identity and least-privilege private-key custody."""
+
+    from apps.console.connection.managed_ssh import (
+        ManagedSSHOperationError,
+        managed_public_key_fingerprint,
+        managed_public_key_for_lane,
+    )
+    from apps.console.connection.ssh import _load_private_key
+
+    role = str(environment.get("BACKUPSHEEP_RUNTIME_ROLE") or "")
+    errors = []
+    if runtime_settings.SSH_MANAGED_LANE_ISOLATION_REQUIRED is not True:
+        errors.append("managed SSH lane isolation is not required")
+    if str(runtime_settings.SSH_MANAGED_PUBLIC_KEY or ""):
+        errors.append("the legacy shared managed SSH public key is configured")
+
+    public_keys = {}
+    try:
+        for lane in ("database", "files"):
+            value = managed_public_key_for_lane(lane)
+            public_keys[lane] = value
+            if value:
+                managed_public_key_fingerprint(value)
+    except ManagedSSHOperationError:
+        errors.append("managed SSH lane public keys are invalid")
+    enabled = bool(public_keys.get("database") and public_keys.get("files"))
+
+    runtime_path = str(runtime_settings.SSH_MANAGED_PRIVATE_KEY_PATH or "")
+    lane_sources = {
+        "database": Path("/run/secrets/ssh_managed_database_private_key"),
+        "files": Path("/run/secrets/ssh_managed_files_private_key"),
+    }
+    if role in lane_sources:
+        own_source = lane_sources[role]
+        other_source = lane_sources["files" if role == "database" else "database"]
+        if own_source.is_symlink() or not own_source.is_file():
+            errors.append("the lane managed SSH private-key secret is unavailable")
+        if other_source.exists() or other_source.is_symlink():
+            errors.append("the opposite managed SSH private-key secret is mounted")
+        if enabled:
+            expected_path = "/run/backupsheep/ssh/managed_private_key"
+            if runtime_path != expected_path:
+                errors.append("the managed SSH private key is not staged in private tmpfs")
+            else:
+                key_path = Path(runtime_path)
+                try:
+                    metadata = key_path.lstat()
+                    if key_path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+                        raise ValueError("not a regular file")
+                    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+                        raise ValueError("unsafe ownership or mode")
+                    if metadata.st_size < 1 or metadata.st_size > 64 * 1024:
+                        raise ValueError("unsafe size")
+                    private_key = _load_private_key(runtime_path, managed=True)
+                    private_fingerprint = hashlib.sha256(
+                        private_key.asbytes()
+                    ).hexdigest()
+                    public_fingerprint = managed_public_key_fingerprint(
+                        public_keys[role]
+                    )
+                    if not hmac.compare_digest(
+                        private_fingerprint, public_fingerprint
+                    ):
+                        raise ValueError("public/private mismatch")
+                except Exception:
+                    errors.append(
+                        "the staged managed SSH private key is invalid or mismatched"
+                    )
+        elif runtime_path or Path(
+            "/run/backupsheep/ssh/managed_private_key"
+        ).exists():
+            errors.append("a managed SSH private key exists while the feature is disabled")
+    else:
+        if runtime_path:
+            errors.append("this runtime role can access a managed SSH private-key path")
+        if any(path.exists() or path.is_symlink() for path in lane_sources.values()):
+            errors.append("this runtime role mounts a managed SSH private-key secret")
+
+    if errors:
+        raise CommandError("Docker security preflight failed: " + "; ".join(errors))
 
 
 def _assert_artifact_encryption_boundary(*, environment, runtime_settings):
@@ -380,6 +479,13 @@ class Command(BaseCommand):
     help = "Validate the stock Docker runtime boundary, database, and broker without consuming work."
 
     def handle(self, *args, **options):
+        runtime_role = str(os.environ.get("BACKUPSHEEP_RUNTIME_ROLE") or "")
+        try:
+            expected_uid = EXPECTED_UID_BY_ROLE[runtime_role]
+        except KeyError as error:
+            raise CommandError(
+                "Docker security preflight failed: runtime role is invalid"
+            ) from error
         try:
             proc_status = Path("/proc/self/status").read_text(encoding="utf-8")
             mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
@@ -392,11 +498,16 @@ class Command(BaseCommand):
             proc_status=proc_status,
             root_flags=root_flags,
             core_limit=resource.getrlimit(resource.RLIMIT_CORE),
+            expected_uid=expected_uid,
         )
         _assert_read_only_path(Path("/code"))
         _assert_read_only_path(Path("/etc"))
-        _assert_private_writable_tmpfs(Path("/tmp"), mountinfo)
-        _assert_private_writable_tmpfs(Path("/run/backupsheep"), mountinfo)
+        _assert_private_writable_tmpfs(
+            Path("/tmp"), mountinfo, expected_uid=expected_uid
+        )
+        _assert_private_writable_tmpfs(
+            Path("/run/backupsheep"), mountinfo, expected_uid=expected_uid
+        )
 
         required_secret_files = _required_secret_file_env(os.environ)
         for setting_name, expected_path in required_secret_files.items():
@@ -423,6 +534,10 @@ class Command(BaseCommand):
         )
         _assert_celery_identity(os.environ)
         _assert_celery_task_manifest(settings)
+        _assert_managed_ssh_identity(
+            environment=os.environ,
+            runtime_settings=settings,
+        )
         _assert_artifact_encryption_boundary(
             environment=os.environ,
             runtime_settings=settings,

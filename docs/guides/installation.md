@@ -13,8 +13,8 @@ definition of the operating-system tools needed by database and file backups.
 | Manual processes | Operators who already manage Python, PostgreSQL, RabbitMQ and process supervision | Every web, worker and scheduler process separately |
 
 The stock Compose stack contains PostgreSQL, RabbitMQ, the web application, five
-specialized Celery workers, a scheduler, a one-shot database-identity provisioner, a
-one-shot migration service and a one-shot security preflight. It publishes the web
+specialized Celery workers, a scheduler, per-role namespace guards and networkless or
+single-purpose provision/migrate/seal/preflight one-shots. It publishes the web
 application on loopback TCP port `8000`;
 PostgreSQL and RabbitMQ are not published to the host.
 
@@ -57,12 +57,29 @@ to use Docker:
 
 ```bash
 COMMIT='<40-character-reviewed-release-commit>'
+KMS_KEY_ARN='arn:aws:kms:us-east-1:123456789012:key/<reviewed-key-id>'
+KMS_REGION='us-east-1'
+KMS_DATABASE_CREDENTIALS='/absolute/protected/kms-database.credentials'
+KMS_FILES_CREDENTIALS='/absolute/protected/kms-files.credentials'
 curl -fSLo install.sh \
   "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
 less install.sh
 chmod 700 install.sh
-./install.sh --ref "${COMMIT}" --domain backups.example.com
+./install.sh \
+  --ref "${COMMIT}" \
+  --install-dir "$HOME/.local/share/backupsheep" \
+  --project-name backupsheep \
+  --domain backups.example.com \
+  --artifact-kms-key-id "${KMS_KEY_ARN}" \
+  --artifact-kms-region "${KMS_REGION}" \
+  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
+  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
+  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}"
 ```
+
+The two KMS credential inputs must be distinct canonical, user-owned
+mode-`0400`/`0600` files for separate database/files AWS identities with matching
+encryption-context policy.
 
 Do not use `sudo` and do not pipe a remote script into a shell. The installer refuses
 effective UID 0, including a root shell or `sudo`, because it must not create a
@@ -78,7 +95,13 @@ user-writable path explicitly when needed:
 ./install.sh \
   --ref "${COMMIT}" \
   --domain backups.example.com \
-  --install-dir "$HOME/backupsheep"
+  --install-dir "$HOME/backupsheep" \
+  --project-name backupsheep \
+  --artifact-kms-key-id "${KMS_KEY_ARN}" \
+  --artifact-kms-region "${KMS_REGION}" \
+  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
+  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
+  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}"
 ```
 
 Supported options are:
@@ -88,10 +111,19 @@ Supported options are:
 | `--ref COMMIT` | Required full 40-character commit; mutable or abbreviated references are rejected |
 | `--domain HOST` | Configures the accepted/public hostname while the listener remains on server loopback; defaults to `localhost` |
 | `--install-dir PATH` | Uses an absolute, user-owned path other than `/` |
-| `--project-name NAME` | Pins the Compose project name instead of accepting it from `.env` or ambient Compose variables |
+| `--project-name NAME` | Pins and persists the Compose project name; every rerun must match that protected witness, and ambient Compose variables are ignored |
 | `--adopt-legacy-project NAME` | One-time recovery for the exact stock four-volume layout left by an old `compose down`; see the guarded workflow below |
 | `--approved-compose-file PATH` | Accepts only the private regular `INSTALL_DIR/docker-compose.override.yml`, rendered after the base file and included in exact ownership history |
-| `--migrate-database-identities` | One-time, explicit conversion of an existing stock database login into separate bootstrap, migrator and runtime identities; requires the reviewed rollback workflow |
+| `--migrate-database-identities` | One-time conversion of an existing stock database to generation-3 bootstrap, owner and exact per-lane ACL/RLS identities |
+| `--migrate-rabbitmq-identities` | One-time conversion of the shared broker login to generation-2 per-lane credentials/ACLs |
+| `--rotate-celery-signing-keys` | Drained-queue generation-3 task-signing rotation; requires all publishers/consumers stopped and exact broker ownership |
+| `--migrate-staging-layout` | One-time existing-install authorization for an empty legacy shared work volume and new layout-v3 witness |
+| `--migrate-egress-policy` | One-time fail-closed reset of a uniform stock legacy egress policy to generation-2 deny defaults and blank exact endpoint/name lists; mixed/custom policy is refused |
+| `--artifact-kms-key-id ARN` | Resolved symmetric AWS KMS key ARN used for new BSE1 data-key wraps |
+| `--artifact-kms-region REGION` | AWS region containing all allowlisted artifact keys |
+| `--artifact-kms-allowed-key-arns ARNS` | Comma-separated resolved ARNs accepted for restore and key-wrap rotation |
+| `--artifact-kms-database-aws-credentials-file PATH` | Canonical private AWS credential input for the database source lane |
+| `--artifact-kms-files-aws-credentials-file PATH` | Different canonical private AWS credential input for the files source lane |
 | `--skip-start` | Verifies/configures the installation but does not build or start Compose |
 | `--enable-operations` | After core health and security preflight pass, explicitly starts the provider workers and scheduler |
 
@@ -105,9 +137,10 @@ On a new installation the script:
    the resulting object database, rejects dirty/foreign/symlinked checkouts and compares
    the running installer with the committed copy;
 3. creates `.env` as mode `0600` and `.secrets` as a mode `0700` directory;
-4. generates independent Django, PostgreSQL bootstrap/migrator/runtime, RabbitMQ and
-   onboarding files plus an empty optional `ssh_managed_private_key` file as mode `0444`
-   inside that private directory,
+4. generates independent Django, PostgreSQL bootstrap/migrator/per-lane, RabbitMQ
+   bootstrap/per-lane, task-signing, onboarding and lane-specific KMS files plus empty
+   optional `ssh_managed_database_private_key` and
+   `ssh_managed_files_private_key` files as mode `0444` inside that private directory,
    keeping values out of Compose inspection and staging storage;
 5. creates and preserves a random 64-character lowercase hexadecimal installation ID.
    Service containers and an empty labeled sentinel volume carry that identity so a
@@ -120,9 +153,9 @@ On a new installation the script:
    installer-owned data-generation witness. It refuses orphaned, stopped, unhealthy,
    ambiguous, 3.13 or 4.2 broker state instead of guessing at a volume format;
 7. validates Compose through explicit `--project-name`, `--env-file` and `-f` arguments;
-8. builds commit-tagged PostgreSQL and application images and starts only PostgreSQL,
-   RabbitMQ, transactional database-identity provisioning, migrations, the fail-closed
-   preflight and web UI on `127.0.0.1:8000`;
+8. builds commit-tagged PostgreSQL, application and namespace-guard images and starts only
+   PostgreSQL/RabbitMQ, the volume/broker/staging/database provisioners, migrate/seal/
+   preflight gates, app guard and web UI on `127.0.0.1:8000`;
 9. waits up to five minutes for the `app` health check;
 10. prints an SSH-tunnel command and an explicit server-side token retrieval command,
    without writing the token itself to install logs.
@@ -130,25 +163,38 @@ On a new installation the script:
 Provider workers and Beat do not start unless `--enable-operations` is explicitly
 provided. Review provider credentials, queued/recoverable work and restore ownership
 before opting in: enabling operations can execute durable work already present in the
-database or broker. On every build/migration run the installer first stops the exact
-worker/Beat service set; an explicit opt-in restarts it only after core health and the
-security preflight pass.
+database or broker. On every build/migration run the installer first removes the complete
+container/network topology with ordinary `down` while preserving named data/identity
+volumes; an explicit opt-in recreates operations only after core health and the security
+preflight pass. Long-lived application roles use `restart: unless-stopped`, but
+namespace guards use `restart: "no"`; the wrapper refuses an independent guard lifecycle
+command and requires the workload/guard pair to be recreated together.
 
 An existing directory is reused only when it is the clean canonical repository at the
 same requested commit, with the expected ownership and permissions. The installer never
 upgrades a checkout in place. It migrates existing direct installation secrets without
-rotating them and then blanks their `.env` values. A pre-generation-2 stock database is
+rotating them and then blanks their `.env` values. A pre-generation-3 stock database is
 the deliberate exception: the operator must first stop work, make a verified encrypted
 rollback, and pass `--migrate-database-identities` once. The installer preserves its
 legacy credential only as the bootstrap credential and generates new independent
 migrator/runtime credentials. See the
-[database identity migration gate](database-identity-migration.md). It creates the optional managed
-SSH-key file empty for a new deployment. If a legacy `SSH_MANAGED_PRIVATE_KEY_PATH` is
-configured, the operator must first place that exact key in
-`.secrets/ssh_managed_private_key`, set mode `0444`, and clear the old path; the installer
-will not guess or copy key material. It refuses ambiguous, missing, mismatched, symlinked
-or hard-linked secret state. A failed start leaves containers and volumes intact for
-evidence and recovery; it never performs an automatic destructive rollback.
+[database identity migration gate](database-identity-migration.md). It creates both optional
+lane-specific managed SSH files empty for a new deployment. A legacy shared identity cannot
+be assigned an account and worker lane safely, so the installer refuses any non-empty
+`.secrets/ssh_managed_private_key` or legacy `SSH_MANAGED_PRIVATE_KEY_PATH` /
+`SSH_MANAGED_PUBLIC_KEY` value. Follow the [upgrade gate](upgrades.md#one-time-legacy-ssh-trust-and-shared-identity-retirement)
+to preserve rollback evidence and create distinct Ed25519 identities. It refuses ambiguous,
+missing, mismatched, symlinked or hard-linked secret state. A failed start leaves containers
+and volumes intact for evidence and recovery; it never performs an automatic destructive
+rollback.
+
+An existing installation without `BACKUPSHEEP_EGRESS_POLICY_GENERATION=2` must also use
+`--migrate-egress-policy` once. The installer accepts only a uniform stock public/blank,
+blank/blank or deny/blank legacy state, then resets all six roles to `deny` and clears old
+and new lists. Internet-dependent operations remain blocked until reviewed exact TCP
+tuples and DNS names are added. Preserve and review any customized/mixed legacy policy,
+manually reset it to the stock deny state, and only then authorize the migration; the
+installer never guesses a translation and rejects reuse of the flag after generation 2.
 
 ### One-time legacy compose-down adoption
 
@@ -166,7 +212,14 @@ startup disabled for the first pass:
 ./install.sh \
   --ref "${COMMIT}" \
   --install-dir "$HOME/.local/share/backupsheep" \
+  --project-name backupsheep \
+  --domain backups.example.com \
   --adopt-legacy-project backupsheep \
+  --artifact-kms-key-id "${KMS_KEY_ARN}" \
+  --artifact-kms-region "${KMS_REGION}" \
+  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
+  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
+  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
   --skip-start
 ```
 
@@ -174,7 +227,7 @@ This gate fails closed unless the existing installation has no persisted project
 the named project has zero containers and networks, and its complete labeled volume set
 is exactly `${project}_{pgdata,rabbitmq_data,backup_workdir,backup_storage}` with the
 standard Compose project/logical labels and no BackupSheep installation-ID labels. It
-also rejects pre-existing `installation_identity` or `ssh_trust` names, inventory or
+also rejects pre-existing `installation_identity` or legacy `ssh_trust` names, inventory or
 inspection errors, missing volumes, extra volumes and label drift.
 
 Only after those checks does the installer create
@@ -195,6 +248,17 @@ under that matching sentinel so the reviewed Compose and RabbitMQ transition com
 recreate them. Any nonblank partial identity, path/model/service drift, noncanonical name,
 foreign sentinel or inspection failure stops without creating a Docker resource.
 
+The exact four-volume adoption gate above is only for the older pre-sentinel layout;
+do not use it to relabel a develop-era `ssh_trust` volume. Development layout v2 was
+prerelease-only. When an already identified project contains its canonical labeled
+`ssh_trust` volume, the ordinary ownership validator may accept it only after exact
+project, physical-name, logical-name and installation-identity checks. It remains
+detached as rollback evidence during the explicit `migrate-empty-legacy-v3` staging
+transition. Layout v3 has no trust mount, trust group or provisioning path, and the
+wrapper rejects every `--volume` override, so the retired global trust inventory cannot
+be imported. Reapprove each exact account/host/port/key in PostgreSQL instead; any
+ambiguous or foreign legacy volume stops installation.
+
 An existing RabbitMQ data volume is a separate fail-closed gate. The installer never
 performs the 3.13 -> 4.2 -> 4.3/Khepri migration. If the stored data-generation witness is
 blank, it accepts only a new project with no broker resources. Existing broker data with
@@ -209,7 +273,9 @@ another version requires the [operator-run RabbitMQ migration](rabbitmq-upgrade.
 cd "$HOME/.local/share/backupsheep"
 ./backupsheep-compose config --quiet
 ./backupsheep-compose ps --all
-./backupsheep-compose logs --tail=100 db-provision migrate preflight app
+./backupsheep-compose logs --tail=100 \
+  rabbitmq-volume-init rabbitmq-provision staging-provision \
+  db-provision migrate db-seal preflight app-egress-guard app
 curl -fsS http://127.0.0.1:8000/healthz/
 ```
 
@@ -219,10 +285,25 @@ request; it does not probe PostgreSQL, RabbitMQ or any provider. Complete the
 before exposing the instance publicly. When the operational preflight is complete, opt in
 using the same exact installer:
 
+The installer and hardened wrapper serialize every real control-plane mutation through
+the same `${INSTALL_DIR}.backupsheep-mutation-lock` directory. Do not run two installer or
+mutating wrapper commands concurrently. Read-only wrapper inspection remains available
+while a mutation is active. If a crash leaves a stale lock, follow the exact inspection and
+non-recursive recovery procedure in the
+[operations runbook](operations.md#control-plane-mutation-lock); the tools never infer that
+a recorded PID is safe to reap.
+
 ```bash
 ./install.sh \
   --ref "${COMMIT}" \
   --install-dir "$HOME/.local/share/backupsheep" \
+  --project-name backupsheep \
+  --domain backups.example.com \
+  --artifact-kms-key-id "${KMS_KEY_ARN}" \
+  --artifact-kms-region "${KMS_REGION}" \
+  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
+  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
+  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
   --enable-operations
 ```
 
@@ -234,77 +315,39 @@ deployment warning. A passing error-level preflight does not make public HTTP sa
 
 ## Manual Docker Compose installation
 
-### 1. Clone and configure
+### 1. Let the verified installer stage the exact model
+
+Directly cloning and inventing `.env`, secret files, identity generations or layout
+witnesses is not a supported stock bootstrap. The model requires independent database and
+broker lane credentials, task-signing keys, two KMS identities, an installation ID,
+resource labels and the v3 staging witness as one fail-closed set. Use `--skip-start` when
+you need to review or add a Compose override before the first build:
 
 ```bash
 COMMIT='<40-character-reviewed-release-commit>'
-git clone --no-checkout https://github.com/bilal414/backupsheep.git
-cd backupsheep
-git checkout --detach "${COMMIT}"
+KMS_KEY_ARN='arn:aws:kms:us-east-1:123456789012:key/<reviewed-key-id>'
+KMS_REGION='us-east-1'
+KMS_DATABASE_CREDENTIALS='/absolute/protected/kms-database.credentials'
+KMS_FILES_CREDENTIALS='/absolute/protected/kms-files.credentials'
+./install.sh \
+  --ref "${COMMIT}" \
+  --install-dir "$HOME/.local/share/backupsheep" \
+  --project-name backupsheep \
+  --domain backups.example.com \
+  --artifact-kms-key-id "${KMS_KEY_ARN}" \
+  --artifact-kms-region "${KMS_REGION}" \
+  --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
+  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
+  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
+  --skip-start
+cd "$HOME/.local/share/backupsheep"
 test "$(git rev-parse HEAD)" = "${COMMIT}"
-cp .env_sample .env
-chmod 600 .env
-install -d -m 700 .secrets
 ```
 
-Set at least these values in `.env`:
-
-```dotenv
-DJANGO_SERVER='prod'
-DJANGO_DEBUG=false
-BACKUPSHEEP_IMAGE='backupsheep:<same-40-character-reviewed-commit>'
-BACKUPSHEEP_POSTGRES_IMAGE='backupsheep-postgres:<same-40-character-reviewed-commit>'
-BACKUPSHEEP_INSTALLATION_ID='<stable-64-character-lowercase-hex-value>'
-BACKUPSHEEP_COMPOSE_PROJECT_NAME='backupsheep'
-BACKUPSHEEP_DATABASE_IDENTITY_GENERATION='2'
-BACKUPSHEEP_SECRETS_DIR='.secrets'
-DJANGO_SETTINGS_MODULE='backupsheep.settings'
-DJANGO_SECRET_KEY=''
-DJANGO_ALLOWED_HOSTS='localhost,127.0.0.1,backups.example.com'
-APP_PROTOCOL='http://'
-APP_DOMAIN='localhost:8000'
-DB_BOOTSTRAP_USER='backupsheep_bootstrap'
-DB_MIGRATOR_USER='backupsheep_migrator'
-DB_USER='backupsheep_runtime'
-DB_PASSWORD=''
-RABBITMQ_PASSWORD=''
-ONBOARDING_INSTALL_TOKEN=''
-```
-
-Create the six required secret files and the empty optional managed-key file without
-writing values to shell history or standard output:
-
-```bash
-umask 077
-od -An -N 48 -tx1 /dev/urandom | tr -d ' \n' > .secrets/django_secret_key
-od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > .secrets/db_bootstrap_password
-od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > .secrets/db_migrator_password
-od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > .secrets/db_password
-od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > .secrets/rabbitmq_password
-od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > .secrets/onboarding_token
-touch .secrets/ssh_managed_private_key
-chmod 444 .secrets/django_secret_key .secrets/db_bootstrap_password \
-  .secrets/db_migrator_password .secrets/db_password \
-  .secrets/rabbitmq_password .secrets/onboarding_token \
-  .secrets/ssh_managed_private_key
-```
-
-Generate `BACKUPSHEEP_INSTALLATION_ID` once from 32 random bytes and preserve it with the
-installation; it is an ownership marker, not an authentication secret. The verified
-installer manages this automatically. Manual deployments must also inspect existing
-Compose resources before first start and must never reuse a project name whose ownership
-is unclear. The explicit `BACKUPSHEEP_COMPOSE_PROJECT_NAME` must match the reviewed
-project name passed to every command; changing it creates or targets a different resource
-set.
-
-```bash
-od -An -N 32 -tx1 /dev/urandom | tr -d ' \n'
-```
-
-Copy that 64-character lowercase result into the placeholder without adding spaces.
-
-Keep `.secrets/django_secret_key` stable. It signs sessions and derives the key used for
-saved email credentials. See the [configuration guide](configuration.md) and the complete
+Do not hand-edit the installer-owned identity/generation/witness values or add arbitrary
+files beneath `.secrets`. Keep `.secrets/django_secret_key` stable. It signs sessions and
+derives the key used for saved email credentials. See the
+[configuration guide](configuration.md) and complete
 [environment-variable reference](../reference/environment-variables.md).
 
 If Local Storage must live on a capacity-managed bind/NFS filesystem, create and review
@@ -323,7 +366,8 @@ BS_COMPOSE=("$PWD/backupsheep-compose")
 # BS_COMPOSE+=(--approved-compose-file "$PWD/docker-compose.override.yml")
 bs_compose() { "${BS_COMPOSE[@]}" "$@"; }
 bs_compose config --quiet
-bs_compose build db app
+bs_compose build db app app-egress-guard
+# Fresh topology only: no guard/workload container may already exist.
 bs_compose up --detach
 bs_compose ps --all
 ```
@@ -332,8 +376,17 @@ The profile-less command starts only the core. Start provider workers and Beat o
 the security preflight and recovery review:
 
 ```bash
-bs_compose --profile operations up --detach
+bs_compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate \
+  cloud-egress-guard database-egress-guard files-egress-guard \
+  storage-egress-guard logs-egress-guard \
+  worker-cloud worker-database worker-files worker-storage worker-logs
+bs_compose --profile operations up --detach --no-build --no-deps beat
 ```
+
+After any pair exists, broad, guard-only and workload-only `up` operations are refused.
+Use the exact paired force-recreation above; see the
+[egress lifecycle contract](../../deploy/egress/README.md#paired-lifecycle-commands).
 
 `db-provision`, `migrate` and `preflight` must all exit with code `0`. The provisioner
 uses the bootstrap credential only on its dedicated internal bridge, creates or rotates
@@ -343,14 +396,17 @@ tables. The preflight independently proves the active Django login has that exac
 least-privilege boundary, computes Django's migration plan and refuses any unapplied
 migration. The application and
 worker services wait for all three one-shot gates before starting. Migrations also seed the
-integration/storage catalogs and create the database-backed cache table. Application
-and PostgreSQL roles use `pull_policy: never`, so both explicit builds above are mandatory
+integration/storage catalogs and create the database-backed cache table. Application,
+PostgreSQL and egress-guard roles use `pull_policy: never`, so all three explicit builds
+above are mandatory
 and a missing local image cannot be replaced silently from a registry. The database build
 uses `Dockerfile.postgres`: it verifies the digest-pinned official 18.6 entrypoint before
-replacing its single `gosu` privilege drop with Debian's security-updated `setpriv`, then
-deletes `gosu`, verifies the fixed util-linux package versions, and declares UID/GID 999.
-Stock Compose starts PostgreSQL directly as that non-root identity with no capabilities;
-a wrongly owned imported volume fails closed instead of being repaired silently.
+replacing its single `gosu` privilege drop with exact Alpine `su-exec=0.3-r0`, then
+deletes `gosu` and declares UID/GID `70:70`. Stock Compose starts PostgreSQL directly as
+that non-root identity with no capabilities and initializes the distinct
+`postgres_data_v1` volume with ICU `und`. A wrong, unwitnessed, or legacy Debian volume
+fails closed instead of being repaired or adopted. Existing installations must use the
+one-time [PostgreSQL Alpine/ICU migration gate](postgres-runtime-migration.md).
 
 Every application-image command still passes through the image entrypoint. It rejects a
 root or weakened runtime, neutralizes shell/Python/dynamic-loader startup hooks and runs
@@ -391,7 +447,7 @@ operations writers, resolve the one exact labeled `backup_storage` volume, take 
 recoverable snapshot, copy its complete contents and metadata to the approved target,
 compare file counts/sizes/hashes, and only then replace that exact old volume with the
 reviewed bind-backed definition. Never use broad `down --volumes` or pruning. Re-run the
-wrapper's rendered-model, ownership, write/read, download and restore checks before
+wrapper's rendered-model, ownership, storage-only write/read and authenticated restore checks before
 operations resume. The repository intentionally does not automate deletion of the old
 host volume.
 
@@ -399,7 +455,9 @@ host volume.
 
 The repository can run as ordinary Django/Celery processes, but there is no bundled
 systemd or supervisor definition. The operator must provide process supervision,
-restart policy, log handling, shared storage and upgrades.
+restart policy, log handling, equivalent lane-private work and ciphertext handoff
+boundaries, Local Storage isolation and upgrades. A shared plaintext work directory is
+not equivalent to stock Compose and must not be used.
 
 Use Python 3.14 to match the image. Install PostgreSQL 14 or newer, RabbitMQ, the Python
 requirements and the external tools listed in `Dockerfile`, including:
@@ -435,20 +493,25 @@ celery -A backupsheep worker --loglevel=info --hostname=logs@%h -Q logs --concur
 celery -A backupsheep beat --loglevel=info --scheduler backupsheep.scheduler:BackupDatabaseScheduler
 ```
 
-Database/file workers create artifacts in shared `_storage`; the storage worker uploads,
-finalizes and cleans them. It also handles `reset_incremental_cache` under the per-node
-incremental lock with directory-descriptor-confined deletes, plus on-disk
-`delete_old_logs`. The stock web process has no staging mount. UI-approved host keys live
-in a separate `ssh_trust` volume that app can update and database/files read only. The
-optional managed key is `.secrets/ssh_managed_private_key`, mounted only in
-app/database/files as a mode-`0444` source. Empty disables it. On each role start, the
-entrypoint rejects an invalid, encrypted or larger-than-64-KiB non-empty key, copies an
-accepted key into private tmpfs at `/run/backupsheep/ssh/managed_private_key`, applies mode
-`0600`, and exports that runtime path. Never configure SSH to read the mode-`0444`
-`/run/secrets/ssh_managed_private_key` source directly. The notification/log worker has no
-staging/trust/key mount.
-`BS_LOCAL_STORAGE_PATH` is writable only by storage; roles that inspect/consume Local
-Storage receive it read-only.
+An equivalent non-Compose supervisor must preserve separate database/files/storage private
+work roots and the two forward plus one reverse BSE1 handoff boundaries; one shared
+plaintext `_storage` directory is not equivalent. `reset_incremental_cache` and files
+run-log pruning execute in the files lane, while database run-log pruning executes in the
+database lane and destination-upload run-log pruning executes in the storage lane.
+UI-approved host keys and append-only approval events are account-scoped
+PostgreSQL records. A database/files worker materializes only the exact approval for one
+operation in a transient mode-`0600` private runtime file and removes it afterward; stock
+Compose has no trust volume.
+
+Optional `.secrets/ssh_managed_database_private_key` and
+`.secrets/ssh_managed_files_private_key` sources are mounted mode `0444` only in their
+matching workers. The app and all other roles receive neither private key. Each accepted
+Ed25519 identity is copied into that worker's private tmpfs as
+`/run/backupsheep/ssh/managed_private_key`, mode `0600`. The identities must be distinct and
+managed-key mode is allowed only while the database contains exactly one account.
+Multi-account installations use customer-supplied private keys.
+`BS_LOCAL_STORAGE_PATH` is mounted read/write only by storage; every other role receives
+no Local Storage mount and consumes restore bytes only through the reverse BSE1 handoff.
 
 Keep one Beat process for the normal maintenance cadence. Backup schedule occurrences
 have a transactional database claim, but duplicated Beat instances add needless

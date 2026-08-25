@@ -26,11 +26,14 @@ def _pkce_challenge(verifier: str) -> str:
 
 
 def issue_oauth_state(request, *, provider, member, account, use_pkce=False):
-    """Issue a session-bound, expiring OAuth state record.
+    """Explicitly restart a session-bound, expiring OAuth transaction.
 
     One pending authorization is retained per provider.  Starting a new flow
     invalidates an older, uncompleted flow for that same provider, while flows
-    for other providers remain independent.
+    for other providers remain independent.  Callers must only use this
+    replacement behavior from an explicit, CSRF-protected user action.  A GET
+    page render must use :func:`get_or_issue_oauth_state` instead so it cannot
+    invalidate an authorization already in flight.
     """
 
     state = secrets.token_urlsafe(32)
@@ -56,26 +59,150 @@ def issue_oauth_state(request, *, provider, member, account, use_pkce=False):
     return dict(record)
 
 
-def consume_oauth_state(request, *, provider, received_state, member, account):
-    """Consume and verify one OAuth state record.
+def _state_record_is_reusable(
+    record, *, provider, member, account, use_pkce=False, now=None
+):
+    """Return whether a pending record is safe to reuse for page rendering."""
 
-    Consumption happens before validation, so malformed, expired, mismatched,
-    and provider-error callbacks cannot be replayed.
+    if not isinstance(record, dict):
+        return False
+    state = record.get("state")
+    if not isinstance(state, str) or not state:
+        return False
+    try:
+        issued_at = float(record.get("issued_at"))
+    except (TypeError, ValueError):
+        return False
+    age = (time.time() if now is None else now) - issued_at
+    if not (
+        0 <= age <= OAUTH_STATE_TTL_SECONDS
+        and secrets.compare_digest(str(record.get("provider")), str(provider))
+        and secrets.compare_digest(str(record.get("member_id")), str(member.pk))
+        and secrets.compare_digest(str(record.get("account_id")), str(account.pk))
+    ):
+        return False
+
+    verifier = record.get("code_verifier")
+    challenge = record.get("code_challenge")
+    if not use_pkce:
+        return verifier is None and challenge is None
+    if not isinstance(verifier, str) or not isinstance(challenge, str):
+        return False
+    try:
+        expected_challenge = _pkce_challenge(verifier)
+    except (UnicodeEncodeError, ValueError):
+        return False
+    return secrets.compare_digest(expected_challenge, challenge)
+
+
+def get_or_issue_oauth_state(
+    request,
+    *,
+    provider,
+    member,
+    account,
+    use_pkce=False,
+    legacy_session_key=None,
+):
+    """Return a matching live transaction without rotating it during a GET.
+
+    A missing, expired, differently-bound, or PKCE-incompatible record is
+    replaced.  This makes authenticated console pages idempotent while retaining
+    the explicit replacement semantics of :func:`issue_oauth_state` for a real
+    restart button or POST endpoint.
     """
 
     pending = request.session.get(OAUTH_STATE_SESSION_KEY, {})
     pending = dict(pending) if isinstance(pending, dict) else {}
-    expected = pending.pop(str(provider), None)
-    if pending:
-        request.session[OAUTH_STATE_SESSION_KEY] = pending
-    else:
-        request.session.pop(OAUTH_STATE_SESSION_KEY, None)
+    record = pending.get(str(provider))
+    if _state_record_is_reusable(
+        record,
+        provider=provider,
+        member=member,
+        account=account,
+        use_pkce=use_pkce,
+    ):
+        if legacy_session_key:
+            request.session.pop(legacy_session_key, None)
+        return dict(record)
+
+    if legacy_session_key:
+        legacy_record = request.session.pop(legacy_session_key, None)
+        if isinstance(legacy_record, dict):
+            legacy_record = dict(legacy_record)
+            legacy_record.setdefault("provider", str(provider))
+            if _state_record_is_reusable(
+                legacy_record,
+                provider=provider,
+                member=member,
+                account=account,
+                use_pkce=use_pkce,
+            ):
+                pending[str(provider)] = legacy_record
+                request.session[OAUTH_STATE_SESSION_KEY] = pending
+                return dict(legacy_record)
+    return issue_oauth_state(
+        request,
+        provider=provider,
+        member=member,
+        account=account,
+        use_pkce=use_pkce,
+    )
+
+
+def consume_oauth_state(
+    request,
+    *,
+    provider,
+    received_state,
+    member,
+    account,
+    legacy_session_key=None,
+):
+    """Verify and consume one matching OAuth state record.
+
+    A callback carrying an unknown state must not cancel the user's legitimate
+    in-flight authorization.  This matters for cross-site top-level callbacks:
+    browsers may attach a SameSite=Lax session cookie even though the sender
+    cannot read the pending state.  Once the opaque state itself matches, consume
+    the record whether the remaining binding/expiry checks pass or fail so that a
+    known stale or misbound value cannot be replayed.
+    """
+
+    pending = request.session.get(OAUTH_STATE_SESSION_KEY, {})
+    pending = dict(pending) if isinstance(pending, dict) else {}
+    provider_key = str(provider)
+    expected = pending.get(provider_key)
+    using_legacy = False
+    if expected is None and legacy_session_key:
+        legacy_expected = request.session.get(legacy_session_key)
+        if isinstance(legacy_expected, dict):
+            expected = dict(legacy_expected)
+            expected.setdefault("provider", provider_key)
+            using_legacy = True
 
     if not isinstance(expected, dict) or not isinstance(received_state, str):
         return None
     expected_state = expected.get("state")
-    if not isinstance(expected_state, str):
+    if not isinstance(expected_state, str) or not secrets.compare_digest(
+        expected_state, received_state
+    ):
         return None
+
+    # Only knowledge of the opaque expected state is allowed to mutate the
+    # pending transaction. A current provider record supersedes and retires any
+    # legacy record for that provider when it is consumed.
+    if using_legacy:
+        request.session.pop(legacy_session_key, None)
+    else:
+        pending.pop(provider_key, None)
+        if pending:
+            request.session[OAUTH_STATE_SESSION_KEY] = pending
+        else:
+            request.session.pop(OAUTH_STATE_SESSION_KEY, None)
+        if legacy_session_key:
+            request.session.pop(legacy_session_key, None)
+
     try:
         issued_at = float(expected.get("issued_at"))
     except (TypeError, ValueError):
@@ -83,8 +210,7 @@ def consume_oauth_state(request, *, provider, received_state, member, account):
     age = time.time() - issued_at
     valid = (
         0 <= age <= OAUTH_STATE_TTL_SECONDS
-        and secrets.compare_digest(expected_state, received_state)
-        and secrets.compare_digest(str(expected.get("provider")), str(provider))
+        and secrets.compare_digest(str(expected.get("provider")), provider_key)
         and secrets.compare_digest(str(expected.get("member_id")), str(member.pk))
         and secrets.compare_digest(str(expected.get("account_id")), str(account.pk))
     )

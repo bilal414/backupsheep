@@ -9,7 +9,7 @@ from django.views.generic import TemplateView
 from apps.console.account.models import CoreAccountGroup
 from apps.console.notification.models import CoreNotificationSlack, CoreNotificationTelegram
 from apps.api.v1.utils.api_permissions import current_account_is_primary
-from apps.api.v1.utils.oauth_security import issue_oauth_state
+from apps.api.v1.utils.oauth_security import get_or_issue_oauth_state
 
 
 class AccountView(LoginRequiredMixin, TemplateView):
@@ -124,7 +124,7 @@ class NotificationView(LoginRequiredMixin, TemplateView):
             and settings.SLACK_CLIENT_SECRET
             and settings.SLACK_TOKEN_URL
         ):
-            oauth_state = issue_oauth_state(
+            oauth_state = get_or_issue_oauth_state(
                 request,
                 provider="slack",
                 member=request.user.member,

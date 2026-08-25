@@ -21,11 +21,12 @@ On success the .sql files are zipped to ``_storage/{uuid}.zip`` and the dump
 directory is deleted; on any failure everything is deleted and
 NodeBackupFailedError is raised. A disk-space preflight (~2x the node's most
 recent COMPLETE backup, 1 GiB floor) runs before anything is dumped so a huge
-database fails fast instead of filling the shared _storage volume mid-run.
+database fails fast instead of filling its private database workdir mid-run.
 """
 
 import subprocess
 import os
+import tempfile
 from sentry_sdk import capture_exception
 from apps._tasks.integration.backup.errors import safe_backup_failure
 from apps._tasks.exceptions import NodeBackupFailedError
@@ -39,7 +40,11 @@ from apps._tasks.integration.backup._mysql_schema import (
 from apps._tasks.helper.tasks import delete_from_disk
 from apps.api.v1.utils.api_helpers import bs_decrypt, ensure_disk_space
 from apps.api.v1.utils.api_helpers import mkdir_p
-from apps._tasks.integration.backup._sanitize import safe_token, safe_password
+from apps._tasks.integration.backup._sanitize import (
+    safe_password,
+    safe_positional_token,
+    safe_token,
+)
 
 from apps.console.utils.models import BackupExecutionLeaseLostError, UtilBackup
 
@@ -76,17 +81,40 @@ def _defaults_file_content(username, password, host, port, use_ssl):
 
 
 def _write_local_defaults_file(file_path, content):
-    with open(file_path, "w") as fh:
-        fh.write(content)
-    os.chmod(file_path, 0o600)
+    directory = os.path.dirname(file_path) or "."
+    descriptor, staged_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(file_path)}.", dir=directory
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w") as destination:
+            descriptor = -1
+            destination.write(content)
+            destination.flush()
+            os.fsync(destination.fileno())
+        # Replace a stale regular file, symlink, or hardlink as a directory entry;
+        # never follow it while writing credential bytes.
+        os.replace(staged_path, file_path)
+        staged_path = None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if staged_path is not None:
+            try:
+                os.unlink(staged_path)
+            except FileNotFoundError:
+                pass
 
 
 def _sftp_write_remote_file(ssh, remote_name, content):
     sftp = ssh.open_sftp()
     try:
-        with sftp.open(remote_name, "w") as fh:
+        with sftp.open(remote_name, "x") as fh:
+            # Exclusive creation rejects a pre-positioned file or symlink. Restrict
+            # the empty inode before publishing credentials; SFTP has no portable
+            # atomic create-with-mode operation.
+            sftp.chmod(remote_name, 0o600)
             fh.write(content)
-        sftp.chmod(remote_name, 0o600)
     finally:
         sftp.close()
 
@@ -243,8 +271,8 @@ def snapshot_mysql(backup):
     log_file.write(f"Attempt Number: {backup.attempt_no} \n")
 
     try:
-        # Disk-space preflight: a huge dump must not fill the shared _storage
-        # volume mid-run. Estimate ~2x the node's most recent COMPLETE backup
+        # Disk-space preflight: a huge dump must not fill the private database
+        # workdir mid-run. Estimate ~2x the node's most recent COMPLETE backup
         # (dump files plus the final zip), floored at 1 GiB.
         last = (
             backup.__class__.objects.filter(
@@ -309,13 +337,15 @@ def snapshot_mysql(backup):
         # connection fields before they are interpolated into the dump commands below.
         safe_token(node.connection.auth_database.host, "host")
         safe_token(node.connection.auth_database.port, "port")
-        safe_token(node.connection.auth_database.database_name, "database_name")
+        safe_positional_token(
+            node.connection.auth_database.database_name, "database_name"
+        )
         safe_token(username, "username")
         safe_password(password, "password")
         for _name in (node.database.databases or []):
-            safe_token(_name, "databases")
+            safe_positional_token(_name, "databases")
         for _name in (node.database.tables or []):
-            safe_token(_name, "tables")
+            safe_positional_token(_name, "tables")
 
         dump_flags = option_flags + [
             "--no-tablespaces",
@@ -366,6 +396,7 @@ def snapshot_mysql(backup):
                     return " ".join(
                         ["mysqldump", f"--defaults-extra-file={remote_defaults_name}"]
                         + dump_flags
+                        + ["--"]
                         + targets
                     )
 
@@ -411,7 +442,7 @@ def snapshot_mysql(backup):
                             databases.append(database_name)
 
                     for database in databases:
-                        safe_token(database, "database")
+                        safe_positional_token(database, "database")
                         defaults = record_remote_database_defaults(database)
                         _ssh_dump_to_file(
                             node,
@@ -495,6 +526,7 @@ def snapshot_mysql(backup):
                 return (
                     [f"{database_version_path}mysqldump", f"--defaults-extra-file={local_defaults_path}"]
                     + dump_flags
+                    + ["--"]
                     + targets
                 )
 
@@ -543,7 +575,7 @@ def snapshot_mysql(backup):
 
             if selected_databases:
                 for database in selected_databases:
-                    safe_token(database, "database")
+                    safe_positional_token(database, "database")
                     defaults = record_local_database_defaults(database)
                     _run_direct_dump(
                         node,

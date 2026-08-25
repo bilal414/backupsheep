@@ -57,6 +57,7 @@ COMPUTE_MAX_WAIT_POLLS = 120
 COMPUTE_POLL_SECONDS = 5
 SSH_MAX_WAIT_POLLS = 60
 SSH_POLL_SECONDS = 5
+SSH_FINGERPRINT_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 FIREWALL_RULE_LIMIT = 1000
 FIREWALL_MAX_WAIT_POLLS = 24
 FIREWALL_POLL_SECONDS = 5
@@ -79,6 +80,31 @@ FIREWALL_RULE_FIELDS = (
     "action",
     "comment",
 )
+
+
+def _ssh_public_key_fingerprint(key) -> str:
+    """Return the OpenSSH SHA-256 fingerprint for one public host key."""
+    try:
+        raw = key.asbytes()
+    except Exception:
+        raise HarnessError("Pinned SSH host key was not readable.") from None
+    if not isinstance(raw, bytes) or not raw:
+        raise HarnessError("Pinned SSH host key was malformed.")
+    return "SHA256:" + base64.b64encode(hashlib.sha256(raw).digest()).decode(
+        "ascii"
+    ).rstrip("=")
+
+
+class _ExactHostKeyPolicy:
+    """Accept a missing Paramiko host only when an independent pin matches."""
+
+    def __init__(self, expected_fingerprint: str):
+        self.expected_fingerprint = expected_fingerprint
+
+    def missing_host_key(self, _client, _hostname, key) -> None:
+        actual = _ssh_public_key_fingerprint(key)
+        if not secrets.compare_digest(actual, self.expected_fingerprint):
+            raise HarnessError("The UpCloud SSH host key did not match the exact pin.")
 RUNTIME_DIR = ROOT / "scripts" / ".upcloud-runtime"
 RUNTIME_SCHEMA = "backupsheep-upcloud-mos-runtime-v1"
 COMPUTE_RUNTIME_SCHEMA = "backupsheep-upcloud-compute-runtime-v1"
@@ -5294,18 +5320,25 @@ class UpCloudLiveHarness:
         except Exception:
             raise HarnessError("Paramiko is required for UpCloud data verification.") from None
         private_path, _public_key = self._ensure_ssh_key()
-        _private, _public, known_hosts = self._key_paths()
         addresses = set(self._server_public_addresses(server))
         configured = str(self.environment.get(host_variable) or "").strip()
         host = configured or (sorted(addresses)[0] if addresses else "")
         if not host or host not in addresses:
             raise HarnessError("SSH host is not an exact provider-reported address.")
+        pin_variable = f"{host_variable}_KEY_SHA256"
+        expected_fingerprint = str(
+            self.environment.get(pin_variable) or ""
+        ).strip()
+        if not SSH_FINGERPRINT_RE.fullmatch(expected_fingerprint):
+            raise HarnessError(
+                f"{pin_variable} must be an exact OpenSSH SHA-256 host-key fingerprint."
+            )
         client = paramiko.SSHClient()
-        if known_hosts.exists():
-            client.load_host_keys(str(known_hosts))
-        first_connection = host not in client.get_host_keys()
+        # A provider-reported IP is not an authenticated host identity. Require
+        # a fingerprint collected through an independent provider/console path;
+        # never persist or reuse a key learned from this SSH connection.
         client.set_missing_host_key_policy(
-            paramiko.AutoAddPolicy() if first_connection else paramiko.RejectPolicy()
+            _ExactHostKeyPolicy(expected_fingerprint)
         )
         try:
             key = paramiko.RSAKey.from_private_key_file(str(private_path))
@@ -5319,11 +5352,17 @@ class UpCloudLiveHarness:
                 banner_timeout=REQUEST_TIMEOUT[1],
                 auth_timeout=REQUEST_TIMEOUT[1],
             )
-            if first_connection:
-                known_hosts.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                client.save_host_keys(str(known_hosts))
-                os.chmod(known_hosts, 0o600)
+            remote_key = client.get_transport().get_remote_server_key()
+            if not secrets.compare_digest(
+                _ssh_public_key_fingerprint(remote_key), expected_fingerprint
+            ):
+                raise HarnessError(
+                    "The connected UpCloud SSH host key did not match the exact pin."
+                )
             return client
+        except HarnessError:
+            client.close()
+            raise
         except Exception:
             client.close()
             raise HarnessError("SSH connection to the exact UpCloud test server failed.") from None
@@ -5345,14 +5384,10 @@ class UpCloudLiveHarness:
     @staticmethod
     def _ssh_host_key_fingerprint(client) -> str:
         try:
-            raw = client.get_transport().get_remote_server_key().asbytes()
+            key = client.get_transport().get_remote_server_key()
         except Exception:
             raise HarnessError("The UpCloud SSH host key was not readable.") from None
-        if not isinstance(raw, bytes) or not raw:
-            raise HarnessError("The UpCloud SSH host key was malformed.")
-        return "SHA256:" + base64.b64encode(hashlib.sha256(raw).digest()).decode(
-            "ascii"
-        ).rstrip("=")
+        return _ssh_public_key_fingerprint(key)
 
     def _guest_restore_evidence(self, client, server: dict) -> dict:
         """Verify the restored guest network, boot, and bounded egress state."""

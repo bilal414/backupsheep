@@ -41,6 +41,10 @@ from apps._tasks.integration.backup import _mysql_schema as MYSQL_SCHEMA
 from apps._tasks.integration.backup import postgresql as PG_ENGINE
 from apps._tasks.integration.backup import website as W
 from apps._tasks.integration.backup._archive import ArchiveSourcePolicyError
+from apps._tasks.integration.backup._sanitize import (
+    UnsafeBackupInput,
+    safe_positional_token,
+)
 from apps._tasks.integration.backup.errors import BackupStageError, safe_backup_failure
 from apps._tasks.integration.database import backup_database
 from apps._tasks.integration.website import backup_website
@@ -777,6 +781,31 @@ class LftpScriptBuilderTests(TestCase):
         self.assertIn('user "u\\"x" "pa\\"ss"', s)
         self.assertIn("set ftps:initial-prot P", s)
 
+    def test_redaction_covers_lftp_escaped_quotes_and_backslashes(self):
+        username = 'user"name\\tenant'
+        password = 'pass"word\\secret'
+        script = W._build_lftp_script(
+            auth=self._auth(CoreAuthWebsite.Protocol.FTPS, explicit=True),
+            host_url="ftp://h",
+            port=21,
+            username=username,
+            password=password,
+            ssh_key_path=None,
+            parallel=1,
+            transfer='get "f" -o "t"',
+            mirror=False,
+        )
+
+        redacted = W._redact(script, username, password)
+
+        for marker in (
+            username,
+            password,
+            'user\\"name\\\\tenant',
+            'pass\\"word\\\\secret',
+        ):
+            self.assertNotIn(marker, redacted)
+
     def test_verify_ssl_flag_reflected(self):
         on = W._build_lftp_script(auth=self._auth(CoreAuthWebsite.Protocol.FTPS, verify=True),
                                   host_url="ftp://h", port=21, username="u", password="p",
@@ -949,6 +978,19 @@ class RemoteTarCommandSafetyTests(TestCase):
         self.assertEqual(arguments[operand_boundary + 1:], sources)
 
 
+class DatabaseClientOperandSafetyTests(SimpleTestCase):
+    def test_option_shaped_database_and_table_names_fail_closed(self):
+        for value in ("-V", "--help", "--tab=_storage", "--result-file=loot.sql"):
+            with self.subTest(value=value), self.assertRaises(UnsafeBackupInput):
+                safe_positional_token(value, "database")
+
+    def test_non_option_database_identifier_is_preserved(self):
+        self.assertEqual(
+            safe_positional_token("customer-data_2026", "database"),
+            "customer-data_2026",
+        )
+
+
 class CeleryRoutingTests(TestCase):
     def test_tasks_route_to_expected_queues(self):
         from backupsheep.celery import app
@@ -983,6 +1025,7 @@ class CeleryRoutingTests(TestCase):
                      "storage_cleanup_owned_multipart",
                      "storage_sweep_owned_multipart_cleanup", "finalize_backup",
                      "delete_from_disk", "poll_cloud_backup", "delete_old_logs",
+                     "delete_old_database_logs", "delete_old_storage_logs",
                      "run_scheduled_backup", "resume_in_progress_backups"]:
             self.assertIn(name, app.tasks)
         self.assertNotIn("send_to_firebase", app.tasks)
@@ -1113,6 +1156,30 @@ class DiskCleanupTests(TestCase):
             helper_tasks.delete_old_logs.apply(args=[30])
         self.assertFalse(os.path.exists(old))
         self.assertTrue(os.path.exists(fresh))
+
+    def test_database_lane_delete_old_logs_uses_the_same_private_pruner(self):
+        import tempfile
+        base = tempfile.mkdtemp()
+        st = self._storage(base)
+        old = os.path.join(st, "old-database.log")
+        open(old, "w").close()
+        forty_days = time.time() - 40 * 86400
+        os.utime(old, (forty_days, forty_days))
+        with override_settings(BASE_DIR=base):
+            helper_tasks.delete_old_database_logs.apply(args=[30])
+        self.assertFalse(os.path.exists(old))
+
+    def test_storage_lane_delete_old_logs_uses_the_same_private_pruner(self):
+        import tempfile
+        base = tempfile.mkdtemp()
+        st = self._storage(base)
+        old = os.path.join(st, "old-storage.log")
+        open(old, "w").close()
+        forty_days = time.time() - 40 * 86400
+        os.utime(old, (forty_days, forty_days))
+        with override_settings(BASE_DIR=base):
+            helper_tasks.delete_old_storage_logs.apply(args=[30])
+        self.assertFalse(os.path.exists(old))
 
 
 def _cleanup_storage_artifacts(*paths):
@@ -1432,12 +1499,12 @@ class CacheFingerprintTests(TestCase):
 
 
 class ResetIncrementalCacheTests(BaseTestCase):
-    """The web role schedules cache deletion on the storage-worker boundary."""
+    """The web role schedules cache deletion on the files-worker boundary."""
 
     @mock.patch(
         "apps.api.v1.node.views.reset_incremental_cache.apply_async"
     )
-    def test_reset_incremental_schedules_storage_task(self, apply_async):
+    def test_reset_incremental_schedules_files_task(self, apply_async):
         node = factories.make_website_node(self.account, self.member)
         request = APIRequestFactory().post(f"/api/v1/nodes/{node.id}/reset_incremental/")
         force_authenticate(request, user=self.user)
@@ -1446,7 +1513,55 @@ class ResetIncrementalCacheTests(BaseTestCase):
         self.assertEqual(resp.status_code, 200)
         apply_async.assert_called_once_with(args=[node.pk])
 
-    def test_storage_task_deletes_only_requested_cache(self):
+    @mock.patch(
+        "apps.api.v1.node.views.reset_incremental_cache.apply_async"
+    )
+    def test_reset_incremental_rejects_non_website_without_publishing(self, apply_async):
+        node = factories.make_cloud_node(self.account, self.member)
+        request = APIRequestFactory().post(f"/api/v1/nodes/{node.id}/reset_incremental/")
+        force_authenticate(request, user=self.user)
+        view = CoreNodeView.as_view({"post": "reset_incremental"})
+
+        resp = view(request, pk=node.id)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            resp.data,
+            {"detail": "Incremental cache reset is available only for website nodes."},
+        )
+        apply_async.assert_not_called()
+
+    @mock.patch(
+        "apps.api.v1.node.views.reset_incremental_cache.apply_async"
+    )
+    def test_reset_incremental_does_not_disclose_foreign_website(self, apply_async):
+        other_account, other_member, _other_user = factories.make_account()
+        node = factories.make_website_node(other_account, other_member)
+        request = APIRequestFactory().post(f"/api/v1/nodes/{node.id}/reset_incremental/")
+        force_authenticate(request, user=self.user)
+        view = CoreNodeView.as_view({"post": "reset_incremental"})
+
+        resp = view(request, pk=node.id)
+
+        self.assertEqual(resp.status_code, 404)
+        apply_async.assert_not_called()
+
+    def test_files_task_ignores_non_website_node_even_if_called_directly(self):
+        node = factories.make_cloud_node(self.account, self.member)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        cache_dir = os.path.join(tmp, "_storage", "website_cache", node.uuid_str)
+        os.makedirs(cache_dir)
+        sentinel = os.path.join(cache_dir, "must-survive")
+        with open(sentinel, "w") as handle:
+            handle.write("not a website cache")
+
+        with override_settings(BASE_DIR=tmp):
+            helper_tasks.reset_incremental_cache.apply(args=[node.pk]).get()
+
+        self.assertTrue(os.path.isfile(sentinel))
+
+    def test_files_task_deletes_only_requested_cache(self):
         node = factories.make_website_node(self.account, self.member)
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -1467,7 +1582,7 @@ class ResetIncrementalCacheTests(BaseTestCase):
             os.path.join(tmp, "_storage", "website_cache", f"{node.uuid_str}.lock")
         ))
 
-    def test_storage_task_holds_incremental_lock_around_deletion(self):
+    def test_files_task_holds_incremental_lock_around_deletion(self):
         node = factories.make_website_node(self.account, self.member)
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -1495,7 +1610,7 @@ class ResetIncrementalCacheTests(BaseTestCase):
 
         self.assertEqual(events, ["lock", "delete", "unlock"])
 
-    def test_storage_task_rejects_cache_root_symlink_outside_workdir(self):
+    def test_files_task_rejects_cache_root_symlink_outside_workdir(self):
         node = factories.make_website_node(self.account, self.member)
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -2196,6 +2311,56 @@ class DatabaseSnapshotDispatchTests(BaseTestCase):
         m_pg.assert_not_called()
 
 
+class DatabaseCredentialFileSecurityTests(SimpleTestCase):
+    def test_local_defaults_publish_never_follows_an_existing_link(self):
+        for engine in (MYSQL_ENGINE, MDB_ENGINE):
+            with self.subTest(engine=engine.__name__):
+                with tempfile.TemporaryDirectory() as root:
+                    victim = os.path.join(root, "victim")
+                    destination = os.path.join(root, "credentials.cnf")
+                    with open(victim, "w", encoding="utf-8") as output:
+                        output.write("must-survive")
+                    os.symlink(victim, destination)
+
+                    engine._write_local_defaults_file(
+                        destination, "password=secret\n"
+                    )
+
+                    self.assertFalse(os.path.islink(destination))
+                    self.assertEqual(
+                        stat.S_IMODE(os.stat(destination).st_mode), 0o600
+                    )
+                    with open(destination, encoding="utf-8") as source:
+                        self.assertEqual(source.read(), "password=secret\n")
+                    with open(victim, encoding="utf-8") as source:
+                        self.assertEqual(source.read(), "must-survive")
+
+    def test_remote_defaults_are_restricted_before_credentials_are_written(self):
+        for engine in (MYSQL_ENGINE, MDB_ENGINE, PG_ENGINE):
+            with self.subTest(engine=engine.__name__):
+                events = []
+                writer = mock.MagicMock()
+                writer.write.side_effect = lambda _content: events.append("write")
+                opened = mock.MagicMock()
+                opened.__enter__.return_value = writer
+                sftp = mock.MagicMock()
+                sftp.open.side_effect = lambda *_args: (
+                    events.append("open") or opened
+                )
+                sftp.chmod.side_effect = lambda *_args: events.append("chmod")
+                sftp.close.side_effect = lambda: events.append("close")
+                ssh = mock.MagicMock()
+                ssh.open_sftp.return_value = sftp
+
+                engine._sftp_write_remote_file(
+                    ssh, "credentials.cnf", "password=secret\n"
+                )
+
+                self.assertEqual(events, ["open", "chmod", "write", "close"])
+                sftp.open.assert_called_once_with("credentials.cnf", "x")
+                sftp.chmod.assert_called_once_with("credentials.cnf", 0o600)
+
+
 class MysqlDirectEngineTests(DatabaseEngineBase):
     """snapshot_mysql in DIRECT mode: argv list, temp defaults file, exit-code checks."""
 
@@ -2264,7 +2429,9 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
         self.assertNotIn("env", kwargs)
         self.assertEqual(kwargs.get("timeout"), 12 * 3600)
         self.assertEqual(calls[0]["defaults_mode"], 0o600)
-        self.assertEqual(backup.option_mysql, " ".join(argv[2:-1]))
+        operand_boundary = argv.index("--")
+        self.assertEqual(operand_boundary, len(argv) - 2)
+        self.assertEqual(backup.option_mysql, " ".join(argv[2:operand_boundary]))
         self.assertEqual(
             backup.metadata["logical_dump"],
             {
@@ -2272,7 +2439,7 @@ class MysqlDirectEngineTests(DatabaseEngineBase):
                 "engine": "mysql",
                 "version": "mysql_8_0",
                 "client": "mysqldump",
-                "flags": argv[2:-1],
+                "flags": argv[2:operand_boundary],
                 "extended_insert": True,
                 "max_allowed_packet_bytes": 512 * 1024 * 1024,
                 "database_defaults": {
@@ -2537,7 +2704,11 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
         self.assertFalse(any("column-statistics" in a for a in argv))
         self.assertNotIn(DB_PASS, " ".join(argv))
         self.assertFalse(os.path.exists(f"_storage/my_{backup.uuid}.cnf"))
-        self.assertEqual(backup.option_mariadb, " ".join(argv[2:-1]))
+        operand_boundary = argv.index("--")
+        self.assertEqual(operand_boundary, len(argv) - 2)
+        self.assertEqual(
+            backup.option_mariadb, " ".join(argv[2:operand_boundary])
+        )
         self.assertEqual(
             backup.metadata["logical_dump"],
             {
@@ -2545,7 +2716,7 @@ class MariadbDirectEngineTests(DatabaseEngineBase):
                 "engine": "mariadb",
                 "version": "mariadb_10_11",
                 "client": "mariadb-dump",
-                "flags": argv[2:-1],
+                "flags": argv[2:operand_boundary],
                 "extended_insert": True,
                 "max_allowed_packet_bytes": 512 * 1024 * 1024,
                 "database_defaults": {
@@ -2705,6 +2876,7 @@ class MariadbSshEngineTests(DatabaseEngineBase):
         self.assertIn("--extended-insert", dump_commands[0])
         self.assertNotIn("--skip-extended-insert", dump_commands[0])
         self.assertNotIn(DB_PASS, dump_commands[0])
+        self.assertIn(" -- appdb", dump_commands[0])
         with zipfile.ZipFile(f"_storage/{backup.uuid}.zip") as archive:
             self.assertEqual(
                 archive.read("appdb.sql"), MYSQL_SCHEMA_PREAMBLE + dump
@@ -2805,6 +2977,7 @@ class MysqlSshEngineTests(DatabaseEngineBase):
         self.assertIn("--extended-insert", dump_cmds[0])
         self.assertNotIn("--skip-extended-insert", dump_cmds[0])
         self.assertNotIn(DB_PASS, dump_cmds[0])
+        self.assertIn(" -- appdb", dump_cmds[0])
 
         # Credentials file SFTP-uploaded with 0600, then removed best-effort.
         self.assertIn(remote_name, ssh.sftp.files)

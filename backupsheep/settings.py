@@ -1099,8 +1099,9 @@ CELERY_IMPORTS = (
 # commits each occurrence and its outbox before broker publication.
 CELERY_BEAT_SCHEDULER = "backupsheep.scheduler:BackupDatabaseScheduler"
 
-# Backup run logs are kept on the container's local _storage volume (never uploaded to
-# any external bucket) and pruned by the delete_old_logs task after this many days.
+# Backup run logs are kept in each source lane's private _storage volume (never
+# uploaded to any external bucket) and pruned by the matching lane-owned task after
+# this many days.
 LOG_RETENTION_DAYS = int(config.get("LOG_RETENTION_DAYS", 30))
 
 # Notification providers are contacted only after a short database lease has
@@ -1322,13 +1323,25 @@ S3_DOWNLOAD_URL_EXPIRES = _bounded_positive_int(
     60 * 60,
 )
 
-# WordPress targets are public HTTPS origins by default. Self-hosters that must
-# reach a private WordPress origin can enumerate only the required private CIDRs;
-# loopback, link-local, reserved and metadata targets remain forbidden regardless.
-WORDPRESS_INTEGRATION_ENABLED = _as_bool(
+# WordPress and Basecamp have no enterprise BSE1 plaintext-export/restore path.
+# Their feature switches are compatibility opt-ins only; the shared recovery
+# capability gate additionally requires non-enterprise legacy-only artifacts with
+# legacy download enabled. Security-policy booleans are strict so a typo cannot
+# accidentally enable an incomplete source family.
+WORDPRESS_INTEGRATION_ENABLED = _strict_bool(
+    "WORDPRESS_INTEGRATION_ENABLED",
     config.get("WORDPRESS_INTEGRATION_ENABLED"),
     default=False,
 )
+BASECAMP_INTEGRATION_ENABLED = _strict_bool(
+    "BASECAMP_INTEGRATION_ENABLED",
+    config.get("BASECAMP_INTEGRATION_ENABLED"),
+    default=False,
+)
+
+# WordPress targets are public HTTPS origins by default. Self-hosters that must
+# reach a private WordPress origin can enumerate only the required private CIDRs;
+# loopback, link-local, reserved and metadata targets remain forbidden regardless.
 WORDPRESS_PRIVATE_TARGET_CIDRS = _private_network_allowlist(
     "WORDPRESS_PRIVATE_TARGET_CIDRS"
 )
@@ -1341,9 +1354,9 @@ ALLOW_INSECURE_FTP = _as_bool(
     default=False,
 )
 
-# Paramiko and the system SSH client both require a verified host key for SSH/SFTP
-# backup sources.  Keep the file under the persistent _storage volume by default so
-# operators can mount a reviewed known_hosts file into the worker containers.
+# Compatibility path for non-Compose development callers. Stock Compose uses the
+# account-scoped approval ledger and transient per-operation known_hosts files; it
+# must not mount a shared writable trust store.
 SSH_KNOWN_HOSTS_PATH = os.path.expanduser(
     str(config.get("SSH_KNOWN_HOSTS_PATH", os.path.join(BASE_DIR, "_storage", "ssh_known_hosts")))
 )
@@ -1363,6 +1376,57 @@ DATABASE_COMMAND_TIMEOUT = int(config.get("DATABASE_COMMAND_TIMEOUT", 23 * 3600)
 DATABASE_VALIDATION_COMMAND_TIMEOUT = int(
     config.get("DATABASE_VALIDATION_COMMAND_TIMEOUT", 30)
 )
+SSH_IO_TIMEOUT = _bounded_positive_int("SSH_IO_TIMEOUT", 30, 120)
+SSH_DISCOVERY_TIMEOUT_SECONDS = _bounded_positive_int(
+    "SSH_DISCOVERY_TIMEOUT_SECONDS", 60, 180
+)
+SSH_DISCOVERY_MAX_ENTRIES = _bounded_positive_int(
+    "SSH_DISCOVERY_MAX_ENTRIES", 10_000, 100_000
+)
+SSH_DISCOVERY_MAX_NAME_BYTES = _bounded_positive_int(
+    "SSH_DISCOVERY_MAX_NAME_BYTES", 4_096, 16_384
+)
+SSH_DISCOVERY_MAX_RESULT_BYTES = _bounded_positive_int(
+    "SSH_DISCOVERY_MAX_RESULT_BYTES", 2 * 1024 * 1024, 4 * 1024 * 1024
+)
+SSH_REMOTE_COMMAND_MAX_BYTES = _bounded_positive_int(
+    "SSH_REMOTE_COMMAND_MAX_BYTES", 2 * 1024 * 1024, 4 * 1024 * 1024
+)
+SSH_REMOTE_CREDENTIAL_STALE_SECONDS = _bounded_positive_int(
+    "SSH_REMOTE_CREDENTIAL_STALE_SECONDS", 900, 86_400
+)
+SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES = _bounded_positive_int(
+    "SSH_REMOTE_CREDENTIAL_SWEEP_MAX_ENTRIES", 10_000, 100_000
+)
+SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS = _bounded_positive_int(
+    "SSH_REMOTE_CREDENTIAL_SWEEP_TIMEOUT_SECONDS", 10, 60
+)
+MANAGED_SSH_OPERATION_TTL_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_OPERATION_TTL_SECONDS", 600, 1_800
+)
+MANAGED_SSH_OPERATION_LEASE_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_OPERATION_LEASE_SECONDS", 300, 900
+)
+MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS", 240, 840
+)
+MANAGED_SSH_TASK_TIME_LIMIT_SECONDS = _bounded_positive_int(
+    "MANAGED_SSH_TASK_TIME_LIMIT_SECONDS", 270, 870
+)
+if not (
+    MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS
+    < MANAGED_SSH_TASK_TIME_LIMIT_SECONDS
+    < MANAGED_SSH_OPERATION_LEASE_SECONDS
+    < MANAGED_SSH_OPERATION_TTL_SECONDS
+):
+    raise ImproperlyConfigured(
+        "Managed SSH limits must satisfy soft time limit < hard time limit < "
+        "lease < operation TTL."
+    )
+if SSH_DISCOVERY_TIMEOUT_SECONDS >= MANAGED_SSH_TASK_SOFT_TIME_LIMIT_SECONDS:
+    raise ImproperlyConfigured(
+        "SSH_DISCOVERY_TIMEOUT_SECONDS must be below the managed SSH soft time limit."
+    )
 SOURCE_ARCHIVE_VERIFY_TIMEOUT_SECONDS = int(
     config.get("SOURCE_ARCHIVE_VERIFY_TIMEOUT_SECONDS", 12 * 3600)
 )
@@ -1430,10 +1494,9 @@ WEBSITE_RESTORE_INLINE_FILE_LIMIT = config.get(
     "WEBSITE_RESTORE_INLINE_FILE_LIMIT", 1_000
 )
 
-# Managed-key authentication is optional and must be configured as an explicit key
-# pair by a self-hosted operator. Never advertise a built-in key whose private half
-# is missing from workers. Relative paths are resolved beneath BASE_DIR so the
-# persistent _storage volume can be shared by web and backup workers.
+# Managed-key authentication is optional. Stock Compose exposes two distinct public
+# identities and stages exactly one private half into each source worker's tmpfs.
+# The generic private path is runtime-only and must never point into a shared volume.
 SSH_MANAGED_PRIVATE_KEY_PATH = os.path.expanduser(
     str(config.get("SSH_MANAGED_PRIVATE_KEY_PATH", ""))
 )
@@ -1442,6 +1505,17 @@ if SSH_MANAGED_PRIVATE_KEY_PATH and not os.path.isabs(SSH_MANAGED_PRIVATE_KEY_PA
         BASE_DIR, SSH_MANAGED_PRIVATE_KEY_PATH
     )
 SSH_MANAGED_PUBLIC_KEY = str(config.get("SSH_MANAGED_PUBLIC_KEY", "")).strip()
+SSH_MANAGED_DATABASE_PUBLIC_KEY = str(
+    config.get("SSH_MANAGED_DATABASE_PUBLIC_KEY", "")
+).strip()
+SSH_MANAGED_FILES_PUBLIC_KEY = str(
+    config.get("SSH_MANAGED_FILES_PUBLIC_KEY", "")
+).strip()
+SSH_MANAGED_LANE_ISOLATION_REQUIRED = _strict_bool(
+    "SSH_MANAGED_LANE_ISOLATION_REQUIRED",
+    config.get("SSH_MANAGED_LANE_ISOLATION_REQUIRED"),
+    default=False,
+)
 # Compatibility for older deployments and code paths.
 SSH_KEY_PATH = SSH_MANAGED_PRIVATE_KEY_PATH
 
@@ -1452,7 +1526,15 @@ from celery.schedules import crontab
 CELERY_BEAT_SCHEDULE = {
     "delete-old-logs": {
         "task": "delete_old_logs",
-        "schedule": crontab(minute=0, hour=3),  # daily at 03:00 (worker timezone)
+        "schedule": crontab(minute=0, hour=3),  # files lane, daily at 03:00
+    },
+    "delete-old-database-run-logs": {
+        "task": "delete_old_database_logs",
+        "schedule": crontab(minute=5, hour=3),  # database lane, daily at 03:05
+    },
+    "delete-old-storage-run-logs": {
+        "task": "delete_old_storage_logs",
+        "schedule": crontab(minute=10, hour=3),  # storage lane, daily at 03:10
     },
     # Prune old CoreLog rows from the database (see delete_old_db_logs task).
     "delete-old-db-logs": {

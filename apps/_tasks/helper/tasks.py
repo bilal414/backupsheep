@@ -30,6 +30,10 @@ from apps.console.storage.models import CoreStorageType, CoreStorage, CoreStorag
 from apps.console.utils.models import UtilBackup
 from slack_sdk import WebhookClient
 from backupsheep.celery_task_intent import notification_fanout_task_id
+from backupsheep.source_recovery_policy import (
+    source_backup_creation_available,
+    require_source_backup_creation,
+)
 
 
 EMAIL_NOTIFICATION_CHANNEL = "email"
@@ -83,6 +87,7 @@ def run_scheduled_backup(self, schedule_id=None, occurrence_id=None):
     except CoreSchedule.DoesNotExist:
         return
 
+    require_source_backup_creation(schedule.node.connection.integration.code)
     request_id = str(
         occurrence_id
         or getattr(self.request, "id", "")
@@ -1107,6 +1112,13 @@ def _resume_in_progress_backup_models(models, *, cloud):
                     CoreNode.Status.PAUSED,
                 ):
                     continue
+                if not source_backup_creation_available(
+                    node.connection.integration.code
+                ):
+                    # Preserve the active historical row for operator inspection;
+                    # do not lease or republish it under an incomplete recovery
+                    # policy.
+                    continue
 
                 # Managed database backups use a provider-owned metadata record
                 # and a database-specific poller. They do not have a CoreVultr
@@ -1359,8 +1371,8 @@ def delete_from_disk(self, backup_uuid, path_type):
         "restore" -> "both" plus the exact restore generation's local credential
                      files (my_<uuid>.cnf and ssh_<uuid>)
 
-    The run log (<uuid>.log) is intentionally kept on disk and pruned later by
-    delete_old_logs; it is never removed here.
+    The storage-lane run log (<uuid>.log) is intentionally kept on disk and pruned
+    later by delete_old_storage_logs; it is never removed here.
 
     Uses plain Python file operations -- no shell, no sudo, no hardcoded host paths --
     and is idempotent: a missing file is success, not an error. Only unexpected failures
@@ -1432,11 +1444,11 @@ def delete_from_disk(self, backup_uuid, path_type):
     ignore_result=True,
 )
 def reset_incremental_cache(self, node_id):
-    """Delete one node's local mirror cache from the storage worker boundary.
+    """Delete one node's local mirror cache from the files worker boundary.
 
-    The web container mounts the shared backup work volume read-only. Moving this
-    mutation to the storage queue prevents a compromised HTTP process from altering
-    staged archives, manifests, SSH trust material, or another worker's lock files.
+    The web container has no work-volume mount. The files lane is the only role that
+    owns the website mirror and its lock, so deletion cannot race through a second
+    container or require a shared plaintext staging volume.
     """
 
     try:
@@ -1448,7 +1460,14 @@ def reset_incremental_cache(self, node_id):
 
     from apps.console.node.models import CoreNode
 
-    node = CoreNode.objects.filter(pk=canonical_id).only("id").first()
+    node = (
+        CoreNode.objects.filter(
+            pk=canonical_id,
+            type=CoreNode.Type.WEBSITE,
+        )
+        .only("id")
+        .first()
+    )
     if node is None:
         return
     cache_key = node.uuid_str
@@ -1505,15 +1524,9 @@ def reset_incremental_cache(self, node_id):
             os.close(cache_root_fd)
 
 
-@current_app.task(name="delete_old_logs", bind=True, ignore_result=True)
-def delete_old_logs(self, max_age_days=None):
-    """Prune backup run logs from local _storage once they pass the retention window.
+def _prune_old_run_logs(max_age_days=None):
+    """Prune run-log artefacts from the caller's private source-lane workdir."""
 
-    Self-hosted builds keep run logs (and the .files/.md5 artefacts) on the container
-    instead of uploading them anywhere, so this task is what bounds their disk usage.
-    It is scheduled daily by Celery beat (see CELERY_BEAT_SCHEDULE). max_age_days
-    defaults to settings.LOG_RETENTION_DAYS (30).
-    """
     if max_age_days is None:
         max_age_days = getattr(settings, "LOG_RETENTION_DAYS", 30)
     storage_dir = os.path.realpath(os.path.join(settings.BASE_DIR, "_storage"))
@@ -1535,13 +1548,34 @@ def delete_old_logs(self, max_age_days=None):
         capture_exception(e)
 
 
+@current_app.task(name="delete_old_logs", bind=True, ignore_result=True)
+def delete_old_logs(self, max_age_days=None):
+    """Prune website/WordPress/Basecamp run logs in the files private workdir."""
+
+    return _prune_old_run_logs(max_age_days)
+
+
+@current_app.task(name="delete_old_database_logs", bind=True, ignore_result=True)
+def delete_old_database_logs(self, max_age_days=None):
+    """Prune database run logs in the database private workdir."""
+
+    return _prune_old_run_logs(max_age_days)
+
+
+@current_app.task(name="delete_old_storage_logs", bind=True, ignore_result=True)
+def delete_old_storage_logs(self, max_age_days=None):
+    """Prune destination-upload run logs in the storage private workdir."""
+
+    return _prune_old_run_logs(max_age_days)
+
+
 @current_app.task(name="delete_old_db_logs", bind=True, ignore_result=True)
 def delete_old_db_logs(self):
     """Prune old CoreLog rows from the database.
 
-    DB counterpart of delete_old_logs (which prunes on-disk run logs): delegates
-    to CoreLog.prune(), which deletes rows older than settings.LOG_RETENTION_DAYS.
-    Scheduled daily by Celery beat (see CELERY_BEAT_SCHEDULE).
+    The three source/storage maintenance tasks prune their private on-disk run logs;
+    this logs-lane task separately delegates to CoreLog.prune(), which deletes rows
+    older than settings.LOG_RETENTION_DAYS. Scheduled daily by Celery beat.
     """
     from apps.console.log.models import CoreLog
 
@@ -2610,6 +2644,7 @@ def clean_delete_failed_backups(self):
 
 def delete_requested_integrations(self):
     from apps.console.node.models import CoreConnection
+    from apps.console.connection.managed_ssh import acquire_managed_ssh_mutation_lock
 
     try:
         for connection in CoreConnection.objects.filter(status=CoreConnection.Status.DELETE_REQUESTED).order_by(
@@ -2617,7 +2652,30 @@ def delete_requested_integrations(self):
         ):
             for node in connection.nodes.filter():
                 node_delete_requested(node_id=node.id)
-            connection.delete()
+            with transaction.atomic():
+                # This legacy helper is not scheduled by the stock deployment,
+                # but any future caller must still obey the managed-SSH delete
+                # order instead of cascading from a row-first transaction.
+                acquire_managed_ssh_mutation_lock()
+                identity = (
+                    CoreConnection.objects.filter(
+                        pk=connection.pk,
+                        status=CoreConnection.Status.DELETE_REQUESTED,
+                    )
+                    .values("account_id")
+                    .first()
+                )
+                if identity is None:
+                    continue
+                account = CoreAccount.objects.select_for_update().only("pk").get(
+                    pk=identity["account_id"]
+                )
+                locked_connection = CoreConnection.objects.select_for_update().get(
+                    pk=connection.pk,
+                    account=account,
+                    status=CoreConnection.Status.DELETE_REQUESTED,
+                )
+                locked_connection.delete()
     except Exception as e:
         capture_exception(e)
         raise self.retry()

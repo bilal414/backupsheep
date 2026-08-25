@@ -14,6 +14,7 @@ from apps.console.connection.models import (
     CoreIntegration,
 )
 from apps.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_authentication import ConsoleSessionAuthentication
 from apps.console.node.models import CoreDigitalOcean, CoreNode
 from .filters import CoreDigitalOceanFilter
 from .permissions import CoreDigitalOceanViewPermissions
@@ -80,16 +81,17 @@ class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         endpoints = CoreConnectionLocation.objects.filter(integrations__code="digitalocean").values()
         return Response(endpoints)
 
-    @action(detail=False, methods=["get"])
+    @action(
+        detail=False,
+        methods=["post"],
+        authentication_classes=[ConsoleSessionAuthentication],
+    )
     def oauth_url(self, request):
         if not member_has_perm(request, "integration_changes"):
             return Response(
                 {"detail": "You do not have permission to connect integrations."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        name = self.request.query_params.get("name")
-        if not name:
-            return Response({"detail": "Name parameter is required to setup DigitalOcean integration."}, status=status.HTTP_400_BAD_REQUEST)
         member = request.user.member
         oauth_state = issue_oauth_state(
             request,
@@ -109,7 +111,7 @@ class CoreDigitalOceanView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         )
         return Response({"oauth_url": oauth_url})
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         try:

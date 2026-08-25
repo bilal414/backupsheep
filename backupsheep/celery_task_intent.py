@@ -576,9 +576,12 @@ def _node_cache_cleanup(
     from apps.console.node.models import CoreNode
 
     node_id = _positive_id(_argument(args, kwargs, 0, "node_id"), "node id")
-    node = CoreNode.objects.filter(pk=node_id).first()
+    node = CoreNode.objects.filter(
+        pk=node_id,
+        type=CoreNode.Type.WEBSITE,
+    ).first()
     if node is None:
-        raise TaskIntentError("cache cleanup has no durable node scope")
+        raise TaskIntentError("cache cleanup has no durable website-node scope")
     return {
         "kind": "node-cache-cleanup",
         "id": node.pk,

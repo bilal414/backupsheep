@@ -1,40 +1,72 @@
+import uuid
+
 from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import status
-from rest_framework import viewsets
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_datatables.filters import DatatablesFilterBackend
+
+from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects
+from apps.api.v1.utils.api_filters import DateRangeFilter
+from apps.api.v1.utils.api_serializers import ReadWriteSerializerMixin
+from apps.console.connection.managed_ssh import (
+    connection_uses_managed_key,
+    create_managed_ssh_operation,
+    validate_direct_connection_and_activate,
+)
 from apps.console.connection.models import (
     CoreConnection,
     CoreConnectionLocation,
-    CoreIntegration,
     CoreManagedSSHOperation,
 )
-from apps.console.connection.managed_ssh import (
-    ManagedSSHOperationError,
-    connection_uses_managed_key,
-    create_managed_ssh_operation,
-    wait_for_managed_ssh_operation,
-)
-from apps.api.v1.utils.api_permissions import MemberPermissions
+
+from ..view_helpers import connection_error_response, safe_connection_action
 from .filters import CoreDatabaseFilter
 from .permissions import CoreDatabaseViewPermissions
-from .serializers import CoreDatabaseConnectionReadSerializer, CoreDatabaseConnectionWriteSerializer
-from apps._tasks.exceptions import NodeConnectionErrorEligibleObjects
-from ...utils.api_filters import DateRangeFilter
-from ...utils.api_serializers import ReadWriteSerializerMixin
-from ..view_helpers import safe_connection_action
-from rest_framework import status
+from .serializers import (
+    CoreDatabaseConnectionReadSerializer,
+    CoreDatabaseConnectionWriteSerializer,
+)
+
+
+def _managed_operation_payload(operation, *, include_result=False):
+    payload = {
+        "operation_id": str(operation.uuid),
+        "operation": operation.operation,
+        "operation_status": operation.status,
+        "created_at": operation.created,
+        "expires_at": operation.expires_at,
+        "completed_at": operation.completed_at,
+    }
+    if include_result and operation.status == CoreManagedSSHOperation.Status.COMPLETE:
+        payload["result"] = operation.result_payload
+    elif include_result and operation.status in (
+        CoreManagedSSHOperation.Status.FAILED,
+        CoreManagedSSHOperation.Status.EXPIRED,
+    ):
+        payload["error"] = operation.error_payload
+    return payload
+
+
+def _saved_validation_failure(error):
+    """Describe a post-commit validation failure without implying rollback."""
+
+    safe_response = connection_error_response(error, stage="validation")
+    return {
+        "validation_status": "failed",
+        "detail": "Connection was saved as pending; validation failed.",
+        "validation_error": safe_response.data.get("connection_error", {}),
+    }
 
 
 class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
-    permission_classes = (IsAuthenticated, CoreDatabaseViewPermissions,)
+    permission_classes = (IsAuthenticated, CoreDatabaseViewPermissions)
     read_serializer_class = CoreDatabaseConnectionReadSerializer
     write_serializer_class = CoreDatabaseConnectionWriteSerializer
-    all_fields = [f.name for f in CoreConnection._meta.get_fields()]
+    all_fields = [field.name for field in CoreConnection._meta.get_fields()]
     filter_backends = [
         DjangoFilterBackend,
         DatatablesFilterBackend,
@@ -45,146 +77,185 @@ class CoreDatabaseView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
     search_fields = all_fields
 
     def get_serializer_context(self):
-        """
-        Extra context provided to the serializer class.
-        """
         return {
-            'encryption_key': self.request.user.member.get_encryption_key(),
-            'request': self.request,
-            'format': self.format_kwarg,
-            'view': self
+            "encryption_key": self.request.user.member.get_encryption_key(),
+            "request": self.request,
+            "format": self.format_kwarg,
+            "view": self,
         }
 
     def get_queryset(self):
         member = self.request.user.member
-        query = Q(account=member.get_current_account(), integration__code="database")
-        # query &= ~Q(status=CoreConnection.Status.DELETE_REQUESTED)
-        queryset = CoreConnection.objects.filter(query)
-        return queryset
+        return CoreConnection.objects.filter(
+            account=member.get_current_account(), integration__code="database"
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+        operation = getattr(serializer, "managed_ssh_operation", None)
+        direct_validation = operation is None and not connection_uses_managed_key(
+            serializer.instance
+        )
+        validation_failure = None
+        if direct_validation:
+            try:
+                validate_direct_connection_and_activate(
+                    serializer.instance,
+                    requested_by_member=request.user.member,
+                )
+            except Exception as error:
+                validation_failure = _saved_validation_failure(error)
+            serializer.instance.refresh_from_db()
+        response_data = dict(serializer.data)
+        if operation is not None:
+            response_data.update(_managed_operation_payload(operation))
+            response_data["validation_status"] = "pending"
+        elif validation_failure is not None:
+            response_data.update(validation_failure)
+        elif direct_validation:
+            response_data["validation_status"] = "complete"
+        response = Response(
+            response_data,
+            status=status.HTTP_201_CREATED,
+            headers=self.get_success_headers(serializer.data),
+        )
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(
+            instance, data=request.data, partial=partial
+        )
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        operation = getattr(serializer, "managed_ssh_operation", None)
+        direct_validation = operation is None and not connection_uses_managed_key(
+            serializer.instance
+        )
+        validation_failure = None
+        if direct_validation:
+            try:
+                validate_direct_connection_and_activate(
+                    serializer.instance,
+                    requested_by_member=request.user.member,
+                )
+            except Exception as error:
+                validation_failure = _saved_validation_failure(error)
+            serializer.instance.refresh_from_db()
+        if getattr(instance, "_prefetched_objects_cache", None):
+            instance._prefetched_objects_cache = {}
+        response_data = dict(serializer.data)
+        if operation is not None:
+            response_data.update(_managed_operation_payload(operation))
+            response_data["validation_status"] = "pending"
+        elif validation_failure is not None:
+            response_data.update(validation_failure)
+        elif direct_validation:
+            response_data["validation_status"] = "complete"
+        response = Response(response_data)
+        response["Cache-Control"] = "private, no-store"
+        return response
 
     def destroy(self, request, *args, **kwargs):
         return Response(status=status.HTTP_403_FORBIDDEN, data={})
 
     @action(detail=False, methods=["get"])
     def endpoints(self, request):
-        member = self.request.user.member
-        query = Q(integrations__code="database")
-
-        query &= ~Q(code="node-d-eu-05")
-        endpoints = CoreConnectionLocation.objects.filter(query).values()
-
+        endpoints = CoreConnectionLocation.objects.filter(
+            Q(integrations__code="database") & ~Q(code="node-d-eu-05")
+        ).values()
         return Response(endpoints)
 
-    @action(detail=True, methods=["get"])
+    def _launch_managed(self, connection, operation, *, requested_path=""):
+        durable = create_managed_ssh_operation(
+            connection,
+            operation,
+            requested_path=requested_path,
+            requested_by_member=self.request.user.member,
+        )
+        payload = _managed_operation_payload(durable)
+        payload["detail"] = "Managed SSH operation accepted."
+        response = Response(payload, status=status.HTTP_202_ACCEPTED)
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+    @action(detail=True, methods=["post"])
     @safe_connection_action(stage="object_discovery")
     def objects(self, request, pk=None):
+        connection = self.get_object()
+        if connection_uses_managed_key(connection):
+            return self._launch_managed(connection, "discover")
         try:
-            connection = self.get_object()
-            if connection_uses_managed_key(connection):
-                operation = wait_for_managed_ssh_operation(
-                    create_managed_ssh_operation(connection, "discover")
-                )
-                if operation.status == CoreManagedSSHOperation.Status.COMPLETE:
-                    return Response(
-                        operation.result_payload.get("eligible_objects", [])
-                    )
-                if operation.status in (
-                    CoreManagedSSHOperation.Status.FAILED,
-                    CoreManagedSSHOperation.Status.EXPIRED,
-                ):
-                    raise ManagedSSHOperationError(
-                        "Managed SSH object discovery failed."
-                    )
-                return Response(
-                    {
-                        "detail": "Managed SSH object discovery is still running.",
-                        "operation_id": str(operation.uuid),
-                        "operation_status": operation.status,
-                    },
-                    status=status.HTTP_202_ACCEPTED,
-                )
-            eligible_objects = connection.auth_database.get_eligible_objects()
-            return Response(eligible_objects)
-        except Exception as e:
-            raise NodeConnectionErrorEligibleObjects(e.__str__())
+            return Response(connection.auth_database.get_eligible_objects())
+        except Exception as error:
+            raise NodeConnectionErrorEligibleObjects(str(error)) from error
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         connection = self.get_object()
         if connection_uses_managed_key(connection):
-            operation = wait_for_managed_ssh_operation(
-                create_managed_ssh_operation(connection, "validate")
-            )
-            if operation.status == CoreManagedSSHOperation.Status.COMPLETE:
-                return Response(
-                    {"detail": "Validation passed. Integration is good for backups."},
-                    status=status.HTTP_200_OK,
-                )
-            if operation.status in (
-                CoreManagedSSHOperation.Status.FAILED,
-                CoreManagedSSHOperation.Status.EXPIRED,
-            ):
-                raise ManagedSSHOperationError("Managed SSH validation failed.")
-            return Response(
-                {
-                    "detail": "Managed SSH validation is still running.",
-                    "operation_id": str(operation.uuid),
-                    "operation_status": operation.status,
-                },
-                status=status.HTTP_202_ACCEPTED,
-            )
-        connection.auth_database.check_connection(check_errors=True)
+            return self._launch_managed(connection, "validate")
+        validate_direct_connection_and_activate(
+            connection,
+            requested_by_member=request.user.member,
+        )
         return Response(
-            {"detail": "Validation passed. Integration is good for backups."},
-            status=status.HTTP_200_OK,
+            {"detail": "Validation passed. Integration is good for backups."}
         )
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     @safe_connection_action(stage="metadata_discovery")
     def update_db_type_and_version(self, request, pk=None):
+        connection = self.get_object()
+        if connection_uses_managed_key(connection):
+            return self._launch_managed(connection, "update_metadata")
         try:
-            connection = self.get_object()
-            if connection_uses_managed_key(connection):
-                operation = wait_for_managed_ssh_operation(
-                    create_managed_ssh_operation(connection, "update_metadata")
-                )
-                if operation.status == CoreManagedSSHOperation.Status.COMPLETE:
-                    result = operation.result_payload.get("database", {})
-                    return Response(
-                        {
-                            "detail": (
-                                f"Database type is set to {result.get('type')} "
-                                f"and version {result.get('version')}."
-                            )
-                        },
-                        status=status.HTTP_200_OK,
-                    )
-                if operation.status in (
-                    CoreManagedSSHOperation.Status.FAILED,
-                    CoreManagedSSHOperation.Status.EXPIRED,
-                ):
-                    raise ManagedSSHOperationError(
-                        "Managed SSH metadata discovery failed."
-                    )
-                return Response(
-                    {
-                        "detail": "Managed SSH metadata discovery is still running.",
-                        "operation_id": str(operation.uuid),
-                        "operation_status": operation.status,
-                    },
-                    status=status.HTTP_202_ACCEPTED,
-                )
             result = connection.auth_database.update_db_type_and_version()
-            return Response(
-                {"detail": f"Database type is set to {result.get('type')} and version {result.get('version')}."},
-                status=status.HTTP_200_OK)
-        except Exception as e:
-            raise NodeConnectionErrorEligibleObjects(e.__str__())
+        except Exception as error:
+            raise NodeConnectionErrorEligibleObjects(str(error)) from error
+        return Response(
+            {
+                "detail": (
+                    f"Database type is set to {result.get('type')} and version "
+                    f"{result.get('version')}."
+                )
+            }
+        )
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=r"managed-ssh-operations/(?P<operation_uuid>[^/.]+)",
+    )
+    def managed_ssh_operation(self, request, pk=None, operation_uuid=None):
+        connection = self.get_object()
+        try:
+            parsed_uuid = uuid.UUID(str(operation_uuid))
+        except (TypeError, ValueError, AttributeError):
+            response = Response(
+                {"detail": "Managed SSH operation not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+            response["Cache-Control"] = "private, no-store"
+            return response
+        operation = CoreManagedSSHOperation.objects.filter(
+            uuid=parsed_uuid,
+            connection=connection,
+            account=connection.account,
+            source_lane=CoreManagedSSHOperation.SourceLane.DATABASE,
+        ).first()
+        if operation is None:
+            response = Response(
+                {"detail": "Managed SSH operation not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+            response["Cache-Control"] = "private, no-store"
+            return response
+        response = Response(_managed_operation_payload(operation, include_result=True))
+        response["Cache-Control"] = "private, no-store"
+        return response

@@ -8,10 +8,12 @@ for the version-specific migration contract; the wrapper enforces the stricter s
 BackupSheep invariants described below.
 
 Legacy `RABBITMQ_DEFAULT_*` values initialize only a blank broker database. Changing a
-secret file does not rotate credentials in an existing `rabbitmq_data` volume. After
-the data-format transition, complete the separate
-[generation-2 identity migration](rabbitmq-identity-migration.md); its one-shot
-provisioner performs the exact credential and permission reconciliation. `install.sh`
+secret file does not rotate credentials in an existing `rabbitmq_data` volume. The
+coordinated bootstrap below stages generation-2 identity and generation-3 task-signing
+material before the data-format hop but does not provision it into the live legacy broker.
+After the 4.3 witness is committed, the normal installer run executes the one-shot exact
+credential, permission, topology and signing-policy reconciliation. See the separate
+[identity details](rabbitmq-identity-migration.md). `install.sh`
 refuses to open an existing volume when it cannot prove the exact pinned broker target; it never runs
 the version migration automatically. Complete this operator-run migration before
 allowing the pinned 4.3 service to open a legacy volume.
@@ -28,33 +30,55 @@ refusal; doing so does not migrate or validate broker data.
 
 ## Required upgrade sequence
 
-Before using the hardened wrapper against a pre-hardening deployment, run the installer
-from the exact reviewed target checkout once. This is an identity bootstrap, not a broker
-upgrade: with legacy containers present it proves the exact project, installation path,
-base/approved-override config history, known services and canonical networks/volumes,
-then creates and re-inspects only the installation-identity sentinel. It is expected to
-stop at the blank-generation/3.13 gate without building or starting 4.3:
+Before using the hardened wrapper against a pre-hardening deployment, stop and reconcile
+provider work, make the complete encrypted rollback set and empty or separately quarantine
+the ambiguous legacy `backup_workdir`. Then run the installer from the exact reviewed
+target checkout once. This is a coordinated pending-state bootstrap, not a broker upgrade.
+It proves the exact project/resources, creates and re-inspects the installation sentinel,
+records the explicit staging-v3 migration intent, imports two distinct KMS identities and
+stages database generation 3 plus RabbitMQ identity generation 2/task-auth generation 3.
+It must stop at the blank-data-generation/3.13 gate without building or starting 4.3:
 
 ```bash
 TARGET_COMMIT="$(git rev-parse HEAD)"
 test "${#TARGET_COMMIT}" = 40
-INSTALL_ARGS=(
+CURRENT_DOMAIN='<existing-public-hostname>'
+KMS_KEY_ARN='<resolved-symmetric-kms-key-arn>'
+KMS_REGION='<aws-region>'
+KMS_ALLOWED_KEY_ARNS="${KMS_KEY_ARN}"
+KMS_DATABASE_CREDENTIALS='<canonical-private-database-lane-credentials-file>'
+KMS_FILES_CREDENTIALS='<different-canonical-private-files-lane-credentials-file>'
+BASE_INSTALL_ARGS=(
   --ref "${TARGET_COMMIT}"
   --install-dir "$PWD"
   --project-name backupsheep
-  --skip-start
+  --domain "${CURRENT_DOMAIN}"
+  --artifact-kms-key-id "${KMS_KEY_ARN}"
+  --artifact-kms-region "${KMS_REGION}"
+  --artifact-kms-allowed-key-arns "${KMS_ALLOWED_KEY_ARNS}"
+  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}"
+  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}"
 )
 # If and only if this installation has the reviewed deployment override:
-# INSTALL_ARGS+=(--approved-compose-file "$PWD/docker-compose.override.yml")
-./install.sh "${INSTALL_ARGS[@]}"
+# BASE_INSTALL_ARGS+=(--approved-compose-file "$PWD/docker-compose.override.yml")
+BOOTSTRAP_ARGS=(
+  "${BASE_INSTALL_ARGS[@]}"
+  --migrate-staging-layout
+  --migrate-database-identities
+  --migrate-rabbitmq-identities
+)
+./install.sh "${BOOTSTRAP_ARGS[@]}" --skip-start
 ```
 
-Do not continue unless the only failure is the documented live legacy RabbitMQ
-generation refusal and the new `.env` contains one stable installation ID. If an old
-`compose down` removed all containers and networks, use the explicit
+The documented 3.13 refusal is expected **only after** the installation/resource proof,
+empty-legacy staging-v3 gate, KMS credential/policy validation, and pending database/
+broker/task identity gates all pass. Preserve the mutated `.env` and `.secrets` together
+with their pre-change rollback; do not hand-edit a pending marker. Do not continue for an
+earlier or different failure. If an old `compose down` removed all containers and networks,
+add the explicit
 [`--adopt-legacy-project` four-volume branch](installation.md#one-time-legacy-compose-down-adoption)
-on this bootstrap invocation. It accepts only the exact stock legacy volume set and
-creates the same sentinel after its independent proof.
+to this bootstrap invocation with the same project name. It accepts only the exact stock
+legacy volume set and creates the same sentinel after its independent proof.
 
 Then schedule the broker maintenance window and stop if any gate cannot be proven:
 
@@ -76,13 +100,13 @@ only the reviewed Docker transport, proxy and CA context.
    requeue their in-flight jobs. Export broker definitions and take a recoverable snapshot
    of the `rabbitmq_data` volume. Do not use `docker compose down --volumes`.
 3. While still on 3.13, retain the dedicated legacy `backupsheep` user and vhost long
-   enough to complete the data-format hop. Generation-2 identity migration later
-   deletes that shared login and creates the lane-specific users. Through a trusted
-   server console, grant the legacy user configure/write/read permissions only on that
-   vhost. Put the matching value in the protected legacy secret file, leave direct
-   `RABBITMQ_PASSWORD` blank in `.env`, and
-   verify all app roles reconnect. Do not put the password in documentation, tickets,
-   process arguments or unattended logs.
+   enough to complete the data-format hop. Generation-2 lane material is only pending;
+   `rabbitmq-provision` deletes the shared login after step 8. Through a trusted server
+   console, grant the legacy user configure/write/read permissions only on that vhost.
+   The bootstrap staged its matching value in the protected
+   `.secrets/rabbitmq_bootstrap_password`; direct `RABBITMQ_PASSWORD` stays blank in
+   `.env`. Verify the wrapper's named-account diagnostics before each hop. Do not put the
+   password in documentation, tickets, process arguments or unattended logs.
 4. On 3.13, enable every stable and required feature flag and confirm the node is healthy.
    The wrapper queries `name stability state` as the named `rabbitmq` account and refuses ambiguous,
    duplicate, empty or disabled stable/required rows. Resolve any disabled/deprecated
@@ -127,10 +151,31 @@ only the reviewed Docker transport, proxy and CA context.
    before the witness write, rerun the exact step 6 command: reconciliation is accepted
    only for healthy `4.3.5` with every required flag and Khepri enabled, the exact base model and matching pinned
    image reference/ID. A different 4.3 release is refused before Compose, preventing an
-   accidental downgrade to 4.3.5. Then explicitly restart
-   the operations profile with `bs_compose --profile operations up --detach`, run a
-   scheduled-backup smoke test, and verify one durable request, one broker delivery and
-   one terminal backup result.
+   accidental downgrade to 4.3.5. The old shared login is still present at this point;
+   do not enable operations.
+
+8. Complete the coordinated pending transition with the same base inputs, retaining only
+   the database migration flag. The first pass has already committed the staging-v3
+   intent and broker identity/signing witnesses, so repeating either of those two
+   migration flags is deliberately rejected:
+
+   ```bash
+   FINAL_INSTALL_ARGS=("${BASE_INSTALL_ARGS[@]}" --migrate-database-identities)
+   ./install.sh "${FINAL_INSTALL_ARGS[@]}"
+   ```
+
+   This builds the three local-only images, verifies/provisions staging layout v3, runs
+   `rabbitmq-provision`, completes database generation 3, applies migrations and `db-seal`,
+   passes preflight and starts only the core. Retain every one-shot exit and bounded log.
+   Only after queue/recovery and cross-lane evidence pass, rerun the same exact base
+   command (without any completed migration flag) with `--enable-operations`:
+
+   ```bash
+   ./install.sh "${BASE_INSTALL_ARGS[@]}" --enable-operations
+   ```
+
+   Run a scheduled-backup smoke test and verify one durable request, broker delivery and
+   terminal backup result.
 
 If a hop or post-transition attestation fails, the generation witness remains blank.
 Stop and restore the volume snapshot with the exact prior image. Do not

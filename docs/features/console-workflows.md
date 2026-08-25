@@ -67,8 +67,9 @@ the source type and the member's permissions, it provides:
 - on-demand backup with optional notes and destination selection;
 - schedule creation, editing, manual triggering, pause/resume, and deletion;
 - backup history with status, type, size/file information, and actions;
-- storage-copy status, transfer, download, delete, and restore actions where
-  supported;
+- storage-copy status, delete, and authenticated restore actions where supported;
+  compatibility download controls refuse current BSE1 artifacts, and the rendered
+  transfer control has no complete current server action/task;
 - tracked website, database, managed-database, and native cloud restore state.
 
 ## Monitor and respond

@@ -38,6 +38,7 @@ from apps._tasks.integration.backup.website import (
     _PREFLIGHT_FLOOR,
     _build_lftp_script,
     _lftp_quote,
+    _lftp_url_host,
     _materialize_ssh_private_key,
     _normalize_ssh_key,
     _redact,
@@ -2144,6 +2145,7 @@ def restore_website(backup, restore):
     local_zip = f"_storage/{work_prefix}.zip"
     local_dir = f"_storage/{work_prefix}/"
     ssh_key_path = None
+    approved_known_hosts_path = None
     temporary_ssh_key = False
 
     _write_log(backup, "Website restore started.\n")
@@ -2173,18 +2175,19 @@ def restore_website(backup, restore):
 
         _ensure_restore_fence(restore)
         auth.check_connection()
+        if auth.protocol == CoreAuthWebsite.Protocol.SFTP:
+            approved_known_hosts_path = auth.materialize_lftp_known_hosts()
         _ensure_restore_fence(restore)
         if auth.use_public_key:
-            ssh_key_path = managed_private_key_path()
+            ssh_key_path = managed_private_key_path(
+                account_id=auth.connection.account_id
+            )
         username = bs_decrypt(auth.username, encryption_key) or ""
         password = bs_decrypt(auth.password, encryption_key) or ""
 
         if auth.use_private_key:
-            suffix = f"_{work_suffix}" if _has_restore_fence(restore) else ""
-            ssh_key_path = f"_storage/ssh_restore_{backup.uuid_str}{suffix}"
-            _materialize_ssh_private_key(
-                ssh_key_path,
-                bs_decrypt(auth.private_key, encryption_key),
+            ssh_key_path = _materialize_ssh_private_key(
+                bs_decrypt(auth.private_key, encryption_key)
             )
             _normalize_ssh_key(ssh_key_path, password)
             temporary_ssh_key = True
@@ -2192,7 +2195,7 @@ def restore_website(backup, restore):
         protocol = auth.get_protocol_display().lower()
         if auth.protocol == CoreAuthWebsite.Protocol.FTPS and auth.ftps_use_explicit_ssl:
             protocol = "ftp"
-        host_url = f"{protocol}://{auth.host}"
+        host_url = f"{protocol}://{_lftp_url_host(auth.host)}"
 
         # Permission checks run before archive download and before any remote
         # website upload or publication. Root/all_paths keeps its historical
@@ -2316,5 +2319,10 @@ def restore_website(backup, restore):
         if temporary_ssh_key and ssh_key_path and os.path.exists(ssh_key_path):
             try:
                 os.remove(ssh_key_path)
+            except OSError:
+                pass
+        if approved_known_hosts_path and os.path.exists(approved_known_hosts_path):
+            try:
+                os.remove(approved_known_hosts_path)
             except OSError:
                 pass

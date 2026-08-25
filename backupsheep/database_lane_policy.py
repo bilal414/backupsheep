@@ -881,7 +881,10 @@ LANE_TABLE_POLICY = MappingProxyType(
         ),
         "preflight": _lane_policy({MIGRATION_TABLE}, set()),
         "beat": _with_table_privileges_many(
-            _lane_policy(BEAT_READS, BEAT_WRITES),
+            # Every long-lived process runs docker_preflight before accepting
+            # work.  SELECT on Django's migration ledger is the only extra grant
+            # needed to prove that its immutable image matches the sealed schema.
+            _lane_policy(BEAT_READS | {MIGRATION_TABLE}, BEAT_WRITES),
             {
                 # The durable scheduler inserts/dispatches its outbox but never
                 # deletes accepted requests or their occurrence audit rows.
@@ -891,7 +894,7 @@ LANE_TABLE_POLICY = MappingProxyType(
         ),
         "cloud": _with_table_privileges_many(
             _lane_policy(
-                CLOUD_READS,
+                CLOUD_READS | {MIGRATION_TABLE},
                 CLOUD_WRITES,
                 consumes_tasks=True,
             ),
@@ -904,7 +907,7 @@ LANE_TABLE_POLICY = MappingProxyType(
         ),
         "database": _with_table_privileges_many(
             _lane_policy(
-                DATABASE_READS - {"core_schedule_run"},
+                (DATABASE_READS - {"core_schedule_run"}) | {MIGRATION_TABLE},
                 DATABASE_WRITES,
                 consumes_tasks=True,
                 write_privileges=MUTATE,
@@ -917,7 +920,7 @@ LANE_TABLE_POLICY = MappingProxyType(
         ),
         "files": _with_table_privileges_many(
             _lane_policy(
-                FILES_READS - {"core_schedule_run"},
+                (FILES_READS - {"core_schedule_run"}) | {MIGRATION_TABLE},
                 FILES_WRITES,
                 consumes_tasks=True,
                 write_privileges=MUTATE,
@@ -930,7 +933,7 @@ LANE_TABLE_POLICY = MappingProxyType(
         ),
         "storage": _with_table_privileges_many(
             _lane_policy(
-                STORAGE_READS,
+                STORAGE_READS | {MIGRATION_TABLE},
                 STORAGE_WRITES,
                 consumes_tasks=True,
             ),
@@ -947,7 +950,7 @@ LANE_TABLE_POLICY = MappingProxyType(
             },
         ),
         "logs": _lane_policy(
-            LOG_READS,
+            LOG_READS | {MIGRATION_TABLE},
             LOG_WRITES,
             consumes_tasks=True,
             replay_privileges=DML,

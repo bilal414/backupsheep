@@ -98,7 +98,7 @@ def display_default(name: str, raw_value: str) -> tuple[str, bool]:
 
 SETTINGS_ONLY_DESCRIPTIONS = {
     "BACKUPSHEEP_SECRETS": "Optional JSON object used by supported managed deployment environments to supply runtime secrets.",
-    "BS_LOCAL_STORAGE_PATH": "Root filesystem path for the Local Storage destination. It must be durable and visible at the same path to every role that uses it.",
+    "BS_LOCAL_STORAGE_PATH": "Durable root for the Local Storage destination. Stock Compose mounts it read/write only in worker-storage; every other runtime role must have no Local Storage mount.",
     "BASECAMP_OAUTH_ENDPOINT": "Basecamp authorization endpoint override.",
     "BASECAMP_REDIRECT_URL": "Basecamp OAuth callback path or URL override; it must match the registered public application callback.",
     "BASECAMP_TOKEN_ENDPOINT": "Basecamp OAuth token endpoint override.",
@@ -206,7 +206,12 @@ ENV_DESCRIPTIONS = {
     "SSH_BANNER_TIMEOUT": "Seconds allowed to receive the remote SSH identification banner.",
     "SSH_CONNECT_TIMEOUT": "Seconds allowed to establish an SSH/SFTP source connection.",
     "SSH_KEEPALIVE_SECONDS": "Interval for SSH keepalive probes during long website/database operations; zero may disable probes depending on the client.",
-    "SSH_MANAGED_PUBLIC_KEY": "Public half of the deployment-managed SSH key shown for installation on source hosts; must match the configured private key.",
+    "SSH_KNOWN_HOSTS_PATH": "Compatibility-only file path for separately reviewed non-stock deployments. Stock Compose stores account-scoped approvals/audit in PostgreSQL and materializes transient exact per-operation trust.",
+    "SSH_MANAGED_DATABASE_PUBLIC_KEY": "Public half of the optional database-worker Ed25519 identity; must match its lane secret and differ from the files identity.",
+    "SSH_MANAGED_FILES_PUBLIC_KEY": "Public half of the optional files-worker Ed25519 identity; must match its lane secret and differ from the database identity.",
+    "SSH_MANAGED_LANE_ISOLATION_REQUIRED": "Fail-closed stock guard requiring distinct database/files identities and lane-only private-key custody.",
+    "SSH_MANAGED_PRIVATE_KEY_PATH": "Legacy shared path that stays blank in stock configuration; an eligible database/files worker exports its validated lane-private runtime target internally.",
+    "SSH_MANAGED_PUBLIC_KEY": "Legacy shared public-key setting that must remain blank in stock Compose.",
     "MAILGUN_API_KEY": "Secret API key used by the Mailgun transactional-email provider.",
     "MAILGUN_API_URL": "Mailgun API base URL, including the appropriate regional endpoint when required.",
     "MAILGUN_EMAIL": "Verified Mailgun sender address used for application email.",

@@ -23,6 +23,10 @@ from apps._tasks.exceptions import (
 from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
 from ..view_helpers import safe_connection_action
+from backupsheep.source_recovery_policy import (
+    source_backup_creation_available,
+    require_source_backup_creation,
+)
 
 
 class CoreBasecampView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
@@ -61,6 +65,7 @@ class CoreBasecampView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         return queryset
 
     def create(self, request, *args, **kwargs):
+        require_source_backup_creation("basecamp")
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
@@ -74,6 +79,8 @@ class CoreBasecampView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def endpoints(self, request):
+        if not source_backup_creation_available("basecamp"):
+            return Response([])
         member = self.request.user.member
         query = Q(integrations__code="basecamp")
 
@@ -81,7 +88,7 @@ class CoreBasecampView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         endpoints = CoreConnectionLocation.objects.filter(query).values()
         return Response(endpoints)
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         try:

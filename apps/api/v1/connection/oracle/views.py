@@ -80,7 +80,7 @@ class CoreOracleView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         endpoints = CoreConnectionLocation.objects.filter(integrations__code="oracle").values()
         return Response(endpoints)
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         try:

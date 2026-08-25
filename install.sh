@@ -11,9 +11,14 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
+# Security grammars and byte-length checks must not inherit locale-specific
+# collation, where ranges such as [a-z] can also match uppercase/accented bytes.
+export LC_ALL=C
 
 readonly REPOSITORY_URL="https://github.com/bilal414/backupsheep.git"
 readonly APP_PORT="8000"
+readonly POSTGRES_STORAGE_GENERATION="18-alpine-icu-v1"
+readonly POSTGRES_STORAGE_LOGICAL_VOLUME="postgres_data_v1"
 readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision staging-provision db-provision migrate db-seal preflight app-egress-guard app)
 readonly -a OPERATION_SERVICES=(
     worker-cloud
@@ -22,6 +27,13 @@ readonly -a OPERATION_SERVICES=(
     worker-storage
     worker-logs
     beat
+)
+readonly -a OPERATION_WORKER_SERVICES=(
+    worker-cloud
+    worker-database
+    worker-files
+    worker-storage
+    worker-logs
 )
 readonly -a OPERATION_GUARD_SERVICES=(
     cloud-egress-guard
@@ -60,14 +72,16 @@ readonly -a SECRET_NAMES=(
     celery_signing_logs_private_key
     celery_trusted_public_keys
     onboarding_token
-    ssh_managed_private_key
+    ssh_managed_database_private_key
+    ssh_managed_files_private_key
     artifact_kms_database_aws_credentials
     artifact_kms_files_aws_credentials
 )
-readonly -a LEGACY_SECRET_NAMES=(rabbitmq_password db_password)
+readonly -a LEGACY_SECRET_NAMES=(rabbitmq_password db_password ssh_managed_private_key)
 readonly -a DATABASE_LANES=(app preflight beat cloud database files storage logs)
 readonly -a RABBITMQ_ROLES=(bootstrap app preflight beat cloud database files storage logs)
 readonly -a CELERY_SIGNING_LANES=(app beat cloud database files storage logs)
+readonly -a EGRESS_ROLES=(APP CLOUD DATABASE FILES STORAGE LOGS)
 readonly -a CELERY_ROTATION_SECRET_NAMES=(
     .celery_rotation_app_private_key
     .celery_rotation_beat_private_key
@@ -102,6 +116,8 @@ MIGRATE_DATABASE_IDENTITIES=false
 MIGRATE_RABBITMQ_IDENTITIES=false
 ROTATE_CELERY_SIGNING_KEYS=false
 MIGRATE_STAGING_LAYOUT=false
+MIGRATE_EGRESS_POLICY=false
+MIGRATE_POSTGRES_RUNTIME=false
 ARTIFACT_KMS_KEY_ID=""
 ARTIFACT_KMS_REGION=""
 ARTIFACT_KMS_ALLOWED_KEY_ARNS=""
@@ -116,6 +132,12 @@ SCRIPT_PATH=""
 STAGING_DIR=""
 GIT_BIN=""
 DOCKER_BIN=""
+MUTATION_LOCK_DIR=""
+MUTATION_LOCK_OWNER_FILE=""
+MUTATION_LOCK_TOKEN=""
+MUTATION_LOCK_HELD=false
+POSTGRES_MIGRATION_REQUIRED=false
+POSTGRES_SOURCE_IMAGE_ID=""
 
 log() {
     printf '\n==> %s\n' "$*"
@@ -128,6 +150,12 @@ warn() {
 die() {
     printf '\nERROR: %s\n' "$*" >&2
     exit 1
+}
+
+valid_compose_project_name() {
+    local value="$1"
+    local LC_ALL=C
+    [[ "$value" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]
 }
 
 usage() {
@@ -174,6 +202,14 @@ Options:
                      One-time authorization to adopt an existing install only when
                      the legacy shared work volume is empty and every new lane volume
                      passes the fail-closed ownership witness.
+  --migrate-egress-policy
+                     One-time authorization to replace the old stock public/blank
+                     egress policy with generation 2 deny-by-default exact TCP tuples.
+                     Customized legacy policy must first be reviewed and reset to deny.
+  --migrate-postgres-runtime
+                     One-time stop-the-world logical migration from the exact retained
+                     Debian/UID-999 `pgdata` volume into the distinct Alpine/UID-70/ICU
+                     storage generation. The old volume remains detached for rollback.
   --artifact-kms-key-id ARN
                      Resolved symmetric AWS KMS key ARN used for new BSE1 data keys.
   --artifact-kms-region REGION
@@ -203,16 +239,26 @@ EOF
 }
 
 cleanup() {
+    local original_status=$?
+    local cleanup_failed=false
+
+    trap - EXIT
     if [[ -n "$STAGING_DIR" && -d "$STAGING_DIR" ]]; then
         case "$(basename -- "$STAGING_DIR")" in
             .backupsheep-install.*)
-                rm -rf -- "$STAGING_DIR"
+                rm -rf -- "$STAGING_DIR" || cleanup_failed=true
                 ;;
             *)
                 warn "Refusing to remove unexpected staging path: ${STAGING_DIR}"
+                cleanup_failed=true
                 ;;
         esac
     fi
+    release_mutation_lock || cleanup_failed=true
+    if [[ "$cleanup_failed" == true ]]; then
+        exit 74
+    fi
+    exit "$original_status"
 }
 
 trap cleanup EXIT
@@ -235,6 +281,56 @@ file_links() {
 
 file_size() {
     stat -c '%s' -- "$1" 2>/dev/null || stat -f '%z' -- "$1"
+}
+
+release_mutation_lock() {
+    local release_failed=false
+
+    [[ "$MUTATION_LOCK_HELD" == true ]] || return 0
+    if [[ ! -d "$MUTATION_LOCK_DIR" || -L "$MUTATION_LOCK_DIR" \
+          || "$(file_uid "$MUTATION_LOCK_DIR")" != "$EUID" \
+          || "$(file_mode "$MUTATION_LOCK_DIR")" != "700" \
+          || ! -f "$MUTATION_LOCK_OWNER_FILE" || -L "$MUTATION_LOCK_OWNER_FILE" \
+          || "$(file_uid "$MUTATION_LOCK_OWNER_FILE")" != "$EUID" \
+          || "$(file_mode "$MUTATION_LOCK_OWNER_FILE")" != "600" \
+          || "$(file_links "$MUTATION_LOCK_OWNER_FILE")" != "1" \
+          || "$(<"$MUTATION_LOCK_OWNER_FILE")" != "$MUTATION_LOCK_TOKEN" ]]; then
+        release_failed=true
+    elif ! rm -f -- "$MUTATION_LOCK_OWNER_FILE" \
+        || ! rmdir -- "$MUTATION_LOCK_DIR"; then
+        release_failed=true
+    fi
+    MUTATION_LOCK_HELD=false
+    if [[ "$release_failed" == true ]]; then
+        warn "The mutation lock could not be released safely; inspect ${MUTATION_LOCK_DIR} before another mutation."
+        return 1
+    fi
+    return 0
+}
+
+acquire_installation_mutation_lock() {
+    MUTATION_LOCK_DIR="${INSTALL_DIR}.backupsheep-mutation-lock"
+    MUTATION_LOCK_OWNER_FILE="${MUTATION_LOCK_DIR}/owner"
+    if ! mkdir "$MUTATION_LOCK_DIR" 2>/dev/null; then
+        die "Another installer/wrapper mutation is active, or a stale fail-closed lock remains at ${MUTATION_LOCK_DIR}. Verify that no BackupSheep mutation is running before removing that exact lock manually."
+    fi
+    MUTATION_LOCK_HELD=true
+    MUTATION_LOCK_TOKEN="version=1;tool=install.sh;pid=$$;uid=${EUID}"
+    chmod 0700 "$MUTATION_LOCK_DIR" \
+        || die "Could not protect the new mutation lock directory."
+    if ! printf '%s\n' "$MUTATION_LOCK_TOKEN" > "$MUTATION_LOCK_OWNER_FILE" \
+        || ! chmod 0600 "$MUTATION_LOCK_OWNER_FILE"; then
+        die "Could not publish the mutation-lock ownership witness."
+    fi
+    [[ -d "$MUTATION_LOCK_DIR" && ! -L "$MUTATION_LOCK_DIR" \
+        && "$(file_uid "$MUTATION_LOCK_DIR")" == "$EUID" \
+        && "$(file_mode "$MUTATION_LOCK_DIR")" == "700" \
+        && -f "$MUTATION_LOCK_OWNER_FILE" && ! -L "$MUTATION_LOCK_OWNER_FILE" \
+        && "$(file_uid "$MUTATION_LOCK_OWNER_FILE")" == "$EUID" \
+        && "$(file_mode "$MUTATION_LOCK_OWNER_FILE")" == "600" \
+        && "$(file_links "$MUTATION_LOCK_OWNER_FILE")" == "1" \
+        && "$(<"$MUTATION_LOCK_OWNER_FILE")" == "$MUTATION_LOCK_TOKEN" ]] \
+        || die "The new mutation-lock ownership witness failed validation."
 }
 
 atomic_move_new() {
@@ -313,6 +409,8 @@ parse_args() {
                 ;;
             --project-name)
                 [[ $# -ge 2 ]] || die "--project-name requires a value"
+                [[ "$PROJECT_NAME_WAS_EXPLICIT" != true ]] \
+                    || die "--project-name may be specified only once"
                 PROJECT_NAME="$2"
                 PROJECT_NAME_WAS_EXPLICIT=true
                 shift 2
@@ -355,6 +453,14 @@ parse_args() {
                 ;;
             --migrate-staging-layout)
                 MIGRATE_STAGING_LAYOUT=true
+                shift
+                ;;
+            --migrate-egress-policy)
+                MIGRATE_EGRESS_POLICY=true
+                shift
+                ;;
+            --migrate-postgres-runtime)
+                MIGRATE_POSTGRES_RUNTIME=true
                 shift
                 ;;
             --artifact-kms-key-id)
@@ -426,8 +532,8 @@ refuse_privileged_invocation() {
 require_commands() {
     local command_name=""
     local -a required=(
-        awk basename chmod cmp cp dirname docker env find git grep install mktemp mv od
-        realpath rm sed ssh-keygen stat tr
+        awk basename chmod cmp cp dirname docker env find git grep install mkdir mktemp mv od
+        realpath rm rmdir sed ssh-keygen stat tr
     )
 
     for command_name in "${required[@]}"; do
@@ -479,7 +585,7 @@ validate_public_host() {
 }
 
 validate_project_name() {
-    [[ "$PROJECT_NAME" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] \
+    valid_compose_project_name "$PROJECT_NAME" \
         || die "--project-name must start with a lowercase letter or digit and contain only lowercase letters, digits, '_' or '-'."
     [[ -z "$ADOPT_LEGACY_PROJECT" || "$ADOPT_LEGACY_PROJECT" == "$PROJECT_NAME" ]] \
         || die "--adopt-legacy-project must match the validated Compose project name."
@@ -730,6 +836,9 @@ validate_checkout() {
     require_regular_checkout_file .env_sample
     require_regular_checkout_file install.sh
     require_regular_checkout_file backupsheep-compose
+    require_regular_checkout_file deploy/postgres/entrypoint.sh
+    require_regular_checkout_file deploy/postgres/storage-witness.sh
+    require_regular_checkout_file deploy/postgres/migrate-runtime.sh
     [[ -x "$INSTALL_DIR/backupsheep-compose" ]] \
         || die "The reviewed backupsheep-compose wrapper must remain executable."
 
@@ -802,6 +911,9 @@ validate_env_file() {
     [[ "$env_owner" == "$EUID" && "$env_mode" == "600" && "$env_links" == "1" ]] \
         || die "${ENV_FILE} must be owned by the invoking user, mode 0600, and not hard-linked."
     [[ "$env_size" -le 1048576 ]] || die "${ENV_FILE} is unexpectedly large."
+    if IFS= read -r -d '' _nul_probe < "$ENV_FILE"; then
+        die "${ENV_FILE} contains a NUL byte."
+    fi
     ! grep -q $'\r' "$ENV_FILE" || die "${ENV_FILE} contains carriage returns."
 
     awk '
@@ -986,11 +1098,25 @@ validate_secret_file() {
         validate_artifact_kms_credentials_content "$secret_path"
         return
     fi
-    if [[ "$secret_name" == "ssh_managed_private_key" ]]; then
+    if [[ "$secret_name" == ssh_managed_*_private_key ]]; then
         [[ "$secret_size" -le 65536 ]] \
             || die "${secret_path} exceeds the 64 KiB managed-key limit."
         ! od -An -v -tx1 "$secret_path" | grep -Eq '(^|[[:space:]])00([[:space:]]|$)' \
             || die "${secret_path} contains a NUL byte."
+        if [[ "$secret_size" -gt 0 ]]; then
+            local validation_copy=""
+            local public_key=""
+            validation_copy="$(mktemp "${SECRETS_DIR}/.managed-key-check.XXXXXXXX")"
+            cp -- "$secret_path" "$validation_copy"
+            chmod 0600 "$validation_copy"
+            if ! public_key="$(ssh-keygen -y -P '' -f "$validation_copy" 2>/dev/null)"; then
+                rm -f -- "$validation_copy"
+                die "${secret_path} is not a readable unencrypted OpenSSH private key."
+            fi
+            rm -f -- "$validation_copy"
+            [[ "$public_key" =~ ^ssh-ed25519[[:space:]][A-Za-z0-9+/]+={0,3}$ ]] \
+                || die "${secret_path} must contain an Ed25519 private key."
+        fi
         return
     fi
 
@@ -1114,7 +1240,8 @@ write_empty_optional_secret_file() {
     local secret_path="${SECRETS_DIR}/${secret_name}"
     local temporary_file=""
 
-    [[ "$secret_name" == "ssh_managed_private_key" ]] \
+    [[ "$secret_name" == "ssh_managed_database_private_key" \
+        || "$secret_name" == "ssh_managed_files_private_key" ]] \
         || die "Unknown optional secret file: ${secret_name}"
     [[ ! -e "$secret_path" && ! -L "$secret_path" ]] \
         || die "Refusing to overwrite existing optional secret ${secret_name}."
@@ -1888,67 +2015,113 @@ rewrite_env_for_secret_files() {
     set_env_value RABBITMQ_PASSWORD ""
     set_env_value ONBOARDING_INSTALL_TOKEN ""
     set_env_value SSH_MANAGED_PRIVATE_KEY_PATH ""
+    set_env_value SSH_MANAGED_PUBLIC_KEY ""
+    set_env_value SSH_MANAGED_LANE_ISOLATION_REQUIRED "true"
 }
 
-prepare_managed_ssh_private_key() {
-    local configured_path=""
-    local secret_path="${SECRETS_DIR}/ssh_managed_private_key"
+prepare_managed_ssh_private_keys() {
+    local legacy_path=""
+    local legacy_public=""
+    local legacy_secret="${SECRETS_DIR}/ssh_managed_private_key"
+    local legacy_secret_mode=""
+    local lane=""
+    local secret_name=""
+    local secret_path=""
     local secret_size=""
-    local validation_copy=""
-    local derived_public_key=""
+    local public_setting=""
     local configured_public_key=""
     local configured_public_identity=""
+    local validation_copy=""
+    local derived_public_key=""
+    local database_identity=""
+    local files_identity=""
 
-    configured_path="$(read_env_value SSH_MANAGED_PRIVATE_KEY_PATH)"
-    if [[ -e "$secret_path" || -L "$secret_path" ]]; then
-        validate_secret_file "$secret_path"
-        secret_size="$(file_size "$secret_path")"
-        if [[ -n "$configured_path" && "$secret_size" -eq 0 ]]; then
-            die "The managed-key placeholder is empty while SSH_MANAGED_PRIVATE_KEY_PATH still names a legacy key. Move that key into .secrets/ssh_managed_private_key (mode 0444), clear the legacy path, and rerun."
+    legacy_path="$(read_env_value SSH_MANAGED_PRIVATE_KEY_PATH)"
+    legacy_public="$(read_env_value SSH_MANAGED_PUBLIC_KEY)"
+    if [[ -n "$legacy_path" || -n "$legacy_public" ]]; then
+        die "The legacy shared managed SSH identity cannot be migrated safely. Create distinct Ed25519 keys at .secrets/ssh_managed_database_private_key and .secrets/ssh_managed_files_private_key, set their lane public keys, remove .secrets/ssh_managed_private_key, clear SSH_MANAGED_PRIVATE_KEY_PATH/SSH_MANAGED_PUBLIC_KEY, and rerun."
+    fi
+    if [[ -e "$legacy_secret" || -L "$legacy_secret" ]]; then
+        legacy_secret_mode="$(file_mode "$legacy_secret" 2>/dev/null || true)"
+        if [[ -f "$legacy_secret" && ! -L "$legacy_secret" \
+            && "$(file_uid "$legacy_secret")" == "$EUID" \
+            && "$(file_links "$legacy_secret")" == "1" \
+            && "$legacy_secret_mode" =~ ^[0-7]{3,4}$ \
+            && $((8#$legacy_secret_mode)) -eq $((8#0444)) \
+            && "$(file_size "$legacy_secret")" == "0" ]]; then
+            # Releases before lane isolation created this exact zero-byte,
+            # read-only placeholder. It contains no key material and is the
+            # only legacy artifact the installer can retire automatically.
+            rm -- "$legacy_secret" \
+                || die "Could not retire the empty legacy managed SSH placeholder."
+        else
+            die "The legacy shared managed SSH identity cannot be migrated safely. Create distinct Ed25519 keys at .secrets/ssh_managed_database_private_key and .secrets/ssh_managed_files_private_key, set their lane public keys, remove .secrets/ssh_managed_private_key, clear SSH_MANAGED_PRIVATE_KEY_PATH/SSH_MANAGED_PUBLIC_KEY, and rerun."
         fi
-    else
-        [[ -z "$configured_path" ]] \
-            || die "Move the existing managed SSH private key into .secrets/ssh_managed_private_key (mode 0444), clear SSH_MANAGED_PRIVATE_KEY_PATH, and rerun. The installer will not copy host key material implicitly."
-        write_empty_optional_secret_file ssh_managed_private_key
     fi
 
-    secret_size="$(file_size "$secret_path")"
-    configured_public_key="$(read_env_value SSH_MANAGED_PUBLIC_KEY)"
-    if [[ "$secret_size" -eq 0 ]]; then
-        [[ -z "$configured_public_key" ]] \
-            || die "SSH_MANAGED_PUBLIC_KEY requires a non-empty .secrets/ssh_managed_private_key file."
-        return
-    fi
+    for lane in database files; do
+        secret_name="ssh_managed_${lane}_private_key"
+        secret_path="${SECRETS_DIR}/${secret_name}"
+        public_setting="SSH_MANAGED_DATABASE_PUBLIC_KEY"
+        [[ "$lane" == "database" ]] || public_setting="SSH_MANAGED_FILES_PUBLIC_KEY"
+        if [[ -e "$secret_path" || -L "$secret_path" ]]; then
+            validate_secret_file "$secret_path"
+        else
+            write_empty_optional_secret_file "$secret_name"
+        fi
+        secret_size="$(file_size "$secret_path")"
+        configured_public_key="$(read_env_value "$public_setting")"
+        if [[ "$secret_size" -eq 0 ]]; then
+            [[ -z "$configured_public_key" ]] \
+                || die "${public_setting} requires a non-empty ${secret_path} file."
+            continue
+        fi
 
-    validation_copy="$(mktemp "${SECRETS_DIR}/.managed-key-check.XXXXXXXX")"
-    cp -- "$secret_path" "$validation_copy"
-    chmod 0600 "$validation_copy"
-    if ! derived_public_key="$(ssh-keygen -y -P '' -f "$validation_copy" 2>/dev/null)"; then
+        validation_copy="$(mktemp "${SECRETS_DIR}/.managed-key-check.XXXXXXXX")"
+        cp -- "$secret_path" "$validation_copy"
+        chmod 0600 "$validation_copy"
+        if ! derived_public_key="$(ssh-keygen -y -P '' -f "$validation_copy" 2>/dev/null)"; then
+            rm -f -- "$validation_copy"
+            die "${secret_path} is invalid or passphrase-protected."
+        fi
         rm -f -- "$validation_copy"
-        die "The managed SSH private-key secret is invalid or passphrase-protected."
-    fi
-    rm -f -- "$validation_copy"
-    [[ "$derived_public_key" =~ ^[A-Za-z0-9@._+-]+[[:space:]][A-Za-z0-9+/]+={0,3}$ ]] \
-        || die "The managed SSH private key produced a malformed public identity."
+        [[ "$derived_public_key" =~ ^ssh-ed25519[[:space:]][A-Za-z0-9+/]+={0,3}$ ]] \
+            || die "${secret_path} must contain an Ed25519 private key."
 
-    if [[ -z "$configured_public_key" ]]; then
-        set_env_value SSH_MANAGED_PUBLIC_KEY "$derived_public_key"
-        return
+        if [[ -n "$configured_public_key" ]]; then
+            configured_public_identity="$(
+                printf '%s\n' "$configured_public_key" \
+                    | awk '
+                        NR == 1 && (NF == 2 || NF == 3) {
+                            if ($1 != "ssh-ed25519" || $2 !~ /^[A-Za-z0-9+\/=]+$/) exit 1
+                            print $1 " " $2
+                            next
+                        }
+                        { exit 1 }
+                        END { if (NR != 1) exit 1 }
+                    '
+            )" || die "${public_setting} must contain one Ed25519 OpenSSH public key."
+            [[ "$configured_public_identity" == "$derived_public_key" ]] \
+                || die "${public_setting} does not match ${secret_path}."
+        fi
+        # Always discard comments and persist only the canonical wire identity.
+        set_env_value "$public_setting" "$derived_public_key"
+        if [[ "$lane" == "database" ]]; then
+            database_identity="$derived_public_key"
+        else
+            files_identity="$derived_public_key"
+        fi
+    done
+
+    if [[ -n "$database_identity" || -n "$files_identity" ]]; then
+        [[ -n "$database_identity" && -n "$files_identity" ]] \
+            || die "Database and files managed SSH identities must be enabled or disabled together."
+        [[ "$database_identity" != "$files_identity" ]] \
+            || die "Database and files managed SSH identities must use different keys."
     fi
-    configured_public_identity="$(
-        printf '%s\n' "$configured_public_key" \
-            | awk '
-                NR == 1 && (NF == 2 || NF == 3) {
-                    if ($1 !~ /^[A-Za-z0-9@._+-]+$/ || $2 !~ /^[A-Za-z0-9+\/=]+$/) exit 1
-                    print $1 " " $2
-                    next
-                }
-                { exit 1 }
-                END { if (NR != 1) exit 1 }
-            '
-    )" || die "SSH_MANAGED_PUBLIC_KEY must contain one canonical OpenSSH public key."
-    [[ "$configured_public_identity" == "$derived_public_key" ]] \
-        || die "SSH_MANAGED_PUBLIC_KEY does not match .secrets/ssh_managed_private_key."
+    set_env_value SSH_MANAGED_PRIVATE_KEY_PATH ""
+    set_env_value SSH_MANAGED_PUBLIC_KEY ""
+    set_env_value SSH_MANAGED_LANE_ISOLATION_REQUIRED "true"
 }
 
 ensure_installation_id() {
@@ -1981,6 +2154,109 @@ sha256_text() {
     printf '%s' "$digest"
 }
 
+configure_postgres_storage_generation() {
+    local installation_id=""
+    local state=""
+    local intent=""
+    local witness=""
+    local expected_witness=""
+    local retired_image_id=""
+    local all_volume_names=""
+    local old_volume="${PROJECT_NAME}_pgdata"
+    local active_volume="${PROJECT_NAME}_${POSTGRES_STORAGE_LOGICAL_VOLUME}"
+    local old_exists=false
+    local active_exists=false
+    local legacy_image_ref=""
+    local legacy_image_user=""
+
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    state="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION)"
+    intent="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_INTENT)"
+    witness="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_WITNESS)"
+    retired_image_id="$(read_env_value BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID)"
+    all_volume_names="$($DOCKER_BIN volume ls --format '{{.Name}}')" \
+        || die "Could not inventory Docker volumes before selecting PostgreSQL storage."
+    grep -Fxq -- "$old_volume" <<< "$all_volume_names" && old_exists=true
+    grep -Fxq -- "$active_volume" <<< "$all_volume_names" && active_exists=true
+
+    case "$state" in
+        "")
+            [[ "$active_exists" == false ]] \
+                || die "The Alpine PostgreSQL target volume already exists without a generation witness; refusing adoption."
+            if [[ "$old_exists" == true ]]; then
+                [[ "$MIGRATE_POSTGRES_RUNTIME" == true ]] \
+                    || die "The legacy Debian PostgreSQL volume exists. Preserve rollback evidence and rerun once with --migrate-postgres-runtime; it will never be mounted by the Alpine image."
+                intent="migrated-debian-v1"
+                state="${POSTGRES_STORAGE_GENERATION}-pending-upgrade"
+                legacy_image_ref="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
+                [[ -n "$legacy_image_ref" ]] \
+                    || die "The legacy PostgreSQL image reference is absent; refusing to guess a rollback runtime."
+                retired_image_id="$($DOCKER_BIN image inspect --format '{{.Id}}' "$legacy_image_ref")" \
+                    || die "The exact retained legacy PostgreSQL image is not present locally."
+                legacy_image_user="$($DOCKER_BIN image inspect --format '{{.Config.User}}' "$retired_image_id")" \
+                    || die "Could not inspect the retained legacy PostgreSQL image user."
+                [[ "$retired_image_id" =~ ^sha256:[0-9a-f]{64}$ && "$legacy_image_user" == "999:999" ]] \
+                    || die "The retained legacy PostgreSQL image is not the reviewed UID/GID-999 runtime."
+                set_env_value BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID "$retired_image_id"
+                POSTGRES_MIGRATION_REQUIRED=true
+            else
+                [[ "$MIGRATE_POSTGRES_RUNTIME" == false ]] \
+                    || die "--migrate-postgres-runtime requires the canonical legacy ${old_volume} volume."
+                intent="new-empty-v1"
+                state="${POSTGRES_STORAGE_GENERATION}-pending-fresh"
+            fi
+            expected_witness="$(sha256_text "BackupSheep/postgres-storage/v1|${installation_id}|${PROJECT_NAME}|${POSTGRES_STORAGE_LOGICAL_VOLUME}|${POSTGRES_STORAGE_GENERATION}|icu=und|${intent}")"
+            set_env_value BACKUPSHEEP_POSTGRES_STORAGE_INTENT "$intent"
+            set_env_value BACKUPSHEEP_POSTGRES_STORAGE_WITNESS "$expected_witness"
+            set_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION "$state"
+            witness="$expected_witness"
+            ;;
+        "${POSTGRES_STORAGE_GENERATION}-pending-fresh")
+            [[ "$intent" == "new-empty-v1" && "$old_exists" == false ]] \
+                || die "Pending fresh PostgreSQL storage conflicts with a legacy volume or intent."
+            [[ "$MIGRATE_POSTGRES_RUNTIME" == false ]] \
+                || die "--migrate-postgres-runtime is invalid for a pending fresh installation."
+            ;;
+        "${POSTGRES_STORAGE_GENERATION}-pending-upgrade")
+            [[ "$intent" == "migrated-debian-v1" && "$old_exists" == true ]] \
+                || die "Pending PostgreSQL migration lost its exact legacy volume or intent."
+            [[ "$MIGRATE_POSTGRES_RUNTIME" == true ]] \
+                || die "The PostgreSQL storage migration remains pending; rerun with --migrate-postgres-runtime."
+            [[ "$retired_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+                || die "Pending PostgreSQL migration is missing its exact retained source image ID."
+            $DOCKER_BIN image inspect "$retired_image_id" >/dev/null \
+                || die "The retained legacy PostgreSQL source image is no longer present locally."
+            legacy_image_user="$($DOCKER_BIN image inspect --format '{{.Config.User}}' "$retired_image_id")" \
+                || die "Could not re-attest the retained legacy PostgreSQL image user."
+            [[ "$legacy_image_user" == "999:999" ]] \
+                || die "The retained legacy PostgreSQL image is no longer the reviewed UID/GID-999 runtime."
+            POSTGRES_MIGRATION_REQUIRED=true
+            ;;
+        "$POSTGRES_STORAGE_GENERATION")
+            [[ "$MIGRATE_POSTGRES_RUNTIME" == false ]] \
+                || die "PostgreSQL storage is already generation ${POSTGRES_STORAGE_GENERATION}; rerun without --migrate-postgres-runtime."
+            [[ "$active_exists" == true ]] \
+                || die "The completed PostgreSQL generation is missing its canonical active volume."
+            case "$intent" in
+                new-empty-v1)
+                    [[ "$old_exists" == false && -z "$retired_image_id" ]] \
+                        || die "Fresh PostgreSQL storage unexpectedly has retired Debian evidence."
+                    ;;
+                migrated-debian-v1)
+                    [[ "$old_exists" == true && "$retired_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+                        || die "Migrated PostgreSQL storage is missing its detached legacy volume or exact retired image ID."
+                    ;;
+                *) die "Completed PostgreSQL storage has an unsupported intent." ;;
+            esac
+            ;;
+        *) die "Unsupported BACKUPSHEEP_POSTGRES_STORAGE_GENERATION=${state}." ;;
+    esac
+
+    expected_witness="$(sha256_text "BackupSheep/postgres-storage/v1|${installation_id}|${PROJECT_NAME}|${POSTGRES_STORAGE_LOGICAL_VOLUME}|${POSTGRES_STORAGE_GENERATION}|icu=und|${intent}")"
+    [[ "$witness" == "$expected_witness" ]] \
+        || die "BACKUPSHEEP_POSTGRES_STORAGE_WITNESS does not match this installation, volume, runtime, ICU locale, and intent."
+}
+
 configure_staging_layout_witness() {
     local intent=""
     local witness=""
@@ -1997,9 +2273,9 @@ configure_staging_layout_witness() {
     if [[ -n "$intent" || -n "$witness" ]]; then
         [[ "$MIGRATE_STAGING_LAYOUT" != true ]] \
             || die "The staging layout already has an installation witness; rerun without --migrate-staging-layout."
-        [[ "$intent" == "new-empty-v2" || "$intent" == "migrate-empty-legacy-v2" ]] \
+        [[ "$intent" == "new-empty-v3" || "$intent" == "migrate-empty-legacy-v3" ]] \
             || die "BACKUPSHEEP_STAGING_LAYOUT_INTENT is invalid."
-        expected="$(sha256_text "BackupSheep/staging-layout/v2|${installation_id}|${intent}")"
+        expected="$(sha256_text "BackupSheep/staging-layout/v3|${installation_id}|${intent}")"
         [[ "$witness" == "$expected" ]] \
             || die "The staging layout witness does not match this installation and intent."
         :
@@ -2007,13 +2283,13 @@ configure_staging_layout_witness() {
         if [[ "$ENV_WAS_PRESENT" != true || "$database_generation" == "3-pending-fresh" ]]; then
             [[ "$MIGRATE_STAGING_LAYOUT" != true ]] \
                 || die "--migrate-staging-layout is valid only for a real existing installation."
-            intent="new-empty-v2"
+            intent="new-empty-v3"
         else
             [[ "$MIGRATE_STAGING_LAYOUT" == true ]] \
                 || die "Existing installations must stop provider operations, drain/quarantine the legacy shared work volume, and rerun once with --migrate-staging-layout."
-            intent="migrate-empty-legacy-v2"
+            intent="migrate-empty-legacy-v3"
         fi
-        witness="$(sha256_text "BackupSheep/staging-layout/v2|${installation_id}|${intent}")"
+        witness="$(sha256_text "BackupSheep/staging-layout/v3|${installation_id}|${intent}")"
         set_env_value BACKUPSHEEP_STAGING_LAYOUT_INTENT "$intent"
         set_env_value BACKUPSHEEP_STAGING_LAYOUT_WITNESS "$witness"
     fi
@@ -2228,7 +2504,7 @@ adopt_legacy_compose_down_project() {
         "${PROJECT_NAME}_rabbitmq_data" \
         "${PROJECT_NAME}_backup_workdir" \
         "${PROJECT_NAME}_backup_storage"; do
-        grep -Fxq "$expected_name" <<< "$all_volume_names" \
+        grep -Fxq -- "$expected_name" <<< "$all_volume_names" \
             || die "Legacy stock volume ${expected_name} is missing from the complete Docker inventory."
     done
     while IFS= read -r resource_name; do
@@ -2297,7 +2573,7 @@ ensure_compose_project_name() {
 
     persisted_project="$(read_env_value BACKUPSHEEP_COMPOSE_PROJECT_NAME)"
     if [[ -n "$persisted_project" ]]; then
-        [[ "$persisted_project" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] \
+        valid_compose_project_name "$persisted_project" \
             || die "BACKUPSHEEP_COMPOSE_PROJECT_NAME is malformed."
         [[ "$persisted_project" == "$PROJECT_NAME" ]] \
             || die "Compose project drift refused: this installation is bound to ${persisted_project}, not ${PROJECT_NAME}. Rerun with --project-name ${persisted_project}."
@@ -2331,7 +2607,9 @@ ensure_compose_project_name() {
             || die "Could not inspect an exact-path container project label while adopting the Compose project name."
         [[ -n "$candidate" ]] \
             || die "An exact-path Compose container has no project label; refusing adoption."
-        if ! grep -Fxq "$candidate" <<< "$candidates"; then
+        valid_compose_project_name "$candidate" \
+            || die "An exact-path Compose container has a malformed project label; refusing adoption."
+        if ! grep -Fxq -- "$candidate" <<< "$candidates"; then
             candidates="${candidates}${candidates:+$'\n'}${candidate}"
             candidate_count=$((candidate_count + 1))
         fi
@@ -2348,7 +2626,9 @@ ensure_compose_project_name() {
             || die "Could not inspect an installation-id sentinel project label while adopting the Compose project name."
         [[ -n "$candidate" ]] \
             || die "An installation-id sentinel has no Compose project label; refusing adoption."
-        if ! grep -Fxq "$candidate" <<< "$candidates"; then
+        valid_compose_project_name "$candidate" \
+            || die "An installation-id sentinel has a malformed project label; refusing adoption."
+        if ! grep -Fxq -- "$candidate" <<< "$candidates"; then
             candidates="${candidates}${candidates:+$'\n'}${candidate}"
             candidate_count=$((candidate_count + 1))
         fi
@@ -2369,6 +2649,113 @@ ensure_compose_project_name() {
     [[ -z "$ADOPT_LEGACY_PROJECT" ]] \
         || die "A normal exact-path or installation-id ownership witness exists. Rerun without --adopt-legacy-project."
     set_env_value BACKUPSHEEP_COMPOSE_PROJECT_NAME "$PROJECT_NAME"
+}
+
+validate_egress_policy_generation_two() {
+    local role=""
+    local mode=""
+    local legacy_ipv4=""
+    local legacy_ipv6=""
+    local ipv4_endpoints=""
+    local ipv6_endpoints=""
+    local dns_names=""
+
+    for role in "${EGRESS_ROLES[@]}"; do
+        mode="$(read_env_value "BACKUPSHEEP_${role}_EGRESS_MODE")"
+        legacy_ipv4="$(read_env_value "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV4")"
+        legacy_ipv6="$(read_env_value "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV6")"
+        ipv4_endpoints="$(read_env_value "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS")"
+        ipv6_endpoints="$(read_env_value "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS")"
+        dns_names="$(read_env_value "BACKUPSHEEP_${role}_EGRESS_ALLOW_DNS_NAMES")"
+
+        [[ -z "$legacy_ipv4" && -z "$legacy_ipv6" ]] \
+            || die "Address-only ${role} egress allowlists are retired. Use exact CIDR:TCP-port endpoints."
+        [[ "${#ipv4_endpoints}" -le 8192 && "$ipv4_endpoints" != *[!0-9./:,[:space:]]* ]] \
+            || die "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS is malformed or too long."
+        [[ "${#ipv6_endpoints}" -le 8192 && "$ipv6_endpoints" != *[!0-9A-Fa-f:/\[\],[:space:]]* ]] \
+            || die "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS is malformed or too long."
+        [[ "${#dns_names}" -le 4096 && "$dns_names" != *[!A-Za-z0-9_.\-,[:space:]]* ]] \
+            || die "BACKUPSHEEP_${role}_EGRESS_ALLOW_DNS_NAMES is malformed or too long."
+        case "$mode" in
+            deny)
+                [[ -z "$ipv4_endpoints" && -z "$ipv6_endpoints" && -z "$dns_names" ]] \
+                    || die "Deny-mode ${role} egress cannot carry outward endpoints or DNS names."
+                ;;
+            allowlist)
+                [[ -n "$ipv4_endpoints" || -n "$ipv6_endpoints" ]] \
+                    || die "Allowlist-mode ${role} egress requires at least one exact TCP endpoint."
+                ;;
+            public)
+                [[ -z "$dns_names" ]] \
+                    || die "Public-mode ${role} egress uses normal DNS and must not carry an ignored exact-name list."
+                ;;
+            *)
+                die "BACKUPSHEEP_${role}_EGRESS_MODE must be deny, allowlist, or public."
+                ;;
+        esac
+    done
+}
+
+configure_egress_policy_generation() {
+    local generation=""
+    local role=""
+    local mode=""
+    local all_public=true
+    local all_blank=true
+    local all_deny=true
+    local lists_blank=true
+    local key=""
+
+    generation="$(read_env_value BACKUPSHEEP_EGRESS_POLICY_GENERATION)"
+    case "$generation" in
+        2)
+            [[ "$MIGRATE_EGRESS_POLICY" != true ]] \
+                || die "--migrate-egress-policy is one-time and this installation already uses generation 2."
+            validate_egress_policy_generation_two
+            return
+            ;;
+        '') ;;
+        *)
+            die "Unsupported BACKUPSHEEP_EGRESS_POLICY_GENERATION=${generation}; refusing to guess outbound policy."
+            ;;
+    esac
+
+    [[ "$ENV_WAS_PRESENT" == true ]] \
+        || die "A fresh installation is missing required egress policy generation 2."
+    [[ "$MIGRATE_EGRESS_POLICY" == true ]] \
+        || die "This existing installation predates fail-closed egress generation 2. Review outbound dependencies, then rerun once with --migrate-egress-policy."
+
+    for role in "${EGRESS_ROLES[@]}"; do
+        mode="$(read_env_value "BACKUPSHEEP_${role}_EGRESS_MODE")"
+        [[ "$mode" == public ]] || all_public=false
+        [[ -z "$mode" ]] || all_blank=false
+        [[ "$mode" == deny ]] || all_deny=false
+        for key in \
+            "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV4" \
+            "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV6" \
+            "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS" \
+            "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS" \
+            "BACKUPSHEEP_${role}_EGRESS_ALLOW_DNS_NAMES"; do
+            [[ -z "$(read_env_value "$key")" ]] || lists_blank=false
+        done
+    done
+    [[ "$lists_blank" == true && \
+        ( "$all_public" == true || "$all_blank" == true || "$all_deny" == true ) ]] \
+        || die "Customized legacy egress cannot be migrated automatically. Preserve it for review, reset all six roles to deny with every old/new allowlist blank, then rerun --migrate-egress-policy."
+
+    # The explicit one-time flag authorizes the availability-impacting safe reset.
+    # Operations stay unable to reach public providers until the operator configures
+    # reviewed exact endpoint tuples under generation 2.
+    for role in "${EGRESS_ROLES[@]}"; do
+        set_env_value "BACKUPSHEEP_${role}_EGRESS_MODE" deny
+        set_env_value "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV4" ""
+        set_env_value "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV6" ""
+        set_env_value "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV4_TCP_ENDPOINTS" ""
+        set_env_value "BACKUPSHEEP_${role}_EGRESS_ALLOW_IPV6_TCP_ENDPOINTS" ""
+        set_env_value "BACKUPSHEEP_${role}_EGRESS_ALLOW_DNS_NAMES" ""
+    done
+    set_env_value BACKUPSHEEP_EGRESS_POLICY_GENERATION 2
+    validate_egress_policy_generation_two
 }
 
 create_or_migrate_configuration() {
@@ -2410,6 +2797,8 @@ create_or_migrate_configuration() {
     ensure_installation_id
     configure_staging_layout_witness
     ensure_compose_project_name
+    configure_postgres_storage_generation
+    configure_egress_policy_generation
     configure_artifact_kms_policy
 
     if [[ "$ENV_WAS_PRESENT" == true ]]; then
@@ -2422,7 +2811,7 @@ create_or_migrate_configuration() {
     fi
     configure_database_identity_generation
     configure_rabbitmq_identity_generation
-    prepare_managed_ssh_private_key
+    prepare_managed_ssh_private_keys
 
     validate_secret_dir
     set_env_value BACKUPSHEEP_IMAGE "backupsheep:${INSTALL_REF}"
@@ -2449,6 +2838,12 @@ validate_runtime_configuration() {
     local staging_witness=""
     local installation_id=""
     local expected_staging_witness=""
+    local postgres_storage_state=""
+    local postgres_storage_intent=""
+    local postgres_storage_witness=""
+    local expected_postgres_storage_witness=""
+    local managed_database_public=""
+    local managed_files_public=""
     local kms_key_arn=""
     local kms_region=""
     local kms_allowlist=""
@@ -2495,14 +2890,27 @@ validate_runtime_configuration() {
         || die "BACKUPSHEEP_INSTALLATION_ID must be one stable 64-character lowercase hexadecimal value."
     staging_intent="$(read_env_value BACKUPSHEEP_STAGING_LAYOUT_INTENT)"
     staging_witness="$(read_env_value BACKUPSHEEP_STAGING_LAYOUT_WITNESS)"
-    [[ "$staging_intent" == "new-empty-v2" || "$staging_intent" == "migrate-empty-legacy-v2" ]] \
+    [[ "$staging_intent" == "new-empty-v3" || "$staging_intent" == "migrate-empty-legacy-v3" ]] \
         || die "BACKUPSHEEP_STAGING_LAYOUT_INTENT is invalid."
-    expected_staging_witness="$(sha256_text "BackupSheep/staging-layout/v2|${installation_id}|${staging_intent}")"
+    expected_staging_witness="$(sha256_text "BackupSheep/staging-layout/v3|${installation_id}|${staging_intent}")"
     [[ "$staging_witness" == "$expected_staging_witness" ]] \
         || die "BACKUPSHEEP_STAGING_LAYOUT_WITNESS does not match this installation."
     value="$(read_env_value BACKUPSHEEP_COMPOSE_PROJECT_NAME)"
     [[ "$value" == "$PROJECT_NAME" ]] \
         || die "BACKUPSHEEP_COMPOSE_PROJECT_NAME must match --project-name exactly."
+    postgres_storage_state="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION)"
+    postgres_storage_intent="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_INTENT)"
+    postgres_storage_witness="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_WITNESS)"
+    case "$postgres_storage_state:$postgres_storage_intent" in
+        "${POSTGRES_STORAGE_GENERATION}:new-empty-v1"|\
+        "${POSTGRES_STORAGE_GENERATION}:migrated-debian-v1"|\
+        "${POSTGRES_STORAGE_GENERATION}-pending-fresh:new-empty-v1"|\
+        "${POSTGRES_STORAGE_GENERATION}-pending-upgrade:migrated-debian-v1") ;;
+        *) die "PostgreSQL storage generation and intent are inconsistent." ;;
+    esac
+    expected_postgres_storage_witness="$(sha256_text "BackupSheep/postgres-storage/v1|${installation_id}|${PROJECT_NAME}|${POSTGRES_STORAGE_LOGICAL_VOLUME}|${POSTGRES_STORAGE_GENERATION}|icu=und|${postgres_storage_intent}")"
+    [[ "$postgres_storage_witness" == "$expected_postgres_storage_witness" ]] \
+        || die "PostgreSQL storage witness does not match the reviewed runtime and active volume."
     value="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
     [[ "$value" == "3" || "$value" == "3-pending-fresh" \
         || "$value" == "3-pending-upgrade" ]] \
@@ -2567,6 +2975,18 @@ validate_runtime_configuration() {
     kms_allowlist="$(read_env_value BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS)"
     validate_artifact_kms_configuration "$kms_key_arn" "$kms_region" "$kms_allowlist"
 
+    [[ "$(read_env_value SSH_MANAGED_LANE_ISOLATION_REQUIRED)" == "true" ]] \
+        || die "SSH_MANAGED_LANE_ISOLATION_REQUIRED must be true."
+    managed_database_public="$(read_env_value SSH_MANAGED_DATABASE_PUBLIC_KEY)"
+    managed_files_public="$(read_env_value SSH_MANAGED_FILES_PUBLIC_KEY)"
+    if [[ -n "$managed_database_public" || -n "$managed_files_public" ]]; then
+        [[ "$managed_database_public" =~ ^ssh-ed25519[[:space:]][A-Za-z0-9+/]+={0,3}$ \
+            && "$managed_files_public" =~ ^ssh-ed25519[[:space:]][A-Za-z0-9+/]+={0,3}$ ]] \
+            || die "Both managed SSH lane public keys must be canonical Ed25519 identities."
+        [[ "$managed_database_public" != "$managed_files_public" ]] \
+            || die "Managed SSH lane public keys must be different."
+    fi
+
     for key in \
         BACKUPSHEEP_STAGING_MIN_FREE_BYTES \
         BACKUPSHEEP_STAGING_MIN_FREE_INODES \
@@ -2593,7 +3013,8 @@ validate_runtime_configuration() {
         DB_PASSWORD \
         RABBITMQ_PASSWORD \
         ONBOARDING_INSTALL_TOKEN \
-        SSH_MANAGED_PRIVATE_KEY_PATH; do
+        SSH_MANAGED_PRIVATE_KEY_PATH \
+        SSH_MANAGED_PUBLIC_KEY; do
         value="$(read_env_value "$key")"
         [[ -z "$value" ]] || die "${key} must be blank after migration to file-backed secrets."
     done
@@ -2606,6 +3027,7 @@ compose() {
     (
         local -a compose_environment=(
             /usr/bin/env -i
+            "LC_ALL=C"
             "HOME=${HOME-}"
             "PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}"
             "COMPOSE_BAKE=false"
@@ -2675,7 +3097,7 @@ require_compose_service() {
     local wanted="$1"
     local available_services="$2"
 
-    grep -Fxq "$wanted" <<< "$available_services" \
+    grep -Fxq -- "$wanted" <<< "$available_services" \
         || die "The reviewed Compose model is missing expected service ${wanted}."
 }
 
@@ -2698,25 +3120,47 @@ docker_resource_label() {
     local resource_type="$1"
     local resource_id="$2"
     local label_name="$3"
+    local frame_marker="__BACKUPSHEEP_DOCKER_LABEL_FRAME_V1__"
+    local label_root=""
+    local framed_value=""
+    local framed_payload=""
+    local declared_length=""
+    local label_value=""
+    local LC_ALL=C
+
+    case "$resource_type" in
+        container) label_root='.Config.Labels' ;;
+        network|volume) label_root='.Labels' ;;
+        *) die "Unknown Docker resource type during ownership validation." ;;
+    esac
 
     case "$resource_type" in
         container)
-            "$DOCKER_BIN" inspect --format \
-                "{{with index .Config.Labels \"${label_name}\"}}{{.}}{{end}}" \
-                "$resource_id"
+            framed_value="$(
+                "$DOCKER_BIN" inspect --format \
+                    "{{with index ${label_root} \"${label_name}\"}}{{len .}}:{{.}}{{else}}0:{{end}}${frame_marker}" \
+                    "$resource_id"
+            )" || return 1
             ;;
-        network)
-            "$DOCKER_BIN" network inspect --format \
-                "{{with index .Labels \"${label_name}\"}}{{.}}{{end}}" \
-                "$resource_id"
+        network|volume)
+            framed_value="$(
+                "$DOCKER_BIN" "$resource_type" inspect --format \
+                    "{{with index ${label_root} \"${label_name}\"}}{{len .}}:{{.}}{{else}}0:{{end}}${frame_marker}" \
+                    "$resource_id"
+            )" || return 1
             ;;
-        volume)
-            "$DOCKER_BIN" volume inspect --format \
-                "{{with index .Labels \"${label_name}\"}}{{.}}{{end}}" \
-                "$resource_id"
-            ;;
-        *) die "Unknown Docker resource type during ownership validation." ;;
     esac
+
+    [[ "$framed_value" == *"$frame_marker" ]] || return 1
+    framed_payload="${framed_value%"$frame_marker"}"
+    [[ "$framed_payload" == *:* ]] || return 1
+    declared_length="${framed_payload%%:*}"
+    label_value="${framed_payload#*:}"
+    [[ "$declared_length" =~ ^(0|[1-9][0-9]{0,6})$ ]] || return 1
+    (( 10#$declared_length <= 1048576 )) || return 1
+    (( ${#label_value} == 10#$declared_length )) || return 1
+    [[ "$label_value" != *[[:cntrl:]]* ]] || return 1
+    printf '%s' "$label_value"
 }
 
 docker_resource_name() {
@@ -2730,7 +3174,7 @@ docker_resource_name() {
     esac
 }
 
-create_verified_legacy_container_sentinel() {
+create_verified_ownership_sentinel() {
     local installation_id="$1"
     local sentinel_name="${PROJECT_NAME}_installation_identity"
     local created_name=""
@@ -2746,23 +3190,23 @@ create_verified_legacy_container_sentinel() {
             --label "com.docker.compose.volume=installation_identity" \
             --label "com.backupsheep.installation-id=${installation_id}" \
             "$sentinel_name"
-    )" || die "Could not create the verified legacy ownership sentinel; no Compose service was mutated."
+    )" || die "Could not create the verified ownership sentinel; no Compose service was mutated."
     [[ "$created_name" == "$sentinel_name" ]] \
-        || die "Docker returned an unexpected legacy ownership-sentinel name; refusing to continue."
+        || die "Docker returned an unexpected ownership-sentinel name; refusing to continue."
 
     inspected_name="$(docker_resource_name volume "$sentinel_name")" \
-        || die "Could not re-inspect the verified legacy ownership sentinel."
+        || die "Could not re-inspect the verified ownership sentinel."
     resource_project="$(docker_resource_label volume "$sentinel_name" com.docker.compose.project)" \
-        || die "Could not verify the legacy ownership-sentinel project label."
+        || die "Could not verify the ownership-sentinel project label."
     logical_name="$(docker_resource_label volume "$sentinel_name" com.docker.compose.volume)" \
-        || die "Could not verify the legacy ownership-sentinel logical label."
+        || die "Could not verify the ownership-sentinel logical label."
     resource_installation_id="$(docker_resource_label volume "$sentinel_name" com.backupsheep.installation-id)" \
-        || die "Could not verify the legacy ownership-sentinel identity label."
+        || die "Could not verify the ownership-sentinel identity label."
     [[ "$inspected_name" == "$sentinel_name" \
         && "$resource_project" == "$PROJECT_NAME" \
         && "$logical_name" == "installation_identity" \
         && "$resource_installation_id" == "$installation_id" ]] \
-        || die "The verified legacy ownership sentinel did not retain every exact required label."
+        || die "The verified ownership sentinel did not retain every exact required label."
 }
 
 validate_compose_project_ownership() {
@@ -2779,8 +3223,22 @@ validate_compose_project_ownership() {
     local all_network_names=""
     local all_volume_names=""
     local expected_resource_name=""
+    local retired_ssh_trust_name="${PROJECT_NAME}_ssh_trust"
+    local retired_ssh_trust_attachments=""
+    local retired_pgdata_name="${PROJECT_NAME}_pgdata"
+    local retired_pgdata_attachments=""
+    local postgres_storage_intent=""
+    local postgres_storage_state=""
+    local postgres_retired_image_id=""
+    local retired_pgdata_attachment_id=""
+    local retired_pgdata_attachment_count=0
+    local retired_pgdata_attachment_service=""
+    local retired_pgdata_attachment_image=""
+    local retired_pgdata_attachment_user=""
     local resource_name=""
     local resource_project=""
+    local is_retired_ssh_trust=false
+    local is_retired_pgdata=false
     local legacy_resource_witness=false
     local identified_resource_without_sentinel=false
     local identity_volume_count=0
@@ -2812,6 +3270,9 @@ validate_compose_project_ownership() {
         || die "Could not inventory Docker network names; refusing mutation."
     all_volume_names="$("$DOCKER_BIN" volume ls --format '{{.Name}}')" \
         || die "Could not inventory Docker volume names; refusing mutation."
+    postgres_storage_intent="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_INTENT)"
+    postgres_storage_state="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION)"
+    postgres_retired_image_id="$(read_env_value BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID)"
 
     while IFS= read -r resource_id; do
         if [[ -n "$resource_id" ]]; then
@@ -2842,7 +3303,7 @@ validate_compose_project_ownership() {
     while IFS= read -r logical_name; do
         [[ -n "$logical_name" ]] || continue
         expected_resource_name="${PROJECT_NAME}_${logical_name}"
-        grep -Fxq "$expected_resource_name" <<< "$all_network_names" || continue
+        grep -Fxq -- "$expected_resource_name" <<< "$all_network_names" || continue
         resource_project="$(docker_resource_label network "$expected_resource_name" com.docker.compose.project)"
         resource_installation_id="$(docker_resource_label network "$expected_resource_name" com.docker.compose.network)"
         [[ "$resource_project" == "$PROJECT_NAME" && "$resource_installation_id" == "$logical_name" ]] \
@@ -2851,14 +3312,40 @@ validate_compose_project_ownership() {
     while IFS= read -r logical_name; do
         [[ -n "$logical_name" ]] || continue
         expected_resource_name="${PROJECT_NAME}_${logical_name}"
-        grep -Fxq "$expected_resource_name" <<< "$all_volume_names" || continue
+        grep -Fxq -- "$expected_resource_name" <<< "$all_volume_names" || continue
         resource_project="$(docker_resource_label volume "$expected_resource_name" com.docker.compose.project)"
         resource_installation_id="$(docker_resource_label volume "$expected_resource_name" com.docker.compose.volume)"
         [[ "$resource_project" == "$PROJECT_NAME" && "$resource_installation_id" == "$logical_name" ]] \
             || die "Docker volume ${expected_resource_name} collides with this Compose model but is not owned by it."
     done <<< "$available_volumes"
+    # The retired develop-era trust volume is intentionally absent from the v3
+    # Compose model, so inspect its canonical physical name separately. A foreign
+    # or unlabeled same-name volume must never be mistaken for rollback evidence.
+    if grep -Fxq -- "$retired_ssh_trust_name" <<< "$all_volume_names"; then
+        resource_project="$(docker_resource_label volume "$retired_ssh_trust_name" com.docker.compose.project)" \
+            || die "Could not inspect retired Docker volume ${retired_ssh_trust_name}."
+        logical_name="$(docker_resource_label volume "$retired_ssh_trust_name" com.docker.compose.volume)" \
+            || die "Could not inspect retired Docker volume ${retired_ssh_trust_name}."
+        [[ "$resource_project" == "$PROJECT_NAME" && "$logical_name" == "ssh_trust" ]] \
+            || die "Docker volume ${retired_ssh_trust_name} collides with the retired BackupSheep trust volume but is not owned by it."
+    fi
+    if grep -Fxq -- "$retired_pgdata_name" <<< "$all_volume_names"; then
+        resource_project="$(docker_resource_label volume "$retired_pgdata_name" com.docker.compose.project)" \
+            || die "Could not inspect retired Docker volume ${retired_pgdata_name}."
+        logical_name="$(docker_resource_label volume "$retired_pgdata_name" com.docker.compose.volume)" \
+            || die "Could not inspect retired Docker volume ${retired_pgdata_name}."
+        [[ "$resource_project" == "$PROJECT_NAME" && "$logical_name" == "pgdata" \
+            && "$postgres_storage_intent" == "migrated-debian-v1" ]] \
+            || die "Docker volume ${retired_pgdata_name} collides with retired PostgreSQL rollback storage but is not its exact owned volume."
+    fi
 
     if (( container_count == 0 && network_count == 0 && volume_count == 0 )); then
+        # Establish the durable installation witness before the first staged
+        # Compose mutation. Service-scoped `up` does not create unused top-level
+        # volumes, so deferring this until app startup could strand an
+        # interrupted installation with identified resources but no safe resume
+        # proof.
+        create_verified_ownership_sentinel "$installation_id"
         return
     fi
     [[ "$INSTALL_WAS_PRESENT" == true ]] \
@@ -2874,7 +3361,7 @@ validate_compose_project_ownership() {
                 || die "Could not inspect a Compose container service label."
             [[ "$working_dir" == "$INSTALL_DIR" && "$config_files" == "$expected_config" ]] \
                 || die "Compose project ${PROJECT_NAME} has a container owned by a different installation path. Refusing mutation."
-            grep -Fxq "$logical_name" <<< "$available_services" \
+            grep -Fxq -- "$logical_name" <<< "$available_services" \
                 || die "Compose project ${PROJECT_NAME} has an unexpected service container: ${logical_name}."
             resource_installation_id="$(docker_resource_label container "$resource_id" com.backupsheep.installation-id)" \
                 || die "Could not inspect a Compose container installation identity."
@@ -2909,7 +3396,7 @@ validate_compose_project_ownership() {
     if (( network_count > 0 )); then
         for resource_id in "${network_ids[@]}"; do
             logical_name="$(docker_resource_label network "$resource_id" com.docker.compose.network)"
-            grep -Fxq "$logical_name" <<< "$available_networks" \
+            grep -Fxq -- "$logical_name" <<< "$available_networks" \
                 || die "Compose project ${PROJECT_NAME} has an unexpected network: ${logical_name}."
             resource_name="$(docker_resource_name network "$resource_id")" \
                 || die "Could not inspect Compose network ${logical_name}."
@@ -2930,12 +3417,73 @@ validate_compose_project_ownership() {
     if (( volume_count > 0 )); then
         for resource_id in "${volume_ids[@]}"; do
             logical_name="$(docker_resource_label volume "$resource_id" com.docker.compose.volume)"
-            grep -Fxq "$logical_name" <<< "$available_volumes" \
-                || die "Compose project ${PROJECT_NAME} has an unexpected volume: ${logical_name}."
+            is_retired_ssh_trust=false
+            is_retired_pgdata=false
+            if ! grep -Fxq -- "$logical_name" <<< "$available_volumes"; then
+                # develop-era installs used one project-owned global SSH trust
+                # volume. It is rollback evidence only: the current model never
+                # mounts it and runtime volume overrides are refused. Preserve it
+                # without treating any other retired/unknown volume as owned.
+                case "$logical_name" in
+                    ssh_trust) is_retired_ssh_trust=true ;;
+                    pgdata)
+                        [[ "$postgres_storage_intent" == "migrated-debian-v1" ]] \
+                            || die "Retired pgdata is valid only for an explicit PostgreSQL runtime migration."
+                        is_retired_pgdata=true
+                        ;;
+                    *) die "Compose project ${PROJECT_NAME} has an unexpected volume: ${logical_name}." ;;
+                esac
+                (( identity_volume_count == 1 )) \
+                    || die "A retired Compose volume requires exactly one matching installation-identity sentinel."
+            fi
             resource_name="$(docker_resource_name volume "$resource_id")" \
                 || die "Could not inspect Compose volume ${logical_name}."
             [[ "$resource_name" == "${PROJECT_NAME}_${logical_name}" ]] \
                 || die "Compose volume ${logical_name} has a non-canonical physical name."
+            if [[ "$is_retired_ssh_trust" == true ]]; then
+                resource_project="$(docker_resource_label volume "$resource_id" com.docker.compose.project)" \
+                    || die "Could not inspect retired Compose volume ssh_trust."
+                [[ "$resource_project" == "$PROJECT_NAME" ]] \
+                    || die "The retired Compose volume ssh_trust is not owned by project ${PROJECT_NAME}."
+                retired_ssh_trust_attachments="$("$DOCKER_BIN" ps --all --quiet \
+                    --filter "volume=${resource_name}")" \
+                    || die "Could not prove that retired Compose volume ssh_trust is detached."
+                [[ -z "$retired_ssh_trust_attachments" ]] \
+                    || die "The retired Compose volume ssh_trust still has attached containers; remove every running or stopped legacy container before retrying."
+            fi
+            if [[ "$is_retired_pgdata" == true ]]; then
+                resource_project="$(docker_resource_label volume "$resource_id" com.docker.compose.project)" \
+                    || die "Could not inspect retired Compose volume pgdata."
+                [[ "$resource_project" == "$PROJECT_NAME" ]] \
+                    || die "The retired Compose volume pgdata is not owned by project ${PROJECT_NAME}."
+                retired_pgdata_attachments="$("$DOCKER_BIN" ps --all --quiet --filter "volume=${resource_name}")" \
+                    || die "Could not inventory attachments to retired Compose volume pgdata."
+                if [[ -n "$retired_pgdata_attachments" ]]; then
+                    [[ "$postgres_storage_state" == "${POSTGRES_STORAGE_GENERATION}-pending-upgrade" \
+                        && "$POSTGRES_MIGRATION_REQUIRED" == true \
+                        && "$postgres_retired_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+                        || die "Retired Compose volume pgdata must remain detached except during the reviewed pre-migration shutdown."
+                    retired_pgdata_attachment_count=0
+                    while IFS= read -r retired_pgdata_attachment_id; do
+                        [[ -n "$retired_pgdata_attachment_id" ]] || continue
+                        retired_pgdata_attachment_count=$((retired_pgdata_attachment_count + 1))
+                        grep -Fxq -- "$retired_pgdata_attachment_id" <<< "$container_listing" \
+                            || die "Legacy PostgreSQL storage is attached to a container outside the exact owned Compose project."
+                        retired_pgdata_attachment_service="$(docker_resource_label container "$retired_pgdata_attachment_id" com.docker.compose.service)" \
+                            || die "Could not inspect the legacy PostgreSQL attachment service."
+                        retired_pgdata_attachment_image="$("$DOCKER_BIN" inspect --format '{{.Image}}' "$retired_pgdata_attachment_id")" \
+                            || die "Could not inspect the legacy PostgreSQL attachment image."
+                        retired_pgdata_attachment_user="$("$DOCKER_BIN" inspect --format '{{.Config.User}}' "$retired_pgdata_attachment_id")" \
+                            || die "Could not inspect the legacy PostgreSQL attachment user."
+                        [[ "$retired_pgdata_attachment_service" == db \
+                            && "$retired_pgdata_attachment_image" == "$postgres_retired_image_id" \
+                            && "$retired_pgdata_attachment_user" == "999:999" ]] \
+                            || die "Legacy PostgreSQL storage is not attached to the exact retained UID/GID-999 database container."
+                    done <<< "$retired_pgdata_attachments"
+                    [[ "$retired_pgdata_attachment_count" -eq 1 ]] \
+                        || die "Legacy PostgreSQL storage must have exactly one reviewed database attachment before shutdown."
+                fi
+            fi
             resource_installation_id="$(docker_resource_label volume "$resource_id" com.backupsheep.installation-id)"
             if [[ -z "$resource_installation_id" ]]; then
                 [[ "$legacy_resource_witness" == true || "$identity_volume_count" -eq 1 ]] \
@@ -2961,7 +3509,7 @@ validate_compose_project_ownership() {
         # All project resources have now passed exact path, config, service, logical-name,
         # physical-name and blank-identity checks. This is the only automatic legacy
         # adoption path, and the sentinel is the only Docker resource it creates.
-        create_verified_legacy_container_sentinel "$installation_id"
+        create_verified_ownership_sentinel "$installation_id"
     fi
 }
 
@@ -3152,12 +3700,119 @@ wait_for_app() {
     die "BackupSheep core did not become healthy within five minutes."
 }
 
+refuse_egress_oneoffs_before_topology_removal() {
+    local container_listing=""
+    local container_id=""
+    local oneoff_label=""
+    local service_name=""
+
+    container_listing="$(
+        "$DOCKER_BIN" ps --all --quiet \
+            --filter "label=com.docker.compose.project=${PROJECT_NAME}"
+    )" || die "Could not inventory Compose one-offs before topology removal."
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        oneoff_label="$(docker_resource_label \
+            container "$container_id" com.docker.compose.oneoff)" \
+            || die "Could not inspect a Compose one-off lifecycle label."
+        case "$oneoff_label" in
+            True|true|TRUE|1) ;;
+            *) continue ;;
+        esac
+        service_name="$(docker_resource_label \
+            container "$container_id" com.docker.compose.service)" \
+            || die "Could not inspect a Compose one-off service label."
+        case "$service_name" in
+            app|worker-cloud|worker-database|worker-files|worker-storage|worker-logs)
+                die "An egress-backed Compose one-off for ${service_name} still exists. Inspect, stop, and remove that exact one-off before rerunning the installer; no topology was removed."
+                ;;
+        esac
+    done <<< "$container_listing"
+}
+
 stop_operations() {
-    log "Stopping the exact provider-worker and scheduler set before build or migration"
-    if ! compose --profile operations stop \
-        "${OPERATION_SERVICES[@]}" "${OPERATION_GUARD_SERVICES[@]}"; then
-        die "Could not stop every operations service; refusing to build or migrate while provider work may still run."
+    refuse_egress_oneoffs_before_topology_removal
+    log "Removing the complete container topology before build or migration"
+    # A guard must never stop/restart independently of the workload that shares
+    # its network namespace. `down` removes containers and networks together but
+    # intentionally preserves every named data/identity volume.
+    if ! compose --profile operations down --timeout 300; then
+        die "Could not remove the complete container topology; refusing to build or migrate while provider work may still run."
     fi
+}
+
+run_postgres_runtime_migration() {
+    local installation_id=""
+    local source_image_id=""
+    local target_image_ref=""
+    local database_name=""
+    local bootstrap_user=""
+    local witness=""
+    local expected_roles_csv=""
+    local legacy_attachments=""
+    local variable=""
+
+    [[ "$POSTGRES_MIGRATION_REQUIRED" == true ]] || return 0
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    source_image_id="$(read_env_value BACKUPSHEEP_POSTGRES_RETIRED_IMAGE_ID)"
+    target_image_ref="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
+    database_name="$(read_env_value DB_NAME)"
+    bootstrap_user="$(read_env_value DB_BOOTSTRAP_USER)"
+    witness="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_WITNESS)"
+    for variable in DB_BOOTSTRAP_USER DB_MIGRATOR_USER DB_APP_USER DB_PREFLIGHT_USER \
+        DB_BEAT_USER DB_CLOUD_USER DB_DATABASE_USER DB_FILES_USER DB_STORAGE_USER DB_LOGS_USER; do
+        if [[ -n "$expected_roles_csv" ]]; then expected_roles_csv+=","; fi
+        expected_roles_csv+="$(read_env_value "$variable")"
+    done
+
+    legacy_attachments="$("$DOCKER_BIN" ps --all --quiet --filter "volume=${PROJECT_NAME}_pgdata")" \
+        || die "Could not prove legacy PostgreSQL detachment immediately before migration."
+    [[ -z "$legacy_attachments" ]] \
+        || die "The reviewed full-stack down did not detach every legacy PostgreSQL container; migration was not started."
+
+    log "Migrating the exact detached Debian database into isolated Alpine/ICU storage"
+    "$INSTALL_DIR/deploy/postgres/migrate-runtime.sh" \
+        "$DOCKER_BIN" "$PROJECT_NAME" "$installation_id" "$source_image_id" \
+        "$target_image_ref" "${PROJECT_NAME}_pgdata" \
+        "${PROJECT_NAME}_${POSTGRES_STORAGE_LOGICAL_VOLUME}" \
+        "$SECRETS_DIR/db_bootstrap_password" "$database_name" "$bootstrap_user" \
+        "$expected_roles_csv" "$witness" \
+        || die "PostgreSQL logical migration failed; the legacy volume remains detached and the target generation remains pending."
+
+    # The target volume receipt was written only after exact image, inventory and
+    # content fingerprints passed. Record the environment generation last.
+    set_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION "$POSTGRES_STORAGE_GENERATION"
+    POSTGRES_MIGRATION_REQUIRED=false
+    validate_compose_project_ownership
+}
+
+complete_postgres_storage_generation() {
+    local state=""
+    local container_id=""
+    local container_count=0
+    local target_image_ref=""
+    local target_image_id=""
+    local container_image_id=""
+
+    state="$(read_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION)"
+    [[ "$state" == "${POSTGRES_STORAGE_GENERATION}-pending-fresh" ]] || return 0
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        container_count=$((container_count + 1))
+    done < <(compose ps --all --quiet db)
+    [[ "$container_count" -eq 1 && -n "$container_id" ]] \
+        || die "Fresh PostgreSQL witness requires exactly one database container."
+    target_image_ref="$(read_env_value BACKUPSHEEP_POSTGRES_IMAGE)"
+    target_image_id="$("$DOCKER_BIN" image inspect --format '{{.Id}}' "$target_image_ref")" \
+        || die "Could not inspect the fresh PostgreSQL target image."
+    container_image_id="$("$DOCKER_BIN" inspect --format '{{.Image}}' "$container_id")" \
+        || die "Could not inspect the fresh PostgreSQL container image."
+    [[ "$container_image_id" == "$target_image_id" ]] \
+        || die "Fresh PostgreSQL container does not use the exact locally built target image."
+    "$DOCKER_BIN" exec "$container_id" \
+        /usr/local/bin/backupsheep-postgres-storage-witness finalize-fresh \
+        || die "Fresh PostgreSQL ICU/storage witness failed; generation remains pending."
+    set_env_value BACKUPSHEEP_POSTGRES_STORAGE_GENERATION "$POSTGRES_STORAGE_GENERATION"
 }
 
 start_core() {
@@ -3165,6 +3820,7 @@ start_core() {
 
     log "Building the reviewed PostgreSQL, application, and egress-guard images"
     compose build --pull db app app-egress-guard
+    run_postgres_runtime_migration
 
     log "Preparing and sealing database identities while every long-lived lane remains blocked"
     if ! compose up --detach --no-build \
@@ -3175,11 +3831,20 @@ start_core() {
     fi
     wait_for_database_seal
     complete_database_identity_generation
+    complete_postgres_storage_generation
     validate_runtime_configuration
     validate_compose_model
 
-    log "Starting the security preflight and web service against the sealed database"
-    if ! compose up --detach --no-build preflight app-egress-guard app; then
+    log "Running the security preflight against the sealed database"
+    if ! compose up --detach --no-build preflight \
+        || ! compose wait preflight >/dev/null; then
+        show_failure_guidance
+        die "Core security preflight failed after the database identity seal."
+    fi
+
+    log "Force-recreating the web/guard network-namespace pair"
+    if ! compose up --detach --no-build --no-deps --force-recreate \
+        app-egress-guard app; then
         show_failure_guidance
         die "Core startup failed after the database identity seal."
     fi
@@ -3206,10 +3871,17 @@ start_operations() {
     local -a operation_service_names=()
 
     log "Explicit operations opt-in received; starting provider workers and the scheduler"
-    if ! compose --profile operations up --detach --no-build "${OPERATION_SERVICES[@]}"; then
+    if ! compose --profile operations up --detach --no-build --no-deps \
+        --force-recreate "${OPERATION_GUARD_SERVICES[@]}" \
+        "${OPERATION_WORKER_SERVICES[@]}"; then
         compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
         show_failure_guidance
         die "Operations startup failed."
+    fi
+    if ! compose --profile operations up --detach --no-build --no-deps beat; then
+        compose --profile operations stop "${OPERATION_SERVICES[@]}" >/dev/null 2>&1 || true
+        show_failure_guidance
+        die "Beat startup failed after the guarded workers were recreated."
     fi
 
     # A container is initially "running" while init.sh is still executing the
@@ -3378,6 +4050,7 @@ main() {
     validate_public_host
     validate_project_name
     validate_install_dir
+    acquire_installation_mutation_lock
     validate_approved_compose_file
     validate_docker_access
     clone_or_validate_repository

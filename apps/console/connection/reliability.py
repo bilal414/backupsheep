@@ -67,6 +67,13 @@ class DatabaseTLSRequiredError(Exception):
         super().__init__("database server requires an SSL/TLS connection")
 
 
+class SSHHostKeyApprovalRequiredError(Exception):
+    """Internal signal that this account has no approved key for the endpoint."""
+
+    def __init__(self):
+        super().__init__("account-scoped SSH host-key approval is required")
+
+
 def database_tls_required_message(value: object) -> bool:
     """Recognize stable MySQL-family secure-transport failures."""
     message = str(value or "").lower()
@@ -151,6 +158,15 @@ def classify_connection_error(error: BaseException, stage: str = "connection") -
             "authorization",
             False,
             "Grant the EVENT privilege on every database selected for backup, then validate the connection again.",
+        )
+
+    if isinstance(error, SSHHostKeyApprovalRequiredError):
+        return _failure(
+            "HOST_KEY_UNKNOWN",
+            "The SSH host key has not been reviewed for this destination.",
+            "host_key",
+            False,
+            "Verify the fingerprint out of band and approve it for this BackupSheep account before retrying.",
         )
 
     # Import optional client libraries lazily so this helper remains usable from
@@ -242,7 +258,7 @@ def classify_connection_error(error: BaseException, stage: str = "connection") -
             "The SSH host key has not been reviewed for this destination.",
             "host_key",
             False,
-            "Verify the server fingerprint out of band and add it to BackupSheep's shared known-hosts store.",
+            "Verify the fingerprint out of band and approve it for this BackupSheep account before retrying.",
         )
     if "host key" in message and ("changed" in message or "mismatch" in message):
         return _failure(

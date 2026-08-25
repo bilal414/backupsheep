@@ -11,7 +11,7 @@ restore monitor; operators must integrate the signals below into their monitorin
 | --- | --- | --- |
 | Web liveness | `GET /healthz/` returns `ok` | A web process handled one HTTP request |
 | Container state | `./backupsheep-compose ps --all`; add `--profile operations` for enabled workers/Beat | Docker health/restart state and one-shot gate exits |
-| PostgreSQL | `pg_isready`, database monitoring | Database accepts a connection; external metrics cover capacity/locks/latency |
+| PostgreSQL | Stock authenticated container healthcheck; database monitoring | File-backed `SELECT 1` authentication plus external capacity/lock/latency metrics |
 | RabbitMQ | diagnostics, queue metrics | Broker availability, backlog and consumers |
 | Celery | worker ping and inspect | Current worker connectivity and transient task view |
 | Durable jobs | console/API and PostgreSQL-backed execution rows | Backup/restore request, phase, retry, progress, provider/reconciliation state |
@@ -27,9 +27,15 @@ provider backup job do not prove recoverability.
 
 ```bash
 curl -fsS http://127.0.0.1:8000/healthz/
-./backupsheep-compose exec -T db pg_isready -U backupsheep -d backupsheep
+DB_CONTAINER="$(./backupsheep-compose ps -q db)"
+test -n "${DB_CONTAINER}"
+test "$(docker inspect --format '{{.State.Health.Status}}' "${DB_CONTAINER}")" = healthy
 ./backupsheep-compose exec -T rabbitmq rabbitmq-diagnostics -q ping
 ```
+
+The database container's stock healthcheck authenticates over TCP with its exact
+file-backed bootstrap credential and executes `SELECT 1`; `pg_isready` alone is not an
+authentication check.
 
 The profile-less core has no workers by design. When operations have been explicitly
 enabled, inspect them separately:
@@ -105,8 +111,11 @@ For an operations-enabled deployment, also collect:
 
 The console's Logs page is an account-scoped activity trail with authentication,
 connection, node, schedule, backup, storage, member and restore events. Local run and
-restore logs live under the `backup_workdir` volume. Both local run logs and database
-activity entries are pruned according to `LOG_RETENTION_DAYS` by daily Beat tasks.
+restore logs live only in their owning `database_workdir`, `files_workdir` or
+`storage_workdir`. The daily files-lane `delete_old_logs` task runs at 03:00,
+database-lane `delete_old_database_logs` at 03:05, storage-lane
+`delete_old_storage_logs` at 03:10, and `CoreLog` database-row pruning separately at
+03:30, all according to `LOG_RETENTION_DAYS`.
 
 The self-hosted build does not provide the old SaaS transfer-log/directory-tree download
 artifacts. Use the console status, activity log, local volume and container logs instead.
@@ -142,8 +151,12 @@ Monitor the host filesystems underlying every named volume:
 
 - `pgdata`: free bytes, database size, connections, locks, transaction age and backup age;
 - `rabbitmq_data`: free bytes, memory/disk alarms, messages and consumer count;
-- `backup_workdir`: free bytes/inodes, growth of active dumps/restores and website caches;
-- `backup_storage`: retained archive bytes/inodes and projected exhaustion date;
+- `database_workdir`: free bytes/inodes and growth of database dumps/restores/run logs;
+- `files_workdir`: free bytes/inodes and growth of file-source work, website caches and logs;
+- `storage_workdir`: free bytes/inodes and BSE1 upload/restore materialization;
+- `database_ciphertext_transfer`, `files_ciphertext_transfer` and
+  `restore_ciphertext_transfer`: published handoff bytes/inodes and stuck fences;
+- `backup_storage`: retained BSE1 archive bytes/inodes and projected exhaustion date;
 - Docker data root: image/build-cache growth and container writable layers.
 
 Useful local snapshots:
@@ -151,8 +164,11 @@ Useful local snapshots:
 ```bash
 ./backupsheep-compose stats --no-stream
 docker system df
-docker inspect "$(./backupsheep-compose ps -q app)" \
-  --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+for service in worker-database worker-files worker-storage; do
+  container="$(./backupsheep-compose --profile operations ps -q "${service}")"
+  test -z "${container}" || docker inspect "${container}" \
+    --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+done
 ```
 
 `docker system df` is diagnostic. Do not automatically prune volumes or image data without

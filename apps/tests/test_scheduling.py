@@ -1,6 +1,7 @@
 from datetime import timedelta
 from unittest import mock
 
+from django.conf import settings
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -308,6 +309,54 @@ class CrashSafeBeatSchedulingTests(BaseTestCase):
             "legacy-delivery-id",
         )
         self.assertEqual(CoreBackupRequest.objects.filter(schedule=schedule).count(), 1)
+
+
+class PrivateWorkdirMaintenanceScheduleTests(BaseTestCase):
+    def test_static_schedule_upgrade_clears_a_stale_storage_queue_override(self):
+        current = settings.CELERY_BEAT_SCHEDULE["delete-old-logs"]
+        BackupModelEntry.from_entry(
+            "delete-old-logs",
+            app=celery_app,
+            task="delete_old_logs",
+            schedule=current["schedule"],
+            options={"queue": "storage"},
+        )
+        self.assertEqual(
+            PeriodicTask.objects.get(name="delete-old-logs").queue,
+            "storage",
+        )
+
+        upgraded = BackupModelEntry.from_entry(
+            "delete-old-logs",
+            app=celery_app,
+            **current,
+        )
+
+        upgraded.model.refresh_from_db()
+        self.assertIsNone(upgraded.model.queue)
+        self.assertEqual(upgraded.model.task, "delete_old_logs")
+
+    def test_database_run_log_schedule_is_materialized_without_queue_override(self):
+        entry = BackupModelEntry.from_entry(
+            "delete-old-database-run-logs",
+            app=celery_app,
+            **settings.CELERY_BEAT_SCHEDULE["delete-old-database-run-logs"],
+        )
+
+        entry.model.refresh_from_db()
+        self.assertIsNone(entry.model.queue)
+        self.assertEqual(entry.model.task, "delete_old_database_logs")
+
+    def test_storage_run_log_schedule_is_materialized_without_queue_override(self):
+        entry = BackupModelEntry.from_entry(
+            "delete-old-storage-run-logs",
+            app=celery_app,
+            **settings.CELERY_BEAT_SCHEDULE["delete-old-storage-run-logs"],
+        )
+
+        entry.model.refresh_from_db()
+        self.assertIsNone(entry.model.queue)
+        self.assertEqual(entry.model.task, "delete_old_storage_logs")
 
 
 class KeepLastRetentionTests(BaseTestCase):

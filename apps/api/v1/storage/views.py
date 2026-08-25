@@ -11,7 +11,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from rest_framework_datatables.filters import DatatablesFilterBackend
-from apps.api.v1.utils.api_permissions import MemberPermissions
+from apps.api.v1.utils.api_permissions import MemberGroupPermissions
 from apps.console.log.models import CoreLog
 from apps.console.node.models import CoreNode
 from apps.console.storage.models import CoreStorage
@@ -46,7 +46,9 @@ def _publish_storage_task(task, storage_id):
 
 
 class CoreStorageView(mixins.ListModelMixin, viewsets.GenericViewSet):
-    permission_classes = (IsAuthenticated, MemberPermissions,)
+    permission_classes = (IsAuthenticated, MemberGroupPermissions,)
+    action_permissions = {"*": "storage_changes"}
+    object_account_path = "account"
     serializer_class = CoreStorageSerializer
     all_fields = [f.name for f in CoreStorage._meta.get_fields()]
     filter_backends = [
@@ -123,7 +125,7 @@ class CoreStorageView(mixins.ListModelMixin, viewsets.GenericViewSet):
         data["detail"] = "Storage is resumed."
         return Response(data, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         storage = self.get_object()
         if storage.type.code == "local":

@@ -6,11 +6,26 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from apps.api.v1.utils.api_helpers import bs_decrypt, bs_encrypt
-from apps.console.connection.models import CoreAuthDatabase, CoreAuthWebsite
+from apps.console.connection.models import (
+    CoreAuthDatabase,
+    CoreAuthWebsite,
+    CoreSSHHostKeyApproval,
+)
 from apps.console.setting.models import CoreSiteSettings
 from apps.tests import factories
 from apps.tests.base import BaseTestCase
 from utils.middleware import OnboardingMiddleware
+
+
+TEST_HOST_KEY_BASE64 = (
+    "AAAAC3NzaC1lZDI1NTE5AAAAIG1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1t"
+)
+TEST_HOST_KEY_FINGERPRINT = "SHA256:S4QrG4wxrzL3obNVPfywy8dyGYBAGs9xbR14IoIuTKE"
+TEST_MANAGED_DATABASE_PUBLIC_KEY = f"ssh-ed25519 {TEST_HOST_KEY_BASE64}"
+TEST_MANAGED_FILES_PUBLIC_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIG5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5u"
+)
 
 
 class ConnectionCredentialSerializerTests(BaseTestCase):
@@ -24,6 +39,20 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
         self.encryption_key = self.account.get_encryption_key()
+
+    def _approve_host(self, host, port):
+        return CoreSSHHostKeyApproval.objects.create(
+            account=self.account,
+            normalized_host=host,
+            port=port,
+            wire_key_type="ssh-ed25519",
+            public_key_base64=TEST_HOST_KEY_BASE64,
+            fingerprint=TEST_HOST_KEY_FINGERPRINT,
+            negotiated_host_key_algorithm="ssh-ed25519",
+            bits=256,
+            approved_by_member_pk_snapshot=self.member.pk,
+            approved_by_user_pk_snapshot=self.user.pk,
+        )
 
     def _website_auth(
         self,
@@ -50,6 +79,7 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
             use_public_key=use_public_key,
             use_private_key=use_private_key,
         )
+        self._approve_host("website.example.test", 22)
         return connection, auth
 
     def _database_auth(
@@ -93,6 +123,8 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
             use_public_key=use_public_key,
             use_private_key=use_private_key,
         )
+        if use_public_key or use_private_key:
+            self._approve_host("ssh.example.test", 22)
         return connection, auth
 
     def test_website_read_response_never_contains_decrypted_secrets(self):
@@ -220,7 +252,8 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.content)
         auth = CoreAuthDatabase.objects.get(connection_id=response.json()["id"])
         self.assertTrue(auth.use_ssl)
-        self.assertTrue(check.call_args.kwargs["data"]["use_ssl"])
+        self.assertEqual(response.json()["validation_status"], "complete")
+        check.assert_called_once_with(check_errors=True)
 
     @patch.object(CoreAuthDatabase, "check_connection", return_value=True)
     def test_new_mysql_84_connection_preserves_explicit_tls_opt_out(self, check):
@@ -249,7 +282,8 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.content)
         auth = CoreAuthDatabase.objects.get(connection_id=response.json()["id"])
         self.assertFalse(auth.use_ssl)
-        self.assertFalse(check.call_args.kwargs["data"]["use_ssl"])
+        self.assertEqual(response.json()["validation_status"], "complete")
+        check.assert_called_once_with(check_errors=True)
 
     @patch.object(CoreAuthWebsite, "check_connection", return_value=True)
     def test_website_patch_omitted_private_key_and_passphrase_are_retained(self, check):
@@ -274,9 +308,8 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
             bs_decrypt(auth.private_key, self.encryption_key),
             "website-private-key-secret",
         )
-        checked = check.call_args.kwargs["data"]
-        self.assertEqual(checked["password"], "website-password-secret")
-        self.assertEqual(checked["private_key"], "website-private-key-secret")
+        self.assertEqual(response.json()["validation_status"], "complete")
+        check.assert_called_once_with(data=None, check_errors=None)
 
     @patch.object(CoreAuthWebsite, "check_connection", return_value=True)
     def test_website_read_payload_can_be_patched_without_resending_secrets(self, _check):
@@ -335,9 +368,8 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
             bs_decrypt(auth.password, self.encryption_key),
             "replacement-login-password",
         )
-        checked = check.call_args.kwargs["data"]
-        self.assertIsNone(checked["private_key"])
-        self.assertEqual(checked["password"], "replacement-login-password")
+        self.assertEqual(response.json()["validation_status"], "complete")
+        check.assert_called_once_with(data=None, check_errors=None)
 
     @patch.object(CoreAuthWebsite, "check_connection", return_value=True)
     def test_website_switch_to_private_key_does_not_reuse_login_password(self, check):
@@ -362,7 +394,8 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
             bs_decrypt(auth.private_key, self.encryption_key),
             "replacement-private-key",
         )
-        self.assertIsNone(check.call_args.kwargs["data"]["password"])
+        self.assertEqual(response.json()["validation_status"], "complete")
+        check.assert_called_once_with(data=None, check_errors=None)
 
     def test_website_rejects_two_key_auth_modes(self):
         connection, _auth = self._website_auth()
@@ -407,10 +440,8 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
             bs_decrypt(auth.private_key, self.encryption_key),
             "database-private-key-secret",
         )
-        checked = check.call_args.kwargs["data"]
-        self.assertEqual(checked["password"], "database-password-secret")
-        self.assertEqual(checked["ssh_password"], "ssh-passphrase-secret")
-        self.assertEqual(checked["private_key"], "database-private-key-secret")
+        self.assertEqual(response.json()["validation_status"], "complete")
+        check.assert_called_once_with(check_errors=True)
 
     @patch.object(CoreAuthDatabase, "check_connection", return_value=True)
     def test_database_read_payload_can_be_patched_without_resending_secrets(self, _check):
@@ -470,21 +501,20 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
         self.assertIsNone(auth.ssh_username)
         self.assertIsNone(auth.ssh_password)
         self.assertIsNone(auth.private_key)
-        checked = check.call_args.kwargs["data"]
-        self.assertIsNone(checked["ssh_host"])
-        self.assertIsNone(checked["ssh_username"])
-        self.assertIsNone(checked["ssh_password"])
-        self.assertIsNone(checked["private_key"])
+        self.assertEqual(response.json()["validation_status"], "complete")
+        check.assert_called_once_with(check_errors=True)
 
     @override_settings(
-        SSH_MANAGED_PUBLIC_KEY=(
-            "ssh-ed25519 "
-            "AAAAC3NzaC1lZDI1NTE5AAAAIG1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1t"
-        )
+        SSH_MANAGED_PUBLIC_KEY="",
+        SSH_MANAGED_DATABASE_PUBLIC_KEY=TEST_MANAGED_DATABASE_PUBLIC_KEY,
+        SSH_MANAGED_FILES_PUBLIC_KEY=TEST_MANAGED_FILES_PUBLIC_KEY,
+        SSH_MANAGED_LANE_ISOLATION_REQUIRED=True,
     )
     @patch.object(CoreAuthDatabase, "check_connection", return_value=True)
     def test_database_switch_to_public_key_clears_private_key_and_passphrase(self, _check):
         connection, auth = self._database_auth(use_private_key=True)
+        connection.refresh_from_db()
+        initial_generation = connection.managed_ssh_generation
 
         response = self.client.patch(
             f"/api/v1/connections/database/{connection.id}/",
@@ -503,6 +533,13 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
         )
         self.assertIsNone(auth.ssh_password)
         self.assertIsNone(auth.private_key)
+        self.assertEqual(response.json()["validation_status"], "pending")
+        _check.assert_not_called()
+        connection.refresh_from_db()
+        self.assertEqual(
+            connection.managed_ssh_generation,
+            initial_generation + 1,
+        )
 
     def test_database_rejects_private_key_mode_without_required_ssh_fields(self):
         connection, _auth = self._database_auth()
@@ -534,11 +571,15 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        payload = response.json()["auth_database"]
-        self.assertIn("non_field_errors", payload)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["validation_status"], "failed")
         self.assertEqual(
-            payload["connection_error"],
+            payload["detail"],
+            "Connection was saved as pending; validation failed.",
+        )
+        self.assertEqual(
+            payload["validation_error"],
             {
                 "code": "TCP_TIMEOUT",
                 "detail": "The destination did not respond before the connection timeout.",
@@ -550,4 +591,6 @@ class ConnectionCredentialSerializerTests(BaseTestCase):
                 ),
             },
         )
+        connection.refresh_from_db()
+        self.assertEqual(connection.status, connection.Status.PENDING)
         self.assertNotIn("database-password-secret", json.dumps(response.json()))

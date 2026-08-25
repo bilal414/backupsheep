@@ -57,14 +57,17 @@ from the RabbitMQ data-format upgrade:
    requeued from durable BackupSheep state.
 2. Capture an encrypted, restorable backup of `.env`, `.secrets`, PostgreSQL, and the
    `rabbitmq_data` volume. Do not use `down --volumes`.
-3. Complete the [RabbitMQ 4.3 data migration](rabbitmq-upgrade.md) first if the existing
-   data-generation witness is blank.
-4. From the exact reviewed checkout, run the installer once with
-   `--migrate-rabbitmq-identities`. If the database identity split is also pending, pass
-   `--migrate-database-identities` in the same invocation. Do not enable operations on
-   this run.
-5. Wait for `rabbitmq-volume-init`, `rabbitmq-provision`, database provisioning,
-   migrations, and security preflight to complete. Any partial `2-pending-*` witness,
+3. If the data-generation witness is blank, follow the coordinated
+   [RabbitMQ 4.3 data migration](rabbitmq-upgrade.md). That runbook stages and then
+   completes this identity transition after the 4.3 witness; do not run a competing
+   identity-only command in parallel.
+4. When the data witness is already `4.3`, run the exact installer once with all normal
+   domain/project/KMS inputs plus `--migrate-rabbitmq-identities`. Also pass
+   `--migrate-database-identities` and/or `--migrate-staging-layout` when those current
+   gates are pending. Do not enable operations on this run.
+5. Wait for `rabbitmq-volume-init`, `rabbitmq-provision`, `staging-provision`, database
+   provisioning, migration, `db-seal` and security preflight to complete. Any partial
+   `2-pending-*` witness,
    missing key, duplicate credential, legacy secret, or broker drift stops the install;
    restore the protected rollback before retrying if the cause is not understood.
 6. Smoke-test one task per lane, then explicitly enable operations.

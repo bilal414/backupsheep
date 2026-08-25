@@ -1184,8 +1184,12 @@ class UtilBackup(TimeStampedModel):
     def retry(self):
         from celery import current_app
         from apps.console.backup.models import CoreBackupRequest
+        from backupsheep.source_recovery_policy import require_source_backup_creation
 
         if self.schedule:
+            require_source_backup_creation(
+                self.schedule.node.connection.integration.code
+            )
             request = CoreBackupRequest.objects.filter(
                 task_id=self.celery_task_id,
                 task_name=self.schedule.node.backup_task_name(),

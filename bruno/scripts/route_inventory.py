@@ -32,6 +32,13 @@ def configure_django():
             "DJANGO_ALLOWED_HOSTS": "localhost",
             "APP_PROTOCOL": "http://",
             "APP_DOMAIN": "localhost",
+            "BACKUPSHEEP_INSTALLATION_ID": "0" * 64,
+            "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE": "false",
+            "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER": "local-development",
+            "BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY": (
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            ),
+            "BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID": "bruno-introspection-v1",
         }
     )
     import django
@@ -139,6 +146,16 @@ def _auth(path: str) -> str:
         return "none"
     if path == "/api/v1/check/login/":
         return "optional-token"
+    if path in {
+        "/api/v1/connections/digitalocean/oauth_url/",
+        "/api/v1/connections/ovh_ca/oauth_url/",
+        "/api/v1/connections/ovh_eu/oauth_url/",
+        "/api/v1/connections/ovh_us/oauth_url/",
+    }:
+        # These starts create state in the same browser session that must later
+        # receive the provider callback. API tokens cannot safely substitute
+        # for the session/CSRF boundary.
+        return "browser-session-csrf"
     return "token"
 
 

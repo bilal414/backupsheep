@@ -1,3 +1,4 @@
+from django.db import transaction
 from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, mixins
@@ -8,6 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_datatables.filters import DatatablesFilterBackend
 from rest_framework.response import Response
 from apps.console.account.models import CoreAccount
+from apps.console.connection.managed_ssh import acquire_managed_ssh_mutation_lock
 from apps.console.member.models import CoreMemberAccount
 from .filters import CoreAccountFilter
 from .permissions import CoreAccountViewPermissions
@@ -47,6 +49,21 @@ class CoreAccountView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
             memberships__status=CoreMemberAccount.Status.ACTIVE,
         ).distinct()
         return queryset
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        # Account deletion cascades through managed auth, approvals, and durable
+        # operations. Take the installation fence before the account row lock so
+        # it cannot invert the managed-SSH global lock order.
+        acquire_managed_ssh_mutation_lock()
+        candidate = self.get_object()
+        # The scoped account queryset is DISTINCT and PostgreSQL cannot combine
+        # DISTINCT with FOR UPDATE. Re-fetch the already-authorized identity from
+        # the base table, then re-run object permission checks on the locked row.
+        instance = CoreAccount.objects.select_for_update().get(pk=candidate.pk)
+        self.check_object_permissions(request, instance)
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])
     def remove_membership(self, request, pk=None):

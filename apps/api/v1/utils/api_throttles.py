@@ -175,3 +175,21 @@ class MFAIdentityRateThrottle(_SubmittedIdentityThrottle):
     def identity(self, request):
         user = getattr(request, "user", None)
         return "mfa-user", getattr(user, "pk", None)
+
+
+class SSHHostKeyPeerThrottle(_ServerPeerThrottle):
+    """Bound unauthenticated handshakes initiated by one observed peer."""
+
+    scope = "ssh-host-key-peer"
+    rate = "12/minute"
+
+
+class SSHHostKeyUserThrottle(_SubmittedIdentityThrottle):
+    """Bound SSH scans initiated by one authenticated user."""
+
+    scope = "ssh-host-key-user"
+    rate = "6/minute"
+
+    def identity(self, request):
+        user = getattr(request, "user", None)
+        return "ssh-host-key-user", getattr(user, "pk", None)

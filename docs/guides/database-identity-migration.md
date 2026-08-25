@@ -88,11 +88,23 @@ installation/KMS arguments. `--skip-start` is useful for a change-review pause:
 
 ```bash
 TARGET_COMMIT='<40-character-reviewed-release-commit>'
+CURRENT_DOMAIN='<existing-public-hostname>'
+KMS_KEY_ARN='<resolved-symmetric-kms-key-arn>'
+KMS_REGION='<aws-region>'
+KMS_ALLOWED_KEY_ARNS="${KMS_KEY_ARN}"
+KMS_DATABASE_CREDENTIALS='<canonical-private-database-lane-credentials-file>'
+KMS_FILES_CREDENTIALS='<different-canonical-private-files-lane-credentials-file>'
 ./install.sh \
   --ref "${TARGET_COMMIT}" \
   --install-dir "$PWD" \
   --project-name backupsheep \
+  --domain "${CURRENT_DOMAIN}" \
   --migrate-database-identities \
+  --artifact-kms-key-id "${KMS_KEY_ARN}" \
+  --artifact-kms-region "${KMS_REGION}" \
+  --artifact-kms-allowed-key-arns "${KMS_ALLOWED_KEY_ARNS}" \
+  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
+  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
   --skip-start
 ```
 
@@ -121,6 +133,12 @@ existing-install transition remains pending:
   --ref "${TARGET_COMMIT}" \
   --install-dir "$PWD" \
   --project-name backupsheep \
+  --domain "${CURRENT_DOMAIN}" \
+  --artifact-kms-key-id "${KMS_KEY_ARN}" \
+  --artifact-kms-region "${KMS_REGION}" \
+  --artifact-kms-allowed-key-arns "${KMS_ALLOWED_KEY_ARNS}" \
+  --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
+  --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}" \
   --migrate-database-identities
 ```
 
@@ -136,6 +154,9 @@ Startup is intentionally two phase:
    password and atomically promote `.env` to generation `3`.
 6. Preflight connects as the unprivileged preflight role and validates the complete
    catalog contract before the web service can start.
+7. Every long-lived worker repeats the image/schema check before accepting work. Its
+   only additional schema-version privilege is `SELECT` on `django_migrations`; the
+   seal does not broaden any other table or sequence grant.
 
 An interruption before step 5 leaves the durable marker pending. An interruption
 after step 5 is safe because `db-seal` has committed, and Compose still requires

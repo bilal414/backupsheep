@@ -14,7 +14,7 @@ never changes or consumes the backup record itself.
 | AWS S3/DynamoDB | Uses AWS Backup recovery metadata and a distinct target bucket/table | No source overwrite; S3 target must be an existing empty versioned bucket |
 | Vultr Managed Database | Creates a new managed-database fork | No |
 | Lightsail bucket replication | Copies a selected replication run back to a configured target prefix | May write objects under the selected target prefix; tracked separately from node restores |
-| WordPress or Basecamp archive | Download or transfer only | No automatic restore action is exposed |
+| WordPress or Basecamp archive | No enterprise recovery action; stock enterprise mode blocks all new protection and backup initiation while retaining existing rows for inspection | Direct BSE1 download is disabled; no automatic restore/authenticated plaintext export exists, and the transfer UI has no complete server action/task. Only explicit non-enterprise `legacy-only` compatibility mode can create a plaintext artifact for the authenticated legacy download action |
 
 Every restore-start action requires a completed/eligible backup or replication
 run plus explicit request data. Node restores require the `backup_create` group
@@ -23,8 +23,10 @@ permission for non-owner members.
 ## Website restore
 
 The operator selects one completed storage point and confirms the operation.
-BackupSheep downloads and validates the archive, stages the content, and
-publishes it back through the configured website connection.
+The storage worker downloads and validates the BSE1 ciphertext, publishes it through the
+files-lane reverse-transfer fence, and the files worker authenticates and decrypts it in
+its private work volume before publishing the content through the configured website
+connection.
 
 By default, files present in the archive overwrite their matching server paths,
 while unrelated server files remain. The optional **Delete files on the server

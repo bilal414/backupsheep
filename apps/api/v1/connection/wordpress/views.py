@@ -29,6 +29,10 @@ from ...utils.api_filters import DateRangeFilter
 from ...utils.api_serializers import ReadWriteSerializerMixin
 from ..view_helpers import safe_connection_action
 from requests.utils import requote_uri
+from backupsheep.source_recovery_policy import (
+    source_backup_creation_available,
+    require_source_backup_creation,
+)
 
 
 class CoreWordPressView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
@@ -67,6 +71,7 @@ class CoreWordPressView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         return queryset
 
     def create(self, request, *args, **kwargs):
+        require_source_backup_creation("wordpress")
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
@@ -80,6 +85,8 @@ class CoreWordPressView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def endpoints(self, request):
+        if not source_backup_creation_available("wordpress"):
+            return Response([])
         member = self.request.user.member
         query = Q(integrations__code="wordpress")
 
@@ -88,7 +95,7 @@ class CoreWordPressView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         return Response(endpoints)
 
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     @safe_connection_action(stage="validation")
     def validate(self, request, pk=None):
         try:

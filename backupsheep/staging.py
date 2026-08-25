@@ -33,7 +33,6 @@ DATABASE_TRANSFER_WRITER_GID = 10989
 DATABASE_TRANSFER_READER_GID = 10990
 FILES_TRANSFER_WRITER_GID = 10991
 FILES_TRANSFER_READER_GID = 10992
-SSH_TRUST_READER_GID = 10997
 ROOT_UID = 0
 ROOT_MODE = 0o3771  # writers can list/create; storage can traverse only a known fence
 FENCE_MODE = 0o2750  # owner mutates; the transfer group can only read/traverse
@@ -229,7 +228,6 @@ def _runtime_role(*, allowed: frozenset[str] | None = None) -> tuple[str, int, i
     if role in SOURCE_ROLES:
         permitted_groups.update(
             {
-                SSH_TRUST_READER_GID,
                 TRANSFER_WRITER_GIDS[role],
                 TRANSFER_READER_GIDS[role],
             }

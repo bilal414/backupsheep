@@ -92,6 +92,14 @@ def account(request):
             )
         if token_ok and form.is_valid():
             with transaction.atomic():
+                # Keep account creation in the same global order as managed SSH
+                # mutation even though a clean onboarding database has no keys
+                # to fence yet.
+                from apps.console.connection.managed_ssh import (
+                    acquire_managed_ssh_mutation_lock,
+                )
+
+                acquire_managed_ssh_mutation_lock()
                 user = User.objects.create_user(
                     username=form.cleaned_data["email"],
                     email=form.cleaned_data["email"],

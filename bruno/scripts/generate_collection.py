@@ -522,6 +522,10 @@ def render_request(operation: Operation, seq: int) -> str:
         "none": "No authentication required.",
         "optional-token": "Token is optional; include it to test the signed-in state.",
         "token": "Requires `Authorization: Token <key>`.",
+        "browser-session-csrf": (
+            "Requires the authenticated browser session and its Django CSRF token; "
+            "API-token authentication is intentionally rejected."
+        ),
     }[operation.auth]
     safety_text = {
         "safe-read": "Read-only request.",

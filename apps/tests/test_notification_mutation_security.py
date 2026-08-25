@@ -91,7 +91,7 @@ class NotificationMutationSecurityTests(BaseTestCase):
             f"/api/v1/notifications-telegram/{self.telegram.pk}/"
         )
         with mock.patch.object(CoreNotificationTelegram, "validate") as validate:
-            validation = self.member_client.get(
+            validation = self.member_client.post(
                 f"/api/v1/notifications-telegram/{self.telegram.pk}/validate/"
             )
         self.assertEqual(
@@ -104,10 +104,16 @@ class NotificationMutationSecurityTests(BaseTestCase):
 
     def test_telegram_owner_can_mutate_and_validate(self):
         with mock.patch.object(CoreNotificationTelegram, "validate", return_value=True):
-            validation = self.owner_client.get(
+            validation = self.owner_client.post(
                 f"/api/v1/notifications-telegram/{self.telegram.pk}/validate/"
             )
         self.assertEqual(validation.status_code, 200, validation.content)
+        self.assertEqual(
+            self.owner_client.get(
+                f"/api/v1/notifications-telegram/{self.telegram.pk}/validate/"
+            ).status_code,
+            405,
+        )
 
         deleted = self.owner_client.delete(
             f"/api/v1/notifications-telegram/{self.telegram.pk}/"
@@ -125,7 +131,7 @@ class NotificationMutationSecurityTests(BaseTestCase):
             f"/api/v1/notifications-telegram/{self.other_telegram.pk}/"
         )
         with mock.patch.object(CoreNotificationTelegram, "validate") as validate:
-            validation = self.owner_client.get(
+            validation = self.owner_client.post(
                 f"/api/v1/notifications-telegram/{self.other_telegram.pk}/validate/"
             )
         self.assertEqual(

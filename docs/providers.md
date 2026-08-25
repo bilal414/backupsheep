@@ -54,13 +54,22 @@ SFTP, or SSH** (transfers use `lftp`). Per-connection FTPS TLS verification is s
 Legacy plaintext FTP requires the explicit `ALLOW_INSECURE_FTP=true` compatibility
 opt-in because it exposes credentials and backup data in transit.
 Backups can run in **incremental** mode (after the first run only new/changed files are
-downloaded, into a per-node local cache — every backup is still a complete zip) or
+downloaded into the files worker's private per-node cache—every backup is still a
+complete, restorable BSE1 artifact) or
 **full** mode (re-download everything every run); see
 [Usage → Website backup modes](usage.md#website-backup-modes).
 
 ### SaaS apps
-- **WordPress** (`wordpress`)
-- **Basecamp** (`basecamp`) — needs a 37signals OAuth app (`BASECAMP_CLIENT_ID/SECRET`).
+- **WordPress** (`wordpress`) — unavailable in stock enterprise/BSE1 mode because no
+  complete authenticated export or automatic restore exists.
+- **Basecamp** (`basecamp`) — unavailable in stock enterprise/BSE1 mode for the same
+  recovery reason; legacy compatibility also needs a 37signals OAuth app
+  (`BASECAMP_CLIENT_ID/SECRET`).
+
+Both choices are hidden and all new-protection/backup dispatch boundaries fail closed in
+enterprise mode. Existing rows remain inspectable. A non-enterprise operator can opt into
+the existing authenticated legacy-download workflow only by enabling the matching family
+flag together with `legacy-only`, legacy restore enabled, and enterprise mode disabled.
 
 > `zendesk` and `slack` rows are seeded but their console tiles are disabled
 > in this build; treat them as experimental/not wired.
@@ -79,7 +88,9 @@ providers just need an access key, secret, bucket, and (for non-AWS) an endpoint
 all entered in the UI. **OAuth** providers (Dropbox, Google Drive, OneDrive, pCloud) need
 an app registered with the provider and its credentials in `.env` first. **Local
 Storage** needs neither — backups stay on a disk path of the BackupSheep server itself
-(`/backups`, overridable via `BS_LOCAL_STORAGE_PATH`).
+(`/backups`, overridable via `BS_LOCAL_STORAGE_PATH`). Stock Compose mounts that path
+only in `worker-storage`, and the stored objects are BSE1 ciphertext; source workers do
+not receive the mount.
 
 | Storage | Code | Type |
 |---------|------|------|

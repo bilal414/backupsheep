@@ -159,6 +159,75 @@ class OracleLiveUIHarnessSafetyTests(SimpleTestCase):
             "compartment_ocid": self.compartment_id,
         }
 
+    def test_ssh_requires_independent_exact_host_key_pin_and_never_uses_tofu(self):
+        host = "198.51.100.25"
+        host_key = mock.Mock()
+        host_key.asbytes.return_value = b"oracle-exact-host-key"
+        expected = OracleLiveUIHarness._ssh_key_fingerprint(host_key)
+        environment = {
+            "ORACLE_E2E_SOURCE_SSH_HOST": host,
+            "ORACLE_E2E_SOURCE_SSH_HOST_KEY_SHA256": expected,
+            "ORACLE_E2E_SSH_USER": "opc",
+        }
+        harness = self.harness(apply=True, environment=environment)
+        client = mock.Mock()
+        client.get_transport.return_value.get_remote_server_key.return_value = host_key
+        with (
+            mock.patch.object(
+                harness,
+                "_ensure_ssh_key",
+                return_value=(self.root / "oracle-key", "ssh-rsa TEST"),
+            ),
+            mock.patch("paramiko.SSHClient", return_value=client),
+            mock.patch(
+                "paramiko.RSAKey.from_private_key_file",
+                return_value=mock.sentinel.private_key,
+            ),
+        ):
+            connected = harness._ssh_client(
+                {"public_ip": host},
+                host_variable="ORACLE_E2E_SOURCE_SSH_HOST",
+            )
+
+        self.assertIs(connected, client)
+        policy = client.set_missing_host_key_policy.call_args.args[0]
+        self.assertEqual(policy.expected_fingerprint, expected)
+        policy.missing_host_key(client, host, host_key)
+        client.load_host_keys.assert_not_called()
+        client.save_host_keys.assert_not_called()
+
+        wrong_key = mock.Mock()
+        wrong_key.asbytes.return_value = b"oracle-attacker-host-key"
+        with self.assertRaisesRegex(HarnessError, "exact pin"):
+            policy.missing_host_key(client, host, wrong_key)
+
+    def test_ssh_missing_host_key_pin_fails_before_paramiko_client(self):
+        host = "198.51.100.25"
+        harness = self.harness(
+            apply=True,
+            environment={
+                "ORACLE_E2E_SOURCE_SSH_HOST": host,
+                "ORACLE_E2E_SSH_USER": "opc",
+            },
+        )
+        with (
+            mock.patch.object(
+                harness,
+                "_ensure_ssh_key",
+                return_value=(self.root / "oracle-key", "ssh-rsa TEST"),
+            ),
+            mock.patch("paramiko.SSHClient") as ssh_client,
+            self.assertRaisesRegex(
+                HarnessError,
+                "ORACLE_E2E_SOURCE_SSH_HOST_KEY_SHA256 is required",
+            ),
+        ):
+            harness._ssh_client(
+                {"public_ip": host},
+                host_variable="ORACLE_E2E_SOURCE_SSH_HOST",
+            )
+        ssh_client.assert_not_called()
+
     def establish_storage_scope(self, harness, *, bucket_name="bucket"):
         bucket = SimpleNamespace(
             id="ocid1.bucket.oc1.iad.backupsheeptest",

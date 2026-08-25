@@ -1,0 +1,29 @@
+meta {
+  name: GET /api/v1/utils/test/
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/api/v1/utils/test/
+  body: none
+  auth: none
+}
+
+headers {
+}
+
+tests {
+  test("API version endpoint returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Operation ID: `get-api-v1-utils-test`
+
+  No authentication required. Read-only request.
+
+  Django action: `apps.api.v1.utils.views.APIUtilsTest.get`
+  Source: `apps/api/v1/utils/views.py`
+}

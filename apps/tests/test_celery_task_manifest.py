@@ -383,6 +383,30 @@ class CeleryTaskManifestTests(SimpleTestCase):
             restore_tasks,
         )
 
+    def test_incremental_cache_intent_is_bound_to_a_website_node(self):
+        from apps.console.node.models import CoreNode
+
+        node = SimpleNamespace(pk=41, uuid_str="website-node-uuid")
+        manager = mock.Mock()
+        manager.filter.return_value.first.return_value = node
+        with mock.patch.object(CoreNode, "objects", manager):
+            intent = resolve_task_intent(
+                task_name="reset_incremental_cache",
+                task_id="website-cache-reset",
+                args=[41],
+                kwargs={},
+                publisher="app",
+                intent="node_cache_cleanup",
+                phase="publish",
+            )
+
+        self.assertEqual(intent["kind"], "node-cache-cleanup")
+        self.assertEqual(intent["id"], 41)
+        manager.filter.assert_called_once_with(
+            pk=41,
+            type=CoreNode.Type.WEBSITE,
+        )
+
     def test_source_log_publication_reads_only_id_and_uses_content_bound_task_id(self):
         from apps.console.log.models import CoreLog
 
@@ -441,6 +465,49 @@ class CeleryTaskManifestTests(SimpleTestCase):
                 TASK_POLICIES[task_name].publishers,
                 frozenset(("beat", queue)),
             )
+
+    def test_private_workdir_maintenance_has_exact_beat_and_lane_policies(self):
+        expected = {
+            "delete-old-logs": ("delete_old_logs", "files"),
+            "delete-old-database-run-logs": (
+                "delete_old_database_logs",
+                "database",
+            ),
+            "delete-old-storage-run-logs": ("delete_old_storage_logs", "storage"),
+        }
+        for schedule_name, (task_name, queue) in expected.items():
+            with self.subTest(schedule_name=schedule_name):
+                entry = settings.CELERY_BEAT_SCHEDULE[schedule_name]
+                self.assertEqual(entry["task"], task_name)
+                self.assertNotIn("args", entry)
+                self.assertNotIn("kwargs", entry)
+                self.assertNotIn("options", entry)
+                self.assertEqual(TASK_POLICIES[task_name].queue, queue)
+                self.assertEqual(
+                    TASK_POLICIES[task_name].publishers,
+                    frozenset(("beat", queue)),
+                )
+                self.assertEqual(TASK_POLICIES[task_name].intent, "retention_sweep")
+                self.assertEqual(
+                    resolve_task_intent(
+                        task_name=task_name,
+                        task_id=f"{task_name}-scheduled-delivery",
+                        args=[],
+                        kwargs={},
+                        publisher="beat",
+                        intent="retention_sweep",
+                    ),
+                    {"kind": "bounded-state-sweep", "task": task_name},
+                )
+                with self.assertRaisesRegex(TaskIntentError, "does not accept arguments"):
+                    resolve_task_intent(
+                        task_name=task_name,
+                        task_id=f"{task_name}-attacker-selected-window",
+                        args=[0],
+                        kwargs={},
+                        publisher="beat",
+                        intent="retention_sweep",
+                    )
 
     def test_worker_startup_gate_rejects_unregistered_task(self):
         registry = {

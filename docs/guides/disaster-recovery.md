@@ -23,12 +23,17 @@ domain it is intended to recover.
 | Material | Why it matters | Recommended protection |
 | --- | --- | --- |
 | PostgreSQL | All product configuration, encrypted credentials, schedules, backup/restore rows and durable orchestration | Frequent logical dumps or managed-PostgreSQL PITR, encrypted off-host |
-| `.env`, `.secrets` / secret-manager object | Runtime/integration settings plus the file-backed Django, DB, broker, onboarding and optional managed-SSH-key secrets | Encrypted secret backup with tightly audited access; preserve ownership and modes |
+| `.env`, `.secrets` / secret-manager object | Runtime/integration settings plus file-backed Django, DB, broker, signing, onboarding and optional lane-specific managed-SSH secrets | Encrypted secret backup with tightly audited access; preserve ownership and modes |
 | Deployment metadata | Exact Git revision/image, Compose overrides, proxy and firewall configuration | Versioned infrastructure repository or encrypted configuration backup |
 | `backup_storage` | Archives stored by the Local Storage destination | Filesystem snapshot/backup to a second system; never the only archive copy |
-| Critical `backup_workdir` files | In-flight material, restore/run logs and website/database incremental caches | Snapshot active work if preserving in-progress local jobs is required |
-| `ssh_trust` | Reviewed SSH `known_hosts` used by app/database/files | Back up independently and preserve out-of-band fingerprint evidence |
+| `database_workdir`, `files_workdir`, `storage_workdir` | Lane-private in-flight material, run logs, website caches and BSE1 materialization | Snapshot the exact lane volumes if preserving in-progress local jobs/caches is required |
+| Database/files/restore ciphertext-transfer volumes | Published BSE1 handoffs that can be in flight across a crash | Include them in an application-consistent snapshot; preserve owner/group/mode metadata |
+| `staging_layout_witness` | Installation-bound v3 filesystem-layout evidence | Preserve it with the exact volume identity; never synthesize or edit it |
 | Remote storage/provider state | Cloud snapshots and offsite archive objects live outside the host | Provider-native protection, independent inventory and restore rehearsal |
+
+SSH host-key approvals and their append-only audit events are part of PostgreSQL. Preserve
+the independent fingerprint evidence used for each approval, but do not create or restore
+a global `known_hosts` file for stock Compose.
 
 RabbitMQ persists queued messages in `rabbitmq_data`, but broker state is not the product
 source of truth. The database outbox and recovery sweeps can republish durable work. Prefer
@@ -81,9 +86,10 @@ dumps. Validate retention, encryption, account isolation and restore permissions
 ```bash
 install -m 600 .env /secure/backups/backupsheep.env
 install -d -m 700 /secure/backups/backupsheep.secrets
-for secret in django_secret_key db_bootstrap_password db_migrator_password \
-  db_password rabbitmq_password onboarding_token ssh_managed_private_key; do
-  install -m 400 ".secrets/${secret}" "/secure/backups/backupsheep.secrets/${secret}"
+for source in .secrets/*; do
+  test -f "${source}" && test ! -L "${source}"
+  secret="${source##*/}"
+  install -m 400 "${source}" "/secure/backups/backupsheep.secrets/${secret}"
 done
 test ! -f docker-compose.override.yml || \
   install -m 600 docker-compose.override.yml /secure/backups/docker-compose.override.yml
@@ -99,30 +105,32 @@ Identify the exact mounted volumes and destinations instead of guessing Compose-
 volume names:
 
 ```bash
-for service in app worker-database worker-storage; do
+for service in worker-database worker-files worker-storage; do
   container="$(bs_compose --profile operations ps -q "${service}")"
   test -z "${container}" || docker inspect "${container}" \
     --format '{{range .Mounts}}{{println .Name "->" .Destination}}{{end}}'
 done
 ```
 
-Use an existing filesystem/volume backup product to protect the exact source behind
-`/backups`. If Local Storage uses a bind-mounted disk, snapshot or back up that disk with
-file metadata intact.
+Use an existing filesystem/volume backup product to protect the exact source behind the
+storage worker's `/backups` mount. No other runtime role receives that mount. If Local
+Storage uses a bind-mounted disk, snapshot or back up that disk with file metadata intact.
 
 For an application-consistent snapshot of active work material:
 
 1. stop Beat so new schedules are not dispatched;
 2. let active database/file/storage/restore work drain;
 3. stop `app` and all workers;
-4. snapshot/copy `backup_workdir`, `ssh_trust` and `backup_storage`;
+4. snapshot/copy the three private work volumes, all three ciphertext-transfer volumes,
+   `staging_layout_witness` and `backup_storage` as one recorded recovery set;
 5. restart the stack and verify recovery.
 
-At minimum, separately retain the `ssh_trust` volume and
-`.secrets/ssh_managed_private_key`. The app has no `backup_workdir` mount; do not infer
-work-volume protection from inspecting only its container. Website incremental caches can
-rebuild, but a missing in-flight dump may require the
-durable backup row to retry from its safe boundary.
+At minimum, separately retain both optional lane-specific managed-key secret files when
+they are configured. The app has no work, transfer or Local Storage mount; do not infer
+data-volume protection from inspecting only its container. Website incremental caches can
+rebuild, but a missing in-flight dump may require the durable backup row to retry from its
+safe boundary. The legacy `backup_workdir` is provisioner-only emptiness evidence, not a
+runtime volume to repopulate.
 
 ## Restore to a replacement host
 
@@ -133,11 +141,12 @@ production provider resources.
 
 - provide operator-managed Docker Engine 28.0.0+ and Compose 2.33.1+ on a supported host;
 - check out the recorded BackupSheep revision (or a reviewed compatible newer release);
-- restore `.env` with mode `0600`, `.secrets` as mode `0700`, its six required
-  owner-owned files and optional `ssh_managed_private_key` source as mode `0444`; an empty
-  optional file means disabled; restore deployment overrides;
-- recreate/mount the Local Storage, work and `ssh_trust` filesystems at the same container
-  paths;
+- restore `.env` with mode `0600`, `.secrets` as mode `0700`, every required owner-owned
+  file and the two optional lane-specific managed-key sources as mode `0444`; empty
+  optional files mean disabled; restore deployment overrides;
+- restore the three private work volumes, three ciphertext-transfer volumes, staging
+  witness and storage-only Local Storage with their exact identities and metadata; let the
+  v3 provisioner validate them rather than adding cross-lane mounts;
 - keep the public endpoint isolated until the database is restored and the first owner is
   confirmed.
 
@@ -148,11 +157,16 @@ The stock services use `pull_policy: never`; they will not fetch an unreviewed r
 substitute:
 
 ```bash
-bs_compose build db app
+bs_compose build db app app-egress-guard
 bs_compose up --detach db rabbitmq
-bs_compose exec -T db pg_isready -U backupsheep -d backupsheep
+DB_CONTAINER="$(bs_compose ps -q db)"
+test -n "${DB_CONTAINER}"
+test "$(docker inspect --format '{{.State.Health.Status}}' "${DB_CONTAINER}")" = healthy
 bs_compose exec -T rabbitmq rabbitmq-diagnostics -q ping
 ```
+
+The stock database healthcheck authenticates over TCP with the exact file-backed bootstrap
+credential and executes `SELECT 1`; a bare `pg_isready` result is not sufficient evidence.
 
 The target database must be disposable/empty or explicitly approved for replacement.
 Take a final safety dump of any database that already exists before proceeding.
@@ -173,6 +187,7 @@ never run this against an unverified database.
 ### 4. Start the application
 
 ```bash
+# Valid here only because the replacement topology has no existing guard/workload pair.
 bs_compose up --detach
 bs_compose ps --all
 bs_compose logs --tail=200 db-provision migrate preflight app
@@ -187,10 +202,17 @@ durable rows, provider identities and broker queues. Once recovery ownership is 
 enable operations explicitly:
 
 ```bash
-bs_compose --profile operations up --detach
+bs_compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate \
+  cloud-egress-guard database-egress-guard files-egress-guard \
+  storage-egress-guard logs-egress-guard \
+  worker-cloud worker-database worker-files worker-storage worker-logs
+bs_compose --profile operations up --detach --no-build --no-deps beat
 ```
 
-That command can resume old provider mutations immediately.
+Those commands can resume old provider mutations immediately. After any pair exists,
+broad, guard-only and workload-only `up` operations are refused; recovery must preserve
+the exact [paired egress lifecycle](../../deploy/egress/README.md#paired-lifecycle-commands).
 
 ### 5. Validate before reopening access
 
@@ -200,11 +222,18 @@ Verify:
 - application identity, email, groups and permissions are intact;
 - source connections, storage destinations, schedules and retention policies match the
   recovery record;
-- Local Storage files are present and download through their recorded backup rows;
-- the app can write the restored `ssh_trust` file while database/files see it read-only;
-- when configured, the managed-key source is not used directly: app/database/files stage
-  the validated non-empty key in private tmpfs at
-  `/run/backupsheep/ssh/managed_private_key`, mode `0600`, while other roles receive no key;
+- Local Storage BSE1 objects are present, match their recorded storage-point evidence and
+  complete an authenticated restore through the exact database/files reverse lane; direct
+  browser/ZIP download remains disabled;
+- account-scoped SSH approvals and append-only approval events are present in PostgreSQL;
+  an operation receives only its exact current approval in a transient private-runtime
+  file, and unknown or changed keys remain rejected;
+- when configured, `worker-database` alone stages the database identity and `worker-files`
+  alone stages the files identity at `/run/backupsheep/ssh/managed_private_key`, mode
+  `0600`; the app and other roles receive neither private key, and the two identities are
+  distinct;
+- managed-key mode is active only if the restored database contains exactly one account;
+  multi-account installations use customer-supplied private keys;
 - `app`, PostgreSQL, RabbitMQ and every worker lane are healthy;
 - existing in-progress rows resume or reach a clear manual-review state;
 - a disposable backup and restore completes with data-level verification.

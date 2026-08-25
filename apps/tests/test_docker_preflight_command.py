@@ -97,6 +97,7 @@ Seccomp_filters:\t1
         safe_environment = {
             "DJANGO_SETTINGS_MODULE": "backupsheep.settings",
             "BACKUPSHEEP_SECRETS": "",
+            "BACKUPSHEEP_EGRESS_POLICY_GENERATION": "2",
         }
         _assert_stock_configuration_sources(
             environment=safe_environment,
@@ -104,7 +105,17 @@ Seccomp_filters:\t1
             secret_values=secrets,
         )
 
+        missing_egress_generation = dict(safe_environment)
+        missing_egress_generation.pop("BACKUPSHEEP_EGRESS_POLICY_GENERATION")
         unsafe_cases = (
+            (missing_egress_generation, runtime_settings),
+            (
+                {
+                    **safe_environment,
+                    "BACKUPSHEEP_EGRESS_POLICY_GENERATION": "1",
+                },
+                runtime_settings,
+            ),
             ({**safe_environment, "DJANGO_SETTINGS_MODULE": "attacker.settings"}, runtime_settings),
             ({**safe_environment, "BACKUPSHEEP_SECRETS": "{}"}, runtime_settings),
             (

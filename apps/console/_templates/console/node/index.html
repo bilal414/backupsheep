@@ -247,7 +247,10 @@
 
                                 <div>
                                     <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-650 xl:sr-only">Schedule and state</p>
-                                    {% if node.active_schedule_count %}
+                                    {% if not node.source_protection_available %}
+                                        <p class="inline-flex items-center gap-2 text-xs font-semibold text-attention-700"><span class="h-2 w-2 flex-none rounded-full bg-attention-600" aria-hidden="true"></span>Complete recovery unavailable</p>
+                                        <p class="mt-1 text-xs text-ink-650">Existing schedules are retained for inspection and will not run.</p>
+                                    {% elif node.active_schedule_count %}
                                         <p class="inline-flex items-center gap-2 text-xs font-semibold text-evidence-700"><span class="h-2 w-2 rounded-full bg-evidence-600" aria-hidden="true"></span>{{ node.active_schedule_count }} active schedule{{ node.active_schedule_count|pluralize }}</p>
                                     {% else %}
                                         <p class="inline-flex items-center gap-2 text-xs font-semibold text-ink-650"><span class="h-2 w-2 rounded-full bg-ink-500" aria-hidden="true"></span>Manual only · no active schedule</p>

@@ -71,7 +71,7 @@ class CoreStorageIBMView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
         regions = CoreIBMRegion.objects.filter().values()
         return Response(regions)
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
         try:
             storage = self.get_object()

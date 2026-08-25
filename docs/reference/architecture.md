@@ -29,19 +29,23 @@ flowchart LR
     Files --> FileSources[FTP, FTPS and SFTP sources]
     Storage --> Destinations[Local, object and drive storage]
 
-    Database <--> Work[(backup_workdir)]
-    Files <--> Work
-    Storage <--> Work
+    Database <--> DBWork[(database_workdir)]
+    Files <--> FilesWork[(files_workdir)]
+    Storage <--> StorageWork[(storage_workdir)]
 
-    App -->|read-write| Trust[(ssh_trust)]
-    Database -->|read-only| Trust
-    Files -->|read-only| Trust
+    Database -->|fenced BSE1 write| DBTransfer[(database_ciphertext_transfer)]
+    DBTransfer -->|read-only| Storage
+    Files -->|fenced BSE1 write| FilesTransfer[(files_ciphertext_transfer)]
+    FilesTransfer -->|read-only| Storage
+    Storage -->|fenced BSE1 restore write| RestoreTransfer[(restore_ciphertext_transfer)]
+    RestoreTransfer -->|lane-scoped read-only| Database
+    RestoreTransfer -->|lane-scoped read-only| Files
 
-    App -->|read-only| Local[(backup_storage)]
-    Cloud -->|read-only| Local
-    Database -->|read-only| Local
-    Files -->|read-only| Local
-    Storage <--> Local
+    App -->|account-scoped approve and audit| DB
+    DB -->|exact operation trust snapshot| Database
+    DB -->|exact operation trust snapshot| Files
+
+    Storage <--> Local[(backup_storage)]
 ```
 
 The reverse proxy is an operator-supplied component; the repository does not ship a TLS
@@ -57,35 +61,69 @@ it can execute queued or recoverable provider work.
 
 | Component | Stock command or image | Responsibility | Scale notes |
 | --- | --- | --- | --- |
-| `db` | locally built `backupsheep-postgres:<commit>` rooted in digest-pinned `postgres:18.6-trixie` | Accounts, configuration, schedules, credentials, backup/restore records, leases and evidence | Image and Compose fix UID/GID `999:999`, drop every capability and exec PostgreSQL as non-root PID 1; fresh named volumes inherit ownership and imported drift fails closed; preserve the cluster's libc collation generation during updates |
+| `db` | locally built `backupsheep-postgres:<commit>` rooted in digest-pinned `postgres:18.6-alpine3.24` | Accounts, configuration, schedules, credentials, backup/restore records, leases and evidence | Image and Compose fix UID/GID `70:70`, drop every capability and exec PostgreSQL as non-root PID 1; active storage is installation-witnessed ICU `und`; legacy Debian storage is never auto-mounted |
 | `rabbitmq` | digest-pinned `rabbitmq:4.3.5-alpine` | Durable Celery queues and persistent message delivery | Vendor entrypoint repairs the data-volume owner, drops privilege and execs RabbitMQ as non-root PID 1; dedicated credentials/vhost; backend network only |
 | `db-provision` | `python -m backupsheep.database_identity provision` | Creates/rotates installation-marked migrator/runtime roles, transfers reviewed public ownership and applies runtime DML grants in one transaction | One-shot on a dedicated database bridge; sole application-image recipient of the bootstrap credential |
 | `migrate` | `python manage.py migrate --noinput` | Applies schema migrations before other application roles start | One-shot; must complete successfully |
 | `preflight` | `python manage.py docker_preflight` | Fails closed on unsafe identity/capability/rootfs/secret/runtime settings, pending migrations, and unavailable database/broker dependencies | One-shot; must complete successfully |
-| `app` | image entrypoint, then Gunicorn on port 8000 | Console, REST API, onboarding, connection validation and static files through WhiteNoise | Scale only behind a proxy and with shared state/mounts |
-| `worker-cloud` | queues `cloud,default`, concurrency 4 | Provider API snapshots/restores and general work | Operations profile; no work-volume mount; Local Storage is read-only |
-| `worker-database` | queue `database`, concurrency 1 | PostgreSQL, MySQL and MariaDB dump/restore work | Operations profile; CPU/disk heavy; shared work is writable, Local Storage read-only |
-| `worker-files` | queue `files`, concurrency 1 | Website collection/restore plus WordPress and Basecamp collection | Operations profile; CPU/disk heavy; shared work is writable, Local Storage read-only |
-| `worker-storage` | queue `storage`, concurrency 2 | Copies finished artifacts to destinations; finalizes, resets incremental caches, and cleans work/run-log files | Operations profile; only worker with writable Local Storage; scale for measured backlog |
-| `worker-logs` | queue `logs`, concurrency 2 | Database activity entries, notifications and database-log pruning | Operations profile; no work or Local Storage mount |
+| `app` | image entrypoint, then Gunicorn on port 8000 | Console, REST API, onboarding, connection validation and static files through WhiteNoise | Scale only behind a proxy; no work, transfer or Local Storage mount |
+| `worker-cloud` | queues `cloud,default`, concurrency 4 | Provider API snapshots/restores and general work | Operations profile; no work, transfer or Local Storage mount |
+| `worker-database` | queue `database`, concurrency 1 | PostgreSQL, MySQL and MariaDB dump/restore work plus database run-log pruning | Operations profile; CPU/disk heavy; private work plus database-forward/restore-transfer grants; no Local Storage mount |
+| `worker-files` | queue `files`, concurrency 1 | Website collection/restore, WordPress/Basecamp collection, incremental-cache reset and files run-log pruning | Operations profile; CPU/disk heavy; private work plus files-forward/restore-transfer grants; no Local Storage mount |
+| `worker-storage` | queue `storage`, concurrency 2 | Copies BSE1 artifacts to destinations, downloads restore ciphertext, finalizes storage state and prunes destination-upload run logs | Operations profile; private work; read-only source transfers; writable restore transfer and Local Storage; scale for measured backlog |
+| `worker-logs` | queue `logs`, concurrency 2 | Database activity entries, notifications and database-activity pruning | Operations profile; no work, transfer or Local Storage mount |
 | `beat` | database-backed `BackupDatabaseScheduler` | Scheduled backups, recovery sweeps and maintenance dispatch | Keep one instance for ordinary maintenance cadence |
 
 Queue routing is declared in Django settings, not in Compose labels. Starting a generic
 Celery worker without the intended queue set can starve a lane or run disk-touching work
 where its files are absent.
 
-**High residual risk:** the stock roles still share one RabbitMQ principal and vhost.
-Queue names and worker mounts limit accidental execution but are not an authorization
-boundary: a compromised broker-connected role can publish a task or command to another
-role's queue. Enterprise deployments should treat this cross-role command-relay path as a
-High risk until BackupSheep supports per-role broker principals/vhosts with enforceable
-publish/consume permissions (or equivalent authenticated task envelopes).
+Queue names by themselves are not an authorization boundary. Stock Compose adds a distinct
+RabbitMQ principal with fixed queue ACLs for each lane and requires lane-bound signed task
+envelopes with replay tracking. Preserve both controls: a generic worker, broader broker
+permission, unsigned compatibility path or shared signing key would reopen cross-lane
+command relay. Durable task-specific execution fences remain necessary for late-ack crash
+recovery even with broker authentication.
 
-Application roles run as UID/GID `10001:10001` with a read-only root, all Linux
-capabilities dropped, `no-new-privileges`, bounded tmpfs/resource limits and no host/PID/IPC
-namespace sharing. Database and broker connectivity use separate role-specific internal
-bridges, while each outbound role gets a separate egress bridge. The stock stack mounts
-only the secret files each role needs; the onboarding token is granted to `app` alone.
+Application roles use fixed lane identities: web `10001`, database `10002`, files `10003`,
+storage `10004`, logs `10005`, Beat `10006`, migration/preflight `10007` and cloud `10008`
+(UID and primary GID match). They have read-only roots, all Linux capabilities dropped,
+`no-new-privileges`, bounded tmpfs/resource limits and no host PID/IPC namespace sharing.
+Each Internet-capable role shares only its network namespace with a no-secret egress
+guard and retains a private PID namespace. Mount, IPC, user and secret contexts also
+remain separate. The guard/workload pair must be recreated together: the wrapper refuses
+independent guard lifecycle commands, and guard restart policy is `"no"` so Docker cannot
+silently replace the namespace owner beneath a running workload.
+The guard drops to UID/GID `10020:10020`, retains only `NET_ADMIN`, and permits the current
+database and broker peers as exact interface/address/TCP-port tuples on two distinct
+directly connected internal bridges. It refreshes those sets after Docker DNS changes and
+blocks both on absence or ambiguity; no bridge subnet is trusted. Each role also has its
+own outward bridge. The stock stack mounts only the secret files each role needs; the
+onboarding token is granted to `app` alone.
+
+Stock generation-2 `deny` mode permits only the exact internal database and broker peers
+and blocks every outward destination. Strict `allowlist` adds exact IPv4 `CIDR:port` or
+IPv6 `[CIDR]:port` TCP tuples. `deny` and `allowlist` redirect workload Docker-DNS queries
+to a loopback-only zero-capability UID-`10021` parser. It can send only an immutable
+allowed-name index and A/AAAA selector to a distinct zero-capability UID-`10022`
+forwarder, which alone constructs canonical queries and reaches Docker DNS. Direct
+external TCP/UDP 53 is blocked. The complete exact-name policy is capped at 66 unique
+names, including DB/broker names, and every CNAME target needs its own entry.
+
+DNS and tuple grants are independent. They are transport-level defense in depth, not a
+resource-aware boundary; another tenant on the same IP and port remains reachable.
+Enterprise operations require dedicated/private endpoints or a resource-aware proxy.
+`public` uses ordinary DNS and is an explicit compatibility risk opt-in; exact tuples are
+special-range exceptions intended only for narrow reviewed private targets. They cannot
+override fixed `never` destinations or discovered gateways; the fixed set includes both
+well-known NAT64 prefixes. They can override only the ordinary private/reserved set.
+Deployment-specific NAT64 remains a host/network control.
+
+Guard health requires a successful renewal witness younger than the kernel lease, not
+PID-1 liveness. Workload health separately proves local web/worker readiness and fresh
+TCP connections to both database and broker through the current exact peer sets. Guard
+loss, lease expiry, peer revocation, or a stranded old namespace therefore makes the
+workload unhealthy without granting it authority to restart the pair.
 
 Every application-image command passes through the image entrypoint. It neutralizes
 shell, Python, dynamic-loader and TLS-key-log startup hooks; verifies the fixed identity,
@@ -93,12 +131,22 @@ empty capability sets, `NoNewPrivs`, seccomp, Docker init, private mounts, read-
 and absence of a Docker socket; and executes configured argv without shell evaluation.
 After Compose's one-shot deployment gate, the same entrypoint runs `docker_preflight`
 again before every web, worker and Beat process. This catches weakened settings or runtime
-flags when Docker later auto-restarts a service without recreating the one-shot gate.
+flags when Docker later auto-restarts a service without recreating the one-shot gate, but
+it does not recover or attest a `restart: "no"` guard after a Docker daemon restart.
+Long-running application services use `restart: unless-stopped`; namespace guards use
+`restart: "no"`. The wrapper refuses independent guard lifecycle commands and requires
+each workload/guard pair to be recreated together, including daemon-restart recovery. The
+installer uses ordinary `down` to
+remove the complete container/network topology before every build or migration while
+preserving named data/identity volumes. An operations-only pause explicitly stops the
+workers and Beat and leaves the no-secret guards in place.
 
-PostgreSQL's derived build verifies the exact official entrypoint bytes, replaces its
-`gosu` transition with security-updated Debian `setpriv`, deletes `gosu`, asserts the
-fixed util-linux family, and declares UID/GID `999:999`. Stock Compose repeats that user,
-drops all capabilities, and starts PostgreSQL without a root ownership-repair phase.
+PostgreSQL's derived build verifies the exact official 18.6 Alpine 3.24 entrypoint bytes,
+replaces its `gosu` transition with exact `su-exec=0.3-r0`, deletes `gosu`, and declares
+UID/GID `70:70`. Stock Compose repeats that user, drops all capabilities, and starts
+PostgreSQL without a root ownership-repair phase. An installation-bound marker permits
+only the distinct ICU `und` generation; the older Debian/UID-999 volume remains detached
+rollback evidence after the explicit logical migration.
 RabbitMQ remains the sole deliberate bootstrap exception: its reviewed entrypoint gets a
 narrow capability set to repair named-volume ownership, drops to the vendor UID, and
 execs the non-root server. Neither service uses Docker's root-owned init shim. Verify UID,
@@ -108,41 +156,57 @@ capabilities and PID 1 whenever either pinned image changes.
 
 | Compose volume | Container path | Authoritative contents |
 | --- | --- | --- |
-| `pgdata` | `/var/lib/postgresql` | PostgreSQL cluster for the bundled database |
+| `postgres_data_v1` | `/var/lib/postgresql` | Active PostgreSQL 18.6 Alpine/ICU cluster, bound to its installation/storage witness |
+| retired `pgdata` | not mounted by stock Compose | Detached Debian/UID-999 rollback evidence after an explicit logical migration |
 | `rabbitmq_data` | `/var/lib/rabbitmq` | Broker metadata and queued messages |
-| `backup_workdir` | `/code/_storage` | In-flight artifacts, restore/run logs and website/database incremental caches |
-| `ssh_trust` | `/var/lib/backupsheep/ssh-trust` | Shared SSH `known_hosts`; writable only by `app`, read-only in the database and files workers |
-| `backup_storage` | `/backups` | Archives for the Local Storage destination |
+| `database_workdir` | `/code/_storage` in database only | Private plaintext database work and database run logs |
+| `files_workdir` | `/code/_storage` in files only | Private plaintext file-source work, incremental cache and files-lane run logs |
+| `storage_workdir` | `/code/_storage` in storage only | Private BSE1 materialization, provider transfer work and destination-upload run logs |
+| `database_ciphertext_transfer` | `/var/lib/backupsheep/transfer/database` | Database-writable, storage-read-only fenced BSE1 handoff |
+| `files_ciphertext_transfer` | `/var/lib/backupsheep/transfer/files` | Files-writable, storage-read-only fenced BSE1 handoff |
+| `restore_ciphertext_transfer` | `/var/lib/backupsheep/restore-transfer` | Storage-writable, database/files read-only lane-fenced BSE1 restore handoff |
+| `backup_workdir` | `/volumes/legacy-work` in `staging-provision` only | Legacy shared-work emptiness evidence; never mounted at runtime |
+| `staging_layout_witness` | `/var/lib/backupsheep-staging` in `staging-provision` only | Installation-bound v3 filesystem-layout witness |
+| `backup_storage` | `/backups` in storage only | BSE1 archives for the Local Storage destination |
 | `installation_identity` | `/run/backupsheep-installation` in `app` (read-only) | Empty persistent ownership sentinel labeled with the installation's stable 64-hex ID; contains no application or secret data |
 
 PostgreSQL is the control-plane source of truth. RabbitMQ is a delivery mechanism: a lost
-message can be republished from durable request state by recovery sweeps. The work volume
-contains important transient state but does not replace the database. `backup_storage` is
-durable customer backup data whenever Local Storage is selected.
+message can be republished from durable request state by recovery sweeps. Private work and
+transfer volumes contain important transient state but do not replace the database.
+`backup_storage` is durable customer backup data whenever Local Storage is selected.
 
-Roles that touch a file must see the same bytes at the same container path, but they do
-not receive equal write access. Database/files/storage workers can write `backup_workdir`;
-`app`, cloud, logs and Beat receive no staging mount. The app alone writes `ssh_trust` while
-database/files mount it read-only; other roles do not receive it. Only storage writes
-`/backups`; app/cloud/database/files read it, and logs/Beat receive no Local Storage mount.
-`reset_incremental_cache` and on-disk `delete_old_logs` are routed to storage so the web
-and notification roles do not need staging access. Reset is confined beneath the expected
+Plaintext never crosses the runtime filesystem boundary between source and storage lanes.
+Database and files write only their own private work volume, seal an authenticated BSE1
+envelope, and publish it through their separate transfer volume. Storage can read but not
+write those published handoffs; it receives no source plaintext. For restores, storage
+writes BSE1 into the reverse transfer and the exact database/files reader consumes only its
+lane. Web, cloud, logs and Beat receive no work or transfer mount. SSH host-key approvals and their
+append-only audit events are account-scoped PostgreSQL state, not a shared filesystem.
+Database/files workers materialize only the exact approved keys for one operation in a
+mode-`0600` private-runtime file and remove it afterward. Only storage mounts `/backups`,
+read/write. `reset_incremental_cache` stays in the files lane. Files run-log pruning runs
+there at 03:00 UTC, database run-log pruning stays in the database lane at 03:05 UTC,
+destination-upload run-log pruning stays in the storage lane at 03:10 UTC, and PostgreSQL
+`CoreLog` pruning is separate at 03:30 UTC. Reset is confined beneath the expected
 node cache with directory-file-descriptor operations and no-follow checks, and takes the
 same per-node incremental lock as archive/mirror work before deleting anything.
 
-The optional managed SSH private key has a separate boundary. Compose mounts the
-operator-owned `.secrets/ssh_managed_private_key` source read-only at
-`/run/secrets/ssh_managed_private_key` only in app/database/files. The entrypoint treats an
-empty source as disabled. A non-empty source must be a regular, NUL-free file no larger
-than 64 KiB and an unencrypted key accepted by `ssh-keygen`; the entrypoint copies it into
-private tmpfs as `/run/backupsheep/ssh/managed_private_key` with mode `0600`, then exports
-that runtime path. SSH code must not use the mode-`0444` source path directly.
+Optional managed SSH identities have a separate, lane-specific boundary. Compose grants
+`.secrets/ssh_managed_database_private_key` only to `worker-database` and
+`.secrets/ssh_managed_files_private_key` only to `worker-files`; the app and every other
+role receive neither private key. Each non-empty source must be a regular, NUL-free,
+unencrypted Ed25519 key no larger than 64 KiB. The entrypoint copies the lane's accepted
+key into private tmpfs as `/run/backupsheep/ssh/managed_private_key` with mode `0600`.
+The two identities must be distinct. Managed-key mode is enabled only when PostgreSQL
+contains exactly one account; a second account atomically disables and fences it. A
+multi-account installation uses customer-supplied, account-scoped private keys instead.
 
-Docker named volumes satisfy byte visibility on one host. A multi-host deployment requires
-a shared filesystem for `backup_workdir`; it also requires shared durable storage for
-`/backups` when Local Storage is used. It also needs an explicitly managed SSH trust store
-and a secure per-host delivery mechanism for the optional managed key. Preserve the same
-role-specific read/write policy; a container-local directory is not sufficient.
+Stock Compose is a single-host model. A separately reviewed multi-host orchestrator must
+preserve three private work stores, two source-specific one-way ciphertext transfers, the
+reverse lane-fenced restore transfer, and storage-only Local Storage rather than replacing
+them with one shared plaintext filesystem. PostgreSQL carries account-scoped SSH approvals
+and audit history. Deliver each optional managed identity only to its matching worker lane,
+or use customer-supplied keys; preserve every role-specific read/write and group boundary.
 
 See [Configuration](../guides/configuration.md#filesystem-configuration) and
 [Disaster recovery](../guides/disaster-recovery.md) for mount and protection rules.
@@ -246,9 +310,17 @@ use key material derived from `DJANGO_SECRET_KEY`. PostgreSQL backups, `.env` an
 `.secrets` directory therefore belong in the same high-sensitivity recovery class even
 though individual fields are encrypted.
 
-Workers necessarily receive decrypted credentials for the operation they execute. Keep
-the Compose network private, restrict host access, avoid dumping process environments,
-and isolate external RabbitMQ/PostgreSQL with TLS and network controls.
+Workers necessarily receive decrypted credentials for the operation they execute. Stock
+Compose reduces ambient deployment-wide credentials despite retaining `.env` compatibility:
+web receives all families needed for setup/OAuth callbacks, cloud only DigitalOcean/OVH,
+files only Basecamp, storage only Dropbox/pCloud/Microsoft/Google, and logs only
+Postmark/Mailgun/SES/Slack/Telegram. Database, Beat and one-shot roles receive none. The
+shared environment blanks every family first and the immutable entrypoint refuses a
+misplaced non-empty value. Sentry DSN remains shared because every Django/Celery process
+initializes the scrubbed client and the DSN is an ingest identifier, not provider-account
+authorization. Keep the Compose network private, restrict host access, avoid dumping
+process environments, and isolate external RabbitMQ/PostgreSQL with TLS and network
+controls.
 
 ## Network boundaries
 

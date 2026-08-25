@@ -211,7 +211,8 @@
                             'Accept': 'application/json',
                             'Content-Type': 'application/json'
                         },
-                        method: 'GET',
+                        method: 'POST',
+                        body: '{}',
                     }).then(async (response) => {
                         Alpine.store('showLoading').toggle();
 
@@ -342,7 +343,8 @@
                             'Accept': 'application/json',
                             'Content-Type': 'application/json'
                         },
-                        method: 'GET',
+                        method: 'POST',
+                        body: '{}',
                     }).then(async (response) => {
                         Alpine.store('showLoading').toggle();
 

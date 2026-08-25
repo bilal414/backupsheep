@@ -19,6 +19,7 @@ from apps.api.v1.connection.serializers import (
     CoreIntegrationSerializer,
     CoreConnectionLocationSerializer,
 )
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 class CoreAuthBasecampReadSerializer(serializers.ModelSerializer):
@@ -100,6 +101,8 @@ class CoreAuthBasecampWriteSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
+        # Refuse before validating or encrypting caller-supplied OAuth material.
+        require_source_backup_creation("basecamp")
         if "refresh_token" in data and "access_token" not in data:
             raise serializers.ValidationError(
                 {"credentials": "Provide the access token when replacing the refresh token."}
@@ -134,6 +137,10 @@ class CoreBasecampConnectionWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreConnection
         fields = "__all__"
+
+    def validate(self, data):
+        require_source_backup_creation("basecamp")
+        return data
 
     def create(self, validated_data):
         auth_basecamp = validated_data.pop("auth_basecamp", [])

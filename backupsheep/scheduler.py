@@ -27,6 +27,7 @@ from django.db import transaction
 from django.utils import timezone
 from django_celery_beat.models import PeriodicTask
 from django_celery_beat.schedulers import DatabaseScheduler, ModelEntry
+from backupsheep.source_recovery_policy import source_backup_creation_available
 
 
 logger = logging.getLogger(__name__)
@@ -306,6 +307,16 @@ class BackupDatabaseScheduler(DatabaseScheduler):
                 # Keep the local scheduler quiet until schedule_update() reflects
                 # the pause in PeriodicTask.  No request or schedule advancement
                 # is committed for an inactive schedule.
+                fresh_entry = self._fresh_entry(periodic_task)
+                if fresh_entry is not None:
+                    fresh_entry.model.enabled = False
+                return {"kind": "inactive", "entry": fresh_entry}
+            if not source_backup_creation_available(
+                schedule.node.connection.integration.code
+            ):
+                # Preserve the schedule row for inspection, but keep this Beat
+                # process quiet and create no run/outbox record. API and worker
+                # boundaries enforce the same capability if a stale message exists.
                 fresh_entry = self._fresh_entry(periodic_task)
                 if fresh_entry is not None:
                     fresh_entry.model.enabled = False

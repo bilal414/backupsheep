@@ -761,14 +761,49 @@ class ReleaseWorkflowContractTests(TestCase):
         cls.workflow = (ROOT / ".github" / "workflows" / "release-images.yml").read_text(
             encoding="utf-8"
         )
+        cls.supply_chain_workflow = (
+            ROOT / ".github" / "workflows" / "supply-chain-security.yml"
+        ).read_text(encoding="utf-8")
         cls.policy = json.loads((ROOT / "deploy" / "release-policy.json").read_text())
 
     def test_every_action_is_pinned_to_a_full_commit(self):
         actions = re.findall(r"^\s*uses:\s*([^\s#]+)", self.workflow, flags=re.MULTILINE)
         self.assertGreaterEqual(len(actions), 10)
-        for action in actions:
+        local_workflows = [action for action in actions if action.startswith("./")]
+        self.assertEqual(
+            local_workflows,
+            ["./.github/workflows/supply-chain-security.yml"],
+        )
+        for action in (action for action in actions if not action.startswith("./")):
             with self.subTest(action=action):
                 self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
+
+    def test_release_repeats_the_exact_security_regression_before_building(self):
+        self.assertIn("on:\n  workflow_call:\n", self.supply_chain_workflow)
+        regression_job = self.workflow.split("  release_regression:", 1)[1].split(
+            "  build_scan:", 1
+        )[0]
+        self.assertIn(
+            "uses: ./.github/workflows/supply-chain-security.yml", regression_job
+        )
+        self.assertIn("contents: read", regression_job)
+        self.assertNotIn("id-token: write", regression_job)
+        self.assertNotIn("packages: write", regression_job)
+        build_job_header = self.workflow.split("  build_scan:", 1)[1].split(
+            "    steps:", 1
+        )[0]
+        self.assertIn("needs: release_regression", build_job_header)
+
+    def test_signed_release_regression_includes_pinned_static_analysis(self):
+        static_job = self.supply_chain_workflow.split(
+            "  static-python-security:", 1
+        )[1].split("  application-security-regression:", 1)[0]
+        self.assertIn("bandit==1.9.4", static_job)
+        self.assertIn("python -m bandit -q -r apps backupsheep scripts", static_job)
+        self.assertIn("-x apps/tests -f json -ll", static_job)
+        self.assertIn("scripts/validate_static_security.py", static_job)
+        self.assertIn("deploy/static-analysis-policy.json", static_job)
+        self.assertIn("uses: ./.github/workflows/supply-chain-security.yml", self.workflow)
 
     def test_release_is_dormant_and_signing_permissions_are_separated(self):
         self.assertIn("vars.BACKUPSHEEP_SIGNED_RELEASES_ENABLED == 'true'", self.workflow)

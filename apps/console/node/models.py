@@ -54,6 +54,10 @@ from ..vultr import (
 
 from ..utils.models import UtilBackup, UtilCloud
 from botocore.exceptions import ClientError
+from backupsheep.source_recovery_policy import (
+    source_backup_creation_available,
+    require_source_backup_creation,
+)
 
 
 class _RestoreProviderError(ValueError):
@@ -12354,6 +12358,7 @@ class CoreWordPress(TimeStampedModel):
         db_table = "core_wordpress"
 
     def create_snapshot(self, backup):
+        require_source_backup_creation("wordpress")
         from apps._tasks.integration.backup.wordpress import snapshot_wordpress
         from ..backup.models import CoreWordPressBackupStoragePoints
         return _resume_local_backup(
@@ -12378,6 +12383,7 @@ class CoreBasecamp(TimeStampedModel):
         db_table = "core_basecamp"
 
     def create_snapshot(self, backup):
+        require_source_backup_creation("basecamp")
         from apps._tasks.integration.backup.basecamp import snapshot_basecamp
         from ..backup.models import CoreBasecampBackupStoragePoints
         return _resume_local_backup(
@@ -12728,6 +12734,10 @@ class CoreNode(TimeStampedModel):
             return self.connection.auth_website.use_public_key or self.connection.auth_website.use_private_key
 
     def backup_ready_to_initiate(self, celery_task_id=None):
+        if not source_backup_creation_available(
+            self.connection.integration.code
+        ):
+            return False
         if self.get_backup_from_celery_task_id(celery_task_id):
             return True
         elif self.status == self.Status.ACTIVE:
@@ -13264,6 +13274,7 @@ class CoreNode(TimeStampedModel):
         (the celery task) returns immediately. A retry of the SAME task reuses its
         own backup (same celery_task_id) and is never blocked by it.
         """
+        require_source_backup_creation(self.connection.integration.code)
         with transaction.atomic():
             # Keep the durable delivery ledger in sync with the concrete backup
             # while the node lock is held.  This import stays local to avoid

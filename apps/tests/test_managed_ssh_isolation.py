@@ -28,6 +28,9 @@ from apps._tasks.managed_ssh import (
     validate_managed_ssh_database_connection,
     validate_managed_ssh_files_connection,
 )
+from apps._tasks.helper.tasks import delete_requested_integrations
+from apps.api.v1.account.views import CoreAccountView
+from apps.api.v1.connection.views import CoreConnectionView
 from apps.api.v1.connection.database.serializers import (
     CoreDatabaseConnectionWriteSerializer,
 )
@@ -40,6 +43,7 @@ from apps.console.account.models import CoreAccount
 from apps.console.connection.managed_ssh import (
     ManagedSSHOperationError,
     acquire_managed_ssh_mutation_lock,
+    connection_config_material,
     create_managed_ssh_operation,
     managed_public_key_fingerprint,
     managed_public_key_for_lane,
@@ -138,6 +142,24 @@ class ManagedSSHIsolationTests(BaseTestCase):
         )
         self._approve_host("bastion.internal.test", 22)
         return connection
+
+    def test_connection_secret_witness_is_keyed_outside_postgresql(self):
+        connection = self._database_connection()
+        encrypted_username = connection.auth_database.username
+        if isinstance(encrypted_username, memoryview):
+            encrypted_username = encrypted_username.tobytes()
+        if not isinstance(encrypted_username, bytes):
+            encrypted_username = str(encrypted_username).encode("utf-8")
+
+        first = connection_config_material(connection)["auth"]["username"]
+        self.assertNotEqual(first, hashlib.sha256(encrypted_username).hexdigest())
+        self.assertEqual(
+            first,
+            connection_config_material(connection)["auth"]["username"],
+        )
+        with override_settings(SECRET_KEY="managed-ssh-witness-rotation-test"):
+            rotated = connection_config_material(connection)["auth"]["username"]
+        self.assertNotEqual(first, rotated)
 
     def _website_connection(self, *, name="managed website"):
         connection = factories.make_connection(
@@ -345,6 +367,52 @@ class ManagedSSHAPIContractTests(ManagedSSHIsolationTests):
         }
         self.assertIn("private", directives)
         self.assertIn("no-store", directives)
+
+    def test_aggregate_connection_delete_cascades_managed_rows_under_fence(self):
+        connection = self._website_connection(name="managed delete target")
+        with mock.patch(
+            "apps.console.connection.managed_ssh.current_app.send_task"
+        ):
+            operation = create_managed_ssh_operation(
+                connection,
+                "validate",
+                requested_by_member=self.member,
+            )
+
+        response = self.client.delete(f"/api/v1/connections/{connection.pk}/")
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_204_NO_CONTENT,
+            response.data,
+        )
+        self.assertFalse(CoreConnection.objects.filter(pk=connection.pk).exists())
+        self.assertFalse(CoreManagedSSHOperation.objects.filter(pk=operation.pk).exists())
+        self.assertTrue(
+            CoreSSHHostKeyApproval.objects.filter(account=self.account).exists()
+        )
+
+    def test_account_delete_cascades_managed_rows_under_fence(self):
+        connection = self._website_connection(name="managed account delete target")
+        with mock.patch(
+            "apps.console.connection.managed_ssh.current_app.send_task"
+        ):
+            operation = create_managed_ssh_operation(
+                connection,
+                "validate",
+                requested_by_member=self.member,
+            )
+
+        response = self.client.delete(f"/api/v1/accounts/{self.account.pk}/")
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_204_NO_CONTENT,
+            response.data,
+        )
+        self.assertFalse(CoreAccount.objects.filter(pk=self.account.pk).exists())
+        self.assertFalse(CoreConnection.objects.filter(pk=connection.pk).exists())
+        self.assertFalse(CoreManagedSSHOperation.objects.filter(pk=operation.pk).exists())
 
     def test_managed_actions_are_post_only_and_status_is_scoped_no_store(self):
         connection = self._website_connection()
@@ -673,6 +741,44 @@ class ManagedSSHMutationEntryOrderingTests(SimpleTestCase):
                     "CoreAccount.objects.select_for_update()",
                 )
 
+    def test_account_destroy_takes_fence_before_account_row_lock(self):
+        self.assert_fence_precedes(
+            CoreAccountView.destroy,
+            "select_for_update()",
+        )
+        self.assert_fence_precedes(
+            CoreAccountView.destroy,
+            "self.perform_destroy(instance)",
+        )
+
+    def test_aggregate_connection_destroy_takes_fence_before_row_locks(self):
+        self.assert_fence_precedes(
+            CoreConnectionView.destroy,
+            "CoreAccount.objects.select_for_update()",
+        )
+        self.assert_fence_precedes(
+            CoreConnectionView.destroy,
+            "CoreConnection.objects.select_for_update()",
+        )
+        self.assert_fence_precedes(
+            CoreConnectionView.destroy,
+            "self.perform_destroy(instance)",
+        )
+
+    def test_legacy_connection_delete_helper_takes_fence_before_row_locks(self):
+        self.assert_fence_precedes(
+            delete_requested_integrations,
+            "CoreAccount.objects.select_for_update()",
+        )
+        self.assert_fence_precedes(
+            delete_requested_integrations,
+            "CoreConnection.objects.select_for_update()",
+        )
+        self.assert_fence_precedes(
+            delete_requested_integrations,
+            "locked_connection.delete()",
+        )
+
 
 @override_settings(**MANAGED_KEY_SETTINGS)
 class ManagedSSHMutationLockConcurrencyTests(TransactionTestCase):
@@ -683,6 +789,13 @@ class ManagedSSHMutationLockConcurrencyTests(TransactionTestCase):
             defaults={
                 "name": "Website",
                 "type": CoreIntegration.Type.WEBSITE,
+            },
+        )
+        CoreIntegration.objects.get_or_create(
+            code="database",
+            defaults={
+                "name": "Database",
+                "type": CoreIntegration.Type.DATABASE,
             },
         )
         self.account, self.member, self.user = factories.make_account()
@@ -702,6 +815,26 @@ class ManagedSSHMutationLockConcurrencyTests(TransactionTestCase):
             password=None,
             private_key=None,
             use_public_key=True,
+            use_private_key=False,
+        )
+        self.database_connection = factories.make_connection(
+            self.account,
+            self.member,
+            code="database",
+            name="managed SSH delete fence database",
+        )
+        key = self.account.get_encryption_key()
+        self.database_auth = CoreAuthDatabase.objects.create(
+            connection=self.database_connection,
+            host="database-delete-fence.example.test",
+            port=5432,
+            database_name="application",
+            all_databases=False,
+            username=bs_encrypt("database-user", key),
+            password=bs_encrypt("database-password", key),
+            type=CoreAuthDatabase.DatabaseType.POSTGRESQL,
+            version=CoreAuthDatabase.DatabaseVersion.POSTGRESQL_16,
+            use_public_key=False,
             use_private_key=False,
         )
         CoreSSHHostKeyApproval.objects.create(
@@ -849,3 +982,61 @@ class ManagedSSHMutationLockConcurrencyTests(TransactionTestCase):
         self.assertLess(outcome.get("elapsed", 999), 1.5)
         self.auth.refresh_from_db()
         self.assertEqual(self.auth.host, "lock-order.example.test")
+
+    def test_row_first_related_deletes_fail_fast_with_serialization_failure(self):
+        targets = (
+            (CoreAccount, self.account.pk),
+            (CoreConnection, self.connection.pk),
+            (CoreAuthWebsite, self.auth.pk),
+            (CoreAuthDatabase, self.database_auth.pk),
+            (CoreSSHHostKeyApproval, self.auth.host),
+        )
+
+        for model, identity in targets:
+            with self.subTest(model=model.__name__):
+                finished = threading.Event()
+                outcome = {}
+
+                def inverted_delete():
+                    close_old_connections()
+                    trigger_started = None
+                    try:
+                        with transaction.atomic():
+                            self._set_statement_timeout(2500)
+                            queryset = model.objects.select_for_update()
+                            if model is CoreSSHHostKeyApproval:
+                                instance = queryset.get(
+                                    account_id=self.account.pk,
+                                    normalized_host=identity,
+                                    port=self.auth.port,
+                                )
+                            else:
+                                instance = queryset.get(pk=identity)
+                            trigger_started = time.monotonic()
+                            instance.delete()
+                    except DatabaseError as error:
+                        cause = getattr(error, "__cause__", None)
+                        outcome["sqlstate"] = getattr(
+                            cause, "pgcode", None
+                        ) or getattr(cause, "sqlstate", None)
+                        if trigger_started is not None:
+                            outcome["elapsed"] = time.monotonic() - trigger_started
+                    except Exception as error:
+                        outcome["unexpected"] = error
+                    finally:
+                        finished.set()
+                        close_old_connections()
+
+                with transaction.atomic():
+                    self._set_statement_timeout(4000)
+                    acquire_managed_ssh_mutation_lock()
+                    thread = threading.Thread(target=inverted_delete)
+                    thread.start()
+                    completed_while_fence_held = finished.wait(timeout=2)
+
+                thread.join(timeout=5)
+                self.assertTrue(completed_while_fence_held)
+                self.assertFalse(thread.is_alive())
+                self.assertNotIn("unexpected", outcome)
+                self.assertEqual(outcome.get("sqlstate"), "40001")
+                self.assertLess(outcome.get("elapsed", 999), 1.5)

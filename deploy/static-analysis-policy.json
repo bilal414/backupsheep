@@ -1,0 +1,392 @@
+{
+  "bandit_version": "1.9.4",
+  "excluded_prefixes": [
+    "apps/tests"
+  ],
+  "minimum_severity": "MEDIUM",
+  "reviewed_findings": [
+    {
+      "fingerprint": "8fc4a853aa4b14f60a0fed5999f8115aa0d3b1f9e58c6ee17528ebc72e116023",
+      "path": "apps/_tasks/integration/backup/website.py",
+      "review": "website-shlex-remote-commands",
+      "test_id": "B601"
+    },
+    {
+      "fingerprint": "c8161ad32bee0f3a7ade308d50cb8dd96f8599af9c5da76f9de60a84408bdaea",
+      "path": "apps/_tasks/integration/backup/website.py",
+      "review": "website-shlex-remote-commands",
+      "test_id": "B601"
+    },
+    {
+      "fingerprint": "9d785fd2053227f0c689d237996db8b915a6bd59fd048abaef56624b75e60823",
+      "path": "apps/_tasks/integration/backup/website.py",
+      "review": "website-shlex-remote-commands",
+      "test_id": "B601"
+    },
+    {
+      "fingerprint": "c207b2ec5ff1d6a4cfbff5f8f5d1accfcd6c360cdef115c19105f54e5a861e4c",
+      "path": "apps/_tasks/integration/restore_common.py",
+      "review": "bound-placeholder-list",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "7c8807fb0f55e24696a25f07c2e6c8d6c98cb250b08830c262cdca8eeb4b0f44",
+      "path": "apps/_tasks/integration/restore_database.py",
+      "review": "validated-restore-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "03e757e6fe021f0f4a529d06b52617aa73827b3c14a37138b3e22853d694f593",
+      "path": "apps/_tasks/integration/restore_database.py",
+      "review": "validated-restore-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "ef8ee75cd45770bf847d64297be87d223e8e9b77ed354215c67ed72925442e94",
+      "path": "apps/_tasks/integration/restore_database.py",
+      "review": "validated-restore-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "59b7dc3909da770387d78653145dcf4954c6362b88fc27b361235f64c1ebbad3",
+      "path": "apps/_tasks/integration/restore_database.py",
+      "review": "validated-restore-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "a0bf40643bb199e7f1dfcecadc8b75585df2b0df3cb5354fe869f3d474683220",
+      "path": "apps/_tasks/integration/restore_database.py",
+      "review": "validated-restore-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "8bbec6b3d8fb48963ec26ee11c1344eadc48dee6a3c3bd57e13b4d42317803d2",
+      "path": "apps/_tasks/integration/restore_database.py",
+      "review": "validated-restore-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "03e757e6fe021f0f4a529d06b52617aa73827b3c14a37138b3e22853d694f593",
+      "path": "apps/_tasks/integration/restore_database.py",
+      "review": "validated-restore-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "ef8ee75cd45770bf847d64297be87d223e8e9b77ed354215c67ed72925442e94",
+      "path": "apps/_tasks/integration/restore_database.py",
+      "review": "validated-restore-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "0c08ee6446f8a756383c4f7f607407482341efbde512a4c2ce3d03ba3d7d2d18",
+      "path": "apps/_tasks/integration/restore_database.py",
+      "review": "validated-restore-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "9bde9cb25bd68c97d8ecbb4937a6cc0c6941be092532009723ee511c1f75b88d",
+      "path": "apps/console/backup/models.py",
+      "review": "non-sql-log-message",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "bf2b56c813d5c4ca0aa026bfa7cb04d3a3c14107afa46dce6c936dbf4c9ae9d7",
+      "path": "apps/console/backup/models.py",
+      "review": "non-sql-log-message",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "2f024d88008802183cbd630f67db966da1c124491c07d1eecf9e4e462a0df467",
+      "path": "apps/console/connection/models.py",
+      "review": "fixed-client-argv-execution",
+      "test_id": "B601"
+    },
+    {
+      "fingerprint": "dd6b148b620f3cf48c6ad4701e3056565ed3e8b7c95c111d15b084a0d4b5d555",
+      "path": "apps/management/commands/docker_preflight.py",
+      "review": "docker-preflight-fixed-runtime-paths",
+      "test_id": "B108"
+    },
+    {
+      "fingerprint": "43c0c40f9511ae0bdc4cac43d1fe6e75cc92e33434ddb231ada93300cab43b94",
+      "path": "apps/management/commands/docker_preflight.py",
+      "review": "docker-preflight-fixed-runtime-paths",
+      "test_id": "B108"
+    },
+    {
+      "fingerprint": "7bef293dbd48277b30025ce133fbab9250541e8fc24132d076f6dcce3312ae07",
+      "path": "apps/management/commands/docker_preflight.py",
+      "review": "docker-preflight-fixed-runtime-paths",
+      "test_id": "B108"
+    },
+    {
+      "fingerprint": "4117c1352dc71d5652ce6c28983b22ca93fb078b614173e7ce561132067480b8",
+      "path": "backupsheep/database_lane_policy.py",
+      "review": "validated-lane-policy-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "98611ae1fcf2ec40c4a9f206770059bf219e90bbfb28fb6147c33753ee72fb7e",
+      "path": "backupsheep/database_lane_policy.py",
+      "review": "validated-lane-policy-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "5f5f5161934d0e128e7d66268abcfcb84d4e3208b9431ed8c8e00fd982e14353",
+      "path": "backupsheep/database_lane_policy.py",
+      "review": "validated-lane-policy-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "7a336a494fd2bf2ae53b97836dd6b36ad9b032a5675274a3b43f09769b7c4be9",
+      "path": "backupsheep/database_lane_policy.py",
+      "review": "validated-lane-policy-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "307be491cce2e0b0abc560b3d77277c718408c970f988a613c23cac10eeec4e2",
+      "path": "backupsheep/database_lane_policy.py",
+      "review": "validated-lane-policy-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "465ed0c4cfdd79ed8b59ff0749778fb3815ca517ba57a3fdc0ec38c4c243ee2e",
+      "path": "backupsheep/database_lane_policy.py",
+      "review": "validated-lane-policy-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "66be8815e8eeef4435b75f4d7ea25b42e75b5af1ddc7a1b663ad4a1220f97890",
+      "path": "backupsheep/database_lane_policy.py",
+      "review": "validated-lane-policy-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "e3b4ab71d8b39f5ab683dd6a9a03ddf1d68415e4867e40e26cb9291eb9ce3811",
+      "path": "backupsheep/database_lane_policy.py",
+      "review": "validated-lane-policy-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "3839928e4ecdee0bf3c30525848e7edc3f86503ed4fb2f0bfb607782be079866",
+      "path": "backupsheep/database_lane_policy.py",
+      "review": "validated-lane-policy-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "487af0aaa09eead5455f7818d399cd985f994f6f58aacdd961e10103d1e9fd95",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "448006b45f30f688179da0253fd7400839703bf3f31f5eb934104fbc47e17b2f",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "b340d43ec0d230bec33258514a62621a51da93aa1abd1ea33e2439275993fa52",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "f0de36524e487467b8d7a9ede18841925e08258ed37e0ccf8df0af26796d5416",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "a9531a342acd578be83f5453dda9fcf3634dd376625663b57c716467d7ef4556",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "14eae54ac78c209165b4187ed1bb58f70779bfa29c2b98a03ca94e58aa8c7105",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "0e812b52eb8cdd43fdc5473b23892c7579719bdc15f7b683ea1d3d8c0c7491ea",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "989c488fca00a3e38ceb66f3e0c1005fb0c243502f81832967209e7b44cd973f",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "991e905372884c6f30d1436e25a162f33fd7552b9ef14c54a7551aebed9485b1",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "b85e6802841d34a1be5240a06a415aa01760d1417dca2191c5a19b9c1a7aaa7d",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "0128dd663eff1001065b0aa4dc52e2025dafc973610789644fd12a845ba36f00",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "5f63b4222e94967a9afd0e6c588681b1070ff94253f83035d171b669110c2187",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "72e5fed0bb52aeb0001a13dd1aaaa54edd75cba405cea459bc03fa64de0ebe3c",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "bcaaf4540922794169397ce5d52173c5b19d2b474ebdc9561e58056de1dc3c6f",
+      "path": "backupsheep/database_lane_probe.py",
+      "review": "fixed-lane-probe-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "f40f6003e2a9d1e3bc00582f521523ab4ba6b96ac9516c3feb3d8c3a85363ffb",
+      "path": "scripts/aws_ec2_ebs_e2e.py",
+      "review": "validated-aws-fixture-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "ddd6805c3007cd7fa1c01524e1bf77a7c4fdc6afa1c9cddfc0fc1062ddf45acd",
+      "path": "scripts/aws_ec2_ebs_e2e.py",
+      "review": "validated-aws-fixture-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "b194dfa44edf04b810542d5dc3c576f9f73b185a52ed396ffd57c909f365dd7d",
+      "path": "scripts/aws_ec2_ebs_e2e.py",
+      "review": "validated-aws-fixture-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "bb6ea8d196a7bbe1e4f7e0c93a2c98718f037c81ab9c2ae19b4272f73ffc514f",
+      "path": "scripts/aws_ec2_ebs_e2e.py",
+      "review": "provider-address-http-probe",
+      "test_id": "B310"
+    },
+    {
+      "fingerprint": "b4698cd8a69893872fcea6bb54a660e42652beceb2463b12d02c311897d8b2f7",
+      "path": "scripts/oracle_live_ui_e2e.py",
+      "review": "validated-harness-remote-commands",
+      "test_id": "B601"
+    },
+    {
+      "fingerprint": "d9f4c8300170e79ce53e7814200d9e4f723038192ac5cb5d44bcf921109fb6a3",
+      "path": "scripts/oracle_live_ui_e2e.py",
+      "review": "owned-harness-temporary-paths",
+      "test_id": "B108"
+    },
+    {
+      "fingerprint": "2c246c6ff60025f99e8cde6ef5493c7f6c9c01aaaaa3a874ad8fd6f34d98e77e",
+      "path": "scripts/publish_release_evidence.py",
+      "review": "fixed-github-api-requests",
+      "test_id": "B310"
+    },
+    {
+      "fingerprint": "68946a320e294e25cfbf59664a229b0b7e4b02c7f45c485a268d1bc4a260304b",
+      "path": "scripts/publish_release_evidence.py",
+      "review": "fixed-github-api-requests",
+      "test_id": "B310"
+    },
+    {
+      "fingerprint": "0ebc4e156bb45109384b225dcf8b8bf48ab357fc00cad063dea0e2bed3f50f3d",
+      "path": "scripts/upcloud_live_ui_e2e.py",
+      "review": "validated-harness-remote-commands",
+      "test_id": "B601"
+    },
+    {
+      "fingerprint": "19c177b506c6d368f51d1a1d9286ee7600576f9dfc9aae108a7672f19dbed83f",
+      "path": "scripts/upcloud_live_ui_e2e.py",
+      "review": "validated-harness-remote-commands",
+      "test_id": "B601"
+    },
+    {
+      "fingerprint": "d6e0850bcafa0a49f8752c8e92ed568eda9cca7bf00183875895b04dc6b7c745",
+      "path": "scripts/upcloud_live_ui_e2e.py",
+      "review": "owned-harness-temporary-paths",
+      "test_id": "B108"
+    },
+    {
+      "fingerprint": "26d2a1f2d32b028a1bb6493913c03acb73cb791ba35d2d382da4e4f74eeb5ae7",
+      "path": "scripts/upcloud_live_ui_e2e.py",
+      "review": "owned-harness-temporary-paths",
+      "test_id": "B108"
+    },
+    {
+      "fingerprint": "4aff4ab8d97379b816f59d22a5f81dda1ba1ce6fadb812211dd010becfea9f43",
+      "path": "scripts/upcloud_live_ui_e2e.py",
+      "review": "validated-upcloud-fixture-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "ecbe4a0ee84bf1271054f28aa6e0e893a48d0e7cb9540019b1c4a2a6b134e51c",
+      "path": "scripts/upcloud_live_ui_e2e.py",
+      "review": "validated-upcloud-fixture-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "ac1152b6b3e310b040a55d3a7e266e4be806ff2e2d5d81167739e3ec92f0c3d5",
+      "path": "scripts/upcloud_live_ui_e2e.py",
+      "review": "owned-harness-temporary-paths",
+      "test_id": "B108"
+    },
+    {
+      "fingerprint": "bc215743f38c0d43ee09b7aa02dd0d1980fb824733c73106a121d91444b03fe9",
+      "path": "scripts/upcloud_live_ui_e2e.py",
+      "review": "owned-harness-temporary-paths",
+      "test_id": "B108"
+    },
+    {
+      "fingerprint": "3a42ad1e3b84b396d369d1d4a9cd440a80220cd7890b2ae927fc69e1797354c8",
+      "path": "scripts/upcloud_live_ui_e2e.py",
+      "review": "validated-upcloud-fixture-sql",
+      "test_id": "B608"
+    },
+    {
+      "fingerprint": "cc3fe0b2e378770fd749752e8e48fa0197354b403f52e2e1c606db931819abfc",
+      "path": "scripts/vultr_live_e2e.py",
+      "review": "non-bind-zero-address-check",
+      "test_id": "B104"
+    }
+  ],
+  "reviews": {
+    "bound-placeholder-list": "The dynamic SQLite fragment contains only a generated count of question-mark placeholders; all values are parameter-bound.",
+    "docker-preflight-fixed-runtime-paths": "Fixed /tmp and /run probe roots are ownership-, mode-, type-, and tmpfs-validated; private scratch files use tempfile.",
+    "fixed-client-argv-execution": "The generic subprocess wrapper receives only fixed database-client executables and validated, argument-vector builders without a shell.",
+    "fixed-github-api-requests": "Release evidence requests use fixed HTTPS GitHub API/upload origins derived from validated repository and release identifiers.",
+    "fixed-lane-probe-sql": "The isolation probe uses fixed statements and internal allowlists to verify database-lane behavior; no untrusted SQL is accepted.",
+    "non-bind-zero-address-check": "This is a provider-response string comparison against the IPv4 unspecified-address sentinel, not a socket bind.",
+    "non-sql-log-message": "The flagged strings are structured execution log messages and are never submitted to a database engine.",
+    "owned-harness-temporary-paths": "Remote temporary names contain a strictly validated run identifier and exist only on an owned disposable test instance.",
+    "provider-address-http-probe": "The scheme is a fixed http literal and the address comes from the authenticated EC2 instance record for a disposable reachability probe.",
+    "validated-aws-fixture-sql": "The disposable AWS fixture accepts strict lowercase SQL identifiers, escapes literals, and shell-quotes complete psql statements.",
+    "validated-harness-remote-commands": "The remote command primitive is used only with constants or strict validation plus shlex quoting in the safety-gated disposable harness.",
+    "validated-lane-policy-sql": "Lane-policy SQL combines module-owned statements with strict identifier/literal validators and no request-controlled SQL fragments.",
+    "validated-restore-sql": "Restore SQL uses allowlisted dialects, strictly validated identifiers, and escaping helpers at each dynamic identifier or literal boundary.",
+    "validated-upcloud-fixture-sql": "Disposable fixture and cleanup SQL uses generated values or strict lowercase identifier and fixed-width hex validators.",
+    "website-shlex-remote-commands": "Remote tar commands use strict input validation, shlex quoting, and explicit option terminators before operands."
+  },
+  "schema": 1,
+  "source_roots": [
+    "apps",
+    "backupsheep",
+    "scripts"
+  ]
+}

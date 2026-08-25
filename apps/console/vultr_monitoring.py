@@ -17,22 +17,36 @@ from apps.console.vultr import vultr_request_timeout
 
 DEFAULT_VULTR_TIMEOUT = (10, 60)
 
+VULTR_MONITORING_PUBLIC_MESSAGES = {
+    "authentication": "Vultr authentication was rejected.",
+    "not_found": "Vultr could not find the automatic-backup resource.",
+    "rate_limited": "Vultr rate-limited automatic-backup monitoring.",
+    "transient_timeout": "Vultr automatic-backup monitoring timed out.",
+    "transient_unavailable": "Vultr automatic-backup monitoring is temporarily unavailable.",
+    "provider_unavailable": "Vultr is temporarily unavailable.",
+    "provider_error": "Vultr rejected the automatic-backup monitoring request.",
+    "malformed_response": "Vultr returned malformed automatic-backup data.",
+    "malformed_pagination": "Vultr returned malformed automatic-backup pagination.",
+    "duplicate_inventory": "Vultr returned duplicate automatic-backup records.",
+}
+
+
+def vultr_monitoring_public_message(classification, status_code=None):
+    """Return a constant allowlisted message without exposing exception text."""
+
+    safe_message = VULTR_MONITORING_PUBLIC_MESSAGES.get(
+        classification, VULTR_MONITORING_PUBLIC_MESSAGES["provider_error"]
+    )
+    if status_code is not None:
+        try:
+            safe_message = f"{safe_message} (HTTP {int(status_code)})."
+        except (TypeError, ValueError):
+            pass
+    return safe_message
+
 
 class VultrMonitoringError(Exception):
     """A safe, user-facing error from a read-only Vultr monitoring call."""
-
-    _MESSAGES = {
-        "authentication": "Vultr authentication was rejected.",
-        "not_found": "Vultr could not find the automatic-backup resource.",
-        "rate_limited": "Vultr rate-limited automatic-backup monitoring.",
-        "transient_timeout": "Vultr automatic-backup monitoring timed out.",
-        "transient_unavailable": "Vultr automatic-backup monitoring is temporarily unavailable.",
-        "provider_unavailable": "Vultr is temporarily unavailable.",
-        "provider_error": "Vultr rejected the automatic-backup monitoring request.",
-        "malformed_response": "Vultr returned malformed automatic-backup data.",
-        "malformed_pagination": "Vultr returned malformed automatic-backup pagination.",
-        "duplicate_inventory": "Vultr returned duplicate automatic-backup records.",
-    }
 
     def __init__(
         self,
@@ -44,14 +58,7 @@ class VultrMonitoringError(Exception):
     ):
         # ``message`` is intentionally ignored for the public exception text;
         # callers may pass provider response text, which must never be durable.
-        safe_message = self._MESSAGES.get(
-            classification, self._MESSAGES["provider_error"]
-        )
-        if status_code is not None:
-            try:
-                safe_message = f"{safe_message} (HTTP {int(status_code)})."
-            except (TypeError, ValueError):
-                pass
+        safe_message = vultr_monitoring_public_message(classification, status_code)
         super().__init__(safe_message)
         self.classification = classification
         self.status_code = status_code

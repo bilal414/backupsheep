@@ -1,12 +1,14 @@
 # DigitalOcean Droplet
 
 BackupSheep runs best on a DigitalOcean Droplet, where its Docker Compose stack can keep
-PostgreSQL data, backup working files, and optional Local Storage on durable volumes.
+PostgreSQL data, lane-private backup work, fenced ciphertext handoffs, and optional
+storage-only Local Storage on distinct durable volumes.
 
 DigitalOcean's App Platform **Deploy to DO** button supports one service, optionally with
-one development database. BackupSheep requires a web process, Celery worker, Celery Beat,
-PostgreSQL, and a message broker, so App Platform's documented button format cannot deploy
-the complete stack.
+one development database. BackupSheep requires a web process, five isolated Celery worker
+lanes, Celery Beat, PostgreSQL, RabbitMQ, private work/transfer boundaries, and per-role
+egress guards, so App Platform's documented button format cannot reproduce the reviewed
+stock stack.
 
 ## Install
 
@@ -23,27 +25,47 @@ the complete stack.
 
    ```bash
    COMMIT='<40-character-reviewed-release-commit>'
+   KMS_KEY_ARN='arn:aws:kms:us-east-1:123456789012:key/<reviewed-key-id>'
+   KMS_REGION='us-east-1'
+   KMS_DATABASE_CREDENTIALS='/absolute/protected/kms-database.credentials'
+   KMS_FILES_CREDENTIALS='/absolute/protected/kms-files.credentials'
    curl -fSLo install.sh \
      "https://raw.githubusercontent.com/bilal414/backupsheep/${COMMIT}/install.sh"
    less install.sh
    chmod 700 install.sh
-   ./install.sh --ref "${COMMIT}" --domain backups.example.com
+   ./install.sh \
+     --ref "${COMMIT}" \
+     --install-dir "$HOME/.local/share/backupsheep" \
+     --project-name backupsheep \
+     --domain backups.example.com \
+     --artifact-kms-key-id "${KMS_KEY_ARN}" \
+     --artifact-kms-region "${KMS_REGION}" \
+     --artifact-kms-allowed-key-arns "${KMS_KEY_ARN}" \
+     --artifact-kms-database-aws-credentials-file "${KMS_DATABASE_CREDENTIALS}" \
+     --artifact-kms-files-aws-credentials-file "${KMS_FILES_CREDENTIALS}"
    ```
+
+   The two credential inputs must be distinct, canonical, user-owned mode-`0400`/`0600`
+   files for separate AWS identities whose IAM/KMS policies enforce the matching lane
+   encryption context.
 
 The installer changes no host settings. It verifies the exact checkout, generates
 file-backed application/database/broker/onboarding secrets, builds the reviewed image and
 starts only the core stack. When the web service is healthy, it prints an SSH-tunnel and
 trusted-shell token retrieval command without writing the token to logs. Provider workers
 and Beat remain stopped until the operator reviews recovery/queue state and explicitly
-runs the same installer with `--enable-operations`.
+reruns the same exact command (including domain, project and KMS inputs) with
+`--enable-operations` appended.
 
 ## Production notes
 
 - Put a TLS-terminating reverse proxy in front of BackupSheep before public use, then set
   `DJANGO_HTTPS=true`, `APP_PROTOCOL=https://`, `APP_DOMAIN`, and
   `DJANGO_ALLOWED_HOSTS` in the installation `.env`.
-- Mount an attached DigitalOcean Block Storage volume over `/backups` if you use **Local
-  Storage** as a backup destination. See [Configuration](configuration.md#local-storage-backup-destination-optional).
+- Back the Compose `backup_storage` volume with an attached DigitalOcean Block Storage
+  volume if you use **Local Storage**. `/backups` is mounted read/write only in
+  `worker-storage`; do not add it to app or another worker. See
+  [Configuration](configuration.md#local-storage-backup-destination-optional).
 - Object storage destinations such as DigitalOcean Spaces, S3, B2, or R2 are generally a
   better long-term backup target than the server's local disk.
 

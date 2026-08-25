@@ -14,9 +14,14 @@ git status --short --branch
 ./backupsheep-compose ps --all
 ./backupsheep-compose logs --tail=200 db-provision migrate preflight app
 curl -fsS http://127.0.0.1:8000/healthz/
-./backupsheep-compose exec -T db pg_isready -U backupsheep -d backupsheep
+DB_CONTAINER="$(./backupsheep-compose ps -q db)"
+test -n "${DB_CONTAINER}"
+test "$(docker inspect --format '{{.State.Health.Status}}' "${DB_CONTAINER}")" = healthy
 ./backupsheep-compose exec -T rabbitmq rabbitmq-diagnostics -q ping
 ```
+
+The stock database healthcheck authenticates with the file-backed bootstrap credential
+and executes `SELECT 1`; a bare `pg_isready` result does not prove authentication.
 
 For a backup or restore, also capture its safe correlation ID, status, phase, retry time,
 provider status and reconciliation state from the console/API. When operations are
@@ -35,10 +40,11 @@ installation guide rather than inventing a second secret source.
 
 ### PostgreSQL does not start or authentication fails
 
-For the bundled stack, confirm `DB_HOST=db`, `DB_PORT=5432`, matching `DB_NAME`/`DB_USER`,
-and the protected `.secrets/db_password` file. The direct `DB_PASSWORD` value stays blank.
-PostgreSQL initializes its role/password only when the volume is first created; replacing
-the secret file later does not alter the existing role.
+For the bundled stack, confirm `DB_HOST=db`, `DB_PORT=5432`, the expected `DB_NAME`, and
+that Compose pins the affected service to its fixed `DB_<LANE>_USER` plus matching
+`.secrets/db_<lane>_password`. The direct `DB_PASSWORD` value stays blank. Inspect
+`db-provision`, `migrate` and `db-seal`; replacing a secret or generation witness by hand
+does not reconcile the durable PostgreSQL role/ACL/RLS contract.
 
 Do not delete `pgdata` to solve a credential mismatch. Restore the old setting, change the
 role password through an authenticated PostgreSQL session, or recover the database into a
@@ -60,8 +66,9 @@ Static assets are collected in the offline, non-root image-build step and WhiteN
 serves the immutable result. Rebuild the current image and inspect app startup:
 
 ```bash
-./backupsheep-compose build db app
-./backupsheep-compose up --detach app
+./backupsheep-compose build db app app-egress-guard
+./backupsheep-compose up --detach --no-build --no-deps --force-recreate \
+  app-egress-guard app
 ./backupsheep-compose logs --tail=200 app
 ```
 
@@ -109,7 +116,7 @@ The BackupSheep owner is not a Django superuser. Create a separate superuser onl
 needed:
 
 ```bash
-./backupsheep-compose run --rm app python manage.py createsuperuser
+./backupsheep-compose run --rm --no-deps app python manage.py createsuperuser
 ```
 
 ### Password email does not arrive
@@ -118,7 +125,7 @@ Send an email test from settings and inspect `worker-logs`. If no transactional 
 is configured, reset from the host:
 
 ```bash
-./backupsheep-compose run --rm app python manage.py changepassword user@example.com
+./backupsheep-compose run --rm --no-deps app python manage.py changepassword user@example.com
 ```
 
 ## RabbitMQ and workers
@@ -126,10 +133,12 @@ is configured, reset from the host:
 ### Workers report connection refused
 
 Inside Compose, RabbitMQ is `rabbitmq`, not `localhost`. Keep `RABBITMQ_HOST=rabbitmq`, use
-the dedicated `backupsheep` user/vhost, and confirm `.secrets/rabbitmq_password` contains
-the same value used when the persistent broker volume was initialized. The direct
-`RABBITMQ_PASSWORD` key remains blank in stock Compose. For an external broker, verify the
-`amqp`/`amqps` URL, credentials, vhost, TLS and firewall.
+the service's fixed lane user/vhost, and confirm its
+`.secrets/rabbitmq_<lane>_password` is present and installer-validated. The direct
+`RABBITMQ_PASSWORD` key remains blank in stock Compose. Inspect `rabbitmq-provision` for
+user, credential, ACL, queue or binding drift; never edit the identity/task-auth witness
+to force startup. For an external broker, verify the `amqp`/`amqps` URL, credentials,
+vhost, TLS and firewall.
 
 ### One worker lane is missing
 
@@ -137,7 +146,12 @@ First confirm that operations were intentionally enabled. A fresh/profile-less d
 has no worker or Beat containers by design. To opt in after the recovery review:
 
 ```bash
-./backupsheep-compose --profile operations up --detach
+./backupsheep-compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate \
+  cloud-egress-guard database-egress-guard files-egress-guard \
+  storage-egress-guard logs-egress-guard \
+  worker-cloud worker-database worker-files worker-storage worker-logs
+./backupsheep-compose --profile operations up --detach --no-build --no-deps beat
 ```
 
 ```bash
@@ -146,19 +160,25 @@ has no worker or Beat containers by design. To opt in after the recovery review:
 ./backupsheep-compose --profile operations exec -T worker-cloud celery -A backupsheep inspect ping
 ```
 
-Start the missing service. Do not reroute disk-touching tasks to a worker without the
-shared `backup_workdir`/Local Storage mount.
+The recovery command deliberately recreates every operations guard/worker pair before
+starting Beat; it does not repair one side of a namespace in isolation. Do not reroute
+disk-touching tasks or add mounts to make them run elsewhere: database, files and storage require their own private work volume and exact
+one-way/lane-fenced ciphertext-transfer grants, and only storage may mount `/backups`.
 
 ### Uploads backlog
 
-Check the `storage` queue, destination provider and work-volume capacity. If workers are
-healthy and the destination is the bottleneck, scale the lane:
+Check the `storage` queue, destination provider, `storage_workdir`, source ciphertext
+transfer and Local Storage capacity. If workers are healthy and the destination is the
+bottleneck, scale the lane:
 
 ```bash
-./backupsheep-compose --profile operations up --detach --scale worker-storage=4
+./backupsheep-compose --profile operations up --detach --no-build --no-deps \
+  --force-recreate --scale worker-storage=4 \
+  storage-egress-guard worker-storage
 ```
 
-Do not scale through provider rate limits without measuring errors/retry behavior.
+This force-recreates the storage pair. Drain or reconcile active storage work first, and
+do not scale through provider rate limits without measuring errors/retry behavior.
 
 ### Scheduler or maintenance seems duplicated
 
@@ -195,10 +215,12 @@ disk reserve. Treat an unexpected expansion or path/manifest failure as a potent
 archive. Raise limits only after validating the archive, source, capacity and security
 impact; never disable validation to force a restore.
 
-### Cold S3 object cannot download
+### Cold S3 object cannot restore
 
 Glacier Flexible Retrieval/Deep Archive objects require provider restoration before
-download. Wait for the thaw status instead of recreating the BackupSheep backup row.
+BackupSheep can read them for an authenticated restore. Wait for the thaw status instead
+of recreating the BackupSheep backup row. Direct BSE1 browser/ZIP download remains
+disabled after thaw.
 
 ### Object Lock prevents retention cleanup
 
@@ -212,19 +234,22 @@ match immediately.
 ### SSH/SFTP host-key error
 
 Unknown or changed host keys are rejected. Verify the new fingerprint through an
-independent channel, then update the reviewed file at `SSH_KNOWN_HOSTS_PATH`. Never accept a
-changed key based only on the failing connection itself.
+independent channel, then use the signed-in preview and explicit approval flow for that
+exact account, host, port and key. Replacements are separately recorded and fence stale
+operations. Never accept a changed key based only on the failing connection itself.
 
 ### Managed SSH key is not offered
 
-Set the matching `SSH_MANAGED_PUBLIC_KEY` and place the unencrypted private key in
-`.secrets/ssh_managed_private_key`, mode `0444`; leave that file empty to disable the
-feature. Do not set a legacy direct key path and do not put the key in `backup_workdir`.
-On each app/database/files start, the entrypoint requires a regular, NUL-free key no larger
-than 64 KiB, validates it without a passphrase, copies it into private tmpfs at
-`/run/backupsheep/ssh/managed_private_key`, mode `0600`, and exports that path. Inspect the
-role's startup refusal if staging fails. Never point SSH directly at the mode-`0444`
-`/run/secrets/ssh_managed_private_key` source.
+First confirm that PostgreSQL contains exactly one account. Creating a second account
+atomically disables and fences managed-key connections; multi-account installations must
+use customer-supplied private keys. For a single-account installation, configure distinct
+Ed25519 database and files identities in
+`.secrets/ssh_managed_database_private_key` and
+`.secrets/ssh_managed_files_private_key`, with matching lane public settings. The app
+receives neither private key; each source is granted only to its worker and copied into
+private tmpfs as mode `0600`. Inspect the matching worker's startup refusal for key type,
+match, file-safety or distinctness failures. Keep legacy `SSH_MANAGED_PRIVATE_KEY_PATH` and
+`SSH_MANAGED_PUBLIC_KEY` values blank.
 
 ### FTPS certificate failure
 
@@ -264,21 +289,24 @@ lowercase DNS-safe bucket and the regional endpoint.
 
 Dropbox, Google Drive, OneDrive and pCloud require their application credentials in `.env`
 before the UI can construct/exchange OAuth requests. Confirm the registered redirect URL
-exactly matches the public `APP_URL` callback, then recreate the app containers after
-editing `.env`.
+exactly matches the public `APP_URL` callback, then recreate `app-egress-guard` and `app`
+as the exact pair shown in the
+[egress lifecycle contract](../../deploy/egress/README.md#paired-lifecycle-commands).
 
 ### Local Storage file is missing
 
 Confirm `BS_LOCAL_STORAGE_PATH`, the role-specific mounts and the destination's optional
-subpath. Stock Compose grants `worker-storage` read/write access, app/cloud/database/files
-read-only access, and no mount to logs/Beat. Every relevant reader must see the same
-archive. A container-local path will be lost or appear empty after recreation.
+subpath. Stock Compose grants `worker-storage` read/write access and gives app, cloud,
+database, files, logs and Beat no `/backups` mount. Storage stages an authenticated restore
+through the target-lane reverse ciphertext fence; never add a source/web read-only mount
+as a shortcut. Verify the BSE1 object's recorded path from the storage lane and its durable
+volume/bind source. A container-local path will be lost or appear empty after recreation.
 
 ### Transfer-log download says unavailable
 
 The old per-backup transfer/directory-tree downloads depended on the former SaaS log
 bucket and are not available in this self-hosted build. Use durable status, console
-activity, container logs and the local work-volume logs.
+activity, container logs and the owning database/files private-work logs.
 
 ## Provider-specific boundaries
 

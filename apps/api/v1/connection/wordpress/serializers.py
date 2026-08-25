@@ -20,6 +20,7 @@ from apps.api.v1.connection.serializers import (
     CoreIntegrationSerializer,
     CoreConnectionLocationSerializer,
 )
+from backupsheep.source_recovery_policy import require_source_backup_creation
 
 
 class CoreAuthWordPressReadSerializer(serializers.ModelSerializer):
@@ -109,6 +110,9 @@ class CoreAuthWordPressWriteSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate(self, data):
+        # Run the recovery capability gate before URL resolution, credential
+        # decryption, or any attacker-selected network request.
+        require_source_backup_creation("wordpress")
         if not {"url", "key", "http_user", "http_pass"}.intersection(data):
             if getattr(getattr(self, "parent", None), "instance", None) is None:
                 raise serializers.ValidationError(
@@ -187,6 +191,10 @@ class CoreWordPressConnectionWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreConnection
         fields = "__all__"
+
+    def validate(self, data):
+        require_source_backup_creation("wordpress")
+        return data
 
     @transaction.atomic
     def create(self, validated_data):

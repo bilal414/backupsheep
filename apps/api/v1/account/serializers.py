@@ -1,6 +1,8 @@
+from django.db import transaction
 from rest_framework import serializers
 
 from apps.console.account.models import CoreAccount
+from apps.console.connection.managed_ssh import acquire_managed_ssh_mutation_lock
 
 
 class CoreAccountSerializer(serializers.ModelSerializer):
@@ -42,3 +44,11 @@ class CoreAccountWriteSerializer(serializers.ModelSerializer):
             "notify_on_success",
             "notify_on_fail",
         )
+
+    @transaction.atomic
+    def create(self, validated_data):
+        # A second account atomically disables installation-managed SSH. Take
+        # the global fence before the account INSERT trigger can touch auth and
+        # connection rows.
+        acquire_managed_ssh_mutation_lock()
+        return super().create(validated_data)
