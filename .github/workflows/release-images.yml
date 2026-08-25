@@ -448,14 +448,17 @@ jobs:
             --oras "$TOOL_DIR/oras" \
             --phase candidate
 
-      - name: Promote exact verified indexes to official SemVer tags
+      - name: Stage exact verified indexes in official repositories without SemVer tags
         shell: bash
+        env:
+          OFFICIAL_STAGING_TAG: staged-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          python3 scripts/promote_release_images.py \
+          python3 scripts/stage_release_images.py \
             --policy deploy/release-policy.json \
             --manifest "$ARTIFACT_DIR/release-manifest.json" \
             --artifacts-dir "$ARTIFACT_DIR" \
+            --staging-tag "$OFFICIAL_STAGING_TAG" \
             --oras "$TOOL_DIR/oras"
 
       - name: Sign official digests and run final verification
@@ -520,6 +523,16 @@ jobs:
             --cosign "$TOOL_DIR/cosign" \
             --oras "$TOOL_DIR/oras" \
             --phase final
+
+      - name: Publish signed official digests under SemVer tags last
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/promote_release_images.py \
+            --policy deploy/release-policy.json \
+            --manifest "$ARTIFACT_DIR/release-manifest.json" \
+            --artifacts-dir "$ARTIFACT_DIR" \
+            --oras "$TOOL_DIR/oras"
 
       - name: Create deterministic signed evidence archive
         shell: bash

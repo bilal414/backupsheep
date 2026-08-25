@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import build_release_manifest as builder  # noqa: E402
 import install_release_tools as installer  # noqa: E402
 import promote_release_images as promoter  # noqa: E402
+import stage_release_images as stager  # noqa: E402
 import verify_release as verifier  # noqa: E402
 
 
@@ -545,6 +546,53 @@ class ReleasePromotionRecoveryTests(ReleaseFixtureMixin, TestCase):
             promoter.promote(self.policy, self.manifest, self.artifacts, "oras")
         self.assertEqual(copies, [])
 
+    def test_official_digest_is_staged_before_semver_and_is_idempotent(self):
+        _registry, copies, fake_oras = self._registry(set())
+        staging_tag = f"staged-{self.commit}-123-1"
+        with mock.patch.object(stager, "_oras", side_effect=fake_oras), mock.patch.object(
+            stager, "_fetch_and_verify_index", wraps=stager._fetch_and_verify_index
+        ):
+            # The shared fetch helper calls promote_release_images._oras, so patch
+            # that exact credential-scrubbing boundary as well.
+            with mock.patch.object(promoter, "_oras", side_effect=fake_oras):
+                stager.stage(
+                    self.policy,
+                    self.manifest,
+                    self.artifacts,
+                    "oras",
+                    staging_tag,
+                )
+        self.assertEqual(len(copies), len(self.manifest["images"]))
+        self.assertTrue(all(destination.endswith(f":{staging_tag}") for destination in copies))
+        self.assertTrue(all(not destination.endswith(f":{self.tag}") for destination in copies))
+
+        copies.clear()
+        with mock.patch.object(stager, "_oras", side_effect=fake_oras), mock.patch.object(
+            promoter, "_oras", side_effect=fake_oras
+        ):
+            stager.stage(
+                self.policy,
+                self.manifest,
+                self.artifacts,
+                "oras",
+                staging_tag,
+            )
+        self.assertEqual(copies, [])
+
+    def test_official_staging_tag_is_commit_bound(self):
+        _registry, copies, fake_oras = self._registry(set())
+        with mock.patch.object(stager, "_oras", side_effect=fake_oras), self.assertRaisesRegex(
+            verifier.ReleaseVerificationError, "source-commit bound"
+        ):
+            stager.stage(
+                self.policy,
+                self.manifest,
+                self.artifacts,
+                "oras",
+                f"staged-{'b' * 40}-123-1",
+            )
+        self.assertEqual(copies, [])
+
 class ReleaseWorkflowContractTests(TestCase):
     @classmethod
     def setUpClass(cls):
@@ -590,8 +638,14 @@ class ReleaseWorkflowContractTests(TestCase):
         self.assertNotIn("backupsheep-postgres:candidate-", self.workflow)
         self.assertNotIn("backupsheep-egress:candidate-", self.workflow)
         verify_position = self.workflow.index("Verify quarantine before any official write")
-        promote_position = self.workflow.index("Promote exact verified indexes")
+        stage_position = self.workflow.index("Stage exact verified indexes")
+        sign_position = self.workflow.index("Sign official digests")
+        promote_position = self.workflow.index("Publish signed official digests under SemVer tags last")
+        self.assertLess(verify_position, stage_position)
+        self.assertLess(stage_position, sign_position)
+        self.assertLess(sign_position, promote_position)
         self.assertLess(verify_position, promote_position)
+        self.assertIn("scripts/stage_release_images.py", self.workflow)
         self.assertIn("scripts/promote_release_images.py", self.workflow)
 
     def test_buildkit_provenance_is_real_remote_source_bound_mode_max(self):
