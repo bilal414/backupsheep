@@ -17,7 +17,7 @@ from django.conf import settings
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.core.serializers.json import DjangoJSONEncoder
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import models, IntegrityError, transaction
 from django.db.models import UniqueConstraint
 from django.urls import reverse
@@ -846,6 +846,172 @@ class CoreBackupExecution(TimeStampedModel):
         )
 
 
+class CoreBackupEncryptionEnvelope(TimeStampedModel):
+    """Durable identity and authenticated-header witness for one backup.
+
+    Wrapped data keys are separate generation records so a KMS rotation never
+    requires rewriting a potentially multi-terabyte backup object.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACTIVE = "active", "Active"
+        MANUAL_REVIEW = "manual_review", "Manual review"
+        RETIRED = "retired", "Retired"
+
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    execution = models.OneToOneField(
+        CoreBackupExecution,
+        related_name="encryption_envelope",
+        on_delete=models.CASCADE,
+    )
+    format_version = models.PositiveSmallIntegerField(default=1)
+    algorithm = models.CharField(max_length=32, default="AES-256-GCM-SIV")
+    chunk_size = models.PositiveIntegerField(default=4 * 1024 * 1024)
+    context_sha256 = models.CharField(max_length=64)
+    header_sha256 = models.CharField(max_length=64)
+    plaintext_byte_count = models.PositiveBigIntegerField(default=0)
+    plaintext_sha256 = models.CharField(max_length=64)
+    ciphertext_byte_count = models.PositiveBigIntegerField(default=0)
+    status = models.CharField(
+        max_length=24, choices=Status.choices, default=Status.PENDING
+    )
+    sealed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "core_backup_encryption_envelope"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    format_version=1, algorithm="AES-256-GCM-SIV"
+                ),
+                name="backup_envelope_bse1_algorithm",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(chunk_size__gte=64 * 1024)
+                & models.Q(chunk_size__lte=64 * 1024 * 1024),
+                name="backup_envelope_chunk_bounds",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(status="active")
+                | models.Q(sealed_at__isnull=False),
+                name="active_backup_envelope_is_sealed",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("status", "sealed_at"), name="backup_envelope_status_idx"
+            )
+        ]
+
+    @staticmethod
+    def _valid_sha256(value):
+        if not isinstance(value, str) or len(value) != 64:
+            return False
+        try:
+            return bytes.fromhex(value).hex() == value
+        except ValueError:
+            return False
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        for field in ("context_sha256", "header_sha256", "plaintext_sha256"):
+            if not self._valid_sha256(getattr(self, field)):
+                errors[field] = "Must be a lowercase SHA-256 hexadecimal digest."
+        if self.status == self.Status.ACTIVE and self.sealed_at is None:
+            errors["sealed_at"] = "An active encryption envelope must be sealed."
+        if errors:
+            raise ValidationError(errors)
+
+    def get_active_key_wrap(self):
+        """Fail closed unless exactly one active key-wrap generation exists."""
+
+        return self.key_wraps.get(status=CoreBackupKeyWrap.Status.ACTIVE)
+
+
+class CoreBackupKeyWrap(TimeStampedModel):
+    """One externally wrapped generation of a backup's random data key."""
+
+    class Provider(models.TextChoices):
+        AWS_KMS = "aws-kms", "AWS KMS"
+        LOCAL_DEVELOPMENT = "local-development", "Local development"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACTIVE = "active", "Active"
+        MANUAL_REVIEW = "manual_review", "Manual review"
+        RETIRED = "retired", "Retired"
+
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    envelope = models.ForeignKey(
+        CoreBackupEncryptionEnvelope,
+        related_name="key_wraps",
+        on_delete=models.CASCADE,
+    )
+    generation = models.PositiveIntegerField(default=1)
+    provider = models.CharField(max_length=32, choices=Provider.choices)
+    wrapping_key_id = models.CharField(max_length=2048)
+    wrapped_data_key = models.BinaryField(editable=False, max_length=8192)
+    wrapped_key_sha256 = models.CharField(max_length=64)
+    status = models.CharField(
+        max_length=24, choices=Status.choices, default=Status.PENDING
+    )
+    activated_at = models.DateTimeField(null=True, blank=True)
+    retired_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "core_backup_key_wrap"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("envelope", "generation"),
+                name="unique_backup_key_wrap_generation",
+            ),
+            models.UniqueConstraint(
+                fields=("envelope",),
+                condition=models.Q(status="active"),
+                name="unique_active_backup_key_wrap",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(generation__gte=1),
+                name="backup_key_wrap_generation_positive",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(status="active")
+                | models.Q(activated_at__isnull=False),
+                name="active_backup_key_wrap_is_activated",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("provider", "status"), name="backup_key_wrap_state_idx"
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        wrapped = self.wrapped_data_key
+        if isinstance(wrapped, memoryview):
+            wrapped = wrapped.tobytes()
+        if not isinstance(wrapped, (bytes, bytearray)) or not wrapped:
+            errors["wrapped_data_key"] = "A wrapped data key is required."
+        elif len(wrapped) > 8192:
+            errors["wrapped_data_key"] = "The wrapped data key is too large."
+        else:
+            expected = hashlib.sha256(bytes(wrapped)).hexdigest()
+            if self.wrapped_key_sha256 != expected:
+                errors["wrapped_key_sha256"] = (
+                    "The wrapped data key digest does not match."
+                )
+        if self.status == self.Status.ACTIVE and self.activated_at is None:
+            errors["activated_at"] = "An active key wrap must be activated."
+        if self.status == self.Status.RETIRED and self.retired_at is None:
+            errors["retired_at"] = "A retired key wrap must have a retirement time."
+        if errors:
+            raise ValidationError(errors)
+
+
 class CoreBackupArtifact(TimeStampedModel):
     """Integrity and resume metadata for one backup artifact/destination."""
 
@@ -854,6 +1020,10 @@ class CoreBackupArtifact(TimeStampedModel):
         ARCHIVE = "archive", "Archive"
         DESTINATION = "destination", "Destination"
         MANIFEST = "manifest", "Manifest"
+
+    class Format(models.TextChoices):
+        LEGACY_ZIP = "legacy_zip", "Legacy ZIP"
+        BSE1 = "bse1", "BSE1 encrypted envelope"
 
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     backup_content_type = models.ForeignKey(
@@ -874,6 +1044,16 @@ class CoreBackupArtifact(TimeStampedModel):
     )
     role = models.CharField(
         max_length=32, choices=Role.choices, default=Role.ARCHIVE
+    )
+    artifact_format = models.CharField(
+        max_length=16, choices=Format.choices, default=Format.LEGACY_ZIP
+    )
+    encryption_envelope = models.ForeignKey(
+        CoreBackupEncryptionEnvelope,
+        related_name="artifacts",
+        null=True,
+        blank=True,
+        on_delete=models.RESTRICT,
     )
     idempotency_key = models.CharField(max_length=255)
     object_key = models.TextField(blank=True, default="")
@@ -896,7 +1076,20 @@ class CoreBackupArtifact(TimeStampedModel):
                     "idempotency_key",
                 ),
                 name="unique_backup_artifact_key",
-            )
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        artifact_format="legacy_zip",
+                        encryption_envelope__isnull=True,
+                    )
+                    | models.Q(
+                        artifact_format="bse1",
+                        encryption_envelope__isnull=False,
+                    )
+                ),
+                name="backup_artifact_format_envelope",
+            ),
         ]
         indexes = [
             models.Index(
@@ -908,6 +1101,22 @@ class CoreBackupArtifact(TimeStampedModel):
                 name="backup_artifact_verify_idx",
             ),
         ]
+
+    def clean(self):
+        super().clean()
+        if self.encryption_envelope_id:
+            execution = self.encryption_envelope.execution
+            if (
+                execution.backup_content_type_id != self.backup_content_type_id
+                or execution.backup_object_id != self.backup_object_id
+            ):
+                raise ValidationError(
+                    {
+                        "encryption_envelope": (
+                            "The encryption envelope belongs to a different backup."
+                        )
+                    }
+                )
 
 
 class CoreBackupRequest(TimeStampedModel):
