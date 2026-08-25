@@ -2,9 +2,9 @@
 
 A restore starts by materializing the stored backup zip onto the local disk:
 
-  * 'Local Storage' backends keep the zip as a plain file under
-    settings.LOCAL_STORAGE_ROOT (storage_file_id is its absolute path) -- it is
-    copied from there, confined to the storage root.
+  * Local Storage remains mounted only in the storage lane. Encrypted objects
+    cross a storage-owned, source-read-only BSE1 handoff whose exact bytes are
+    checked against the durable ledger before authenticated decryption.
   * Committed Dropbox, pCloud, Google Drive, OneDrive, Google Cloud Storage,
     and Azure copies are fetched through authenticated provider APIs using
     their durable object identity, ownership markers, and version/revision
@@ -35,17 +35,25 @@ import subprocess
 import tarfile
 import tempfile
 import uuid
+from datetime import datetime
 from urllib.parse import quote
 
 from apps.api.v1.utils.http import requests
 from apps.api.v1.utils.http import request_timeout
 from apps.api.v1.utils.api_helpers import bs_decrypt
 from django.conf import settings
+from django.utils import timezone
 from sentry_sdk import capture_exception
 
 from apps._tasks.integration.backup._archive import (
     iter_zip_members,
     mark_utf8_zip_names,
+)
+from apps._tasks.artifact_encryption import (
+    ArtifactPipelineError,
+    restore_ciphertext_handoff_identity,
+    restore_encryption_plan,
+    unseal_downloaded_artifact,
 )
 
 # (connect, read) timeout for the download URL fetch; 1 MiB stream chunks.
@@ -2924,79 +2932,236 @@ def _fetch_exact_provider(stored_backup, dest_zip_path, expected, provider_code,
     )
 
 
-def fetch_backup_zip(stored_backup, dest_zip_path):
-    """Materialize the stored backup zip at dest_zip_path (a local file path)."""
+def _local_restore_model_key(restore):
+    model_name = str(getattr(getattr(restore, "_meta", None), "model_name", ""))
+    value = {
+        "corewebsiterestore": "website",
+        "coredatabaserestore": "database",
+    }.get(model_name)
+    if value is None:
+        raise RestoreError("the local restore handoff model is unsupported.")
+    return value
+
+
+def _open_local_restore_ciphertext(restore, stored_backup, encryption_plan):
+    if restore is None or restore.storage_point_id != stored_backup.pk:
+        raise RestoreError(
+            "an encrypted local restore requires its durable restore handoff."
+        )
+    try:
+        expected = restore_ciphertext_handoff_identity(restore, encryption_plan)
+    except ArtifactPipelineError:
+        raise RestoreError("the local restore handoff identity is invalid.") from None
+    state = dict(
+        (restore.execution_metadata or {}).get(
+            "local_restore_ciphertext_handoff"
+        )
+        or {}
+    )
+    identity_matches = all(state.get(key) == value for key, value in expected.items())
+    if state.get("status") in {"ready", "authenticated"} and not identity_matches:
+        raise RestoreError("the local restore handoff evidence conflicts with its ledger.")
+    if not identity_matches or state.get("status") not in {"ready", "authenticated"}:
+        should_publish = True
+        if identity_matches and state.get("status") == "staging":
+            try:
+                lease_expires_at = datetime.fromisoformat(
+                    str(state.get("lease_expires_at") or "")
+                )
+                if timezone.is_naive(lease_expires_at):
+                    lease_expires_at = timezone.make_aware(lease_expires_at)
+                should_publish = lease_expires_at <= timezone.now()
+            except (TypeError, ValueError):
+                should_publish = True
+        if should_publish:
+            from apps._tasks.integration.storage.tasks import (
+                stage_local_restore_ciphertext,
+            )
+
+            stage_local_restore_ciphertext.apply_async(
+                args=[_local_restore_model_key(restore), restore.pk]
+            )
+        raise _SafeProviderRestoreError(
+            "RESTORE_CIPHERTEXT_HANDOFF_PENDING",
+            "the storage worker is preparing the authenticated local restore object.",
+            retryable=True,
+            retry_after=30,
+        )
+
+    from backupsheep.staging import open_restore_ciphertext
+
+    try:
+        return open_restore_ciphertext(
+            expected["handoff_uuid"],
+            expected["artifact_name"],
+            backup_uuid=expected["backup_uuid"],
+            target_lane=expected["target_lane"],
+            installation_id=encryption_plan.context.installation_id,
+        )
+    except Exception:
+        raise RestoreError(
+            "the encrypted local restore handoff is missing or unsafe."
+        ) from None
+
+
+def _mark_local_restore_ciphertext_authenticated(restore, encryption_plan):
+    expected = restore_ciphertext_handoff_identity(restore, encryption_plan)
+    metadata = dict(restore.execution_metadata or {})
+    state = dict(metadata.get("local_restore_ciphertext_handoff") or {})
+    if not all(state.get(key) == value for key, value in expected.items()) or state.get(
+        "status"
+    ) not in {"ready", "authenticated"}:
+        raise RestoreError("the local restore handoff witness changed during decryption.")
+    metadata["local_restore_ciphertext_handoff"] = {
+        **expected,
+        "status": "authenticated",
+        "authenticated_at": timezone.now().isoformat(),
+    }
+    restore.execution_metadata = metadata
+    restore.save(update_fields=["execution_metadata", "modified"])
+
+
+def fetch_backup_zip(stored_backup, dest_zip_path, *, restore=None):
+    """Materialize a verified ZIP; BSE1 is authenticated before ZIP publication."""
+
+    try:
+        encryption_plan = restore_encryption_plan(stored_backup)
+    except ArtifactPipelineError:
+        raise RestoreError(
+            "stored backup encryption evidence is incomplete or inconsistent."
+        ) from None
     expected = _expected_integrity(stored_backup)
-    if stored_backup.storage.type.code == "local":
-        source_path = _local_source_path(stored_backup.storage_file_id)
-        with open(source_path, "rb") as source:
-            _materialize_stream(
-                iter(lambda: source.read(CHUNK_SIZE), b""),
-                dest_zip_path,
-                expected,
-            )
-    else:
-        provider_code = str(getattr(stored_backup.storage.type, "code", "") or "")
-        if provider_code in EXACT_PROVIDER_CODES:
-            aws_s3_exact = provider_code == "aws_s3" and (
-                _destination_ledger_exists(stored_backup)
-                or "aws_s3_object" in (stored_backup.metadata or {})
-            )
-            # S3 identity is split across the destination artifact, version ID,
-            # storage metadata, and provider-owned object metadata rather than a
-            # single generic provider-state record.
-            if provider_code == "aws_s3":
-                state = None
-            elif provider_code == "idrive":
-                state = _idrive_s3_state(stored_backup, expected)
-            elif provider_code in S3_COMPATIBLE_PROVIDER_STATE_KEYS:
-                state = _s3_compatible_state(
-                    stored_backup,
-                    expected,
-                    provider_code,
-                )
+    if encryption_plan is not None:
+        from backupsheep.staging import require_private_capacity
+
+        require_private_capacity(
+            required_bytes=(
+                int(expected["size_bytes"])
+                + int(encryption_plan.envelope.plaintext_byte_count)
+            ),
+            required_inodes=3,
+        )
+    materialized_path = (
+        dest_zip_path
+        if encryption_plan is None
+        else f"{dest_zip_path}.{uuid.uuid4().hex}.bse1"
+    )
+    try:
+        if stored_backup.storage.type.code == "local":
+            if encryption_plan is None:
+                source_path = _local_source_path(stored_backup.storage_file_id)
+                source_context = open(source_path, "rb")
             else:
-                state = _provider_state(stored_backup, provider_code, expected)
-            if aws_s3_exact or state is not None:
-                _fetch_exact_provider(
+                source_context = _open_local_restore_ciphertext(
+                    restore,
                     stored_backup,
-                    dest_zip_path,
-                    expected,
-                    provider_code,
-                    state,
+                    encryption_plan,
                 )
-                return dest_zip_path
-        # Explicit legacy path: only a row with no destination ledger and no
-        # committed provider state may use the historical URL method.  This is
-        # retained for backups created before provider identity ledgers existed;
-        # it is never a fallback for a missing/mismatched committed object.
-        try:
-            url = stored_backup.generate_download_url()
-        except Exception:
-            raise RestoreError(
-                "unable to prepare the stored backup for download."
-            ) from None
-        if url in GLACIER_SENTINELS:
-            raise RestoreError(
-                "backup is archived in Glacier/Deep Archive — restore it with the storage provider first"
-            )
-        if not url:
-            raise RestoreError("unable to generate a download URL for the stored backup.")
-        try:
-            with requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT) as response:
-                response.raise_for_status()
+            with source_context as source:
                 _materialize_stream(
-                    response.iter_content(chunk_size=CHUNK_SIZE),
-                    dest_zip_path,
+                    iter(lambda: source.read(CHUNK_SIZE), b""),
+                    materialized_path,
                     expected,
                 )
-        except RestoreError:
-            raise
-        except Exception:
-            raise RestoreError(
-                "unable to download the stored backup from its storage provider."
-            ) from None
-    return dest_zip_path
+        else:
+            provider_code = str(
+                getattr(stored_backup.storage.type, "code", "") or ""
+            )
+            downloaded_exact = False
+            if provider_code in EXACT_PROVIDER_CODES:
+                aws_s3_exact = provider_code == "aws_s3" and (
+                    _destination_ledger_exists(stored_backup)
+                    or "aws_s3_object" in (stored_backup.metadata or {})
+                )
+                # S3 identity is split across the destination artifact, version ID,
+                # storage metadata, and provider-owned object metadata rather than a
+                # single generic provider-state record.
+                if provider_code == "aws_s3":
+                    state = None
+                elif provider_code == "idrive":
+                    state = _idrive_s3_state(stored_backup, expected)
+                elif provider_code in S3_COMPATIBLE_PROVIDER_STATE_KEYS:
+                    state = _s3_compatible_state(
+                        stored_backup,
+                        expected,
+                        provider_code,
+                    )
+                else:
+                    state = _provider_state(stored_backup, provider_code, expected)
+                if aws_s3_exact or state is not None:
+                    _fetch_exact_provider(
+                        stored_backup,
+                        materialized_path,
+                        expected,
+                        provider_code,
+                        state,
+                    )
+                    downloaded_exact = True
+            if not downloaded_exact:
+                # Provider-transport legacy is distinct from plaintext-artifact
+                # legacy. A BSE1 object may still use this historical URL only when
+                # no committed provider identity exists; its ciphertext digest and
+                # full AEAD are verified below before any ZIP becomes visible.
+                try:
+                    if encryption_plan is None:
+                        url = stored_backup.generate_download_url()
+                    else:
+                        url = stored_backup.generate_download_url(for_restore=True)
+                except Exception:
+                    raise RestoreError(
+                        "unable to prepare the stored backup for download."
+                    ) from None
+                if url in GLACIER_SENTINELS:
+                    raise RestoreError(
+                        "backup is archived in Glacier/Deep Archive — restore it with the storage provider first"
+                    )
+                if not url:
+                    raise RestoreError(
+                        "unable to generate a download URL for the stored backup."
+                    )
+                try:
+                    with requests.get(
+                        url, stream=True, timeout=DOWNLOAD_TIMEOUT
+                    ) as response:
+                        response.raise_for_status()
+                        _materialize_stream(
+                            response.iter_content(chunk_size=CHUNK_SIZE),
+                            materialized_path,
+                            expected,
+                        )
+                except RestoreError:
+                    raise
+                except Exception:
+                    raise RestoreError(
+                        "unable to download the stored backup from its storage provider."
+                    ) from None
+        if encryption_plan is not None:
+            try:
+                unseal_downloaded_artifact(
+                    encryption_plan,
+                    materialized_path,
+                    dest_zip_path,
+                )
+                if stored_backup.storage.type.code == "local":
+                    _mark_local_restore_ciphertext_authenticated(
+                        restore,
+                        encryption_plan,
+                    )
+            except Exception:
+                try:
+                    os.remove(dest_zip_path)
+                except FileNotFoundError:
+                    pass
+                raise RestoreError(
+                    "stored backup ciphertext failed authenticated decryption."
+                ) from None
+        return dest_zip_path
+    finally:
+        if encryption_plan is not None:
+            try:
+                os.remove(materialized_path)
+            except FileNotFoundError:
+                pass
 
 
 def _check_members(names, dest_root, kind):

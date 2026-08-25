@@ -3936,7 +3936,7 @@ def restore_database(backup, restore):
         # size, compression-ratio, and disk checks) happen before any DB client
         # is opened or any target is created.
         _ensure_restore_fence(restore)
-        fetch_backup_zip(stored_backup, local_zip)
+        fetch_backup_zip(stored_backup, local_zip, restore=restore)
         _ensure_restore_fence(restore)
         extract_backup_zip(local_zip, local_dir)
         _ensure_restore_fence(restore)

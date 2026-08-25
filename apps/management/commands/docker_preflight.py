@@ -19,6 +19,8 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from kombu import Connection
 
+from backupsheep.artifact_crypto import AWSKMSConfig, AWSKMSKeyProvider
+
 from backupsheep.celery_security import (
     CONSUMER_QUEUES,
     LANES,
@@ -378,6 +380,57 @@ def _assert_runtime_database_identity(*, cursor, environment, runtime_settings):
         )
 
 
+def _assert_artifact_encryption_boundary(*, environment, runtime_settings):
+    """Prove the hardened stack cannot transfer or restore plaintext artifacts."""
+
+    errors = []
+    if runtime_settings.BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE != "bse1":
+        errors.append("artifact encryption mode is not BSE1")
+    if runtime_settings.BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE is not True:
+        errors.append("enterprise artifact policy is not active")
+    if runtime_settings.BACKUPSHEEP_ARTIFACT_KEY_PROVIDER != "aws-kms":
+        errors.append("artifact key custody is not AWS KMS")
+    if runtime_settings.BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE is not False:
+        errors.append("legacy plaintext restore is enabled")
+    if environment.get("BACKUPSHEEP_PLAINTEXT_ROOT", "/code/_storage") != "/code/_storage":
+        errors.append("the private artifact root is not the stock container path")
+    if (
+        environment.get(
+            "BACKUPSHEEP_CIPHERTEXT_TRANSFER_ROOT",
+            "/var/lib/backupsheep/transfer",
+        )
+        != "/var/lib/backupsheep/transfer"
+    ):
+        errors.append("the ciphertext transfer root is not the stock container path")
+    try:
+        provider = AWSKMSKeyProvider(
+            AWSKMSConfig(
+                key_id=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_KEY_ID,
+                region_name=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_REGION,
+                allowed_key_ids=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS,
+                endpoint_url=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL,
+                connect_timeout_seconds=(
+                    runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS
+                ),
+                read_timeout_seconds=(
+                    runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS
+                ),
+                max_attempts=runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS,
+                allow_insecure_endpoint=(
+                    runtime_settings.BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT
+                ),
+            )
+        )
+        if provider.enterprise_eligible is not True:
+            errors.append("AWS KMS artifact configuration is not enterprise eligible")
+    except Exception:
+        errors.append("AWS KMS artifact configuration is invalid")
+    if errors:
+        raise CommandError(
+            "Docker security preflight failed: " + "; ".join(errors)
+        )
+
+
 class Command(BaseCommand):
     help = "Validate the stock Docker runtime boundary, database, and broker without consuming work."
 
@@ -424,6 +477,10 @@ class Command(BaseCommand):
             secret_values=_read_stock_secret_values(required_secret_files),
         )
         _assert_celery_identity(os.environ)
+        _assert_artifact_encryption_boundary(
+            environment=os.environ,
+            runtime_settings=settings,
+        )
 
         static_root = Path(settings.STATIC_ROOT)
         if not static_root.is_dir() or not any(static_root.iterdir()):
@@ -459,7 +516,8 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 "Docker security preflight passed: immutable non-root runtime, "
-                "file-backed secrets, least-privilege database identity, applied "
-                "migrations, database, and broker verified."
+                "file-backed secrets, external-KMS BSE1 artifact custody, "
+                "least-privilege database identity, applied migrations, database, "
+                "and broker verified."
             )
         )

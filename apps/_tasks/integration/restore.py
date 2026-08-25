@@ -327,6 +327,21 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
             else None
         )
         metadata = dict(restore.execution_metadata or {})
+        # The storage lane may finish a local ciphertext handoff while this
+        # source task is classifying the expected "handoff pending" retry. Keep
+        # the newer DB-bound handoff witness instead of overwriting it with the
+        # source task's pre-publication in-memory metadata.
+        current_metadata = (
+            restore.__class__.objects.filter(pk=restore.pk)
+            .values_list("execution_metadata", flat=True)
+            .first()
+        )
+        current_handoff = dict(
+            (current_metadata or {}).get("local_restore_ciphertext_handoff")
+            or {}
+        )
+        if current_handoff:
+            metadata["local_restore_ciphertext_handoff"] = current_handoff
         if retry_due_at is not None:
             metadata[SCHEDULED_RETRY_RESERVED_UNTIL] = (
                 _scheduled_retry_reservation_deadline(retry_due_at).isoformat()
@@ -413,6 +428,27 @@ def _run_materialized_restore(task, *, node, backup, restore, engine, phase):
             )
     finally:
         lease.release()
+
+
+def _schedule_local_restore_handoff_cleanup(restore):
+    state = dict(
+        (restore.execution_metadata or {}).get(
+            "local_restore_ciphertext_handoff"
+        )
+        or {}
+    )
+    if restore.status not in {restore.Status.COMPLETE, restore.Status.FAILED} or state.get(
+        "status"
+    ) not in {"ready", "authenticated"}:
+        return
+    from apps._tasks.integration.storage.tasks import (
+        cleanup_local_restore_ciphertext,
+    )
+
+    model_key = (
+        "website" if isinstance(restore, CoreWebsiteRestore) else "database"
+    )
+    cleanup_local_restore_ciphertext.apply_async(args=[model_key, restore.pk])
 
 
 def _refresh_bound_restore(lease):
@@ -869,7 +905,7 @@ def restore_website_backup(self, node_id=None, backup_id=None, restore_id=None):
     backup = node.website.backups.get(id=backup_id)
     restore = CoreWebsiteRestore.objects.get(id=restore_id, backup=backup)
 
-    return _run_materialized_restore(
+    result = _run_materialized_restore(
         self,
         node=node,
         backup=backup,
@@ -877,6 +913,13 @@ def restore_website_backup(self, node_id=None, backup_id=None, restore_id=None):
         engine=restore_website,
         phase="website_restore",
     )
+    restore.refresh_from_db()
+    try:
+        _schedule_local_restore_handoff_cleanup(restore)
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(exc=error, countdown=60, max_retries=2880)
+    return result
 
 
 @current_app.task(
@@ -900,7 +943,7 @@ def restore_database_backup(self, node_id=None, backup_id=None, restore_id=None)
     backup = node.database.backups.get(id=backup_id)
     restore = CoreDatabaseRestore.objects.get(id=restore_id, backup=backup)
 
-    return _run_materialized_restore(
+    result = _run_materialized_restore(
         self,
         node=node,
         backup=backup,
@@ -908,6 +951,13 @@ def restore_database_backup(self, node_id=None, backup_id=None, restore_id=None)
         engine=restore_database,
         phase="database_restore",
     )
+    restore.refresh_from_db()
+    try:
+        _schedule_local_restore_handoff_cleanup(restore)
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(exc=error, countdown=60, max_retries=2880)
+    return result
 
 
 def _recoverable_restore_rows(model, *, now, cutoff, batch_size):

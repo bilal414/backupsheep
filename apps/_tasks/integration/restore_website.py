@@ -2210,7 +2210,7 @@ def restore_website(backup, restore):
             ssh_key_path,
         )
         _ensure_restore_fence(restore)
-        fetch_backup_zip(stored_backup, local_zip)
+        fetch_backup_zip(stored_backup, local_zip, restore=restore)
         _ensure_restore_fence(restore)
         extract_backup_zip(local_zip, local_dir)
         tree_root = maybe_extract_tar(local_dir, backup.uuid_str)

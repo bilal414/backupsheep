@@ -5335,7 +5335,35 @@ class BaseBackupStoragePoints(TimeStampedModel):
         client.delete_object(**delete_args)
         return True
 
-    def generate_download_url(self):
+    def direct_download_permitted(self):
+        """Return false when a browser URL would expose ciphertext as a ZIP."""
+
+        encrypted = self.backup.artifact_records.filter(
+            storage_id=self.storage_id,
+            role__in=("archive", "destination"),
+        ).filter(
+            models.Q(artifact_format=CoreBackupArtifact.Format.BSE1)
+            | models.Q(encryption_envelope__isnull=False)
+        ).exists()
+        allow_legacy = getattr(
+            settings, "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE", False
+        )
+        enterprise = getattr(
+            settings, "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE", False
+        )
+        return bool(
+            not encrypted
+            and type(allow_legacy) is bool
+            and allow_legacy
+            and type(enterprise) is bool
+            and not enterprise
+        )
+
+    def generate_download_url(self, *, for_restore=False):
+        if not for_restore and not self.direct_download_permitted():
+            raise RuntimeError(
+                "Direct download is disabled for encrypted backup artifacts."
+            )
         encryption_key = self.storage.account.get_encryption_key()
 
         if self.storage.type.code == "aws_s3":

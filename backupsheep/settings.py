@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 import io
+import base64
 import ipaddress
 import json
 import os
@@ -67,6 +68,21 @@ def _as_bool(value, default=False):
     if value is None:
         return default
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _strict_bool(name, value, *, default=False):
+    """Parse a security policy boolean without treating typos as disabled."""
+
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ImproperlyConfigured(f"{name} must be an explicit boolean value.")
 
 
 SECRET_KEY = config["DJANGO_SECRET_KEY"]
@@ -530,6 +546,130 @@ APP_NAME = config["APP_NAME"]
 APP_DOMAIN = config["APP_DOMAIN"]
 APP_PROTOCOL = config["APP_PROTOCOL"]
 APP_URL = f"{APP_PROTOCOL}{APP_DOMAIN}"
+
+# Backup artifacts have one explicit wire-policy.  The stock hardened Docker
+# deployment sets enterprise mode and therefore cannot start or dispatch work in
+# legacy-only mode.  The compatibility mode remains available to non-enterprise
+# upgrades solely so operators can restore historical plaintext ZIP objects.
+BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE = str(
+    config.get("BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE", "legacy-only")
+).strip().lower()
+if BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE not in {"bse1", "legacy-only"}:
+    raise ImproperlyConfigured(
+        "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE must be bse1 or legacy-only."
+    )
+
+BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE = _strict_bool(
+    "BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE",
+    config.get("BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE"),
+    default=False,
+)
+BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE = _strict_bool(
+    "BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE",
+    config.get("BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE"),
+    default=BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "legacy-only",
+)
+BACKUPSHEEP_ARTIFACT_KEY_PROVIDER = str(
+    config.get(
+        "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER",
+        "aws-kms" if DJANGO_SERVER == "prod" else "local-development",
+    )
+).strip().lower()
+if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER not in {"aws-kms", "local-development"}:
+    raise ImproperlyConfigured(
+        "BACKUPSHEEP_ARTIFACT_KEY_PROVIDER must be aws-kms or local-development."
+    )
+
+BACKUPSHEEP_INSTALLATION_ID = str(config.get("BACKUPSHEEP_INSTALLATION_ID", ""))
+BACKUPSHEEP_ARTIFACT_CHUNK_SIZE = _bounded_positive_int(
+    "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE", 4 * 1024 * 1024, 64 * 1024 * 1024
+)
+if BACKUPSHEEP_ARTIFACT_CHUNK_SIZE < 64 * 1024:
+    raise ImproperlyConfigured(
+        "BACKUPSHEEP_ARTIFACT_CHUNK_SIZE must be at least 65536 bytes."
+    )
+
+BACKUPSHEEP_ARTIFACT_KMS_KEY_ID = str(
+    config.get("BACKUPSHEEP_ARTIFACT_KMS_KEY_ID", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_KMS_REGION = str(
+    config.get("BACKUPSHEEP_ARTIFACT_KMS_REGION", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS = tuple(
+    value.strip()
+    for value in str(
+        config.get("BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS", "")
+    ).split(",")
+    if value.strip()
+)
+BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL = (
+    str(config.get("BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL", "")).strip() or None
+)
+BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT = _strict_bool(
+    "BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT",
+    config.get("BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT"),
+    default=False,
+)
+BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS = _bounded_positive_int(
+    "BACKUPSHEEP_ARTIFACT_KMS_CONNECT_TIMEOUT_SECONDS", 5, 60
+)
+BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS = _bounded_positive_int(
+    "BACKUPSHEEP_ARTIFACT_KMS_READ_TIMEOUT_SECONDS", 30, 120
+)
+BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS = _bounded_positive_int(
+    "BACKUPSHEEP_ARTIFACT_KMS_MAX_ATTEMPTS", 3, 5
+)
+BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY = str(
+    config.get("BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY", "")
+).strip()
+BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID = str(
+    config.get("BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID", "local-v1")
+).strip()
+
+if BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE == "bse1":
+    if not re.fullmatch(r"[0-9a-f]{64}", BACKUPSHEEP_INSTALLATION_ID):
+        raise ImproperlyConfigured(
+            "BSE1 encryption requires a stable 64-character BACKUPSHEEP_INSTALLATION_ID."
+        )
+    if BACKUPSHEEP_ARTIFACT_KEY_PROVIDER == "aws-kms":
+        if not (
+            BACKUPSHEEP_ARTIFACT_KMS_KEY_ID
+            and BACKUPSHEEP_ARTIFACT_KMS_REGION
+            and BACKUPSHEEP_ARTIFACT_KMS_ALLOWED_KEY_ARNS
+        ):
+            raise ImproperlyConfigured(
+                "BSE1 AWS KMS encryption requires a key, region, and resolved key-ARN allowlist."
+            )
+    else:
+        if DJANGO_SERVER == "prod" or BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE:
+            raise ImproperlyConfigured(
+                "The local artifact key provider is restricted to explicit non-production use."
+            )
+        try:
+            local_wrapping_key = base64.b64decode(
+                BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY,
+                validate=True,
+            )
+        except (ValueError, TypeError) as error:
+            raise ImproperlyConfigured(
+                "BACKUPSHEEP_ARTIFACT_LOCAL_WRAPPING_KEY must be canonical base64."
+            ) from error
+        if len(local_wrapping_key) != 32 or not BACKUPSHEEP_ARTIFACT_LOCAL_KEY_ID:
+            raise ImproperlyConfigured(
+                "The local development artifact provider requires a 32-byte key and key ID."
+            )
+        del local_wrapping_key
+
+if BACKUPSHEEP_ARTIFACT_ENTERPRISE_MODE and (
+    BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE != "bse1"
+    or BACKUPSHEEP_ARTIFACT_KEY_PROVIDER != "aws-kms"
+    or BACKUPSHEEP_ARTIFACT_ALLOW_LEGACY_RESTORE
+    or BACKUPSHEEP_ARTIFACT_KMS_ENDPOINT_URL is not None
+    or BACKUPSHEEP_ARTIFACT_KMS_ALLOW_INSECURE_ENDPOINT
+):
+    raise ImproperlyConfigured(
+        "Enterprise artifact policy requires BSE1, standard-endpoint AWS KMS, and no legacy restore."
+    )
 
 
 def _sentry_sample_rate(name):

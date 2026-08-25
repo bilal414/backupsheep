@@ -297,6 +297,24 @@ def _open_regular_source(
         raise
 
 
+def open_artifact_source(
+    path: str | os.PathLike[str],
+    *,
+    trusted_source_root: str | os.PathLike[str],
+) -> BinaryIO:
+    """Open one encrypted artifact without following any path-component link."""
+
+    if trusted_source_root is None:
+        raise ArtifactConfigurationError(
+            "An encrypted artifact source requires a trusted filesystem root."
+        )
+    return _open_regular_source(
+        path,
+        encrypted=True,
+        trusted_root=trusted_source_root,
+    )
+
+
 def _write_all(destination: BinaryIO, value: bytes) -> None:
     view = memoryview(value)
     while view:

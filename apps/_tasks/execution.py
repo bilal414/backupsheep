@@ -221,6 +221,21 @@ def verify_and_commit_source_artifact(backup):
     archive_path = os.path.realpath(
         os.path.join(storage_dir, f"{backup.uuid_str}.zip")
     )
+    if getattr(
+        settings, "BACKUPSHEEP_ARTIFACT_ENCRYPTION_MODE", "legacy-only"
+    ) == "bse1" or backup.artifact_records.filter(
+        artifact_format="bse1"
+    ).exists():
+        # A durable BSE1 ledger always wins over runtime policy so a retry can
+        # never reinterpret encrypted bytes as a legacy ZIP.  The helper also
+        # handles the post-commit retry where the plaintext ZIP is already gone.
+        from apps._tasks.artifact_encryption import seal_or_validate_source_artifact
+
+        return seal_or_validate_source_artifact(
+            backup,
+            archive_path,
+            zip_verifier=_verify_zip_crc_bounded,
+        )
     if (
         archive_path == storage_dir
         or os.path.commonpath([storage_dir, archive_path]) != storage_dir

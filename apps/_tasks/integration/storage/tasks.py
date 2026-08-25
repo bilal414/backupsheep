@@ -72,6 +72,14 @@ from apps._tasks.integration.storage.wasabi import (
     storage_wasabi_delete,
 )
 from apps._tasks.execution import verify_and_commit_source_artifact
+from apps._tasks.artifact_encryption import (
+    ArtifactPipelineError,
+    cleanup_terminal_restore_ciphertext_handoff,
+    cleanup_terminal_source_ciphertext,
+    ensure_destination_ciphertext_ledger,
+    materialize_local_restore_ciphertext_handoff,
+    storage_upload_artifact,
+)
 from apps._tasks.integration.storage.lease import (
     DurableStorageUploadLease,
     StorageCleanupNotEligible,
@@ -101,6 +109,8 @@ from apps.console.backup.models import (
     CoreWordPressBackup, CoreWebsiteBackupStoragePoints, CoreDatabaseBackupStoragePoints,
     CoreWordPressBackupStoragePoints, CoreBasecampBackup,
     CoreBasecampBackupStoragePoints,
+    CoreDatabaseRestore,
+    CoreWebsiteRestore,
     StoragePointLeaseLostError,
 )
 from apps.console.node.models import CoreNode
@@ -118,6 +128,65 @@ class UnsupportedStorageBackend(RuntimeError):
 
 class SourceArtifactInvalid(RuntimeError):
     pass
+
+
+def _dispatch_storage_adapter(stored_backup):
+    """Run one adapter against the already-materialized immutable upload input."""
+
+    if stored_backup.storage.type.code == "dropbox":
+        storage_dropbox(stored_backup)
+    elif stored_backup.storage.type.code == "google_drive":
+        storage_google_drive(stored_backup)
+    elif stored_backup.storage.type.code == "aws_s3":
+        storage_aws_s3(stored_backup)
+    elif stored_backup.storage.type.code == "wasabi":
+        storage_wasabi(stored_backup)
+    elif stored_backup.storage.type.code == "do_spaces":
+        storage_do_spaces(stored_backup)
+    elif stored_backup.storage.type.code == "filebase":
+        storage_filebase(stored_backup)
+    elif stored_backup.storage.type.code == "backblaze_b2":
+        storage_backblaze_b2(stored_backup)
+    elif stored_backup.storage.type.code == "linode":
+        storage_linode(stored_backup)
+    elif stored_backup.storage.type.code == "vultr":
+        storage_vultr(stored_backup)
+    elif stored_backup.storage.type.code == "upcloud":
+        storage_upcloud(stored_backup)
+    elif stored_backup.storage.type.code == "exoscale":
+        storage_exoscale(stored_backup)
+    elif stored_backup.storage.type.code == "oracle":
+        storage_oracle(stored_backup)
+    elif stored_backup.storage.type.code == "scaleway":
+        storage_scaleway(stored_backup)
+    elif stored_backup.storage.type.code == "pcloud":
+        storage_pcloud(stored_backup)
+    elif stored_backup.storage.type.code == "onedrive":
+        storage_onedrive(stored_backup)
+    elif stored_backup.storage.type.code == "cloudflare":
+        storage_cloudflare(stored_backup)
+    elif stored_backup.storage.type.code == "google_cloud":
+        storage_google_cloud(stored_backup)
+    elif stored_backup.storage.type.code == "azure":
+        storage_azure(stored_backup)
+    elif stored_backup.storage.type.code == "leviia":
+        storage_leviia(stored_backup)
+    elif stored_backup.storage.type.code == "idrive":
+        storage_idrive(stored_backup)
+    elif stored_backup.storage.type.code == "ionos":
+        storage_ionos(stored_backup)
+    elif stored_backup.storage.type.code == "alibaba":
+        storage_alibaba(stored_backup)
+    elif stored_backup.storage.type.code == "tencent":
+        storage_tencent(stored_backup)
+    elif stored_backup.storage.type.code == "rackcorp":
+        storage_rackcorp(stored_backup)
+    elif stored_backup.storage.type.code == "ibm":
+        storage_ibm(stored_backup)
+    elif stored_backup.storage.type.code == "local":
+        storage_local(stored_backup)
+    else:
+        raise UnsupportedStorageBackend()
 
 
 def _mark_storage_upload_started(backup):
@@ -180,6 +249,10 @@ _BACKUP_POINT_RELATIONS = {
     "database": "stored_database_backups",
     "wordpress": "stored_wordpress_backups",
     "basecamp": "stored_basecamp_backups",
+}
+_LOCAL_RESTORE_MODELS = {
+    "website": CoreWebsiteRestore,
+    "database": CoreDatabaseRestore,
 }
 
 
@@ -846,7 +919,10 @@ def _storage_error_outcome(error, point):
             point.Status.UPLOAD_FAILED,
             False,
         )
-    if _caused_by(error, (S3ObjectIntegrityError, SourceArtifactInvalid)) or (
+    if _caused_by(
+        error,
+        (S3ObjectIntegrityError, SourceArtifactInvalid, ArtifactPipelineError),
+    ) or (
         _chain_has_class_name(error, "_LocalStorageIntegrityError")
     ):
         return (
@@ -1071,74 +1147,21 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     log_file.write(f"{storage_type_name}: {stored_backup.storage.name} \n")
 
     try:
-        # A destination may only upload the immutable source identity committed by
-        # the dump worker.  This catches disk corruption and stale-file reuse before
-        # a provider receives any bytes.
-        try:
-            verify_and_commit_source_artifact(backup)
-        except FileNotFoundError:
-            raise
-        except Exception as error:
-            raise SourceArtifactInvalid(
-                "The committed source artifact failed verification."
-            ) from error
-
-        if stored_backup.storage.type.code == "dropbox":
-            storage_dropbox(stored_backup)
-        elif stored_backup.storage.type.code == "google_drive":
-            storage_google_drive(stored_backup)
-        elif stored_backup.storage.type.code == "aws_s3":
-            storage_aws_s3(stored_backup)
-        elif stored_backup.storage.type.code == "wasabi":
-            storage_wasabi(stored_backup)
-        elif stored_backup.storage.type.code == "do_spaces":
-            storage_do_spaces(stored_backup)
-        elif stored_backup.storage.type.code == "filebase":
-            storage_filebase(stored_backup)
-        elif stored_backup.storage.type.code == "backblaze_b2":
-            storage_backblaze_b2(stored_backup)
-        elif stored_backup.storage.type.code == "linode":
-            storage_linode(stored_backup)
-        elif stored_backup.storage.type.code == "vultr":
-            storage_vultr(stored_backup)
-        elif stored_backup.storage.type.code == "upcloud":
-            storage_upcloud(stored_backup)
-        elif stored_backup.storage.type.code == "exoscale":
-            storage_exoscale(stored_backup)
-        elif stored_backup.storage.type.code == "oracle":
-            storage_oracle(stored_backup)
-        elif stored_backup.storage.type.code == "scaleway":
-            storage_scaleway(stored_backup)
-        elif stored_backup.storage.type.code == "pcloud":
-            storage_pcloud(stored_backup)
-        elif stored_backup.storage.type.code == "onedrive":
-            storage_onedrive(stored_backup)
-        elif stored_backup.storage.type.code == "cloudflare":
-            storage_cloudflare(stored_backup)
-        elif stored_backup.storage.type.code == "google_cloud":
-            storage_google_cloud(stored_backup)
-        elif stored_backup.storage.type.code == "azure":
-            storage_azure(stored_backup)
-        elif stored_backup.storage.type.code == "leviia":
-            storage_leviia(stored_backup)
-        elif stored_backup.storage.type.code == "idrive":
-            storage_idrive(stored_backup)
-        elif stored_backup.storage.type.code == "ionos":
-            storage_ionos(stored_backup)
-        elif stored_backup.storage.type.code == "alibaba":
-            storage_alibaba(stored_backup)
-        elif stored_backup.storage.type.code == "tencent":
-            storage_tencent(stored_backup)
-        elif stored_backup.storage.type.code == "rackcorp":
-            storage_rackcorp(stored_backup)
-        elif stored_backup.storage.type.code == "ibm":
-            storage_ibm(stored_backup)
-        elif stored_backup.storage.type.code == "local":
-            storage_local(stored_backup)
-        else:
-            raise UnsupportedStorageBackend()
-
-        lease.ensure_owned()
+        # In BSE1 mode this context materializes only authenticated-header,
+        # ledger-matched ciphertext into storage's private volume.  The .zip
+        # suffix is retained solely for compatibility with existing adapters;
+        # remote objects contain BSE1 bytes and are never decrypted here.
+        with storage_upload_artifact(
+            backup,
+            legacy_verifier=verify_and_commit_source_artifact,
+        ) as source_artifact:
+            _dispatch_storage_adapter(stored_backup)
+            lease.ensure_owned()
+            ensure_destination_ciphertext_ledger(
+                backup,
+                stored_backup,
+                source_artifact,
+            )
 
         # The backend sets the storage point to UPLOAD_COMPLETE on success (or a
         # failure status / raises). Backup-level completion (status, notification,
@@ -1374,6 +1397,126 @@ def storage_sweep_owned_multipart_cleanup(self):
     return {"enqueued": enqueued, "scanned": scanned}
 
 
+def _cleanup_source_ciphertext(model_key, backup_id, *, expected_lane):
+    if model_key not in _BACKUP_MODELS:
+        raise ArtifactPipelineError("The ciphertext cleanup model is invalid.")
+    if (
+        (expected_lane == "database" and model_key != "database")
+        or (expected_lane == "files" and model_key == "database")
+    ):
+        raise ArtifactPipelineError(
+            "The ciphertext cleanup model is routed to the wrong lane."
+        )
+    canonical_id = _canonical_positive_id(backup_id)
+    if canonical_id is None:
+        raise ArtifactPipelineError("The ciphertext cleanup backup id is invalid.")
+    backup = _BACKUP_MODELS[model_key].objects.get(pk=canonical_id)
+    return cleanup_terminal_source_ciphertext(backup, expected_lane=expected_lane)
+
+
+@current_app.task(
+    name="cleanup_database_ciphertext_fence",
+    track_started=True,
+    bind=True,
+    default_retry_delay=300,
+    max_retries=24,
+)
+def cleanup_database_ciphertext_fence(self, backup_id):
+    """Clean a terminal database fence only inside the database source lane."""
+
+    try:
+        return _cleanup_source_ciphertext(
+            "database", backup_id, expected_lane="database"
+        )
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(
+            exc=ArtifactPipelineError(
+                "Database ciphertext-fence cleanup did not complete safely."
+            )
+        ) from None
+
+
+@current_app.task(
+    name="cleanup_files_ciphertext_fence",
+    track_started=True,
+    bind=True,
+    default_retry_delay=300,
+    max_retries=24,
+)
+def cleanup_files_ciphertext_fence(self, model_key, backup_id):
+    """Clean terminal website/SaaS fences only inside the files source lane."""
+
+    try:
+        return _cleanup_source_ciphertext(
+            model_key, backup_id, expected_lane="files"
+        )
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(
+            exc=ArtifactPipelineError(
+                "Files ciphertext-fence cleanup did not complete safely."
+            )
+        ) from None
+
+
+def _local_restore(model_key, restore_id):
+    model = _LOCAL_RESTORE_MODELS.get(str(model_key))
+    canonical_id = _canonical_positive_id(restore_id)
+    if model is None or canonical_id is None:
+        raise ArtifactPipelineError("The local restore handoff identity is invalid.")
+    return model.objects.get(pk=canonical_id)
+
+
+@current_app.task(
+    name="stage_local_restore_ciphertext",
+    track_started=True,
+    bind=True,
+    default_retry_delay=300,
+    max_retries=96,
+    time_limit=48 * 3600,
+    soft_time_limit=47 * 3600,
+)
+def stage_local_restore_ciphertext(self, model_key, restore_id):
+    """Stage an exact local BSE1 object for one database/files restore lane."""
+
+    try:
+        restore = _local_restore(model_key, restore_id)
+        return materialize_local_restore_ciphertext_handoff(
+            restore,
+            task_id=self.request.id,
+        )
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(
+            exc=ArtifactPipelineError(
+                "Local restore ciphertext staging did not complete safely."
+            )
+        ) from None
+
+
+@current_app.task(
+    name="cleanup_local_restore_ciphertext",
+    track_started=True,
+    bind=True,
+    default_retry_delay=300,
+    max_retries=24,
+)
+def cleanup_local_restore_ciphertext(self, model_key, restore_id):
+    """Clean one reverse local-restore handoff after durable terminal state."""
+
+    try:
+        restore = _local_restore(model_key, restore_id)
+        return cleanup_terminal_restore_ciphertext_handoff(restore)
+    except Exception as error:
+        capture_exception(error)
+        raise self.retry(
+            exc=ArtifactPipelineError(
+                "Local restore ciphertext cleanup did not complete safely."
+            )
+        ) from None
+
+
 @current_app.task(
     name="finalize_backup",
     track_started=True,
@@ -1607,4 +1750,34 @@ def finalize_backup(self, node_id, backup_id):
         # Local working files are no longer needed once the terminal DB decision is
         # committed. If the DB transaction above failed, control never reaches this
         # block, preserving the files for recovery.
-        delete_from_disk.apply_async(args=[backup.uuid_str, "both"])
+        try:
+            if backup.artifact_records.filter(
+                role="source",
+                storage__isnull=True,
+                artifact_format="bse1",
+                encryption_envelope__isnull=False,
+            ).exists():
+                if node.type == CoreNode.Type.DATABASE:
+                    cleanup_database_ciphertext_fence.apply_async(args=[backup.pk])
+                else:
+                    model_key = (
+                        "website"
+                        if node.type == CoreNode.Type.WEBSITE
+                        else (
+                            "wordpress"
+                            if node.connection.integration.code == "wordpress"
+                            else "basecamp"
+                        )
+                    )
+                    cleanup_files_ciphertext_fence.apply_async(
+                        args=[model_key, backup.pk]
+                    )
+            delete_from_disk.apply_async(args=[backup.uuid_str, "both"])
+        except Exception as error:
+            capture_exception(error)
+            raise self.retry(
+                exc=ArtifactPipelineError(
+                    "Terminal artifact cleanup publication did not complete safely."
+                ),
+                countdown=60,
+            ) from None
