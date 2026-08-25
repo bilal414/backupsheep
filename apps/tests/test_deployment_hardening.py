@@ -246,7 +246,8 @@ class DeploymentHardeningContractTests(TestCase):
             "rabbitmq_storage_password",
             "rabbitmq_logs_password",
             "onboarding_token",
-            "ssh_managed_private_key",
+            "ssh_managed_database_private_key",
+            "ssh_managed_files_private_key",
         ):
             with self.subTest(secret=name):
                 self.assertIn(
@@ -454,7 +455,7 @@ class DeploymentHardeningContractTests(TestCase):
         app = self.service_block("app")
         self.assertNotIn("source: backup_workdir", app)
         self.assertNotIn("- backup_workdir:/code/_storage", app)
-        self.assertIn("ssh_trust:/var/lib/backupsheep/ssh-trust", app)
+        self.assertNotIn("ssh_trust:/var/lib/backupsheep/ssh-trust", app)
         self.assertNotIn("/code/_storage", self.service_block("worker-logs"))
         settings = (ROOT / "backupsheep" / "settings.py").read_text(
             encoding="utf-8"
@@ -462,26 +463,33 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertIn('"delete_old_logs": {"queue": "storage"}', settings)
         self.assertIn('"reset_incremental_cache": {"queue": "storage"}', settings)
 
-    def test_ssh_trust_and_managed_identity_are_separate_from_staging(self):
+    def test_tenant_trust_is_ephemeral_and_managed_identities_are_lane_split(self):
         app = self.service_block("app")
         database = self.service_block("worker-database")
         files = self.service_block("worker-files")
+        secret_environment = self.compose.split(
+            "x-app-secret-environment: &app-secret-environment\n", 1
+        )[1].split("\nx-app-secrets:", 1)[0]
+        self.assertNotIn("SSH_KNOWN_HOSTS_PATH", secret_environment)
         self.assertIn(
-            "SSH_KNOWN_HOSTS_PATH: /var/lib/backupsheep/ssh-trust/known_hosts",
+            'SSH_MANAGED_PRIVATE_KEY_PATH: ""',
             self.compose,
         )
-        self.assertIn(
-            "SSH_MANAGED_PRIVATE_KEY_PATH: /run/backupsheep/ssh/managed_private_key",
-            self.compose,
-        )
-        self.assertIn("ssh_trust:/var/lib/backupsheep/ssh-trust", app)
-        for block in (database, files):
-            self.assertRegex(
-                block,
-                r"source: ssh_trust\n\s+target: /var/lib/backupsheep/ssh-trust\n"
-                r"\s+read_only: true",
-            )
-            self.assertIn("- ssh_managed_private_key", block)
+        self.assertIn("SSH_MANAGED_DATABASE_PUBLIC_KEY", self.compose)
+        self.assertIn("SSH_MANAGED_FILES_PUBLIC_KEY", self.compose)
+        self.assertIn('SSH_MANAGED_LANE_ISOLATION_REQUIRED: "true"', self.compose)
+        for block in (app, database, files):
+            self.assertNotIn("ssh_trust:/var/lib/backupsheep/ssh-trust", block)
+        self.assertIn("- ssh_managed_database_private_key", database)
+        self.assertNotIn("- ssh_managed_files_private_key", database)
+        self.assertIn("- ssh_managed_files_private_key", files)
+        self.assertNotIn("- ssh_managed_database_private_key", files)
+        self.assertNotIn("- ssh_managed_database_private_key", app)
+        self.assertNotIn("- ssh_managed_files_private_key", app)
+        retired_volume = self.compose.split("\nvolumes:\n", 1)[1].split(
+            "\nsecrets:\n", 1
+        )[0]
+        self.assertNotRegex(retired_volume, r"(?m)^\s*ssh_trust:")
 
     def test_existing_volume_non_root_migration_is_operator_gated(self):
         guide = (ROOT / "docs" / "guides" / "upgrades.md").read_text(

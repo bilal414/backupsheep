@@ -1,13 +1,19 @@
 import errno
+import base64
+import hashlib
 import os
 import socket
 import stat
+import struct
 import tempfile
 from unittest import mock
 
 import paramiko
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from django.test import SimpleTestCase, override_settings
 
+from apps.api.v1.utils.api_helpers import bs_encrypt
 from apps.console.connection.reliability import (
     ClassifiedConnectionError,
     DatabaseClientCapabilityError,
@@ -15,9 +21,45 @@ from apps.console.connection.reliability import (
     DatabaseTLSRequiredError,
     classify_connection_error,
 )
-from apps.console.connection.models import CoreAuthDatabase
-from apps.console.connection.ssh import _temporary_private_key, open_ssh_client
+from apps.console.connection.models import (
+    CoreAuthDatabase,
+    CoreAuthWebsite,
+    CoreConnection,
+    CoreSSHHostKeyApproval,
+)
+from apps.console.connection.ssh import (
+    _temporary_private_key,
+    materialize_approved_known_hosts,
+    open_ssh_client,
+    strict_transport_factory,
+)
 from apps.api.v1.utils.http import TimeoutSession, _retry_policy
+from apps.tests import factories
+from apps.tests.base import BaseTestCase
+
+
+def _host_key_material():
+    public_bytes = Ed25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    wire_type = b"ssh-ed25519"
+    blob = (
+        struct.pack(">I", len(wire_type))
+        + wire_type
+        + struct.pack(">I", len(public_bytes))
+        + public_bytes
+    )
+    return {
+        "wire_key_type": "ssh-ed25519",
+        "public_key_base64": base64.b64encode(blob).decode("ascii"),
+        "fingerprint": "SHA256:"
+        + base64.b64encode(hashlib.sha256(blob).digest())
+        .decode("ascii")
+        .rstrip("="),
+        "negotiated_host_key_algorithm": "ssh-ed25519",
+        "bits": 256,
+    }
 
 
 class ConnectionErrorClassificationTests(SimpleTestCase):
@@ -724,8 +766,69 @@ class StrictSSHClientTests(SimpleTestCase):
                     stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode),
                     0o700,
                 )
+                self.assertNotIn(os.path.abspath("_storage"), path)
             finally:
                 os.remove(path)
+
+    def test_ephemeral_material_refuses_relative_or_nonprivate_runtime(self):
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": "relative/runtime"}):
+            with self.assertRaisesRegex(ValueError, "must be absolute"):
+                _temporary_private_key("private-key-material")
+
+        with tempfile.TemporaryDirectory() as runtime_dir:
+            os.chmod(runtime_dir, 0o755)
+            with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime_dir}):
+                with self.assertRaisesRegex(ValueError, "not private"):
+                    _temporary_private_key("private-key-material")
+
+    def test_exact_approved_known_hosts_is_private_ephemeral_and_algorithm_bound(self):
+        material = _host_key_material()
+        witness = {
+            "approval_id": 7,
+            "generation": 3,
+            "normalized_host": "backup.example.test",
+            "port": 2222,
+            **material,
+        }
+        with tempfile.TemporaryDirectory() as runtime_dir, mock.patch.dict(
+            os.environ,
+            {"XDG_RUNTIME_DIR": runtime_dir},
+        ):
+            path, algorithm = materialize_approved_known_hosts(
+                "backup.example.test", 2222, witness
+            )
+            try:
+                self.assertEqual(algorithm, "ssh-ed25519")
+                self.assertEqual(os.path.dirname(path), os.path.join(runtime_dir, "ssh"))
+                self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+                with open(path, encoding="ascii") as known_hosts:
+                    self.assertEqual(
+                        known_hosts.read(),
+                        "[backup.example.test]:2222 ssh-ed25519 "
+                        f"{material['public_key_base64']}\n",
+                    )
+                self.assertNotIn(os.path.abspath("_storage"), path)
+            finally:
+                os.remove(path)
+
+    def test_known_hosts_witness_endpoint_mismatch_fails_before_file_creation(self):
+        material = _host_key_material()
+        witness = {
+            "approval_id": 7,
+            "generation": 3,
+            "normalized_host": "other.example.test",
+            "port": 2222,
+            **material,
+        }
+        with tempfile.TemporaryDirectory() as runtime_dir, mock.patch.dict(
+            os.environ,
+            {"XDG_RUNTIME_DIR": runtime_dir},
+        ):
+            with self.assertRaisesRegex(ValueError, "witness changed"):
+                materialize_approved_known_hosts(
+                    "backup.example.test", 2222, witness
+                )
+            self.assertFalse(os.path.exists(os.path.join(runtime_dir, "ssh")))
 
     @mock.patch("apps.console.connection.ssh.configure_host_keys")
     @mock.patch("apps.console.connection.ssh.paramiko.SSHClient")
@@ -754,7 +857,9 @@ class StrictSSHClientTests(SimpleTestCase):
             auth_timeout=9,
             allow_agent=False,
             look_for_keys=False,
+            compress=False,
             password="not-returned",
+            transport_factory=strict_transport_factory,
         )
         transport.set_keepalive.assert_called_once_with(10)
 
@@ -773,6 +878,182 @@ class StrictSSHClientTests(SimpleTestCase):
             )
         self.assertEqual(raised.exception.code, "TCP_TIMEOUT")
         self.assertNotIn("credential fragment", str(raised.exception))
+
+
+class TenantScopedSSHTrustTests(BaseTestCase):
+    def _approval(self, account, member, user, host, port, material):
+        return CoreSSHHostKeyApproval.objects.create(
+            account=account,
+            normalized_host=host,
+            port=port,
+            approved_by_member_pk_snapshot=member.pk,
+            approved_by_user_pk_snapshot=user.pk,
+            **material,
+        )
+
+    def _website_auth(self, account, member, user, material):
+        connection = factories.make_connection(account, member, code="website")
+        key = account.get_encryption_key()
+        CoreAuthWebsite.objects.create(
+            connection=connection,
+            host="shared-endpoint.example.test",
+            port=2222,
+            protocol=CoreAuthWebsite.Protocol.SFTP,
+            username=bs_encrypt("website-user", key),
+            password=bs_encrypt("website-password", key),
+            use_public_key=False,
+            use_private_key=False,
+        )
+        self._approval(
+            account,
+            member,
+            user,
+            "shared-endpoint.example.test",
+            2222,
+            material,
+        )
+        connection.refresh_from_db()
+        connection.status = CoreConnection.Status.ACTIVE
+        connection.save(update_fields=("status",))
+        return CoreAuthWebsite.objects.select_related(
+            "connection__account", "connection__integration"
+        ).get(connection=connection)
+
+    def test_same_endpoint_materializes_each_tenants_exact_key_and_cleans_privately(self):
+        first_material = _host_key_material()
+        second_material = _host_key_material()
+        first_auth = self._website_auth(
+            self.account,
+            self.member,
+            self.user,
+            first_material,
+        )
+        other_account, other_member, other_user = factories.make_account(
+            "trust-other@example.test"
+        )
+        second_auth = self._website_auth(
+            other_account,
+            other_member,
+            other_user,
+            second_material,
+        )
+
+        with tempfile.TemporaryDirectory() as runtime_dir, mock.patch.dict(
+            os.environ,
+            {"XDG_RUNTIME_DIR": runtime_dir},
+        ):
+            first_path = first_auth.materialize_lftp_known_hosts()
+            second_path = second_auth.materialize_lftp_known_hosts()
+            try:
+                with open(first_path, encoding="ascii") as first_file:
+                    first_line = first_file.read()
+                with open(second_path, encoding="ascii") as second_file:
+                    second_line = second_file.read()
+                self.assertIn(first_material["public_key_base64"], first_line)
+                self.assertNotIn(second_material["public_key_base64"], first_line)
+                self.assertIn(second_material["public_key_base64"], second_line)
+                self.assertNotIn(first_material["public_key_base64"], second_line)
+                self.assertEqual(stat.S_IMODE(os.stat(first_path).st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(os.stat(second_path).st_mode), 0o600)
+                self.assertNotEqual(first_path, second_path)
+            finally:
+                os.remove(first_path)
+                os.remove(second_path)
+            self.assertFalse(os.path.exists(first_path))
+            self.assertFalse(os.path.exists(second_path))
+
+    def test_host_key_replacement_between_validation_and_transfer_fails_closed(self):
+        original = _host_key_material()
+        auth = self._website_auth(
+            self.account,
+            self.member,
+            self.user,
+            original,
+        )
+        approval = CoreSSHHostKeyApproval.objects.get(
+            account=self.account,
+            normalized_host=auth.host,
+            port=auth.port,
+        )
+        replacement = _host_key_material()
+        for field, value in replacement.items():
+            setattr(approval, field, value)
+        approval.save(
+            update_fields=(
+                "wire_key_type",
+                "public_key_base64",
+                "fingerprint",
+                "negotiated_host_key_algorithm",
+                "bits",
+                "modified",
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as runtime_dir, mock.patch.dict(
+            os.environ,
+            {"XDG_RUNTIME_DIR": runtime_dir},
+        ):
+            with self.assertRaisesRegex(ValueError, "not active|changed"):
+                auth.materialize_lftp_known_hosts()
+            ssh_dir = os.path.join(runtime_dir, "ssh")
+            self.assertFalse(os.path.exists(ssh_dir) and os.listdir(ssh_dir))
+
+    def test_stale_database_auth_never_sends_old_credentials_to_new_ssh_endpoint(self):
+        connection = factories.make_connection(
+            self.account, self.member, code="database"
+        )
+        key = self.account.get_encryption_key()
+        CoreAuthDatabase.objects.create(
+            connection=connection,
+            host="database.internal.test",
+            port=5432,
+            database_name="application",
+            all_databases=False,
+            username=bs_encrypt("old-database-user", key),
+            password=bs_encrypt("old-database-password", key),
+            type=CoreAuthDatabase.DatabaseType.POSTGRESQL,
+            version=CoreAuthDatabase.DatabaseVersion.POSTGRESQL_16,
+            ssh_host="old-bastion.example.test",
+            ssh_port=22,
+            ssh_username=bs_encrypt("old-ssh-user", key),
+            ssh_password=bs_encrypt("old-ssh-passphrase", key),
+            private_key=bs_encrypt("old-private-key", key),
+            use_public_key=False,
+            use_private_key=True,
+        )
+        self._approval(
+            self.account,
+            self.member,
+            self.user,
+            "old-bastion.example.test",
+            22,
+            _host_key_material(),
+        )
+        connection.refresh_from_db()
+        connection.status = CoreConnection.Status.ACTIVE
+        connection.save(update_fields=("status",))
+        # Approve the future endpoint before it is configured. This does not fence
+        # the old endpoint, so the stale-auth witness check itself is what stops the
+        # old database credentials from reaching the newly selected host.
+        self._approval(
+            self.account,
+            self.member,
+            self.user,
+            "new-bastion.example.test",
+            22,
+            _host_key_material(),
+        )
+        stale_auth = CoreAuthDatabase.objects.select_related(
+            "connection__account", "connection__integration"
+        ).get(connection=connection)
+        CoreAuthDatabase.objects.filter(pk=stale_auth.pk).update(
+            ssh_host="new-bastion.example.test"
+        )
+
+        with mock.patch("apps.console.connection.models.open_ssh_client") as connect:
+            with self.assertRaisesRegex(ValueError, "changed after this work item"):
+                stale_auth.get_ssh_client()
+        connect.assert_not_called()
 
 
 @override_settings(

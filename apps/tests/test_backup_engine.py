@@ -1,5 +1,7 @@
 import io
+import base64
 import ftplib
+import hashlib
 import json
 import os
 import shlex
@@ -7,6 +9,7 @@ import shutil
 import ssl
 import subprocess
 import stat
+import struct
 import tempfile
 import time
 import uuid
@@ -18,8 +21,10 @@ from unittest import mock
 import requests as raw_requests
 from botocore.exceptions import ClientError
 from celery.exceptions import MaxRetriesExceededError, Retry
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from django.conf import settings
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
@@ -62,6 +67,7 @@ from apps.console.connection.models import (
     CoreAuthDigitalOcean,
     CoreAuthWebsite,
     CoreConnection,
+    CoreSSHHostKeyApproval,
 )
 from apps.console.node.models import (
     CoreDatabase,
@@ -655,7 +661,13 @@ class DigitalOceanSnapshotCreateTests(BaseTestCase):
 
 class LftpScriptBuilderTests(TestCase):
     def _auth(self, proto, explicit=False, verify=True):
-        return SimpleNamespace(protocol=proto, ftps_use_explicit_ssl=explicit, verify_ssl=verify)
+        return SimpleNamespace(
+            protocol=proto,
+            ftps_use_explicit_ssl=explicit,
+            verify_ssl=verify,
+            _approved_known_hosts_path="/run/backupsheep/ssh/known-hosts-test",
+            _approved_host_key_algorithm="ssh-ed25519",
+        )
 
     def test_password_in_script_not_argv_and_quoted(self):
         s = W._build_lftp_script(
@@ -686,7 +698,7 @@ class LftpScriptBuilderTests(TestCase):
         # the dangerous chars are shell-quoted, so they are data, not commands/args
         self.assertNotIn("-l u'; rm -rf /", line)
 
-    def test_sftp_password_uses_shared_strict_known_hosts(self):
+    def test_sftp_password_uses_exact_ephemeral_trust_without_ambient_auth(self):
         s = W._build_lftp_script(
             auth=self._auth(CoreAuthWebsite.Protocol.SFTP),
             host_url="sftp://h",
@@ -699,10 +711,62 @@ class LftpScriptBuilderTests(TestCase):
             mirror=True,
         )
         line = next(l for l in s.splitlines() if "connect-program" in l)
+        self.assertIn("ssh -F /dev/null", line)
         self.assertIn("StrictHostKeyChecking=yes", line)
-        self.assertIn("UserKnownHostsFile=", line)
-        self.assertIn(settings.SSH_KNOWN_HOSTS_PATH, line)
+        self.assertIn(
+            "UserKnownHostsFile=/run/backupsheep/ssh/known-hosts-test", line
+        )
+        self.assertIn("GlobalKnownHostsFile=/dev/null", line)
+        self.assertIn("UpdateHostKeys=no", line)
+        self.assertIn("HostKeyAlgorithms=ssh-ed25519", line)
+        self.assertIn("PubkeyAcceptedAlgorithms=", line)
+        self.assertIn("IdentityAgent=none", line)
+        self.assertIn("VerifyHostKeyDNS=no", line)
+        self.assertIn("CheckHostIP=no", line)
+        self.assertIn("CanonicalizeHostname=no", line)
+        self.assertIn("IdentitiesOnly=yes", line)
+        self.assertIn("PubkeyAuthentication=no", line)
+        self.assertIn("PreferredAuthentications=password", line)
+        self.assertIn("KbdInteractiveAuthentication=no", line)
+        self.assertNotIn(settings.SSH_KNOWN_HOSTS_PATH, line)
         self.assertIn('user "user" "secret"', s)
+
+    def test_sftp_key_mode_is_publickey_only_with_no_password_fallback(self):
+        s = W._build_lftp_script(
+            auth=self._auth(CoreAuthWebsite.Protocol.SFTP),
+            host_url="sftp://h",
+            port=22,
+            username="user",
+            password="must-not-be-used",
+            ssh_key_path="/run/backupsheep/ssh/ssh-key-test",
+            parallel=2,
+            transfer='mirror "." "t"',
+            mirror=True,
+        )
+        line = next(l for l in s.splitlines() if "connect-program" in l)
+        self.assertIn("PreferredAuthentications=publickey", line)
+        self.assertIn("PasswordAuthentication=no", line)
+        self.assertIn("KbdInteractiveAuthentication=no", line)
+        self.assertIn("IdentitiesOnly=yes", line)
+        self.assertIn("-i /run/backupsheep/ssh/ssh-key-test", line)
+        self.assertNotIn("PubkeyAuthentication=no", line)
+        self.assertNotIn("must-not-be-used", s)
+
+    def test_sftp_refuses_to_build_without_exact_tenant_trust_snapshot(self):
+        auth = self._auth(CoreAuthWebsite.Protocol.SFTP)
+        auth._approved_known_hosts_path = ""
+        with self.assertRaisesRegex(ValueError, "exact SFTP host-key approval"):
+            W._build_lftp_script(
+                auth=auth,
+                host_url="sftp://h",
+                port=22,
+                username="user",
+                password="secret",
+                ssh_key_path=None,
+                parallel=1,
+                transfer='mirror "." "t"',
+                mirror=True,
+            )
 
     @override_settings(ALLOW_INSECURE_FTP=False)
     def test_plain_ftp_is_denied_by_default(self):
@@ -991,6 +1055,51 @@ class WebsiteEngineBase(BaseTestCase):
         auth.use_private_key = use_private_key
         auth.use_public_key = use_public_key
         auth.save()
+        public_bytes = Ed25519PrivateKey.generate().public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+        wire_type = b"ssh-ed25519"
+        host_blob = (
+            struct.pack(">I", len(wire_type))
+            + wire_type
+            + struct.pack(">I", len(public_bytes))
+            + public_bytes
+        )
+        CoreSSHHostKeyApproval.objects.create(
+            account=self.account,
+            normalized_host=auth.host,
+            port=auth.port,
+            wire_key_type="ssh-ed25519",
+            public_key_base64=base64.b64encode(host_blob).decode("ascii"),
+            fingerprint=(
+                "SHA256:"
+                + base64.b64encode(hashlib.sha256(host_blob).digest())
+                .decode("ascii")
+                .rstrip("=")
+            ),
+            negotiated_host_key_algorithm="ssh-ed25519",
+            bits=256,
+            approved_by_member_pk_snapshot=self.member.pk,
+            approved_by_user_pk_snapshot=self.user.pk,
+        )
+        # Approval insertion fences matching connections to PENDING. These engine
+        # tests model a previously validated source, so project it ACTIVE only after
+        # the exact tenant approval exists and refresh every cached witness.
+        node.connection.refresh_from_db()
+        node.connection.status = CoreConnection.Status.ACTIVE
+        node.connection.save(update_fields=("status",))
+        node.connection.refresh_from_db()
+        auth._state.fields_cache["connection"] = node.connection
+        if not hasattr(self, "_ssh_runtime_dir"):
+            self._ssh_runtime_dir = tempfile.mkdtemp(prefix="bs-test-runtime-")
+            os.chmod(self._ssh_runtime_dir, 0o700)
+            runtime_patch = mock.patch.dict(
+                os.environ, {"XDG_RUNTIME_DIR": self._ssh_runtime_dir}
+            )
+            runtime_patch.start()
+            self.addCleanup(runtime_patch.stop)
+            self.addCleanup(shutil.rmtree, self._ssh_runtime_dir, True)
         website = node.website
         website.backup_type = backup_type or CoreWebsite.BackupType.FULL
         website.incremental = incremental
@@ -1092,6 +1201,11 @@ class WebsiteMirrorOptsTests(WebsiteEngineBase):
              mock.patch.object(W, "_finalize_zip"):
             W._snapshot_lftp(backup, base_dir=base_dir, incremental=incremental)
         self.assertTrue(scripts, "expected _snapshot_lftp to invoke lftp")
+        runtime_ssh = os.path.join(self._ssh_runtime_dir, "ssh")
+        self.assertFalse(
+            os.path.isdir(runtime_ssh)
+            and any(name.startswith("known-hosts-") for name in os.listdir(runtime_ssh))
+        )
         return scripts[0]
 
     def test_incremental_mirror_opts(self):
@@ -1144,7 +1258,7 @@ class WebsiteMirrorOptsTests(WebsiteEngineBase):
         self.assertIn('"request-path"', scripts[0])
         self.assertNotIn("later-node-path", scripts[0])
 
-    def test_sftp_private_key_path_is_absolute_for_lftp(self):
+    def test_sftp_private_key_path_uses_verified_runtime_not_persistent_storage(self):
         node, backup = self._make_backup(use_private_key=True)
         auth = node.connection.auth_website
         auth.protocol = CoreAuthWebsite.Protocol.SFTP
@@ -1168,7 +1282,8 @@ class WebsiteMirrorOptsTests(WebsiteEngineBase):
             W._snapshot_lftp(backup, base_dir=f"_storage/{backup.uuid}/", incremental=False)
 
         line = next(line for line in scripts[0].splitlines() if "connect-program" in line)
-        self.assertIn(os.path.abspath(f"_storage/ssh_{backup.uuid}"), line)
+        self.assertIn(os.path.join(self._ssh_runtime_dir, "ssh", "ssh-key-"), line)
+        self.assertNotIn(os.path.abspath("_storage"), line)
 
 
 class CacheFingerprintTests(TestCase):
@@ -1663,30 +1778,77 @@ class _FakeChannelStream:
 
 
 class _FakeSFTP:
-    """Records open()/write()/chmod() of the remote credentials file."""
+    """Records exclusive remote credential-file creation and verification."""
 
-    def __init__(self):
+    def __init__(self, *, bad_stat_open_index=None, fail_open_index=None):
         self.files = {}
         self.chmods = []
+        self.events = []
+        self.entries = []
+        self.removed = []
+        self.open_count = 0
+        self.bad_stat_open_index = bad_stat_open_index
+        self.fail_open_index = fail_open_index
         self.closed = False
 
     def open(self, name, mode):
         sftp = self
+        self.open_count += 1
+        open_index = self.open_count
+        self.events.append(("open", name, mode))
+        if open_index == self.fail_open_index:
+            raise OSError("exclusive create failed")
 
         class _FH:
+            file_mode = 0o600
+
             def __enter__(self):
                 return self
 
             def __exit__(self, *args):
                 return False
 
+            def chmod(self, requested_mode):
+                self.file_mode = requested_mode
+                sftp.chmods.append((name, requested_mode))
+                sftp.events.append(("chmod", name, requested_mode))
+
+            def stat(self):
+                sftp.events.append(("stat", name, self.file_mode))
+                observed_mode = self.file_mode
+                if (
+                    open_index == sftp.bad_stat_open_index
+                    and not sftp.files.get(name)
+                ):
+                    observed_mode = 0o644
+                return SimpleNamespace(
+                    st_mode=stat.S_IFREG | observed_mode,
+                    st_size=len(sftp.files.get(name, "")),
+                )
+
             def write(self, data):
+                sftp.events.append(("write", name, data))
                 sftp.files[name] = sftp.files.get(name, "") + data
+
+            def flush(self):
+                sftp.events.append(("flush", name))
 
         return _FH()
 
     def chmod(self, name, mode):
         self.chmods.append((name, mode))
+
+    def listdir_attr(self, path):
+        self.events.append(("listdir_attr", path))
+        return list(self.entries)
+
+    def listdir_iter(self, path, read_aheads):
+        self.events.append(("listdir_iter", path, read_aheads))
+        yield from self.entries
+
+    def remove(self, name):
+        self.removed.append(name)
+        self.files.pop(name, None)
 
     def close(self):
         self.closed = True
@@ -1715,6 +1877,101 @@ class _FakeSSH:
 
     def close(self):
         self.closed = True
+
+
+class RemoteDatabaseCredentialMaterializationTests(SimpleTestCase):
+    def _ssh(self, sftp):
+        return SimpleNamespace(open_sftp=mock.Mock(return_value=sftp))
+
+    @override_settings(SSH_REMOTE_CREDENTIAL_STALE_SECONDS=900)
+    def test_secrets_are_written_only_after_exclusive_private_empty_file_check(self):
+        sftp = _FakeSFTP()
+        credentials = CoreAuthDatabase()._install_remote_database_credentials(
+            self._ssh(sftp),
+            host="database.internal.test",
+            port=5432,
+            username="backup-user",
+            password="database-secret",
+        )
+
+        self.assertEqual(len(credentials["files"]), 2)
+        for name in credentials["files"]:
+            events = [event for event in sftp.events if len(event) > 1 and event[1] == name]
+            self.assertEqual(events[0], ("open", name, "wx"))
+            self.assertEqual(events[1], ("chmod", name, 0o600))
+            self.assertEqual(events[2], ("stat", name, 0o600))
+            write_index = next(
+                index for index, event in enumerate(events) if event[0] == "write"
+            )
+            self.assertGreater(write_index, 2)
+            self.assertEqual(events[write_index + 1], ("flush", name))
+            self.assertEqual(events[write_index + 2], ("stat", name, 0o600))
+            self.assertIn("database-secret", sftp.files[name])
+        self.assertTrue(sftp.closed)
+
+    @override_settings(SSH_REMOTE_CREDENTIAL_STALE_SECONDS=900)
+    def test_unsafe_metadata_fails_before_first_secret_byte_and_cleans_path(self):
+        sftp = _FakeSFTP(bad_stat_open_index=1)
+        with self.assertRaisesRegex(PermissionError, "private empty regular file"):
+            CoreAuthDatabase()._install_remote_database_credentials(
+                self._ssh(sftp),
+                host="database.internal.test",
+                port=5432,
+                username="backup-user",
+                password="must-never-be-written",
+            )
+
+        self.assertFalse(any(event[0] == "write" for event in sftp.events))
+        self.assertFalse(
+            any("must-never-be-written" in content for content in sftp.files.values())
+        )
+        self.assertEqual(len(sftp.removed), 1)
+        self.assertTrue(sftp.closed)
+
+    @override_settings(SSH_REMOTE_CREDENTIAL_STALE_SECONDS=900)
+    def test_partial_second_file_failure_removes_the_first_exclusive_file(self):
+        sftp = _FakeSFTP(fail_open_index=2)
+        with self.assertRaisesRegex(OSError, "exclusive create failed"):
+            CoreAuthDatabase()._install_remote_database_credentials(
+                self._ssh(sftp),
+                host="database.internal.test",
+                port=5432,
+                username="backup-user",
+                password="database-secret",
+            )
+
+        opened_names = [event[1] for event in sftp.events if event[0] == "open"]
+        self.assertEqual(len(opened_names), 2)
+        self.assertEqual(sftp.removed, [opened_names[0]])
+        self.assertNotIn(opened_names[0], sftp.files)
+        self.assertTrue(sftp.closed)
+
+    @override_settings(SSH_REMOTE_CREDENTIAL_STALE_SECONDS=900)
+    def test_stale_sweep_matches_only_exact_old_regular_artifacts(self):
+        now = 2_000_000_000
+        old = now - 901
+        young = now - 899
+        exact_old_cnf = ".backupsheep-0123456789abcdef0123456789abcdef.cnf"
+        exact_old_pgpass = ".backupsheep-fedcba9876543210fedcba9876543210.pgpass"
+        exact_young = ".backupsheep-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.cnf"
+        near_match = ".backupsheep-0123456789abcdef0123456789abcdef.cnf.bak"
+        old_directory = ".backupsheep-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pgpass"
+        sftp = _FakeSFTP()
+        sftp.entries = [
+            SimpleNamespace(filename=exact_old_cnf, st_mode=stat.S_IFREG | 0o600, st_mtime=old),
+            SimpleNamespace(filename=exact_old_pgpass, st_mode=stat.S_IFREG | 0o600, st_mtime=old),
+            SimpleNamespace(filename=exact_young, st_mode=stat.S_IFREG | 0o600, st_mtime=young),
+            SimpleNamespace(filename=near_match, st_mode=stat.S_IFREG | 0o600, st_mtime=old),
+            SimpleNamespace(filename=old_directory, st_mode=stat.S_IFDIR | 0o700, st_mtime=old),
+        ]
+
+        with mock.patch("apps.console.connection.models.time.time", return_value=now):
+            CoreAuthDatabase._sweep_stale_remote_database_credentials(sftp)
+
+        self.assertEqual(sftp.removed, [exact_old_cnf, exact_old_pgpass])
+        self.assertNotIn(exact_young, sftp.removed)
+        self.assertNotIn(near_match, sftp.removed)
+        self.assertNotIn(old_directory, sftp.removed)
 
 
 class DatabaseEngineBase(BaseTestCase):

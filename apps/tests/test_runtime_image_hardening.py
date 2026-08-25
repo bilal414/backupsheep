@@ -175,7 +175,6 @@ class RuntimeImageHardeningTests(TestCase):
             (10993, "backupsheep-rst-files"),
             (10994, "backupsheep-rst-database"),
             (10995, "backupsheep-rst-writer"),
-            (10997, "backupsheep-ssh-trust"),
         ):
             with self.subTest(group=group):
                 self.assertIn(f"groupadd --gid {gid} {group}", self.runtime)
@@ -188,13 +187,27 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertIn("STOPSIGNAL SIGTERM", self.runtime)
         self.assertIn('ENTRYPOINT ["/usr/local/bin/init.sh"]', self.runtime)
 
-    def test_managed_ssh_key_is_validated_and_staged_privately(self):
+    def test_managed_ssh_lane_keys_are_validated_and_staged_privately(self):
         self.assertIn(
+            "managed_key_source='/run/secrets/ssh_managed_database_private_key'",
+            self.entrypoint,
+        )
+        self.assertIn(
+            "managed_key_source='/run/secrets/ssh_managed_files_private_key'",
+            self.entrypoint,
+        )
+        self.assertNotIn(
             "managed_key_source='/run/secrets/ssh_managed_private_key'",
             self.entrypoint,
         )
         self.assertIn(
             "managed_key_target='/run/backupsheep/ssh/managed_private_key'",
+            self.entrypoint,
+        )
+        self.assertIn("SSH_MANAGED_DATABASE_PUBLIC_KEY", self.entrypoint)
+        self.assertIn("SSH_MANAGED_FILES_PUBLIC_KEY", self.entrypoint)
+        self.assertIn(
+            "database and files managed SSH identities must be different",
             self.entrypoint,
         )
         self.assertIn('chmod 0600 "$managed_key_target"', self.entrypoint)
@@ -306,7 +319,8 @@ class RuntimeImageHardeningTests(TestCase):
         self.assertIn("restore_writer_gid='10995'", self.entrypoint)
         self.assertIn("restore_database_reader_gid='10994'", self.entrypoint)
         self.assertIn("restore_files_reader_gid='10993'", self.entrypoint)
-        self.assertIn("ssh_trust_gid='10997'", self.entrypoint)
+        self.assertNotIn("ssh_trust_gid='10997'", self.entrypoint)
+        self.assertNotIn("backupsheep-ssh-trust", self.runtime)
         self.assertIn(
             'verify_owned_directory /var/lib/backupsheep/transfer/database 0 '
             '"$database_transfer_writer_gid" 3771',
@@ -323,6 +337,10 @@ class RuntimeImageHardeningTests(TestCase):
             self.entrypoint,
         )
         self.assertIn("reject_dedicated_mount /backups", self.entrypoint)
+        self.assertIn(
+            "reject_dedicated_mount /var/lib/backupsheep/ssh-trust",
+            self.entrypoint,
+        )
         self.assertIn(
             "database_kms_credentials='/run/secrets/artifact_kms_database_aws_credentials'",
             self.entrypoint,
@@ -358,7 +376,8 @@ class RuntimeImageHardeningTests(TestCase):
             "[ \"$3\" = 'backupsheep.database_identity' ]",
             self.entrypoint,
         )
-        self.assertIn("[ \"$4\" = 'provision' ]", self.entrypoint)
+        self.assertIn('case "$4" in', self.entrypoint)
+        self.assertIn("provision|seal", self.entrypoint)
         for variable in (
             "LD_AUDIT",
             "LD_LIBRARY_PATH",

@@ -126,8 +126,10 @@ class LiveConnectionViewContractTests(BaseTestCase):
             "validate",
             side_effect=socket.timeout("password=api-secret"),
         ):
-            response = self.client.get(
-                f"/api/v1/connections/website/{self.node.connection_id}/validate/"
+            response = self.client.post(
+                f"/api/v1/connections/website/{self.node.connection_id}/validate/",
+                {},
+                format="json",
             )
 
         self.assertEqual(response.status_code, status.HTTP_504_GATEWAY_TIMEOUT)
@@ -140,8 +142,10 @@ class LiveConnectionViewContractTests(BaseTestCase):
             "get_eligible_objects",
             side_effect=socket.gaierror("private.database.internal"),
         ):
-            response = self.client.get(
-                f"/api/v1/connections/website/{self.node.connection_id}/objects/"
+            response = self.client.post(
+                f"/api/v1/connections/website/{self.node.connection_id}/objects/",
+                {},
+                format="json",
             )
 
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -183,8 +187,10 @@ class LiveConnectionViewContractTests(BaseTestCase):
             "check_connection",
             side_effect=event_privilege_failure,
         ):
-            response = self.client.get(
-                f"/api/v1/connections/database/{connection.id}/validate/"
+            response = self.client.post(
+                f"/api/v1/connections/database/{connection.id}/validate/",
+                {},
+                format="json",
             )
 
         payload = response.json()
@@ -203,8 +209,10 @@ class LiveConnectionViewContractTests(BaseTestCase):
         other_account, other_member, _ = factories.make_account()
         other_node = factories.make_website_node(other_account, other_member)
 
-        response = self.client.get(
-            f"/api/v1/connections/website/{other_node.connection_id}/validate/"
+        response = self.client.post(
+            f"/api/v1/connections/website/{other_node.connection_id}/validate/",
+            {},
+            format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -253,6 +261,30 @@ class ConnectionSetupTemplateResilienceTests(SimpleTestCase):
         self.assertIn("finally", validate_source)
         self.assertIn("finally", endpoints_source)
         self.assertIn("finally", regions_source)
+
+    def test_managed_actions_post_then_poll_with_bounded_no_store_requests(self):
+        validate_source = self.method_source(
+            "validateConnection", "updateDBTypeAndVersion"
+        )
+        metadata_source = self.method_source(
+            "updateDBTypeAndVersion", "resumeConnection"
+        )
+        polling_source = self.method_source(
+            "waitForManagedOperation", "sshHostKeyTarget"
+        )
+        for source in (validate_source, metadata_source):
+            self.assertIn("method: 'POST'", source)
+            self.assertIn("body: '{}'", source)
+            self.assertIn("await this.waitForManagedOperation", source)
+        self.assertIn("managed-ssh-operations", polling_source)
+        self.assertIn("this.managedOperationTimeoutMs", polling_source)
+        self.assertIn("Date.now() < deadline", polling_source)
+        self.assertIn("window.setTimeout(resolve, 750)", polling_source)
+        self.assertIn("method: 'GET'", polling_source)
+        self.assertIn("cache: 'no-store'", polling_source)
+        self.assertIn("this.requestJSON", polling_source)
+        self.assertIn('operationStatus === "failed"', polling_source)
+        self.assertIn('operationStatus === "expired"', polling_source)
 
     def test_submit_and_validate_controls_are_disabled_and_restored(self):
         self.assertIn(":disabled=\"loading || discoveryLoading\"", self.source)
@@ -331,3 +363,27 @@ class ConnectionSetupTemplateResilienceTests(SimpleTestCase):
             'aria-label="Use legacy SHA-1 key verification"',
             self.source,
         )
+
+
+class NodeSetupManagedOperationTemplateTests(SimpleTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        root = Path(__file__).resolve().parents[1] / "console" / "_templates" / "console" / "setup"
+        cls.database = (root / "_setup_database_node.html").read_text()
+        cls.website = (root / "_setup_website_node.html").read_text()
+
+    def test_object_discovery_posts_and_polls_with_deadlines_and_abort(self):
+        for name, source in (("database", self.database), ("website", self.website)):
+            with self.subTest(template=name):
+                self.assertIn("async waitForManagedObjectDiscovery(accepted)", source)
+                self.assertIn("managed-ssh-operations", source)
+                self.assertIn("const deadline = Date.now() + 300000", source)
+                self.assertIn("Date.now() < deadline", source)
+                self.assertIn("new AbortController()", source)
+                self.assertIn("controller.abort()", source)
+                self.assertIn("window.clearTimeout(timeout)", source)
+                self.assertIn("cache: 'no-store'", source)
+                object_source = source.split("async getObjects(path)", 1)[1]
+                self.assertIn("method: 'POST'", object_source)
+                self.assertIn("waitForManagedObjectDiscovery", object_source)
