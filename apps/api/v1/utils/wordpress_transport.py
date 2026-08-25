@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import hmac
 import ipaddress
+import json
+import re
+import secrets
 import socket
+import time
 import weakref
 from urllib.parse import urlsplit, urlunsplit
 
@@ -40,17 +46,20 @@ _PRIVATE_TARGET_SUPERNETS = tuple(
     ipaddress.ip_network(value)
     for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
 )
-_WORDPRESS_KEY_HEADER = "X-BackupSheep-Key"
-_SENSITIVE_QUERY_NAMES = frozenset(
-    {
-        "authorization",
-        "http_pass",
-        "http_password",
-        "key",
-        "password",
-        "x-backupsheep-key",
-    }
-)
+WORDPRESS_PROTOCOL_VERSION = "2"
+WORDPRESS_PROTOCOL_HEADER = "X-BackupSheep-Protocol"
+WORDPRESS_KEY_ID_HEADER = "X-BackupSheep-Key-Id"
+WORDPRESS_TIMESTAMP_HEADER = "X-BackupSheep-Timestamp"
+WORDPRESS_NONCE_HEADER = "X-BackupSheep-Nonce"
+WORDPRESS_ROUTE_HEADER = "X-BackupSheep-Route"
+WORDPRESS_CONTENT_SHA256_HEADER = "X-BackupSheep-Content-SHA256"
+WORDPRESS_SIGNATURE_HEADER = "X-BackupSheep-Signature"
+WORDPRESS_MAX_REQUEST_BYTES = 64 * 1024
+_WORDPRESS_SIGNATURE_DOMAIN = "backupsheep-wordpress-v2"
+_WORDPRESS_ROUTE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_WORDPRESS_NONCE = re.compile(r"^[0-9a-f]{32}$")
+_WORDPRESS_SIGNATURE = re.compile(r"^[0-9a-f]{64}$")
+_WORDPRESS_INTEGRATION_KEY = re.compile(rb"^[A-Za-z0-9_-]{24,512}$")
 
 
 class WordPressTransportError(ValueError):
@@ -73,6 +82,81 @@ def require_wordpress_protocol_v2():
         )
 
 
+def _canonical_wordpress_v2_body(payload):
+    if not isinstance(payload, dict):
+        raise WordPressTransportError("WordPress protocol v2 requires an object body")
+    try:
+        body = json.dumps(
+            payload,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    except (TypeError, ValueError):
+        raise WordPressTransportError(
+            "WordPress protocol v2 request data is not canonical JSON"
+        ) from None
+    if len(body) > WORDPRESS_MAX_REQUEST_BYTES:
+        raise WordPressTransportError("WordPress protocol v2 request is too large")
+    return body
+
+
+def build_wordpress_v2_request(route, payload, integration_key, *, now=None, nonce=None):
+    """Return a canonical body and replay-resistant HMAC authentication headers.
+
+    The integration key is a shared secret and is never placed in the URL or headers.
+    Its digest is only a non-secret selector so a future plugin can support overlap
+    during rotation. The route and exact body digest are part of the signature.
+    """
+
+    route = str(route or "")
+    if not _WORDPRESS_ROUTE.fullmatch(route):
+        raise WordPressTransportError("WordPress protocol v2 route is invalid")
+    if not isinstance(integration_key, str):
+        raise WordPressTransportError("WordPress integration key is unavailable")
+    try:
+        key = integration_key.encode("utf-8")
+    except UnicodeEncodeError:
+        raise WordPressTransportError("WordPress integration key is invalid") from None
+    if not _WORDPRESS_INTEGRATION_KEY.fullmatch(key):
+        raise WordPressTransportError(
+            "WordPress integration key must be a bounded high-entropy token"
+        )
+
+    body = _canonical_wordpress_v2_body(payload)
+    body_sha256 = hashlib.sha256(body).hexdigest()
+    timestamp = int(time.time() if now is None else now)
+    if timestamp < 0:
+        raise WordPressTransportError("WordPress protocol v2 timestamp is invalid")
+    nonce = secrets.token_hex(16) if nonce is None else str(nonce)
+    if not _WORDPRESS_NONCE.fullmatch(nonce):
+        raise WordPressTransportError("WordPress protocol v2 nonce is invalid")
+
+    canonical = "\n".join(
+        (
+            _WORDPRESS_SIGNATURE_DOMAIN,
+            WORDPRESS_PROTOCOL_VERSION,
+            "POST",
+            route,
+            str(timestamp),
+            nonce,
+            body_sha256,
+        )
+    ).encode("ascii")
+    signature = hmac.new(key, canonical, hashlib.sha256).hexdigest()
+    return body, {
+        "Content-Type": "application/json",
+        WORDPRESS_PROTOCOL_HEADER: WORDPRESS_PROTOCOL_VERSION,
+        WORDPRESS_KEY_ID_HEADER: hashlib.sha256(key).hexdigest()[:32],
+        WORDPRESS_TIMESTAMP_HEADER: str(timestamp),
+        WORDPRESS_NONCE_HEADER: nonce,
+        WORDPRESS_ROUTE_HEADER: route,
+        WORDPRESS_CONTENT_SHA256_HEADER: body_sha256,
+        WORDPRESS_SIGNATURE_HEADER: signature,
+    }
+
+
 @dataclass(frozen=True)
 class PinnedWordPressTarget:
     hostname: str
@@ -88,7 +172,7 @@ class WordPressPinnedHTTPSAdapter(HTTPAdapter):
 
     def __init__(self, tls_hostname: str):
         self.tls_hostname = tls_hostname
-        # Credentialed WordPress GET routes can mutate state. Never retry them
+        # Credentialed WordPress routes can mutate state. Never retry them
         # implicitly after an unknown network outcome.
         super().__init__(max_retries=0)
 
@@ -284,10 +368,11 @@ def _response_peer_address(response):
     return address
 
 
-def pinned_wordpress_get(
+def pinned_wordpress_request(
     target,
     *,
-    params,
+    route,
+    body,
     headers,
     auth,
     stream=False,
@@ -295,29 +380,50 @@ def pinned_wordpress_get(
 ):
     """Make one direct pinned request; never resolve, redirect, retry, or proxy."""
 
-    request_headers = dict(headers or {})
-    key = next(
-        (
-            value
-            for name, value in request_headers.items()
-            if str(name).lower() == _WORDPRESS_KEY_HEADER.lower()
-        ),
-        None,
-    )
-    if not isinstance(key, str) or not key:
-        raise WordPressTransportError("WordPress integration key header is required")
-    query = dict(params or {})
-    credential_values = {key}
-    if auth:
-        credential_values.update(str(value) for value in auth if value)
-    for name, value in query.items():
-        values = value if isinstance(value, (list, tuple)) else (value,)
-        if str(name).lower() in _SENSITIVE_QUERY_NAMES or any(
-            str(item) in credential_values for item in values
-        ):
+    request_headers = {str(name): str(value) for name, value in (headers or {}).items()}
+    route = str(route or "")
+    if not _WORDPRESS_ROUTE.fullmatch(route):
+        raise WordPressTransportError("WordPress protocol v2 route is invalid")
+    if (
+        not isinstance(body, bytes)
+        or not body
+        or len(body) > WORDPRESS_MAX_REQUEST_BYTES
+    ):
+        raise WordPressTransportError("WordPress protocol v2 body is invalid")
+    required = {
+        WORDPRESS_PROTOCOL_HEADER: WORDPRESS_PROTOCOL_VERSION,
+        WORDPRESS_ROUTE_HEADER: route,
+        WORDPRESS_CONTENT_SHA256_HEADER: hashlib.sha256(body).hexdigest(),
+    }
+    for name, expected in required.items():
+        if request_headers.get(name) != expected:
             raise WordPressTransportError(
-                "WordPress credentials must not be query parameters"
+                "WordPress protocol v2 authentication headers are invalid"
             )
+    if not _WORDPRESS_NONCE.fullmatch(request_headers.get(WORDPRESS_NONCE_HEADER, "")):
+        raise WordPressTransportError("WordPress protocol v2 nonce header is invalid")
+    if not _WORDPRESS_SIGNATURE.fullmatch(
+        request_headers.get(WORDPRESS_SIGNATURE_HEADER, "")
+    ):
+        raise WordPressTransportError("WordPress protocol v2 signature header is invalid")
+    key_id = request_headers.get(WORDPRESS_KEY_ID_HEADER, "")
+    if not re.fullmatch(r"[0-9a-f]{32}", key_id):
+        raise WordPressTransportError("WordPress protocol v2 key identifier is invalid")
+    try:
+        timestamp = int(request_headers.get(WORDPRESS_TIMESTAMP_HEADER, ""))
+    except (TypeError, ValueError):
+        raise WordPressTransportError(
+            "WordPress protocol v2 timestamp header is invalid"
+        ) from None
+    if str(timestamp) != request_headers.get(WORDPRESS_TIMESTAMP_HEADER) or timestamp < 0:
+        raise WordPressTransportError("WordPress protocol v2 timestamp header is invalid")
+
+    query = {"rest_route": f"/backupsheep/v2/{route}"}
+    if any(
+        secret and str(secret) in query["rest_route"]
+        for secret in (auth or ())
+    ):
+        raise WordPressTransportError("WordPress credentials must not be query parameters")
 
     session = TimeoutSession()
     session.trust_env = False
@@ -335,10 +441,11 @@ def pinned_wordpress_get(
             "allow_redirects": False,
             "verify": True,
             "stream": True,
+            "data": body,
         }
         if timeout is not None:
             request_kwargs["timeout"] = timeout
-        response = session.get(target.pinned_url, **request_kwargs)
+        response = session.post(target.pinned_url, **request_kwargs)
         peer = _response_peer_address(response)
         if peer is not None and peer != target.selected_ip:
             response.close()

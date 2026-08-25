@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import ipaddress
 import socket
 from unittest import mock
@@ -5,12 +7,19 @@ from unittest import mock
 from django.test import SimpleTestCase, override_settings
 
 from apps.api.v1.utils.wordpress_transport import (
+    WORDPRESS_CONTENT_SHA256_HEADER,
+    WORDPRESS_KEY_ID_HEADER,
+    WORDPRESS_NONCE_HEADER,
+    WORDPRESS_PROTOCOL_HEADER,
+    WORDPRESS_ROUTE_HEADER,
+    WORDPRESS_SIGNATURE_HEADER,
+    WORDPRESS_TIMESTAMP_HEADER,
     WordPressPinnedHTTPSAdapter,
     WordPressTransportError,
-    pinned_wordpress_get,
+    build_wordpress_v2_request,
+    pinned_wordpress_request,
     resolve_wordpress_target,
 )
-from apps.console.connection.models import WORDPRESS_KEY_HEADER
 
 
 def _answer(address):
@@ -60,7 +69,7 @@ class _FakeSession:
     def mount(self, prefix, adapter):
         self.mounts[prefix] = adapter
 
-    def get(self, *args, **kwargs):
+    def post(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return self.response
 
@@ -211,10 +220,18 @@ class WordPressPinnedRequestTests(SimpleTestCase):
             "apps.api.v1.utils.wordpress_transport.TimeoutSession",
             return_value=session,
         ):
-            pinned_wordpress_get(
+            body, headers = build_wordpress_v2_request(
+                "status",
+                {"backup_uuid": "backup-123"},
+                "header-key-canary-value-32-bytes",
+                now=1_700_000_000,
+                nonce="1" * 32,
+            )
+            pinned_wordpress_request(
                 target,
-                params={"rest_route": "/backupsheep/updraftplus/status"},
-                headers={WORDPRESS_KEY_HEADER: "header-key-canary"},
+                route="status",
+                body=body,
+                headers=headers,
                 auth=("http-user-canary", "http-password-canary"),
             )
 
@@ -233,13 +250,18 @@ class WordPressPinnedRequestTests(SimpleTestCase):
             "apps.api.v1.utils.wordpress_transport.TimeoutSession",
             return_value=session,
         ):
-            result = pinned_wordpress_get(
+            body, headers = build_wordpress_v2_request(
+                "status",
+                {"backup_uuid": "backup-123"},
+                "header-key-canary-value-32-bytes",
+                now=1_700_000_000,
+                nonce="2" * 32,
+            )
+            result = pinned_wordpress_request(
                 target,
-                params={
-                    "rest_route": "/backupsheep/updraftplus/status",
-                    "backup_uuid": "backup-123",
-                },
-                headers={WORDPRESS_KEY_HEADER: "header-key-canary"},
+                route="status",
+                body=body,
+                headers=headers,
                 auth=("http-user-canary", "http-password-canary"),
             )
 
@@ -250,11 +272,10 @@ class WordPressPinnedRequestTests(SimpleTestCase):
         self.assertFalse(kwargs["allow_redirects"])
         self.assertTrue(kwargs["verify"])
         self.assertEqual(kwargs["headers"]["Host"], "wordpress.example.test")
-        self.assertEqual(
-            kwargs["headers"][WORDPRESS_KEY_HEADER], "header-key-canary"
-        )
+        self.assertEqual(kwargs["params"], {"rest_route": "/backupsheep/v2/status"})
+        self.assertEqual(kwargs["data"], body)
         rendered_url_data = repr((args[0], kwargs["params"]))
-        self.assertNotIn("header-key-canary", rendered_url_data)
+        self.assertNotIn("header-key-canary-value-32-bytes", rendered_url_data)
         self.assertNotIn("http-password-canary", rendered_url_data)
 
     def test_observed_peer_mismatch_is_rejected(self):
@@ -266,25 +287,84 @@ class WordPressPinnedRequestTests(SimpleTestCase):
             return_value=session,
         ):
             with self.assertRaisesRegex(WordPressTransportError, "peer"):
-                pinned_wordpress_get(
+                body, headers = build_wordpress_v2_request(
+                    "status",
+                    {},
+                    "header-key-canary-value-32-bytes",
+                    now=1_700_000_000,
+                    nonce="3" * 32,
+                )
+                pinned_wordpress_request(
                     target,
-                    params={},
-                    headers={WORDPRESS_KEY_HEADER: "header-key-canary"},
+                    route="status",
+                    body=body,
+                    headers=headers,
                     auth=None,
                 )
         self.assertTrue(response.closed)
         self.assertTrue(session.closed)
 
-    def test_transport_rejects_credentials_under_any_query_name_before_connect(self):
+    def test_transport_rejects_tampered_body_before_connect(self):
         target = self._public_target()
+        body, headers = build_wordpress_v2_request(
+            "status",
+            {"backup_uuid": "backup-123"},
+            "header-key-canary-value-32-bytes",
+            now=1_700_000_000,
+            nonce="4" * 32,
+        )
         with mock.patch(
             "apps.api.v1.utils.wordpress_transport.TimeoutSession"
         ) as session_class:
-            with self.assertRaisesRegex(WordPressTransportError, "query"):
-                pinned_wordpress_get(
+            with self.assertRaisesRegex(WordPressTransportError, "headers"):
+                pinned_wordpress_request(
                     target,
-                    params={"innocent_name": "header-key-canary"},
-                    headers={WORDPRESS_KEY_HEADER: "header-key-canary"},
+                    route="status",
+                    body=body + b" ",
+                    headers=headers,
                     auth=None,
                 )
         session_class.assert_not_called()
+
+    def test_signature_vector_binds_route_timestamp_nonce_and_exact_body(self):
+        key = "wordpress-integration-key-32-bytes"
+        nonce = "a" * 32
+        body, headers = build_wordpress_v2_request(
+            "delete",
+            {"backup_file": "archive.zip", "backup_uuid": "backup-123"},
+            key,
+            now=1_700_000_123,
+            nonce=nonce,
+        )
+        body_digest = hashlib.sha256(body).hexdigest()
+        canonical = "\n".join(
+            (
+                "backupsheep-wordpress-v2",
+                "2",
+                "POST",
+                "delete",
+                "1700000123",
+                nonce,
+                body_digest,
+            )
+        ).encode("ascii")
+        expected = hmac.new(key.encode(), canonical, hashlib.sha256).hexdigest()
+
+        self.assertEqual(headers[WORDPRESS_PROTOCOL_HEADER], "2")
+        self.assertEqual(headers[WORDPRESS_ROUTE_HEADER], "delete")
+        self.assertEqual(headers[WORDPRESS_TIMESTAMP_HEADER], "1700000123")
+        self.assertEqual(headers[WORDPRESS_NONCE_HEADER], nonce)
+        self.assertEqual(headers[WORDPRESS_CONTENT_SHA256_HEADER], body_digest)
+        self.assertEqual(headers[WORDPRESS_SIGNATURE_HEADER], expected)
+        self.assertEqual(
+            headers[WORDPRESS_KEY_ID_HEADER], hashlib.sha256(key.encode()).hexdigest()[:32]
+        )
+        self.assertNotIn(key, repr(headers))
+
+    def test_signer_rejects_short_or_non_url_safe_shared_keys(self):
+        for invalid in ("too-short", "x" * 23, "x" * 24 + "!", "x" * 513):
+            with self.subTest(invalid_length=len(invalid)):
+                with self.assertRaisesRegex(
+                    WordPressTransportError, "high-entropy token"
+                ):
+                    build_wordpress_v2_request("status", {}, invalid)

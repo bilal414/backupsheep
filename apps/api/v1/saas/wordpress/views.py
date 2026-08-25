@@ -1,4 +1,5 @@
-from cryptography.fernet import Fernet
+import secrets
+
 from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets
@@ -93,5 +94,5 @@ class CoreWordPressView(ReadWriteSerializerMixin, viewsets.ModelViewSet):
 
     @action(detail=False)
     def generate_key(self, request):
-        key = Fernet.generate_key()[0:24]
+        key = secrets.token_urlsafe(32)
         return Response({"key": key})

@@ -65,7 +65,6 @@ _PROVIDER_SDK_TIMEOUT_MAX_DEFAULT = 300.0
 _GOOGLE_TIMEOUT_UNSET = object()
 _GOOGLE_REFRESH_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 WORDPRESS_SECRET_PREFIX = "bs-wordpress-fernet-v1:"
-WORDPRESS_KEY_HEADER = "X-BackupSheep-Key"
 _WORDPRESS_ROUTES = frozenset(
     {
         "backup",
@@ -3624,7 +3623,8 @@ class CoreAuthWordPress(TimeStampedModel):
         """Call one exact WordPress origin without placing credentials in its URL."""
 
         from apps.api.v1.utils.wordpress_transport import (
-            pinned_wordpress_get,
+            build_wordpress_v2_request,
+            pinned_wordpress_request,
             require_wordpress_protocol_v2,
             resolve_wordpress_target,
         )
@@ -3655,24 +3655,31 @@ class CoreAuthWordPress(TimeStampedModel):
                 "WordPress HTTP username and password must be configured together"
             )
 
-        headers = self.get_client()
-        headers[WORDPRESS_KEY_HEADER] = key
-        query = {"rest_route": f"/backupsheep/updraftplus/{route}"}
+        payload = {}
         for name, value in (params or {}).items():
             if str(name).lower() in {"key", "x-backupsheep-key", "authorization"}:
                 raise ValueError("WordPress credentials must not be query parameters")
-            query[name] = value
+            payload[str(name)] = value
+        body, authentication_headers = build_wordpress_v2_request(
+            route,
+            payload,
+            key,
+        )
+        headers = self.get_client()
+        headers.update(authentication_headers)
         request_kwargs = {
-            "params": query,
+            "route": route,
+            "body": body,
             "headers": headers,
             "auth": (http_user, http_pass) if http_user and http_pass else None,
             "stream": stream,
         }
         if timeout is not None:
             request_kwargs["timeout"] = timeout
-        return pinned_wordpress_get(
+        return pinned_wordpress_request(
             target,
-            params=request_kwargs["params"],
+            route=request_kwargs["route"],
+            body=request_kwargs["body"],
             headers=request_kwargs["headers"],
             auth=request_kwargs["auth"],
             stream=request_kwargs["stream"],
@@ -3681,7 +3688,7 @@ class CoreAuthWordPress(TimeStampedModel):
 
     def get_client(self):
         return {
-            "User-Agent": "BackupSheep-WordPress/1",
+            "User-Agent": "BackupSheep-WordPress/2",
             "content-type": "application/json",
         }
 
@@ -3746,27 +3753,26 @@ class CoreAuthWordPress(TimeStampedModel):
             return False
         if result.status_code == 200:
             try:
-                if result.json().get("plugins", {}).get("backupsheep") and result.json().get("plugins", {}).get(
-                    "updraftplus"
-                ):
-                    return True
-                elif not result.json().get("validate_backupsheep_key"):
+                response_data = result.json()
+                if response_data.get("protocol") != 2:
                     raise ValueError(
-                        "Invalid WordPress Key. Please get correct WordPress Key from your integration "
-                        f"and add it to BackupSheep Wordpress plugin. Validation URL: {safe_url}"
+                        "WordPress connector did not confirm authenticated protocol v2. "
+                        f"Validation URL: {safe_url}"
                     )
-                elif not result.json().get("plugins", {}).get("backupsheep") and not result.json().get(
-                    "plugins", {}
-                ).get("updraftplus"):
-                    raise ValueError(f"Your BackupSheep & UpdraftPlus plugins are not active. Validation URL: {safe_url}")
-                elif not result.json().get("plugins", {}).get("backupsheep") and not result.json().get(
-                    "plugins", {}
-                ).get("updraftplus"):
-                    raise ValueError(f"Your BackupSheep & UpdraftPlus plugins are not active. Validation URL: {safe_url}")
-                elif not result.json().get("plugins", {}).get("backupsheep"):
-                    raise ValueError(f"Your BackupSheep plugin is not active. Validation URL: {safe_url}")
-                elif not result.json().get("plugins", {}).get("updraftplus"):
-                    raise ValueError(f"Your UpdraftPlus plugin is not active. Validation URL: {safe_url}")
+                if response_data.get("plugins", {}).get(
+                    "backupsheep"
+                ) and response_data.get("plugins", {}).get("updraftplus"):
+                    return True
+                elif not response_data.get("plugins", {}).get("backupsheep"):
+                    raise ValueError(
+                        "The BackupSheep Secure Connector is not active. "
+                        f"Validation URL: {safe_url}"
+                    )
+                elif not response_data.get("plugins", {}).get("updraftplus"):
+                    raise ValueError(
+                        "UpdraftPlus is not active. "
+                        f"Validation URL: {safe_url}"
+                    )
             except JSONDecodeError:
                 if check_errors:
                     raise ValueError(

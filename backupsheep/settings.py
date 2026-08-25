@@ -1150,6 +1150,10 @@ S3_DOWNLOAD_URL_EXPIRES = _bounded_positive_int(
 # WordPress targets are public HTTPS origins by default. Self-hosters that must
 # reach a private WordPress origin can enumerate only the required private CIDRs;
 # loopback, link-local, reserved and metadata targets remain forbidden regardless.
+WORDPRESS_INTEGRATION_ENABLED = _as_bool(
+    config.get("WORDPRESS_INTEGRATION_ENABLED"),
+    default=False,
+)
 WORDPRESS_PRIVATE_TARGET_CIDRS = _private_network_allowlist(
     "WORDPRESS_PRIVATE_TARGET_CIDRS"
 )

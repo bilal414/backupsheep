@@ -9,9 +9,13 @@ from django.test import SimpleTestCase, override_settings
 from apps.api.v1.connection.wordpress.serializers import (
     CoreAuthWordPressWriteSerializer,
 )
+from apps.api.v1.utils.wordpress_transport import (
+    WORDPRESS_KEY_ID_HEADER,
+    WORDPRESS_SIGNATURE_HEADER,
+)
+from apps.api.v1.saas.wordpress.views import CoreWordPressView
 from apps.console.connection.models import (
     CoreAuthWordPress,
-    WORDPRESS_KEY_HEADER,
     WORDPRESS_SECRET_PREFIX,
 )
 from apps.tests import factories
@@ -30,7 +34,7 @@ class WordPressCredentialModelTests(BaseTestCase):
         values = {
             "connection": self.connection,
             "url": "https://wordpress.example.test/subsite",
-            "key": "wordpress-key-canary",
+            "key": "wordpress-key-canary-32-bytes",
             "http_user": "http-user-canary",
             "http_pass": "http-password-canary",
         }
@@ -43,7 +47,7 @@ class WordPressCredentialModelTests(BaseTestCase):
 
         stored = {}
         for field_name, plaintext in {
-            "key": "wordpress-key-canary",
+            "key": "wordpress-key-canary-32-bytes",
             "http_user": "http-user-canary",
             "http_pass": "http-password-canary",
         }.items():
@@ -78,7 +82,7 @@ class WordPressCredentialModelTests(BaseTestCase):
         )
 
     @mock.patch(
-        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_get"
+        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_request"
     )
     @mock.patch(
         "apps.api.v1.utils.wordpress_transport.resolve_wordpress_target"
@@ -103,30 +107,27 @@ class WordPressCredentialModelTests(BaseTestCase):
         )
         pinned_get.assert_called_once()
         self.assertIs(pinned_get.call_args.args[0], target)
+        self.assertEqual(pinned_get.call_args.kwargs["route"], "status")
         self.assertEqual(
-            pinned_get.call_args.kwargs["params"],
-            {
-                "rest_route": "/backupsheep/updraftplus/status",
-                "backup_uuid": "backup-123",
-                "t": 123,
-            },
+            pinned_get.call_args.kwargs["body"],
+            b'{"backup_uuid":"backup-123","t":123}',
         )
-        self.assertEqual(
-            pinned_get.call_args.kwargs["headers"][WORDPRESS_KEY_HEADER],
-            "wordpress-key-canary",
-        )
+        headers = pinned_get.call_args.kwargs["headers"]
+        self.assertRegex(headers[WORDPRESS_SIGNATURE_HEADER], r"^[0-9a-f]{64}$")
+        self.assertRegex(headers[WORDPRESS_KEY_ID_HEADER], r"^[0-9a-f]{32}$")
+        self.assertNotIn("wordpress-key-canary-32-bytes", repr(headers))
         self.assertEqual(
             pinned_get.call_args.kwargs["auth"],
             ("http-user-canary", "http-password-canary"),
         )
         rendered_url_data = repr(
-            (target.pinned_url, pinned_get.call_args.kwargs["params"])
+            (target.pinned_url, pinned_get.call_args.kwargs["body"], headers)
         )
-        self.assertNotIn("wordpress-key-canary", rendered_url_data)
+        self.assertNotIn("wordpress-key-canary-32-bytes", rendered_url_data)
         self.assertNotIn("http-password-canary", rendered_url_data)
 
     @mock.patch(
-        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_get"
+        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_request"
     )
     @mock.patch(
         "apps.api.v1.utils.wordpress_transport.resolve_wordpress_target"
@@ -152,7 +153,7 @@ class WordPressCredentialModelTests(BaseTestCase):
         pinned_get.assert_not_called()
 
     @mock.patch(
-        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_get"
+        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_request"
     )
     @mock.patch(
         "apps.api.v1.utils.wordpress_transport.resolve_wordpress_target"
@@ -205,7 +206,7 @@ class WordPressProtocolKillSwitchTests(BaseTestCase):
 
     @override_settings(WORDPRESS_INTEGRATION_ENABLED=False)
     @mock.patch(
-        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_get"
+        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_request"
     )
     @mock.patch(
         "apps.api.v1.utils.wordpress_transport.resolve_wordpress_target"
@@ -222,6 +223,54 @@ class WordPressProtocolKillSwitchTests(BaseTestCase):
         resolve_target.assert_not_called()
         pinned_get.assert_not_called()
         decrypt.assert_not_called()
+
+
+@override_settings(WORDPRESS_INTEGRATION_ENABLED=True)
+class WordPressProtocolValidationTests(BaseTestCase):
+    def setUp(self):
+        super().setUp()
+        connection = factories.make_connection(
+            self.account, self.member, code="wordpress"
+        )
+        self.auth = CoreAuthWordPress.objects.create(
+            connection=connection,
+            url="https://wordpress.example.test",
+            key="wordpress-key-canary-32-bytes",
+        )
+
+    @staticmethod
+    def response(payload):
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: payload,
+            raise_for_status=lambda: None,
+        )
+
+    def test_validation_requires_explicit_protocol_v2_confirmation(self):
+        payload = {
+            "plugins": {"backupsheep": True, "updraftplus": True},
+        }
+        with mock.patch.object(self.auth, "request", return_value=self.response(payload)):
+            with self.assertRaisesRegex(ValueError, "protocol v2"):
+                self.auth.validate(check_errors=True)
+
+    def test_validation_accepts_only_v2_with_both_plugins_active(self):
+        payload = {
+            "protocol": 2,
+            "plugins": {"backupsheep": True, "updraftplus": True},
+        }
+        with mock.patch.object(self.auth, "request", return_value=self.response(payload)):
+            self.assertTrue(self.auth.validate(check_errors=True))
+
+
+class WordPressIntegrationKeyTests(SimpleTestCase):
+    def test_generated_key_is_a_high_entropy_url_safe_string(self):
+        first = CoreWordPressView().generate_key(None).data["key"]
+        second = CoreWordPressView().generate_key(None).data["key"]
+
+        self.assertIsInstance(first, str)
+        self.assertRegex(first, r"^[A-Za-z0-9_-]{43}$")
+        self.assertNotEqual(first, second)
 
 
 class WordPressCredentialMigrationTests(SimpleTestCase):
