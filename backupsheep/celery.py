@@ -2,6 +2,7 @@ from __future__ import unicode_literals
 import os
 from celery import Celery
 from django.apps import apps
+from backupsheep.celery_security import install_task_security
 
 # set the default Django settings module for the 'celery' program.
 # This is already done by settings file.
@@ -9,7 +10,11 @@ from django.conf import settings
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'backupsheep.settings')
 
-app = Celery('backupsheep')
+app = Celery(
+    'backupsheep',
+    task_cls='backupsheep.celery_security:AuthenticatedTask',
+)
+install_task_security()
 
 # Using a string here means the worker don't have to serialize
 # the configuration object to child processes.

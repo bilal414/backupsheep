@@ -163,9 +163,13 @@ options may instead be supplied in the `DATABASE_URL` query string.
 | `RABBITMQ_HOST` | `rabbitmq` | When non-empty, fragment mode takes highest precedence |
 | `RABBITMQ_PORT` | `5672` | Fragment-mode port |
 | `RABBITMQ_SCHEME` | `amqp` | Fragment-mode scheme; use `amqps` for every external broker |
-| `RABBITMQ_USER` | `backupsheep` | Dedicated bundled-broker username |
+| `RABBITMQ_USER` | `backupsheep_app` | Stock application broker identity; Compose pins each other role independently |
 | `RABBITMQ_PASSWORD` | blank | Direct broker password for non-stock deployments; must remain blank in stock `.env` |
-| `RABBITMQ_PASSWORD_FILE` | unset outside stock Compose | Absolute file-backed broker-password pointer; stock application roles use `/run/secrets/rabbitmq_password` |
+| `RABBITMQ_PASSWORD_FILE` | unset outside stock Compose | Absolute file-backed broker-password pointer; stock roles receive only `/run/secrets/rabbitmq_<lane>_password` |
+| `BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION` | blank sample / installer-owned `2` | Fail-closed stock broker identity witness; existing installs use the explicit migration flag |
+| `BACKUPSHEEP_CELERY_SECURITY_GENERATION` | blank sample / installer-owned `2` | Authenticated-task protocol/key generation witness |
+| `BACKUPSHEEP_CELERY_SECURITY_REQUIRED` | `true` in stock Compose | Requires signed lane-bound task envelopes; do not disable in stock Docker |
+| `BACKUPSHEEP_CELERY_LANE` | service-owned | Fixed app, Beat, preflight, or worker identity used for credential/key selection |
 | `RABBITMQ_VHOST` | `backupsheep` | Dedicated virtual host; components are URL encoded |
 | `RABBITMQ_CA_CERT` | blank | Optional private CA bundle for `amqps`; system roots are used when blank |
 

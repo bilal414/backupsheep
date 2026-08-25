@@ -85,7 +85,7 @@ semver_at_least 2.34.0-rc.1 2.33.1
 
     def test_installer_starts_only_the_core_without_explicit_operations_opt_in(self):
         self.assertIn(
-            "readonly -a CORE_SERVICES=(db rabbitmq db-provision migrate preflight app)",
+            "readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app)",
             self.installer,
         )
         self.assertIn('if [[ "$ENABLE_OPERATIONS" == true ]]', self.installer)
@@ -97,7 +97,8 @@ semver_at_least 2.34.0-rc.1 2.33.1
         )
         self.assertNotIn("up --build --detach --remove-orphans", self.installer)
         self.assertIn("/proc/1/task/1/children", self.installer)
-        self.assertIn("celery -A backupsheep inspect ping", self.installer)
+        self.assertNotIn("celery -A backupsheep inspect ping", self.installer)
+        self.assertIn("/run/backupsheep/celery-ready", self.installer)
 
     def test_compose_control_plane_is_explicit(self):
         for token in (
@@ -148,8 +149,10 @@ semver_at_least 2.34.0-rc.1 2.33.1
         self.assertIn("preflight_container_id", self.installer)
         self.assertIn("Docker security preflight failed", self.installer)
         self.assertIn(
-            "logs --tail=100 db-provision migrate preflight app", self.installer
+            "logs --tail=100 rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app",
+            self.installer,
         )
+        self.assertIn("RabbitMQ identity provisioning failed", self.installer)
         self.assertIn("provision_container_id", self.installer)
         self.assertIn("Database identity provisioning failed", self.installer)
 
@@ -179,6 +182,7 @@ class InstallerSecretMigrationTests(TestCase):
             content = content.replace(old, new, 1)
         # Model an installation created before generation-2 identities existed.
         content = content.replace("DB_USER='backupsheep_runtime'", "DB_USER='backupsheep'", 1)
+        content = content.replace("RABBITMQ_USER='backupsheep_app'", "RABBITMQ_USER='backupsheep'", 1)
         content = "\n".join(
             line
             for line in content.splitlines()
@@ -187,6 +191,9 @@ class InstallerSecretMigrationTests(TestCase):
                     "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION=",
                     "DB_BOOTSTRAP_USER=",
                     "DB_MIGRATOR_USER=",
+                    "BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION=",
+                    "BACKUPSHEEP_CELERY_SECURITY_GENERATION=",
+                    "RABBITMQ_LEGACY_USER=",
                 )
             )
         ) + "\n"
@@ -216,6 +223,7 @@ INSTALL_WAS_PRESENT=true
     def test_existing_env_secrets_migrate_atomically_and_rerun_without_rotation(self):
         self.run_installer_functions(
             "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
             "create_or_migrate_configuration\nvalidate_runtime_configuration"
         )
 
@@ -224,7 +232,7 @@ INSTALL_WAS_PRESENT=true
         expected = {
             "django_secret_key": f"{self.legacy_secrets['django_secret_key']}\n",
             "db_bootstrap_password": f"{self.legacy_secrets['db_password']}\n",
-            "rabbitmq_password": f"{self.legacy_secrets['rabbitmq_password']}\n",
+            "rabbitmq_bootstrap_password": f"{self.legacy_secrets['rabbitmq_password']}\n",
             "onboarding_token": f"{self.legacy_secrets['onboarding_token']}\n",
         }
         for filename, value in expected.items():
@@ -248,6 +256,11 @@ INSTALL_WAS_PRESENT=true
         self.assertIn("DB_MIGRATOR_USER='backupsheep_migrator'", migrated_env)
         self.assertIn("DB_USER='backupsheep_runtime'", migrated_env)
         self.assertIn("DB_PASSWORD=''", migrated_env)
+        self.assertIn("BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION='2'", migrated_env)
+        self.assertIn("BACKUPSHEEP_CELERY_SECURITY_GENERATION='2'", migrated_env)
+        self.assertIn("RABBITMQ_USER='backupsheep_app'", migrated_env)
+        self.assertIn("RABBITMQ_LEGACY_USER='backupsheep'", migrated_env)
+        self.assertIn("RABBITMQ_PASSWORD=''", migrated_env)
         self.assertIn("SSH_MANAGED_PRIVATE_KEY_PATH=''", migrated_env)
         self.assertIn(f"BACKUPSHEEP_IMAGE='backupsheep:{COMMIT}'", migrated_env)
         self.assertIn(
@@ -263,6 +276,36 @@ INSTALL_WAS_PRESENT=true
             self.assertNotEqual(
                 generated_value.strip(), self.legacy_secrets["db_password"]
             )
+        rabbit_passwords = []
+        for role in (
+            "bootstrap",
+            "app",
+            "preflight",
+            "beat",
+            "cloud",
+            "database",
+            "files",
+            "storage",
+            "logs",
+        ):
+            value = (secret_dir / f"rabbitmq_{role}_password").read_text(
+                encoding="utf-8"
+            )
+            if role == "bootstrap":
+                self.assertEqual(value, f"{self.legacy_secrets['rabbitmq_password']}\n")
+            else:
+                self.assertRegex(value, r"^[0-9a-f]{64}\n$")
+            rabbit_passwords.append(value)
+        self.assertEqual(len(rabbit_passwords), len(set(rabbit_passwords)))
+        for lane in ("app", "beat", "cloud", "database", "files", "storage", "logs"):
+            key_path = secret_dir / f"celery_signing_{lane}_private_key"
+            self.assertEqual(stat.S_IMODE(key_path.stat().st_mode), 0o444)
+            self.assertIn("BEGIN OPENSSH PRIVATE KEY", key_path.read_text(encoding="utf-8"))
+        registry = (secret_dir / "celery_trusted_public_keys").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"installation_id"', registry)
+        self.assertIn('"keys"', registry)
 
         before = {path.name: path.read_bytes() for path in secret_dir.iterdir()}
         self.run_installer_functions(
@@ -366,7 +409,9 @@ INSTALL_WAS_PRESENT=true
 
     def test_database_image_tag_is_persisted_and_tampering_fails_closed(self):
         self.run_installer_functions(
-            "MIGRATE_DATABASE_IDENTITIES=true\ncreate_or_migrate_configuration"
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
+            "create_or_migrate_configuration"
         )
         result = self.run_installer_functions(
             'ENV_FILE="$INSTALL_DIR/.env"\n'
@@ -465,7 +510,9 @@ INSTALL_WAS_PRESENT=true
         os.chmod(self.env_file, 0o600)
 
         self.run_installer_functions(
-            "MIGRATE_DATABASE_IDENTITIES=true\ncreate_or_migrate_configuration"
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
+            "create_or_migrate_configuration"
         )
         token = (self.temp_dir / ".secrets" / "onboarding_token").read_text(
             encoding="utf-8"
@@ -483,7 +530,9 @@ INSTALL_WAS_PRESENT=true
         os.chmod(self.env_file, 0o600)
 
         result = self.run_installer_functions(
-            "MIGRATE_DATABASE_IDENTITIES=true\ncreate_or_migrate_configuration",
+            "MIGRATE_DATABASE_IDENTITIES=true\n"
+            "MIGRATE_RABBITMQ_IDENTITIES=true\n"
+            "create_or_migrate_configuration",
             check=False,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -847,7 +896,7 @@ compose() {{
     for last_arg in "$@"; do :; done
     case "$last_arg" in
         --services)
-            printf '%s\n' db rabbitmq db-provision migrate preflight app worker-cloud \
+            printf '%s\n' db rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app worker-cloud \
                 worker-database worker-files worker-storage worker-logs beat
             ;;
         --networks) printf '%s\n' app-database app-broker ;;
@@ -998,7 +1047,7 @@ compose() {{
     local last_arg=""
     for last_arg in "$@"; do :; done
     case "$last_arg" in
-        --services) printf '%s\n' db rabbitmq db-provision migrate preflight app worker-cloud \
+        --services) printf '%s\n' db rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app worker-cloud \
             worker-database worker-files worker-storage worker-logs beat ;;
         --networks) printf 'app-database\n' ;;
         --volumes) printf '%s\n' pgdata rabbitmq_data backup_workdir backup_storage \

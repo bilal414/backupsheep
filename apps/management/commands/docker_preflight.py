@@ -19,13 +19,21 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from kombu import Connection
 
+from backupsheep.celery_security import (
+    CONSUMER_QUEUES,
+    LANES,
+    _load_private_key,
+    _load_public_keys,
+    _security_configuration,
+)
+
 
 EXPECTED_UID = 10001
 REQUIRED_SECRET_FILE_ENV = {
     "DJANGO_SECRET_KEY": "/run/secrets/django_secret_key",
     "DB_PASSWORD": "/run/secrets/db_password",
-    "RABBITMQ_PASSWORD": "/run/secrets/rabbitmq_password",
 }
+CELERY_PUBLIC_KEYS_FILE = "/run/secrets/celery_trusted_public_keys"
 FORBIDDEN_CREDENTIAL_URL_ENV = ("DATABASE_URL", "CELERY_BROKER_URL")
 INSTALLATION_ID_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -59,9 +67,23 @@ def _assert_stock_configuration_sources(*, environment, runtime_settings, secret
         raise CommandError("Docker security preflight failed: " + "; ".join(errors))
 
 
-def _read_stock_secret_values():
+def _rabbitmq_secret_path(environment):
+    lane = str(environment.get("BACKUPSHEEP_CELERY_LANE") or "")
+    if lane not in (*LANES, "preflight"):
+        raise CommandError("Docker security preflight failed: Celery lane is invalid")
+    return f"/run/secrets/rabbitmq_{lane}_password"
+
+
+def _required_secret_file_env(environment):
+    return {
+        **REQUIRED_SECRET_FILE_ENV,
+        "RABBITMQ_PASSWORD": _rabbitmq_secret_path(environment),
+    }
+
+
+def _read_stock_secret_values(required_secret_files):
     values = {}
-    for setting_name, expected_path in REQUIRED_SECRET_FILE_ENV.items():
+    for setting_name, expected_path in required_secret_files.items():
         try:
             values[setting_name] = Path(expected_path).read_text(encoding="utf-8").rstrip("\n")
         except OSError as error:
@@ -69,6 +91,47 @@ def _read_stock_secret_values():
                 "Docker security preflight failed: could not read a required stock secret file"
             ) from error
     return values
+
+
+def _assert_celery_identity(environment):
+    lane = str(environment.get("BACKUPSHEEP_CELERY_LANE") or "")
+    if str(environment.get("BACKUPSHEEP_CELERY_SECURITY_REQUIRED") or "").lower() != "true":
+        raise CommandError(
+            "Docker security preflight failed: authenticated Celery is not required"
+        )
+    expected_user = f"backupsheep_{lane}"
+    if environment.get("RABBITMQ_USER") != expected_user:
+        raise CommandError(
+            "Docker security preflight failed: RabbitMQ identity does not match its Celery lane"
+        )
+    if environment.get("CELERY_TRUSTED_PUBLIC_KEYS_FILE") != CELERY_PUBLIC_KEYS_FILE:
+        raise CommandError(
+            "Docker security preflight failed: Celery public-key registry path drifted"
+        )
+    publishing = lane in LANES
+    expected_private = (
+        f"/run/secrets/celery_signing_{lane}_private_key" if publishing else ""
+    )
+    if str(environment.get("CELERY_SIGNING_PRIVATE_KEY_FILE") or "") != expected_private:
+        raise CommandError(
+            "Docker security preflight failed: Celery signing-key path drifted"
+        )
+    try:
+        config = _security_configuration(publishing=publishing)
+        public_keys = _load_public_keys(
+            config.public_keys_file, config.installation_id
+        )
+        if publishing:
+            probe = b"backupsheep-celery-identity-v2"
+            public_keys[lane].verify(
+                _load_private_key(config.private_key_file).sign(probe), probe
+            )
+        elif lane not in CONSUMER_QUEUES and lane != "preflight":
+            raise ValueError("invalid non-publishing lane")
+    except Exception as error:
+        raise CommandError(
+            "Docker security preflight failed: Celery signing material is invalid"
+        ) from error
 
 
 def _proc_status_values(text: str) -> dict[str, str]:
@@ -337,7 +400,8 @@ class Command(BaseCommand):
         _assert_private_writable_tmpfs(Path("/tmp"), mountinfo)
         _assert_private_writable_tmpfs(Path("/run/backupsheep"), mountinfo)
 
-        for setting_name, expected_path in REQUIRED_SECRET_FILE_ENV.items():
+        required_secret_files = _required_secret_file_env(os.environ)
+        for setting_name, expected_path in required_secret_files.items():
             if os.environ.get(setting_name):
                 raise CommandError(
                     f"Docker security preflight failed: {setting_name} is exposed "
@@ -357,8 +421,9 @@ class Command(BaseCommand):
         _assert_stock_configuration_sources(
             environment=os.environ,
             runtime_settings=settings,
-            secret_values=_read_stock_secret_values(),
+            secret_values=_read_stock_secret_values(required_secret_files),
         )
+        _assert_celery_identity(os.environ)
 
         static_root = Path(settings.STATIC_ROOT)
         if not static_root.is_dir() or not any(static_root.iterdir()):

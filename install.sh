@@ -14,7 +14,7 @@ umask 077
 
 readonly REPOSITORY_URL="https://github.com/bilal414/backupsheep.git"
 readonly APP_PORT="8000"
-readonly -a CORE_SERVICES=(db rabbitmq db-provision migrate preflight app)
+readonly -a CORE_SERVICES=(db rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app)
 readonly -a OPERATION_SERVICES=(
     worker-cloud
     worker-database
@@ -28,10 +28,29 @@ readonly -a SECRET_NAMES=(
     db_password
     db_bootstrap_password
     db_migrator_password
-    rabbitmq_password
+    rabbitmq_bootstrap_password
+    rabbitmq_app_password
+    rabbitmq_preflight_password
+    rabbitmq_beat_password
+    rabbitmq_cloud_password
+    rabbitmq_database_password
+    rabbitmq_files_password
+    rabbitmq_storage_password
+    rabbitmq_logs_password
+    celery_signing_app_private_key
+    celery_signing_beat_private_key
+    celery_signing_cloud_private_key
+    celery_signing_database_private_key
+    celery_signing_files_private_key
+    celery_signing_storage_private_key
+    celery_signing_logs_private_key
+    celery_trusted_public_keys
     onboarding_token
     ssh_managed_private_key
 )
+readonly -a LEGACY_SECRET_NAMES=(rabbitmq_password)
+readonly -a RABBITMQ_ROLES=(bootstrap app preflight beat cloud database files storage logs)
+readonly -a CELERY_SIGNING_LANES=(app beat cloud database files storage logs)
 
 default_install_dir() {
     if [[ -n "${XDG_DATA_HOME:-}" && "${XDG_DATA_HOME}" == /* ]]; then
@@ -53,6 +72,7 @@ APPROVED_COMPOSE_FILE=""
 SKIP_START=false
 ENABLE_OPERATIONS=false
 MIGRATE_DATABASE_IDENTITIES=false
+MIGRATE_RABBITMQ_IDENTITIES=false
 INSTALL_WAS_PRESENT=false
 ENV_WAS_PRESENT=false
 ENV_FILE=""
@@ -106,6 +126,11 @@ Options:
                      Explicitly convert a legacy stock database superuser into the
                      database-only bootstrap identity and generate separate migrator
                      and runtime credentials. Required once for an existing install.
+  --migrate-rabbitmq-identities
+                     Explicitly retire the legacy shared broker login, generate
+                     per-lane file credentials and Ed25519 task-signing keys, and
+                     enable the one-shot permission reconciler. Required once for
+                     an existing install.
   --skip-start        Create and validate the installation, but do not build or start it.
   -h, --help          Show this help.
 
@@ -264,6 +289,10 @@ parse_args() {
                 MIGRATE_DATABASE_IDENTITIES=true
                 shift
                 ;;
+            --migrate-rabbitmq-identities)
+                MIGRATE_RABBITMQ_IDENTITIES=true
+                shift
+                ;;
             --skip-start)
                 SKIP_START=true
                 shift
@@ -297,7 +326,7 @@ require_commands() {
     local command_name=""
     local -a required=(
         awk basename chmod cmp cp dirname docker env find git grep install mktemp mv od
-        realpath rm sed stat tr
+        realpath rm sed ssh-keygen stat tr
     )
 
     for command_name in "${required[@]}"; do
@@ -778,7 +807,7 @@ validate_secret_dir() {
         [[ -e "$entry" || -L "$entry" ]] || continue
         base="$(basename -- "$entry")"
         allowed=false
-        for expected in "${SECRET_NAMES[@]}"; do
+        for expected in "${SECRET_NAMES[@]}" "${LEGACY_SECRET_NAMES[@]}"; do
             if [[ "$base" == "$expected" ]]; then
                 allowed=true
                 break
@@ -816,6 +845,26 @@ validate_secret_file() {
         return
     fi
 
+    if [[ "$secret_name" == celery_signing_*_private_key ]]; then
+        local validation_copy=""
+        local public_key=""
+        [[ "$secret_size" -gt 100 && "$secret_size" -le 16384 ]] \
+            || die "${secret_path} has an invalid Ed25519 private-key size."
+        ! od -An -v -tx1 "$secret_path" | grep -Eq '(^|[[:space:]])00([[:space:]]|$)' \
+            || die "${secret_path} contains a NUL byte."
+        validation_copy="$(mktemp "${SECRETS_DIR}/.celery-key-check.XXXXXXXX")"
+        cp -- "$secret_path" "$validation_copy"
+        chmod 0600 "$validation_copy"
+        if ! public_key="$(ssh-keygen -y -f "$validation_copy" 2>/dev/null)"; then
+            rm -f -- "$validation_copy"
+            die "${secret_path} is not a readable OpenSSH private key."
+        fi
+        rm -f -- "$validation_copy"
+        [[ "$public_key" =~ ^ssh-ed25519[[:space:]][A-Za-z0-9+/]+={0,3}$ ]] \
+            || die "${secret_path} must contain an Ed25519 private key."
+        return
+    fi
+
     [[ "$secret_size" -gt 0 && "$secret_size" -le 4096 ]] \
         || die "${secret_path} must contain one non-empty bounded secret value."
     awk '
@@ -831,7 +880,8 @@ validate_secret_file() {
     case "$secret_name" in
         django_secret_key) minimum_length=48 ;;
         db_password|db_bootstrap_password|db_migrator_password) minimum_length=24 ;;
-        rabbitmq_password|onboarding_token) minimum_length=32 ;;
+        rabbitmq_password|rabbitmq_*_password|onboarding_token) minimum_length=32 ;;
+        celery_trusted_public_keys) minimum_length=100 ;;
         *) die "Unknown installation secret file: ${secret_name}" ;;
     esac
     [[ "${#secret_value}" -ge "$minimum_length" ]] \
@@ -881,6 +931,87 @@ write_secret_file() {
         die "Could not atomically publish secret ${secret_name}."
     fi
     validate_secret_file "$secret_path"
+}
+
+write_celery_signing_key() {
+    local lane="$1"
+    local secret_name="celery_signing_${lane}_private_key"
+    local destination="${SECRETS_DIR}/${secret_name}"
+    local temporary_key=""
+    local candidate=""
+    local valid_lane=false
+
+    for candidate in "${CELERY_SIGNING_LANES[@]}"; do
+        if [[ "$candidate" == "$lane" ]]; then
+            valid_lane=true
+            break
+        fi
+    done
+    [[ "$valid_lane" == true ]] || die "Unknown Celery signing lane: ${lane}"
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        validate_secret_file "$destination"
+        return
+    fi
+    temporary_key="$(mktemp "${SECRETS_DIR}/.${secret_name}.XXXXXXXX")"
+    rm -f -- "$temporary_key"
+    if ! ssh-keygen -q -t ed25519 -N '' -C '' -f "$temporary_key"; then
+        rm -f -- "$temporary_key" "${temporary_key}.pub"
+        die "Could not generate the ${lane} Celery signing key."
+    fi
+    rm -f -- "${temporary_key}.pub"
+    chmod 0444 "$temporary_key"
+    if ! atomic_move_new "$temporary_key" "$destination"; then
+        rm -f -- "$temporary_key"
+        die "Could not atomically publish the ${lane} Celery signing key."
+    fi
+    validate_secret_file "$destination"
+}
+
+celery_public_key() {
+    local lane="$1"
+    local private_key="${SECRETS_DIR}/celery_signing_${lane}_private_key"
+    local validation_copy=""
+    local public_key=""
+
+    validate_secret_file "$private_key"
+    validation_copy="$(mktemp "${SECRETS_DIR}/.celery-public.XXXXXXXX")"
+    cp -- "$private_key" "$validation_copy"
+    chmod 0600 "$validation_copy"
+    if ! public_key="$(ssh-keygen -y -f "$validation_copy" 2>/dev/null)"; then
+        rm -f -- "$validation_copy"
+        die "Could not derive the ${lane} Celery public key."
+    fi
+    rm -f -- "$validation_copy"
+    [[ "$public_key" =~ ^ssh-ed25519[[:space:]][A-Za-z0-9+/]+={0,3}$ ]] \
+        || die "The ${lane} Celery public key is malformed."
+    printf '%s' "$public_key"
+}
+
+configure_celery_public_registry() {
+    local installation_id=""
+    local expected=""
+    local lane=""
+    local separator=""
+    local existing=""
+    local registry="${SECRETS_DIR}/celery_trusted_public_keys"
+
+    installation_id="$(read_env_value BACKUPSHEEP_INSTALLATION_ID)"
+    [[ "$installation_id" =~ ^[0-9a-f]{64}$ ]] \
+        || die "Cannot bind Celery keys to a malformed installation identity."
+    expected="{\"version\":1,\"installation_id\":\"${installation_id}\",\"keys\":{"
+    for lane in "${CELERY_SIGNING_LANES[@]}"; do
+        expected="${expected}${separator}\"${lane}\":\"$(celery_public_key "$lane")\""
+        separator=','
+    done
+    expected="${expected}}}"
+    if [[ -e "$registry" || -L "$registry" ]]; then
+        validate_secret_file "$registry"
+        existing="$(<"$registry")"
+        [[ "$existing" == "$expected" ]] \
+            || die "The Celery public-key registry does not match this installation's private keys."
+        return
+    fi
+    write_secret_file celery_trusted_public_keys "$expected"
 }
 
 reject_placeholder_secret() {
@@ -1064,6 +1195,135 @@ configure_database_identity_generation() {
     set_env_value DB_MIGRATOR_USER "$migrator_user"
     set_env_value DB_USER "$runtime_user"
     set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "2"
+}
+
+validate_rabbitmq_role_name() {
+    local variable_name="$1"
+    local value="$2"
+
+    [[ "$value" =~ ^[a-z][a-z0-9_]{0,62}$ ]] \
+        || die "${variable_name} must be a lowercase RabbitMQ username."
+}
+
+validate_distinct_rabbitmq_passwords() {
+    local left_role=""
+    local right_role=""
+    local left_value=""
+    local right_value=""
+
+    for left_role in "${RABBITMQ_ROLES[@]}"; do
+        left_value="$(<"${SECRETS_DIR}/rabbitmq_${left_role}_password")"
+        for right_role in "${RABBITMQ_ROLES[@]}"; do
+            [[ "$left_role" < "$right_role" ]] || continue
+            right_value="$(<"${SECRETS_DIR}/rabbitmq_${right_role}_password")"
+            [[ "$left_value" != "$right_value" ]] \
+                || die "RabbitMQ roles ${left_role} and ${right_role} share a credential."
+        done
+    done
+}
+
+configure_rabbitmq_identity_generation() {
+    local generation=""
+    local security_generation=""
+    local legacy_user=""
+    local role=""
+    local lane=""
+    local secret_path=""
+    local legacy_secret="${SECRETS_DIR}/rabbitmq_password"
+    local bootstrap_secret="${SECRETS_DIR}/rabbitmq_bootstrap_password"
+
+    generation="$(read_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION)"
+    security_generation="$(read_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION)"
+    if [[ "$ENV_WAS_PRESENT" != true ]]; then
+        [[ "$MIGRATE_RABBITMQ_IDENTITIES" != true ]] \
+            || die "--migrate-rabbitmq-identities is valid only for an existing legacy installation."
+        set_env_value RABBITMQ_LEGACY_USER backupsheep
+        set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2-pending-fresh
+        set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 2-pending-fresh
+        generation=2-pending-fresh
+        security_generation=2-pending-fresh
+    fi
+
+    case "$generation" in
+        2)
+            [[ "$MIGRATE_RABBITMQ_IDENTITIES" != true ]] \
+                || die "RabbitMQ identities are already generation 2; rerun without --migrate-rabbitmq-identities."
+            [[ "$security_generation" == 2 ]] \
+                || die "RabbitMQ identity generation 2 has a mismatched Celery security generation."
+            for role in "${RABBITMQ_ROLES[@]}"; do
+                validate_secret_file "${SECRETS_DIR}/rabbitmq_${role}_password"
+            done
+            for lane in "${CELERY_SIGNING_LANES[@]}"; do
+                validate_secret_file "${SECRETS_DIR}/celery_signing_${lane}_private_key"
+            done
+            configure_celery_public_registry
+            [[ ! -e "$legacy_secret" && ! -L "$legacy_secret" ]] \
+                || die "RabbitMQ generation 2 still contains the retired shared secret."
+            validate_distinct_rabbitmq_passwords
+            return
+            ;;
+        2-pending-fresh)
+            [[ "$MIGRATE_RABBITMQ_IDENTITIES" != true ]] \
+                || die "A fresh RabbitMQ identity transition is already pending; rerun without the migration flag."
+            [[ "$security_generation" == 2-pending-fresh ]] \
+                || die "The pending fresh Celery security generation drifted."
+            [[ ! -e "$legacy_secret" && ! -L "$legacy_secret" ]] \
+                || die "A pending fresh install unexpectedly contains a legacy RabbitMQ secret."
+            ;;
+        ''|2-pending-legacy)
+            [[ "$MIGRATE_RABBITMQ_IDENTITIES" == true ]] \
+                || die "This existing installation still shares one RabbitMQ credential. Review the broker identity migration guide, stop provider operations, create an encrypted rollback, then rerun once with --migrate-rabbitmq-identities."
+            if [[ "$generation" == "" ]]; then
+                legacy_user="$(read_env_value RABBITMQ_USER)"
+                [[ -n "$legacy_user" ]] || legacy_user=backupsheep
+                validate_rabbitmq_role_name RABBITMQ_USER "$legacy_user"
+                [[ "$legacy_user" != guest ]] \
+                    || die "The RabbitMQ guest account cannot be migrated as a stock identity."
+                set_env_value RABBITMQ_LEGACY_USER "$legacy_user"
+                set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2-pending-legacy
+                set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 2-pending-legacy
+            else
+                [[ "$security_generation" == 2-pending-legacy ]] \
+                    || die "The pending legacy Celery security generation drifted."
+                legacy_user="$(read_env_value RABBITMQ_LEGACY_USER)"
+                validate_rabbitmq_role_name RABBITMQ_LEGACY_USER "$legacy_user"
+            fi
+            if [[ ! -e "$legacy_secret" && ! -L "$legacy_secret" \
+                && ! -e "$bootstrap_secret" && ! -L "$bootstrap_secret" ]]; then
+                migrate_one_secret RABBITMQ_PASSWORD rabbitmq_password false
+            fi
+            if [[ -e "$legacy_secret" || -L "$legacy_secret" ]]; then
+                [[ ! -e "$bootstrap_secret" && ! -L "$bootstrap_secret" ]] \
+                    || die "Both legacy and bootstrap RabbitMQ secrets exist; restore the protected rollback before retrying."
+                validate_secret_file "$legacy_secret"
+                atomic_move_new "$legacy_secret" "$bootstrap_secret" \
+                    || die "Could not atomically confine the legacy broker credential."
+            fi
+            ;;
+        *)
+            die "Unsupported BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION=${generation}; refusing to guess broker permissions."
+            ;;
+    esac
+
+    for role in "${RABBITMQ_ROLES[@]}"; do
+        secret_path="${SECRETS_DIR}/rabbitmq_${role}_password"
+        if [[ -e "$secret_path" || -L "$secret_path" ]]; then
+            validate_secret_file "$secret_path"
+        else
+            write_secret_file "rabbitmq_${role}_password" "$(random_hex 32)"
+        fi
+    done
+    for lane in "${CELERY_SIGNING_LANES[@]}"; do
+        write_celery_signing_key "$lane"
+    done
+    configure_celery_public_registry
+    validate_distinct_rabbitmq_passwords
+
+    # These witnesses are last: no partial secret/key set can look deployable.
+    set_env_value RABBITMQ_USER backupsheep_app
+    set_env_value RABBITMQ_VHOST backupsheep
+    set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION 2
+    set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION 2
 }
 
 reject_connection_url_overrides() {
@@ -1381,6 +1641,8 @@ create_or_migrate_configuration() {
         # secret generation. A terminated first run can then distinguish itself
         # from a real legacy installation without guessing from partial files.
         set_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION "2-pending-fresh"
+        set_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION "2-pending-fresh"
+        set_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION "2-pending-fresh"
         set_env_value BACKUPSHEEP_IMAGE "backupsheep:${INSTALL_REF}"
         set_env_value BACKUPSHEEP_POSTGRES_IMAGE "backupsheep-postgres:${INSTALL_REF}"
         set_env_value DJANGO_ALLOWED_HOSTS "${PUBLIC_HOST},localhost,127.0.0.1"
@@ -1402,14 +1664,13 @@ create_or_migrate_configuration() {
     if [[ "$ENV_WAS_PRESENT" == true ]]; then
         reject_connection_url_overrides
         migrate_one_secret DJANGO_SECRET_KEY django_secret_key false
-        migrate_one_secret RABBITMQ_PASSWORD rabbitmq_password false
         migrate_one_secret ONBOARDING_INSTALL_TOKEN onboarding_token true
     else
         write_secret_file django_secret_key "$(random_hex 48)"
-        write_secret_file rabbitmq_password "$(random_hex 32)"
         write_secret_file onboarding_token "$(random_hex 32)"
     fi
     configure_database_identity_generation
+    configure_rabbitmq_identity_generation
     prepare_managed_ssh_private_key
 
     validate_secret_dir
@@ -1454,6 +1715,12 @@ validate_runtime_configuration() {
     value="$(read_env_value BACKUPSHEEP_DATABASE_IDENTITY_GENERATION)"
     [[ "$value" == "2" ]] \
         || die "BACKUPSHEEP_DATABASE_IDENTITY_GENERATION must be 2."
+    value="$(read_env_value BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION)"
+    [[ "$value" == "2" ]] \
+        || die "BACKUPSHEEP_RABBITMQ_IDENTITY_GENERATION must be 2."
+    value="$(read_env_value BACKUPSHEEP_CELERY_SECURITY_GENERATION)"
+    [[ "$value" == "2" ]] \
+        || die "BACKUPSHEEP_CELERY_SECURITY_GENERATION must be 2."
     bootstrap_user="$(read_env_value DB_BOOTSTRAP_USER)"
     migrator_user="$(read_env_value DB_MIGRATOR_USER)"
     runtime_user="$(read_env_value DB_USER)"
@@ -1471,7 +1738,13 @@ validate_runtime_configuration() {
     [[ "$value" == "5432" ]] \
         || die "The stock database identity provisioner requires DB_PORT=5432."
     value="$(read_env_value RABBITMQ_USER)"
-    [[ "$value" != "guest" ]] || die "The bundled broker must not use the RabbitMQ guest account."
+    [[ "$value" == "backupsheep_app" ]] \
+        || die "The stock application broker identity must be backupsheep_app."
+    value="$(read_env_value RABBITMQ_LEGACY_USER)"
+    validate_rabbitmq_role_name RABBITMQ_LEGACY_USER "$value"
+    value="$(read_env_value RABBITMQ_VHOST)"
+    [[ "$value" == "backupsheep" ]] \
+        || die "The stock broker vhost must be backupsheep."
     value="$(read_env_value CELERY_BROKER_URL)"
     [[ -z "$value" ]] || die "CELERY_BROKER_URL must be blank for the stock file-backed broker configuration."
     value="$(read_env_value DATABASE_URL)"
@@ -1924,7 +2197,7 @@ validate_rabbitmq_data_generation() {
 
 show_failure_guidance() {
     warn "Startup was left in place for evidence and recovery; no volumes or containers were deleted."
-    warn "Inspect locally with: cd $(printf '%q' "$INSTALL_DIR") && ./backupsheep-compose logs --tail=100 db-provision migrate preflight app"
+    warn "Inspect locally with: cd $(printf '%q' "$INSTALL_DIR") && ./backupsheep-compose logs --tail=100 rabbitmq-volume-init rabbitmq rabbitmq-provision db-provision migrate preflight app"
 }
 
 wait_for_app() {
@@ -1934,6 +2207,9 @@ wait_for_app() {
     local provision_container_id=""
     local provision_status=""
     local provision_exit_code=""
+    local rabbit_provision_container_id=""
+    local rabbit_provision_status=""
+    local rabbit_provision_exit_code=""
     local migrate_container_id=""
     local migrate_status=""
     local migrate_exit_code=""
@@ -1943,6 +2219,16 @@ wait_for_app() {
 
     log "Waiting for the BackupSheep core to become healthy"
     while [[ "$elapsed" -lt 300 ]]; do
+        rabbit_provision_container_id="$(compose ps --all -q rabbitmq-provision 2>/dev/null || true)"
+        if [[ -n "$rabbit_provision_container_id" ]]; then
+            rabbit_provision_status="$("$DOCKER_BIN" inspect --format '{{.State.Status}}' "$rabbit_provision_container_id" 2>/dev/null || true)"
+            rabbit_provision_exit_code="$("$DOCKER_BIN" inspect --format '{{.State.ExitCode}}' "$rabbit_provision_container_id" 2>/dev/null || true)"
+            if [[ "$rabbit_provision_status" == "exited" && "$rabbit_provision_exit_code" != "0" ]]; then
+                show_failure_guidance
+                die "RabbitMQ identity provisioning failed (exit code: ${rabbit_provision_exit_code})."
+            fi
+        fi
+
         provision_container_id="$(compose ps --all -q db-provision 2>/dev/null || true)"
         if [[ -n "$provision_container_id" ]]; then
             provision_status="$("$DOCKER_BIN" inspect --format '{{.State.Status}}' "$provision_container_id" 2>/dev/null || true)"
@@ -2043,8 +2329,9 @@ start_operations() {
 
     # A container is initially "running" while init.sh is still executing the
     # deployment preflight. Docker's init shim remains PID 1, so inspect its one
-    # direct child and, for workers, require an authenticated Celery ping before
-    # accepting readiness. Then require a restart-free stability window.
+    # direct child and, for workers, require the post-AMQP-consumer readiness witness
+    # before accepting readiness. Remote-control pidboxes stay disabled so a worker
+    # cannot configure or consume another lane's broker resources.
     while [[ "$elapsed" -lt 180 ]]; do
         all_ready=true
         operation_container_ids=()
@@ -2086,12 +2373,8 @@ start_operations() {
                         || container_ready=false
                     worker_role="${service_name#worker-}"
                     if [[ "$container_ready" == true ]] && ! "$DOCKER_BIN" exec "$container_id" \
-                        sh -ec '
-                            node_name="$1@$(hostname)"
-                            response="$(celery -A backupsheep inspect ping \
-                                --timeout=5 --destination "$node_name" 2>/dev/null)"
-                            case "$response" in *pong*) ;; *) exit 1 ;; esac
-                        ' worker-health "$worker_role"; then
+                        sh -ec 'test "$(cat /run/backupsheep/celery-ready 2>/dev/null)" = "$1"' \
+                        worker-health "$worker_role"; then
                         container_ready=false
                     fi
                 fi

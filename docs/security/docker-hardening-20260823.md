@@ -40,7 +40,7 @@ or host compromise can still disclose or tamper with backup material.
 | --- | --- | --- |
 | Application image containment | Pass | Strong non-root immutable baseline demonstrated live |
 | PostgreSQL image containment | Pass | Fixed non-root identity, zero capabilities, read-only root, authenticated probe |
-| RabbitMQ containment | Conditional pass | Non-root server with zero effective/permitted capabilities; bootstrap bounding-set residual remains |
+| RabbitMQ containment | Pass in repository integration | UID/GID 100:101, all capability sets zero, witness-gated volume, per-lane identities; demo redeploy still required |
 | Compose topology | Pass | Loopback web publication, no DB/broker host ports, role-specific internal networks, operations opt-in |
 | Installer/update safety | Pass in tests; demo exception documented | Exact commit, no host provisioning, fail-closed ownership/collision/generation checks |
 | Runtime secrets | Pass with residual | Values absent from direct env; a compromised granted process can still read its mounted files |
@@ -156,11 +156,12 @@ authenticated backup cryptography.
   role-specific internal networks.
 - RabbitMQ is digest-pinned to `4.3.5-alpine`, uses an authenticated health check,
   has bounded resources and logs, and runs `beam.smp` as UID `100`, GID `101`.
-- The live RabbitMQ server has zero inherited, permitted, effective, and ambient
-  capabilities, `NoNewPrivs=1`, and seccomp mode 2. Its bounding set remains `0xcb`
-  because the vendor root bootstrap receives five ownership/UID transition
-  capabilities. This is recorded as a residual, not reported as full capability-free
-  parity with the app and database.
+- The hardened repository starts RabbitMQ directly as UID/GID `100:101`; integration
+  proof showed inherited, permitted, effective, bounding, and ambient capability sets
+  all zero, with `NoNewPrivs=1` and seccomp mode 2. A non-networked, capability-free
+  one-shot validates the complete volume ownership and an installation/generation
+  witness before the server starts. This evidence is not a claim that the demo has
+  already been redeployed.
 - RabbitMQ data-generation fencing prevents a 4.3 image from guessing at a legacy
   3.13/4.2 volume. The installer/wrapper require exact state witnesses and the
   documented Khepri transition path.
@@ -441,10 +442,14 @@ user-owned host acceptance test is still recommended.
 
 ### High
 
-1. **Shared RabbitMQ identity/vhost.** A compromised authenticated role can publish a
-   crafted task to another lane. Add per-role publisher/consumer users, queue ACLs or
-   vhosts, authenticated task envelopes, task/argument authorization, and alerts for
-   unexpected publisher/consumer combinations.
+1. **RabbitMQ lane identity is closed in the repository; rollout evidence remains.**
+   Generation 2 provisions distinct app/Beat/preflight/worker credentials, fixed queue
+   ACLs, and per-lane Ed25519-authenticated task envelopes with replay tracking. Real
+   Rabbit/Kombu/Celery integration proved a worker can consume its precreated queue with
+   configure denied, cannot actively redeclare topology, and cannot read another queue.
+   Deploy this exact commit and retain provisioning/consumer evidence before closing the
+   live gate. Exact unfinished late-ack redelivery still relies on durable task-specific
+   execution fences after a worker crash.
 2. **Shared runtime PostgreSQL principal across application lanes.** Generation 2 now
    separates the database-only bootstrap superuser, schema-owning one-shot migrator and
    non-owner runtime login, and preflight proves the runtime has no DDL/TEMP/elevated
@@ -481,9 +486,9 @@ user-owned host acceptance test is still recommended.
 
 1. Same-host PostgreSQL/RabbitMQ transport is plaintext. Internal unpublished networks
    are an accepted single-host exception, not suitable across an untrusted boundary.
-2. RabbitMQ's server process retains bootstrap capabilities in its bounding set even
-   though permitted/effective sets are zero and NNP is active. A custom verified
-   entrypoint or separately initialized pre-owned volume can remove that ceiling.
+2. RabbitMQ capability bounding-set removal is implemented and integration-proven in
+   the repository, but must still be demonstrated after the exact demo/production
+   rollout with the matching named volume witness.
 3. Grype/Trivy disagree on the RabbitMQ OpenSSL QUIC issue. QUIC is not exposed, but the
    pinned vendor image must be rescanned and updated when a reviewed fix lands.
 4. At-least-once outbox delivery can duplicate a notification after an unknown publish
@@ -502,7 +507,8 @@ user-owned host acceptance test is still recommended.
 1. Add per-backup AEAD and external KMS/HSM envelope custody.
 2. Authenticate artifact identity, tenant context, provenance, and integrity before any
    restore writes to a destination.
-3. Split RabbitMQ users/permissions and database migration/runtime roles by lane.
+3. Deploy and retain evidence for the implemented RabbitMQ lane identities/task
+   authentication and database bootstrap/migrator/runtime split.
 4. Split writable staging volumes and reduce the web/worker data each compromised role
    can read.
 5. Publish signed multi-architecture images, SBOMs, provenance, and a verified exact-ref
@@ -516,8 +522,7 @@ user-owned host acceptance test is still recommended.
 2. Add encrypted/quota-controlled storage, byte/inode alerts, and recurring encrypted
    control-plane backups with restore drills.
 3. Integrate an external secret manager and exercise key rotation/revocation.
-4. Remove RabbitMQ's residual bounding set through a verified non-root initialization
-   design.
+4. Verify RabbitMQ's zero bounding set and volume witness after every image/data upgrade.
 5. Add immutable off-host audit export and alerting for auth abuse, preflight changes,
    unexpected task publishers, outbound destinations, disk growth, queue age, and
    container restarts.

@@ -7,10 +7,12 @@ See RabbitMQ's upstream [feature-flag guidance](https://www.rabbitmq.com/docs/fe
 for the version-specific migration contract; the wrapper enforces the stricter stock
 BackupSheep invariants described below.
 
-`RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_PASS` and `RABBITMQ_DEFAULT_VHOST` initialize
-only a blank broker database. Changing `.secrets/rabbitmq_password` does not create or
-rotate credentials in an existing `rabbitmq_data` volume. `install.sh` refuses to open
-an existing volume when it cannot prove the exact pinned broker target; it never runs
+Legacy `RABBITMQ_DEFAULT_*` values initialize only a blank broker database. Changing a
+secret file does not rotate credentials in an existing `rabbitmq_data` volume. After
+the data-format transition, complete the separate
+[generation-2 identity migration](rabbitmq-identity-migration.md); its one-shot
+provisioner performs the exact credential and permission reconciliation. `install.sh`
+refuses to open an existing volume when it cannot prove the exact pinned broker target; it never runs
 the version migration automatically. Complete this operator-run migration before
 allowing the pinned 4.3 service to open a legacy volume.
 
@@ -73,10 +75,12 @@ only the reviewed Docker transport, proxy and CA context.
 2. Stop Beat from scheduling new work, stop producers, and let workers finish or safely
    requeue their in-flight jobs. Export broker definitions and take a recoverable snapshot
    of the `rabbitmq_data` volume. Do not use `docker compose down --volumes`.
-3. While still on 3.13, create the dedicated `backupsheep` user and `backupsheep` vhost
-   through a trusted server console and grant that user configure/write/read permissions
-   only on that vhost. Put the matching value in the protected
-   `.secrets/rabbitmq_password` file, leave direct `RABBITMQ_PASSWORD` blank in `.env`, and
+3. While still on 3.13, retain the dedicated legacy `backupsheep` user and vhost long
+   enough to complete the data-format hop. Generation-2 identity migration later
+   deletes that shared login and creates the lane-specific users. Through a trusted
+   server console, grant the legacy user configure/write/read permissions only on that
+   vhost. Put the matching value in the protected legacy secret file, leave direct
+   `RABBITMQ_PASSWORD` blank in `.env`, and
    verify all app roles reconnect. Do not put the password in documentation, tickets,
    process arguments or unattended logs.
 4. On 3.13, enable every stable and required feature flag and confirm the node is healthy.

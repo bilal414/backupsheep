@@ -74,18 +74,29 @@ class DeploymentHardeningContractTests(TestCase):
             "d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7",
             self.compose,
         )
-        self.assertIn("RABBITMQ_DEFAULT_PASS:", self.compose)
-        self.assertIn("/run/secrets/rabbitmq_password", self.compose)
+        self.assertNotIn("RABBITMQ_DEFAULT_PASS:", self.compose)
+        self.assertIn(
+            "/run/secrets/rabbitmq_bootstrap_password",
+            (ROOT / "deploy" / "rabbitmq" / "entrypoint.sh").read_text(
+                encoding="utf-8"
+            ),
+        )
+        self.assertIn("/run/secrets/rabbitmq_app_password", self.compose)
         self.assertIn(
             "exec /usr/local/bin/docker-entrypoint.sh rabbitmq-server",
-            self.compose,
+            (ROOT / "deploy" / "rabbitmq" / "entrypoint.sh").read_text(
+                encoding="utf-8"
+            ),
         )
         self.assertIn(
-            'su-exec rabbitmq rabbitmqctl -q authenticate_user', self.compose
+            'ctl authenticate_user "$user" "$password"',
+            (ROOT / "deploy" / "rabbitmq" / "provision.sh").read_text(
+                encoding="utf-8"
+            ),
         )
-        self.assertIn('$$(cat /run/secrets/rabbitmq_password)', self.compose)
-        self.assertNotIn(
-            '["CMD", "su-exec", "rabbitmq", "rabbitmq-diagnostics", "-q", "ping"]',
+        self.assertNotIn("rabbitmq_password:/run/secrets/rabbitmq_password", self.compose)
+        self.assertIn(
+            '["CMD", "rabbitmq-diagnostics", "-q", "ping"]',
             self.service_block("rabbitmq"),
         )
         self.assertIn("start_period: 30s", self.compose)
@@ -193,7 +204,14 @@ class DeploymentHardeningContractTests(TestCase):
                 )
 
         for service in (
-            "db", "rabbitmq", "db-provision", "migrate", "preflight", "app"
+            "db",
+            "rabbitmq-volume-init",
+            "rabbitmq",
+            "rabbitmq-provision",
+            "db-provision",
+            "migrate",
+            "preflight",
+            "app",
         ):
             with self.subTest(core_service=service):
                 self.assertNotIn("profiles:", self.service_block(service))
@@ -218,7 +236,15 @@ class DeploymentHardeningContractTests(TestCase):
             "db_password",
             "db_bootstrap_password",
             "db_migrator_password",
-            "rabbitmq_password",
+            "rabbitmq_bootstrap_password",
+            "rabbitmq_app_password",
+            "rabbitmq_preflight_password",
+            "rabbitmq_beat_password",
+            "rabbitmq_cloud_password",
+            "rabbitmq_database_password",
+            "rabbitmq_files_password",
+            "rabbitmq_storage_password",
+            "rabbitmq_logs_password",
             "onboarding_token",
             "ssh_managed_private_key",
         ):
@@ -352,11 +378,18 @@ class DeploymentHardeningContractTests(TestCase):
         self.assertIn('user: "999:999"', database)
         self.assertNotIn("cap_add:", database)
         rabbitmq = self.service_block("rabbitmq")
-        for capability in ("CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"):
-            self.assertIn(f"      - {capability}\n", rabbitmq)
+        self.assertIn('user: "100:101"', rabbitmq)
+        self.assertNotIn("cap_add:", rabbitmq)
         self.assertNotIn("SYS_ADMIN", rabbitmq)
         self.assertNotIn("NET_ADMIN", rabbitmq)
         self.assertNotIn("init: true", stateful)
+
+        volume_init = self.service_block("rabbitmq-volume-init")
+        self.assertIn('user: "100:101"', volume_init)
+        self.assertIn("network_mode: none", volume_init)
+        self.assertIn('restart: "no"', volume_init)
+        self.assertNotIn("cap_add:", volume_init)
+        self.assertIn("backupsheep-rabbitmq-volume-init", volume_init)
 
     def test_role_networks_prevent_worker_to_worker_lateral_reachability(self):
         role_networks = {}
@@ -486,9 +519,9 @@ class DeploymentHardeningContractTests(TestCase):
         )
 
         self.assertIn("ENV_WAS_PRESENT", installer)
-        self.assertIn("The bundled broker must not use the RabbitMQ guest account", installer)
-        self.assertIn("Cannot safely infer existing ${key}", installer)
-        self.assertIn("install.sh` refuses", guide)
+        self.assertIn("--migrate-rabbitmq-identities", installer)
+        self.assertIn("still shares one RabbitMQ credential", installer)
+        self.assertIn("refuses to open an existing volume", guide)
 
     def test_build_metadata_is_not_in_public_static_root(self):
         public_root = ROOT / "apps" / "console" / "_static" / "console"

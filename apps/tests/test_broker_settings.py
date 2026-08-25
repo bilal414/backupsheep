@@ -8,6 +8,7 @@ from backupsheep.settings import _resolve_celery_broker_url
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RABBITMQ_CONFIG = PROJECT_ROOT / "deploy" / "rabbitmq" / "90-backupsheep.conf"
+RABBITMQ_PROVISION = PROJECT_ROOT / "deploy" / "rabbitmq" / "provision.sh"
 COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yml"
 ENV_SAMPLE = PROJECT_ROOT / ".env_sample"
 SCALING_GUIDE = PROJECT_ROOT / "docs" / "scaling.md"
@@ -106,9 +107,10 @@ class RabbitMQRuntimeContractTests(SimpleTestCase):
         self.assertIn("\n    hostname: rabbitmq\n", rabbitmq_service)
 
     def test_default_broker_user_is_not_a_management_administrator(self):
-        config = RABBITMQ_CONFIG.read_text(encoding="utf-8")
+        provision = RABBITMQ_PROVISION.read_text(encoding="utf-8")
 
-        self.assertIn("default_user_tags.administrator = false", config)
+        self.assertIn("RabbitMQ user tag drift detected", provision)
+        self.assertIn("awk '$2 != \"[]\" { exit 1 }'", provision)
 
 
 class WorkerCapacityContractTests(SimpleTestCase):

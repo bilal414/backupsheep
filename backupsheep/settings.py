@@ -23,6 +23,7 @@ from django.core.exceptions import ImproperlyConfigured
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
 import google.auth
+from kombu import Exchange, Queue
 from dotenv import load_dotenv
 from dotenv import dotenv_values
 
@@ -891,6 +892,35 @@ CELERY_TASK_PUBLISH_RETRY_POLICY = {
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
+CELERY_TASK_PROTOCOL = 2
+# Stock RabbitMQ declares this fixed topology from a root-owned definitions file.
+# Producers and consumers set ``no_declare`` so their AMQP users need no configure
+# permission and cannot create, delete, or rebind another lane's queue.
+_BACKUPSHEEP_CELERY_QUEUES = ("default", "cloud", "database", "files", "storage", "logs")
+CELERY_TASK_QUEUES = tuple(
+    Queue(
+        queue_name,
+        exchange=Exchange(
+            f"backupsheep.{queue_name}",
+            type="direct",
+            durable=True,
+            auto_delete=False,
+            no_declare=True,
+        ),
+        routing_key=queue_name,
+        durable=True,
+        auto_delete=False,
+        no_declare=True,
+    )
+    for queue_name in _BACKUPSHEEP_CELERY_QUEUES
+)
+CELERY_TASK_CREATE_MISSING_QUEUES = False
+CELERY_TASK_DEFAULT_EXCHANGE = "backupsheep.default"
+CELERY_TASK_DEFAULT_EXCHANGE_TYPE = "direct"
+CELERY_TASK_DEFAULT_ROUTING_KEY = "default"
+# Remote-control pidbox, gossip, and mingle create shared broker resources that defeat
+# queue configure isolation. Compose also passes the explicit CLI disable switches.
+CELERY_WORKER_ENABLE_REMOTE_CONTROL = False
 # Task modules the worker must import at boot so every task is registered. These
 # do not live in the conventional "<app>/tasks.py" location, so Celery's app
 # autodiscovery does not find them; backups are dispatched by name via
@@ -1379,10 +1409,18 @@ CELERY_TASK_ROUTES = {
     # Restores push data back to the source server — same per-type isolation.
     "restore_website_backup": {"queue": "files"},
     "restore_database_backup": {"queue": "database"},
+    # Storage finalization hands source-ciphertext fence cleanup back to the
+    # least-privilege source lane after every destination reaches a terminal state.
+    "cleanup_database_ciphertext_fence": {"queue": "database"},
+    "cleanup_files_ciphertext_fence": {"queue": "files"},
     # Local-disk upload + cleanup — handled by the scalable worker-storage pool.
     "storage_upload": {"queue": "storage"},
     "finalize_backup": {"queue": "storage"},
     "delete_from_disk": {"queue": "storage"},
+    # Local-restore ciphertext moves only through the storage lane; authenticated
+    # provenance limits both handoffs to the database/files source workers.
+    "stage_local_restore_ciphertext": {"queue": "storage"},
+    "cleanup_local_restore_ciphertext": {"queue": "storage"},
     "reset_incremental_cache": {"queue": "storage"},
     "delete_old_logs": {"queue": "storage"},
     "validate_local_storage": {"queue": "storage"},

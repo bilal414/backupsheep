@@ -124,7 +124,13 @@ x-app-secret-environment: &app-secret-environment
   DB_PASSWORD_FILE: /run/secrets/db_password
   CELERY_BROKER_URL: ""
   RABBITMQ_PASSWORD: ""
-  RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_password
+  RABBITMQ_PASSWORD_FILE: ""
+  # Stock Docker authenticates every Celery publication with a lane-specific
+  # Ed25519 key. Consumers receive the public registry, never another lane's key.
+  BACKUPSHEEP_CELERY_SECURITY_REQUIRED: "true"
+  BACKUPSHEEP_CELERY_SECURITY_GENERATION: "${BACKUPSHEEP_CELERY_SECURITY_GENERATION:?BACKUPSHEEP_CELERY_SECURITY_GENERATION is required}"
+  CELERY_SIGNING_PRIVATE_KEY_FILE: ""
+  CELERY_TRUSTED_PUBLIC_KEYS_FILE: /run/secrets/celery_trusted_public_keys
   ONBOARDING_INSTALL_TOKEN: ""
   # Keep SSH trust and the optional managed identity out of the shared backup
   # work volume. Compose mounts the trust store only into roles that use SSH,
@@ -135,11 +141,11 @@ x-app-secret-environment: &app-secret-environment
 x-app-secrets: &app-secrets
   - django_secret_key
   - db_password
-  - rabbitmq_password
+  - celery_trusted_public_keys
 
-# Shared stateful-service controls. PostgreSQL starts directly as its fixed non-root
-# user with no capabilities. RabbitMQ retains a service-local bootstrap capability
-# list solely to repair its named-volume ownership before dropping privilege.
+# Shared stateful-service controls. PostgreSQL and RabbitMQ start directly as their
+# fixed non-root users with an empty capability bounding set. A separate non-networked
+# RabbitMQ one-shot proves its already-correct named-volume ownership before startup.
 x-stateful-runtime: &stateful-runtime
   labels: *installation-labels
   privileged: false
@@ -236,33 +242,43 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  rabbitmq-volume-init:
+    <<: *stateful-runtime
+    user: "100:101"
+    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+    environment:
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:?BACKUPSHEEP_RABBITMQ_DATA_GENERATION is required}"
+    entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-volume-init", "init"]
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: "0.25"
+    network_mode: none
+    logging: *default-logging
+    restart: "no"
+
   rabbitmq:
     <<: *stateful-runtime
-    cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - FOWNER
-      - SETGID
-      - SETUID
+    user: "100:101"
     image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
     # RabbitMQ derives its durable node database path from the node hostname.
     # Container IDs change on recreation, so keep the hostname stable or the same
     # named volume will appear to contain a brand-new, empty broker.
     hostname: rabbitmq
+    # RabbitMQ 4.3 has no supported DEFAULT_PASS_FILE input. This reviewed wrapper
+    # derives a salted hash into tmpfs and invokes the vendor entrypoint without ever
+    # exporting the plaintext bootstrap credential.
+    entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-entrypoint"]
     environment:
-      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER:-backupsheep}"
-      RABBITMQ_DEFAULT_VHOST: "${RABBITMQ_VHOST:-backupsheep}"
-      RABBITMQ_DEFAULT_PASS: ""
-    # RabbitMQ 4.3 rejects the formerly supported RABBITMQ_DEFAULT_PASS_FILE variable.
-    # Read the mounted secret in-process, then hand control back to the vendor entrypoint
-    # so its volume repair and UID 100 privilege drop remain intact.
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        export RABBITMQ_DEFAULT_PASS="$$(cat /run/secrets/rabbitmq_password)"
-        exec /usr/local/bin/docker-entrypoint.sh rabbitmq-server
+      BACKUPSHEEP_INSTALLATION_ID: "${BACKUPSHEEP_INSTALLATION_ID:?BACKUPSHEEP_INSTALLATION_ID is required}"
+      BACKUPSHEEP_RABBITMQ_DATA_GENERATION: "${BACKUPSHEEP_RABBITMQ_DATA_GENERATION:?BACKUPSHEEP_RABBITMQ_DATA_GENERATION is required}"
     secrets:
-      - rabbitmq_password
+      - rabbitmq_bootstrap_password
     # Celery uses durable queues and persistent delivery, but RabbitMQ still needs
     # its own data directory persisted across container recreation. Without this,
     # `docker compose down && up` can discard queued backups before the database
@@ -273,19 +289,21 @@ services:
       # work. Database/file/storage commands can legitimately run for many hours,
       # so the broker timeout must exceed their longest supported command budget.
       - ./deploy/rabbitmq/90-backupsheep.conf:/etc/rabbitmq/conf.d/90-backupsheep.conf:ro
+      - ./deploy/rabbitmq/entrypoint.sh:/usr/local/bin/backupsheep-rabbitmq-entrypoint:ro
+      - ./deploy/rabbitmq/volume-init.sh:/usr/local/bin/backupsheep-rabbitmq-volume-init:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=${RABBITMQ_TMPFS_SIZE:-128m},mode=1777
       - /var/log/rabbitmq:rw,noexec,nosuid,nodev,size=64m,mode=0750,uid=100,gid=101
+      - /run/backupsheep-rabbitmq:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=100,gid=101
     pids_limit: "${RABBITMQ_PIDS_LIMIT:-512}"
     mem_limit: "${RABBITMQ_MEMORY_LIMIT:-1g}"
     cpus: "${RABBITMQ_CPU_LIMIT:-1.0}"
     stop_grace_period: "${RABBITMQ_STOP_GRACE_PERIOD:-3m}"
     healthcheck:
-      # A node ping can succeed before the restored authentication database is ready.
-      # Prove the dedicated file-backed credential as the broker user so dependent
-      # services cannot race that recovery, and so the probe cannot create a root-owned
-      # Erlang cookie. Neither the secret nor command output is persisted in health logs.
-      test: ["CMD-SHELL", "su-exec rabbitmq rabbitmqctl -q authenticate_user \"$${RABBITMQ_DEFAULT_USER}\" \"$$(cat /run/secrets/rabbitmq_password)\" >/dev/null 2>&1"]
+      # This first gate proves node readiness only. Every credential, permission and
+      # topology invariant is reconciled and authenticated by rabbitmq-provision before
+      # an application process is allowed to start.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -299,8 +317,52 @@ services:
       - logs-broker
       - beat-broker
       - preflight-broker
+      - provision-broker
+    depends_on:
+      rabbitmq-volume-init:
+        condition: service_completed_successfully
     logging: *default-logging
     restart: unless-stopped
+
+  # One-shot: reconcile the dedicated vhost after definitions import. It borrows only
+  # the broker volume's Erlang cookie read-only, then deletes the legacy shared login,
+  # rotates every role from its file secret, proves lane permissions and exits.
+  rabbitmq-provision:
+    <<: *stateful-runtime
+    user: "100:101"
+    image: rabbitmq:4.3.5-alpine@sha256:d07d6a0657affe0354ae61b3ca1a3e4d244c247ac5d7e25940c8759658ce7ad7
+    environment:
+      HOME: /var/lib/rabbitmq
+      RABBITMQ_LEGACY_USER: "${RABBITMQ_LEGACY_USER:-backupsheep}"
+    entrypoint: ["/bin/sh", "/usr/local/bin/backupsheep-rabbitmq-provision"]
+    secrets:
+      - rabbitmq_bootstrap_password
+      - rabbitmq_app_password
+      - rabbitmq_preflight_password
+      - rabbitmq_beat_password
+      - rabbitmq_cloud_password
+      - rabbitmq_database_password
+      - rabbitmq_files_password
+      - rabbitmq_storage_password
+      - rabbitmq_logs_password
+    volumes:
+      - type: volume
+        source: rabbitmq_data
+        target: /var/lib/rabbitmq
+        read_only: true
+      - ./deploy/rabbitmq/provision.sh:/usr/local/bin/backupsheep-rabbitmq-provision:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: "0.5"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - provision-broker
+    logging: *default-logging
+    restart: "no"
 
   # One-shot: provision the database identity boundary before Django can migrate or
   # serve. It connects as the database-only bootstrap superuser, creates/rotates the
@@ -351,7 +413,6 @@ services:
     secrets:
       - django_secret_key
       - db_migrator_password
-      - rabbitmq_password
     command: ["python", "manage.py", "migrate", "--noinput"]
     mem_limit: "${MIGRATE_MEMORY_LIMIT:-2g}"
     cpus: "${MIGRATE_CPU_LIMIT:-2.0}"
@@ -372,16 +433,24 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_CELERY_LANE: preflight
+      RABBITMQ_USER: backupsheep_preflight
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_preflight_password
+    secrets:
+      - django_secret_key
+      - db_password
+      - rabbitmq_preflight_password
+      - celery_trusted_public_keys
     command: ["python", "manage.py", "docker_preflight"]
     mem_limit: "${PREFLIGHT_MEMORY_LIMIT:-1g}"
     cpus: "${PREFLIGHT_CPU_LIMIT:-1.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
     networks:
@@ -399,19 +468,25 @@ services:
     env_file: .env
     environment:
       <<: *app-secret-environment
+      BACKUPSHEEP_CELERY_LANE: app
+      RABBITMQ_USER: backupsheep_app
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_app_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_app_private_key
       ONBOARDING_INSTALL_TOKEN_SECRET_FILE: /run/secrets/onboarding_token
     secrets:
       - django_secret_key
       - db_password
-      - rabbitmq_password
+      - rabbitmq_app_password
+      - celery_signing_app_private_key
+      - celery_trusted_public_keys
       - onboarding_token
       - ssh_managed_private_key
     # Uses the image ENTRYPOINT (init.sh) to start gunicorn on :8000.
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
@@ -458,17 +533,27 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
-    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=${CELERY_CLOUD_CONCURRENCY:-4}", "--prefetch-multiplier=${CELERY_CLOUD_PREFETCH_MULTIPLIER:-1}"]
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_CELERY_LANE: cloud
+      RABBITMQ_USER: backupsheep_cloud
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_cloud_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_cloud_private_key
+    secrets:
+      - django_secret_key
+      - db_password
+      - rabbitmq_cloud_password
+      - celery_signing_cloud_private_key
+      - celery_trusted_public_keys
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=cloud@%h", "-Q", "cloud,default", "--concurrency=${CELERY_CLOUD_CONCURRENCY:-4}", "--prefetch-multiplier=${CELERY_CLOUD_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_CLOUD_MEMORY_LIMIT:-1g}"
     cpus: "${WORKER_CLOUD_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
@@ -487,21 +572,28 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
-    environment: *app-secret-environment
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_CELERY_LANE: database
+      RABBITMQ_USER: backupsheep_database
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_database_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_database_private_key
     secrets:
       - django_secret_key
       - db_password
-      - rabbitmq_password
+      - rabbitmq_database_password
+      - celery_signing_database_private_key
+      - celery_trusted_public_keys
       - ssh_managed_private_key
-    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=database@%h", "-Q", "database", "--concurrency=${CELERY_DATABASE_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_DATABASE_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_DATABASE_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_DATABASE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
@@ -530,21 +622,28 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
-    environment: *app-secret-environment
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_CELERY_LANE: files
+      RABBITMQ_USER: backupsheep_files
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_files_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_files_private_key
     secrets:
       - django_secret_key
       - db_password
-      - rabbitmq_password
+      - rabbitmq_files_password
+      - celery_signing_files_private_key
+      - celery_trusted_public_keys
       - ssh_managed_private_key
-    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=files@%h", "-Q", "files", "--concurrency=${CELERY_FILES_CONCURRENCY:-1}", "--prefetch-multiplier=${CELERY_FILES_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_FILES_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_FILES_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
@@ -576,17 +675,27 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
-    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=storage@%h", "-Q", "storage", "--concurrency=${CELERY_STORAGE_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_STORAGE_PREFETCH_MULTIPLIER:-1}"]
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_CELERY_LANE: storage
+      RABBITMQ_USER: backupsheep_storage
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_storage_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_storage_private_key
+    secrets:
+      - django_secret_key
+      - db_password
+      - rabbitmq_storage_password
+      - celery_signing_storage_private_key
+      - celery_trusted_public_keys
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=storage@%h", "-Q", "storage", "--concurrency=${CELERY_STORAGE_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_STORAGE_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_STORAGE_MEMORY_LIMIT:-2g}"
     cpus: "${WORKER_STORAGE_CPU_LIMIT:-2.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
@@ -609,17 +718,27 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
-    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--hostname=logs@%h", "-Q", "logs", "--concurrency=${CELERY_LOGS_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_LOGS_PREFETCH_MULTIPLIER:-1}"]
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_CELERY_LANE: logs
+      RABBITMQ_USER: backupsheep_logs
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_logs_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_logs_private_key
+    secrets:
+      - django_secret_key
+      - db_password
+      - rabbitmq_logs_password
+      - celery_signing_logs_private_key
+      - celery_trusted_public_keys
+    command: ["celery", "-A", "backupsheep", "worker", "--loglevel=info", "--without-gossip", "--without-mingle", "--hostname=logs@%h", "-Q", "logs", "--concurrency=${CELERY_LOGS_CONCURRENCY:-2}", "--prefetch-multiplier=${CELERY_LOGS_PREFETCH_MULTIPLIER:-1}"]
     profiles: ["operations"]
     mem_limit: "${WORKER_LOGS_MEMORY_LIMIT:-512m}"
     cpus: "${WORKER_LOGS_CPU_LIMIT:-1.0}"
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
@@ -636,8 +755,18 @@ services:
     <<: *app-runtime
     image: "${BACKUPSHEEP_IMAGE:-backupsheep:local}"
     env_file: .env
-    environment: *app-secret-environment
-    secrets: *app-secrets
+    environment:
+      <<: *app-secret-environment
+      BACKUPSHEEP_CELERY_LANE: beat
+      RABBITMQ_USER: backupsheep_beat
+      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_beat_password
+      CELERY_SIGNING_PRIVATE_KEY_FILE: /run/secrets/celery_signing_beat_private_key
+    secrets:
+      - django_secret_key
+      - db_password
+      - rabbitmq_beat_password
+      - celery_signing_beat_private_key
+      - celery_trusted_public_keys
     command: ["celery", "-A", "backupsheep", "beat", "--loglevel=info", "--scheduler", "backupsheep.scheduler:BackupDatabaseScheduler"]
     profiles: ["operations"]
     mem_limit: "${BEAT_MEMORY_LIMIT:-512m}"
@@ -645,8 +774,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      rabbitmq-provision:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       preflight:
@@ -676,6 +805,7 @@ networks:
   preflight-database: *internal-network
   preflight-broker: *internal-network
   provision-database: *internal-network
+  provision-broker: *internal-network
   app-egress: *egress-network
   cloud-egress: *egress-network
   database-egress: *egress-network
@@ -719,8 +849,40 @@ secrets:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_bootstrap_password
   db_migrator_password:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/db_migrator_password
-  rabbitmq_password:
-    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_password
+  rabbitmq_bootstrap_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_bootstrap_password
+  rabbitmq_app_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_app_password
+  rabbitmq_preflight_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_preflight_password
+  rabbitmq_beat_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_beat_password
+  rabbitmq_cloud_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_cloud_password
+  rabbitmq_database_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_database_password
+  rabbitmq_files_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_files_password
+  rabbitmq_storage_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_storage_password
+  rabbitmq_logs_password:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/rabbitmq_logs_password
+  celery_signing_app_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_app_private_key
+  celery_signing_beat_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_beat_private_key
+  celery_signing_cloud_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_cloud_private_key
+  celery_signing_database_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_database_private_key
+  celery_signing_files_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_files_private_key
+  celery_signing_storage_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_storage_private_key
+  celery_signing_logs_private_key:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_signing_logs_private_key
+  celery_trusted_public_keys:
+    file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/celery_trusted_public_keys
   onboarding_token:
     file: ${BACKUPSHEEP_SECRETS_DIR:-.secrets}/onboarding_token
   ssh_managed_private_key:
