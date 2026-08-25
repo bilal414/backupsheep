@@ -14,7 +14,6 @@ import uuid
 from contextlib import contextmanager
 from types import SimpleNamespace
 from urllib.parse import quote
-from celery import chord
 from django.conf import settings
 from django.db import models, transaction
 from django.db.models import UniqueConstraint
@@ -12003,7 +12002,7 @@ class CoreGoogleCloud(UtilCloud):
 
 @contextmanager
 def _local_backup_phase_lock(backup):
-    """Serialize the dump/chord publication phase for one backup row.
+    """Serialize the dump/upload publication phase for one backup row.
 
     A database status is not enough to distinguish a live long-running dump from a
     worker that died mid-dump. A host-level flock gives us that distinction without a
@@ -12109,7 +12108,7 @@ def _resume_local_backup_owned(
 ):
     """Resume a local dump/upload pipeline from its persisted phase.
 
-    A worker can die after the dump has been created but before the chord is
+    A worker can die after the dump has been created but before upload tasks are
     published. Re-running the dump is wasteful and can produce a second upload;
     the parent status and each storage-point status are the durable phase markers.
     """
@@ -12203,10 +12202,13 @@ def _resume_local_backup_owned(
             # ``source_ready``.  The first storage worker that acquires a fenced
             # point lease moves the parent to UPLOAD_IN_PROGRESS immediately before
             # touching the destination.
-            chord(
-                storage_upload_task_list,
-                finalize_backup.si(node.id, backup.id),
-            ).apply_async()
+            # Do not use a Celery chord here. Chords publish framework-owned
+            # ``celery.chord*`` messages that cannot be bound to BackupSheep's
+            # reviewed task manifest or durable business intent. Each terminal
+            # storage worker publishes the idempotent finalizer instead; an early
+            # duplicate safely retries while another point is still pending.
+            for storage_upload_task in storage_upload_task_list:
+                storage_upload_task.apply_async()
         else:
             # All points are already complete, or there are no accepted destinations.
             # The finalizer makes the correct COMPLETE/PARTIAL/UPLOAD_FAILED decision.

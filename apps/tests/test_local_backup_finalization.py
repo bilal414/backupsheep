@@ -3,6 +3,7 @@
 from datetime import timedelta
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from django.test import SimpleTestCase
@@ -10,7 +11,10 @@ from django.utils import timezone
 
 from apps.api.v1.backup.database.serializers import CoreDatabaseBackupSerializer
 from apps.api.v1.backup.website.serializers import CoreWebsiteBackupSerializer
-from apps._tasks.integration.storage.tasks import finalize_backup
+from apps._tasks.integration.storage.tasks import (
+    _publish_backup_finalizer_if_terminal,
+    finalize_backup,
+)
 from apps.console.backup.models import (
     CoreBasecampBackup,
     CoreBasecampBackupStoragePoints,
@@ -274,6 +278,57 @@ class LocalBackupFinalizationTests(BaseTestCase):
         stale.status = UtilBackup.Status.UPLOAD_IN_PROGRESS
         with self.assertRaises(BackupExecutionLeaseLostError):
             stale.save(update_fields=["status", "modified"])
+
+
+class StorageUploadFinalizerPublicationTests(SimpleTestCase):
+    class Status:
+        UPLOAD_READY = "ready"
+        UPLOAD_RETRY = "retry"
+        UPLOAD_IN_PROGRESS = "in-progress"
+        UPLOAD_VALIDATION = "validation"
+        UPLOAD_COMPLETE = "complete"
+        UPLOAD_FAILED = "failed"
+
+    def _point(self, status):
+        return SimpleNamespace(
+            status=status,
+            Status=self.Status,
+            refresh_from_db=mock.Mock(),
+        )
+
+    def test_terminal_upload_publishes_only_the_idempotent_finalizer(self):
+        node = SimpleNamespace(pk=17)
+        backup = SimpleNamespace(pk=29)
+        point = self._point(self.Status.UPLOAD_COMPLETE)
+
+        with mock.patch.object(finalize_backup, "apply_async") as publish:
+            published = _publish_backup_finalizer_if_terminal(
+                node, backup, point
+            )
+
+        self.assertTrue(published)
+        point.refresh_from_db.assert_called_once_with(fields=["status"])
+        publish.assert_called_once_with(args=[17, 29])
+
+    def test_retrying_upload_does_not_publish_an_early_finalizer(self):
+        node = SimpleNamespace(pk=17)
+        backup = SimpleNamespace(pk=29)
+        point = self._point(self.Status.UPLOAD_RETRY)
+
+        with mock.patch.object(finalize_backup, "apply_async") as publish:
+            published = _publish_backup_finalizer_if_terminal(
+                node, backup, point
+            )
+
+        self.assertFalse(published)
+        publish.assert_not_called()
+
+    def test_backup_dispatch_does_not_emit_unowned_celery_chord_tasks(self):
+        models_source = (
+            Path(__file__).resolve().parents[1] / "console" / "node" / "models.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("from celery import chord", models_source)
+        self.assertNotIn("chord(", models_source)
 
 
 class LocalBackupFinalizationUiContractTests(SimpleTestCase):

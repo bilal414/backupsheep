@@ -3504,10 +3504,14 @@ class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
         )
         artifact = SimpleNamespace(byte_count=321)
 
+        queued_upload = mock.Mock()
         with mock.patch(
             "apps._tasks.execution.verify_and_commit_source_artifact",
             return_value=artifact,
-        ), mock.patch("apps.console.node.models.chord") as queued_chord:
+        ), mock.patch(
+            "apps._tasks.integration.storage.tasks.storage_upload.s",
+            return_value=queued_upload,
+        ) as storage_signature:
             _resume_local_backup_owned(
                 backup,
                 node,
@@ -3523,7 +3527,10 @@ class WebsiteMirrorCheckpointTests(WebsiteEngineBase):
             CoreWebsiteBackupSerializer(backup).data["execution_status"]["phase"],
             "source_ready",
         )
-        queued_chord.return_value.apply_async.assert_called_once_with()
+        point = CoreWebsiteBackupStoragePoints.objects.get(backup=backup)
+        storage_signature.assert_called_once_with(node.id, backup.id, point.id)
+        queued_upload.set.assert_called_once_with()
+        queued_upload.set.return_value.apply_async.assert_called_once_with()
 
     def test_directory_symlink_is_rejected_before_archive_publication(self):
         _node, backup = self._make_backup()

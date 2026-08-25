@@ -1064,6 +1064,25 @@ def _storage_error_outcome(error, point):
     )
 
 
+def _publish_backup_finalizer_if_terminal(node, backup, stored_backup):
+    """Publish finalization only after this durable destination is terminal."""
+
+    stored_backup.refresh_from_db(fields=["status"])
+    pending_statuses = {
+        stored_backup.Status.UPLOAD_READY,
+        stored_backup.Status.UPLOAD_RETRY,
+        stored_backup.Status.UPLOAD_IN_PROGRESS,
+        stored_backup.Status.UPLOAD_VALIDATION,
+    }
+    if stored_backup.status in pending_statuses:
+        return False
+    # ``finalize_backup`` is resolved when the upload executes, after module task
+    # registration has completed. A fresh task id is intentional: duplicate
+    # finalizers are harmless, while the signed id remains replay-protected.
+    finalize_backup.apply_async(args=[node.pk, backup.pk])
+    return True
+
+
 @current_app.task(
     name="storage_upload",
     track_started=True,
@@ -1106,6 +1125,13 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
     try:
         stored_backup = lease.claim()
     except StorageUploadAlreadyComplete:
+        try:
+            _publish_backup_finalizer_if_terminal(node, backup, stored_backup)
+        except Exception as finalizer_error:
+            # The point is already terminal, so replaying its provider mutation
+            # would be unsafe. The durable recovery sweep will republish the
+            # idempotent finalizer if the broker is temporarily unavailable.
+            capture_exception(finalizer_error)
         return
     except StorageUploadLeaseBusy as error:
         raise self.retry(
@@ -1146,8 +1172,8 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
 
         # The backend sets the storage point to UPLOAD_COMPLETE on success (or a
         # failure status / raises). Backup-level completion (status, notification,
-        # retention) is handled exactly once by the finalize_backup chord callback
-        # after every upload finishes.
+        # retention) is handled by the idempotent finalizer once every point is
+        # terminal.
         log_file.write(f"{storage_type_name}: {stored_backup.get_status_display()} \n")
 
     except (StorageUploadLeaseLost, StoragePointLeaseLostError) as error:
@@ -1237,6 +1263,13 @@ def storage_upload(self, node_id, backup_id, stored_backup_id):
                 # mutation. The bounded periodic sweep will republish this exact
                 # terminal point.
                 capture_exception(cleanup_error)
+        try:
+            _publish_backup_finalizer_if_terminal(node, backup, stored_backup)
+        except Exception as finalizer_error:
+            # Never replay a completed provider mutation merely because the
+            # broker was unavailable for the follow-up. The bounded recovery
+            # sweep can derive and republish finalization from durable rows.
+            capture_exception(finalizer_error)
 
 
 @current_app.task(
@@ -1506,9 +1539,12 @@ def cleanup_local_restore_ciphertext(self, model_key, restore_id):
     max_retries=8,
 )
 def finalize_backup(self, node_id, backup_id):
-    """Chord callback: runs exactly once after every storage_upload for a backup
-    finishes. Decides the backup's final state from the real upload tally, applies
-    the schedule retention policy, and cleans up the local working files.
+    """Idempotently finalize a backup after its storage uploads become terminal.
+
+    Each terminal storage worker can publish this task, and recovery can publish it
+    again after broker loss. The locked durable tally below ensures early or
+    duplicate delivery cannot commit a false or repeated result. It applies the
+    schedule retention policy and cleans up the local working files.
 
     Marking completion here (instead of inside each parallel storage_upload) removes
     the previous race conditions and the false "complete on first success".
@@ -1541,10 +1577,9 @@ def finalize_backup(self, node_id, backup_id):
         ),
     }[node.type]
 
-    # The callback is normally invoked by a chord, but it can also be published by
-    # recovery or be duplicated by broker redelivery. Lock both the backup row and
-    # all of its storage points so a second finalizer cannot tally a moving upload
-    # set or send a second completion notification.
+    # Lock both the backup row and all of its storage points so an early or duplicate
+    # finalizer cannot tally a moving upload set or send a second completion
+    # notification.
     with transaction.atomic():
         backup = backup.__class__.objects.select_for_update().get(pk=backup.pk)
         storage_relation = getattr(backup, relation_name)
