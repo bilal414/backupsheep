@@ -18,8 +18,6 @@ from django.utils import timezone
 from sentry_sdk import capture_exception, capture_message
 
 from apps.console.account.models import CoreAccount
-from backupsheep.celery import app
-
 from apps.console.connection.models import CoreAuthBasecamp
 from apps.console.member.models import CoreMember
 from apps.console.notification.models import (
@@ -1261,13 +1259,6 @@ def reconcile_oracle_backup_deletions(self):
             capture_exception(error)
 
 
-@current_app.task(
-    name="digitalocean_refresh_tokens",
-    track_started=True,
-    default_retry_delay=15 * 60,
-    max_retries=16,
-    bind=True,
-)
 def digitalocean_refresh_tokens(self):
     try:
         from datetime import datetime
@@ -1653,20 +1644,6 @@ def poll_cloud_backup(self, node_id, backup_id, started_at=None, interval=120, t
         args=[node_id, backup_id, started_at, interval, timeout],
         countdown=next_countdown,
     )
-
-
-@current_app.task(
-    name="terminate_backup",
-    track_started=True,
-    default_retry_delay=15 * 60,
-    max_retries=16,
-    bind=True,
-)
-def terminate_backup(self, data):
-    try:
-        app.control.revoke(data["celery_task_id"], terminate=True)
-    except Exception as e:
-        raise self.retry()
 
 
 @current_app.task(
@@ -2119,13 +2096,6 @@ def send_log_to_telegram(self, chat_id, message):
         return False
 
 
-@current_app.task(
-    name="account_delete",
-    track_started=True,
-    default_retry_delay=15 * 60,
-    max_retries=16,
-    bind=True,
-)
 def account_delete(self):
     try:
         from apps.console.node.models import CoreSchedule, CoreNode
@@ -2196,13 +2166,6 @@ def send_postmark_email(self, to_email, template, context):
 """
 NO NEED TO RUN IT ON REGULAR BASIS ANYMORE. 
 """
-@current_app.task(
-    name="digitalocean_clean_volume_snapshots",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
 def digitalocean_clean_volume_snapshots(self):
     from apps.console.node.models import CoreNode
     from apps.console.backup.models import CoreDigitalOceanBackup
@@ -2323,13 +2286,6 @@ def resume_requested_node_deletions():
     return node_ids
 
 
-@current_app.task(
-    name="clean_delete_failed_backups",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
 def clean_delete_failed_backups(self):
     from apps.console.node.models import CoreNode, CoreSchedule
 
@@ -2366,13 +2322,6 @@ def clean_delete_failed_backups(self):
         raise self.retry()
 
 
-@current_app.task(
-    name="delete_requested_integrations",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
 def delete_requested_integrations(self):
     from apps.console.node.models import CoreConnection
 
@@ -2389,13 +2338,6 @@ def delete_requested_integrations(self):
 
 
 # Todo: Add some checks here
-@current_app.task(
-    name="delete_requested_storages",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
 def delete_requested_storages(self):
     from apps._tasks.integration.storage.tasks import (
         _delete_storage_requested_id,
@@ -2411,13 +2353,6 @@ def delete_requested_storages(self):
         raise self.retry()
 
 
-@current_app.task(
-    name="calc_stats_storage_insight",
-    track_started=True,
-    default_retry_delay=1 * 60,
-    max_retries=16,
-    bind=True,
-)
 def calc_stats_storage_insight(self):
     try:
         for account in CoreAccount.objects.filter().order_by("-created"):
@@ -2456,13 +2391,6 @@ def calc_stats_storage_insight(self):
         raise self.retry()
 
 
-@current_app.task(
-    name="token_refresh_all",
-    track_started=True,
-    default_retry_delay=15 * 60,
-    max_retries=16,
-    bind=True,
-)
 def token_refresh_all(self):
     from datetime import datetime
 
