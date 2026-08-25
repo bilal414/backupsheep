@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a private Trivy filesystem report and emit zero-sensitive evidence."""
+"""Validate private Trivy source reports and emit zero-sensitive evidence."""
 
 from __future__ import annotations
 
@@ -14,12 +14,14 @@ import sys
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 MAX_POLICY_BYTES = 64 * 1024
 MAX_REPORT_BYTES = 128 * 1024 * 1024
 MAX_TARGET_BYTES = 4 * 1024 * 1024
 MAX_RESULT_COUNT = 100_000
+MAX_GIT_OUTPUT_BYTES = 64 * 1024
 EXPECTED_REVIEWS = {
     ("Dockerfile", "DS-0017"),
     ("Dockerfile.egress", "DS-0002"),
@@ -68,7 +70,7 @@ EXPECTED_SCANNER = {
     },
     "version": "0.74.0",
 }
-EXPECTED_REPORT_FIELDS = {
+EXPECTED_FILESYSTEM_REPORT_FIELDS = {
     "ArtifactName",
     "ArtifactType",
     "CreatedAt",
@@ -76,6 +78,18 @@ EXPECTED_REPORT_FIELDS = {
     "Results",
     "SchemaVersion",
     "Trivy",
+}
+EXPECTED_REPOSITORY_REPORT_FIELDS = EXPECTED_FILESYSTEM_REPORT_FIELDS | {
+    "ArtifactID",
+    "Metadata",
+}
+KNOWN_REPORT_FIELDS = EXPECTED_REPOSITORY_REPORT_FIELDS
+EXPECTED_DETACHED_REPOSITORY_METADATA_FIELDS = {
+    "Author",
+    "Commit",
+    "CommitMsg",
+    "Committer",
+    "RepoURL",
 }
 EXPECTED_SECRET_CANARIES = Counter(
     {
@@ -253,29 +267,201 @@ def _nonnegative_integer(value: Any, label: str) -> int:
     return value
 
 
-def _validate_report_header(report: dict[str, Any], artifact_name: str) -> Any:
-    if set(report) != EXPECTED_REPORT_FIELDS:
-        raise SourceScanError("The Trivy report schema has unexpected or missing fields.")
+def _raise_report_schema_error(
+    *, label: str, actual_fields: set[Any], expected_fields: set[str]
+) -> None:
+    """Report only fixed field names and counts, never attacker-controlled keys."""
+    missing = sorted(expected_fields - actual_fields)
+    unexpected = actual_fields - expected_fields
+    recognized_unexpected = sorted(unexpected & KNOWN_REPORT_FIELDS)
+    unrecognized_count = len(unexpected - KNOWN_REPORT_FIELDS)
+    missing_text = ",".join(missing) if missing else "none"
+    recognized_text = (
+        ",".join(recognized_unexpected) if recognized_unexpected else "none"
+    )
+    raise SourceScanError(
+        f"The {label} Trivy report schema is invalid "
+        f"(missing_known={missing_text}; unexpected_known={recognized_text}; "
+        f"unexpected_unknown_count={unrecognized_count})."
+    )
+
+
+def _validated_signature(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or len(value) > 512:
+        raise SourceScanError(f"The {label} repository signature is malformed.")
+    match = re.fullmatch(
+        r"([^\x00-\x20\x7f<>][^\x00-\x1f\x7f<>]{0,255}) "
+        r"<([^\x00-\x20\x7f<>]{3,254})>",
+        value,
+    )
+    if match is None or match.group(1).rstrip() != match.group(1):
+        raise SourceScanError(f"The {label} repository signature is malformed.")
+    return value
+
+
+def _validated_commit_message(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 16 * 1024
+        or value.strip() != value
+        or any(
+            character not in {"\n", "\t"} and not character.isprintable()
+            for character in value
+        )
+    ):
+        raise SourceScanError("The repository commit message metadata is malformed.")
+    return value
+
+
+def _validated_repository_url(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 2048
+        or not value.isascii()
+        or any(ord(character) <= 32 or ord(character) == 127 for character in value)
+    ):
+        raise SourceScanError("The repository URL metadata is malformed.")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as error:
+        raise SourceScanError("The repository URL metadata is malformed.") from error
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not 1 <= port <= 65535)
+        or not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", parsed.hostname)
+        or not re.fullmatch(r"/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{1,1800}", parsed.path)
+        or urlunsplit(parsed) != value
+    ):
+        raise SourceScanError("The repository URL metadata is malformed.")
+    return value
+
+
+def _repository_artifact_id(repository_url: str, commit: str) -> str:
+    digest = hashlib.sha256(f"{repository_url}@{commit}".encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _validate_repository_report_identity(
+    report: dict[str, Any], *, source_revision: str, label: str
+) -> dict[str, Any]:
+    metadata = report.get("Metadata")
+    if (
+        not isinstance(metadata, dict)
+        or set(metadata) != EXPECTED_DETACHED_REPOSITORY_METADATA_FIELDS
+    ):
+        raise SourceScanError(
+            f"The {label} Trivy report repository metadata shape is invalid."
+        )
+    commit = metadata.get("Commit")
+    if (
+        not isinstance(commit, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", commit)
+        or commit != source_revision
+    ):
+        raise SourceScanError(
+            f"The {label} Trivy report repository commit is not the final source revision."
+        )
+    repository_url = _validated_repository_url(metadata.get("RepoURL"))
+    _validated_signature(metadata.get("Author"), label="author")
+    _validated_signature(metadata.get("Committer"), label="committer")
+    _validated_commit_message(metadata.get("CommitMsg"))
+    artifact_id = report.get("ArtifactID")
+    expected_artifact_id = _repository_artifact_id(repository_url, commit)
+    if (
+        not isinstance(artifact_id, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_id)
+        or artifact_id != expected_artifact_id
+    ):
+        raise SourceScanError(
+            f"The {label} Trivy report repository artifact identity is invalid."
+        )
+    return {
+        "artifact_id": artifact_id,
+        "artifact_name": report["ArtifactName"],
+        "artifact_type": "repository",
+        "metadata": dict(metadata),
+    }
+
+
+def _validate_report_header(
+    report: dict[str, Any],
+    artifact_name: str,
+    *,
+    expected_artifact_type: str,
+    label: str,
+    source_revision: str | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    if expected_artifact_type == "repository":
+        expected_fields = EXPECTED_REPOSITORY_REPORT_FIELDS
+    elif expected_artifact_type == "filesystem":
+        expected_fields = EXPECTED_FILESYSTEM_REPORT_FIELDS
+    else:
+        raise SourceScanError("The expected Trivy artifact type is unsupported.")
+    if set(report) != expected_fields:
+        _raise_report_schema_error(
+            label=label,
+            actual_fields=set(report),
+            expected_fields=expected_fields,
+        )
     if type(report["SchemaVersion"]) is not int or report["SchemaVersion"] != 2:
-        raise SourceScanError("The Trivy report schema version is unsupported.")
-    if report["ArtifactName"] != artifact_name or report["ArtifactType"] != "filesystem":
-        raise SourceScanError("Trivy did not report the expected filesystem target.")
+        raise SourceScanError(f"The {label} Trivy report schema version is unsupported.")
+    if (
+        report["ArtifactName"] != artifact_name
+        or report["ArtifactType"] != expected_artifact_type
+    ):
+        raise SourceScanError(
+            f"The {label} Trivy report did not identify the expected scan target."
+        )
     if report["Trivy"] != {"Version": EXPECTED_SCANNER["version"]}:
-        raise SourceScanError("The Trivy report does not identify the pinned scanner.")
+        raise SourceScanError(
+            f"The {label} Trivy report does not identify the pinned scanner."
+        )
     if not isinstance(report["CreatedAt"], str) or not re.fullmatch(
         r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\x00-\x20]{1,64}Z", report["CreatedAt"]
     ):
-        raise SourceScanError("The Trivy report creation time is malformed.")
+        raise SourceScanError(f"The {label} Trivy report creation time is malformed.")
     if not isinstance(report["ReportID"], str) or not re.fullmatch(
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
         report["ReportID"],
     ):
-        raise SourceScanError("The Trivy report identifier is malformed.")
-    return report["Results"]
+        raise SourceScanError(f"The {label} Trivy report identifier is malformed.")
+    if expected_artifact_type == "repository":
+        if source_revision is None:
+            raise SourceScanError("The repository report has no source revision contract.")
+        identity = _validate_repository_report_identity(
+            report, source_revision=source_revision, label=label
+        )
+    else:
+        identity = {
+            "artifact_name": report["ArtifactName"],
+            "artifact_type": "filesystem",
+        }
+    return report["Results"], identity
 
 
-def validate_secret_report(report: dict[str, Any], *, canary: bool) -> int:
-    results = _validate_report_header(report, ".")
+def validate_secret_report(
+    report: dict[str, Any],
+    *,
+    canary: bool,
+    expected_artifact_type: str,
+    source_revision: str | None = None,
+) -> tuple[int, dict[str, Any]]:
+    label = "secret canary" if canary else "all-severity secret"
+    results, report_identity = _validate_report_header(
+        report,
+        ".",
+        expected_artifact_type=expected_artifact_type,
+        label=label,
+        source_revision=source_revision,
+    )
     if (
         not isinstance(results, list)
         or not results
@@ -373,7 +559,7 @@ def validate_secret_report(report: dict[str, Any], *, canary: bool) -> int:
         )
     elif package_count == 0:
         raise SourceScanError("The all-severity secret report has no source inventory.")
-    return secret_count
+    return secret_count, report_identity
 
 
 def validate_report(
@@ -388,8 +574,20 @@ def validate_report(
         raise SourceScanError("The source revision is not a full Git SHA-1.")
     reviews = validate_policy(policy)
     validate_target_hashes(reviews, repository_root)
+    trusted_repository_identity = _trusted_repository_identity_for_checkout(
+        repository_root, source_revision
+    )
+    expected_artifact_type = (
+        "repository" if trusted_repository_identity is not None else "filesystem"
+    )
 
-    results = _validate_report_header(report, ".")
+    results, report_identity = _validate_report_header(
+        report,
+        ".",
+        expected_artifact_type=expected_artifact_type,
+        label="vulnerability/misconfiguration",
+        source_revision=source_revision,
+    )
     if not isinstance(results, list) or not results or len(results) > MAX_RESULT_COUNT:
         raise SourceScanError("The Trivy report results are absent or excessive.")
 
@@ -512,8 +710,28 @@ def validate_report(
             "The Trivy misconfiguration set is extra, missing, changed, or duplicated."
         )
 
-    validate_secret_report(secret_report, canary=False)
-    canary_count = validate_secret_report(canary_report, canary=True)
+    _secret_count, secret_report_identity = validate_secret_report(
+        secret_report,
+        canary=False,
+        expected_artifact_type=expected_artifact_type,
+        source_revision=source_revision,
+    )
+    if report_identity != secret_report_identity:
+        raise SourceScanError(
+            "The vulnerability and all-severity secret reports do not share one exact artifact identity."
+        )
+    if (
+        trusted_repository_identity is not None
+        and report_identity != trusted_repository_identity
+    ):
+        raise SourceScanError(
+            "The Trivy repository report identity does not match the detached checkout."
+        )
+    canary_count, _canary_identity = validate_secret_report(
+        canary_report,
+        canary=True,
+        expected_artifact_type="filesystem",
+    )
 
     return {
         "schema_version": 1,
@@ -539,7 +757,23 @@ def validate_report(
     }
 
 
-def _git_head(repository_root: Path) -> str:
+def _git_output(
+    repository_root: Path,
+    arguments: list[str],
+    *,
+    label: str,
+    allowed_returncodes: tuple[int, ...] = (0,),
+) -> tuple[int, str]:
+    git_environment = {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "HOME": os.devnull,
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": os.environ.get("PATH", os.defpath),
+    }
     try:
         completed = subprocess.run(
             [
@@ -548,23 +782,143 @@ def _git_head(repository_root: Path) -> str:
                 "core.hooksPath=/dev/null",
                 "-C",
                 str(repository_root),
-                "rev-parse",
-                "--verify",
-                "HEAD^{commit}",
+                *arguments,
             ],
+            env=git_environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
             timeout=10,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        raise SourceScanError("Could not resolve the checked-out Git revision.") from error
-    revision = completed.stdout.strip()
-    if completed.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise SourceScanError(f"Could not read the checked-out Git {label}.") from error
+    if (
+        completed.returncode not in allowed_returncodes
+        or len(completed.stdout) > MAX_GIT_OUTPUT_BYTES
+    ):
+        raise SourceScanError(f"Could not read the checked-out Git {label}.")
+    try:
+        output = completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SourceScanError(f"The checked-out Git {label} is not UTF-8.") from error
+    return completed.returncode, output
+
+
+def _git_head(repository_root: Path) -> str:
+    _returncode, output = _git_output(
+        repository_root,
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+        label="revision",
+    )
+    revision = output.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise SourceScanError("Could not resolve the checked-out Git revision.")
     return revision
+
+
+def _sanitized_trivy_remote_url(value: str) -> str:
+    if (
+        not value
+        or len(value) > 2048
+        or not value.isascii()
+        or any(ord(character) <= 32 or ord(character) == 127 for character in value)
+    ):
+        raise SourceScanError("The checked-out Git remote URL is malformed.")
+    try:
+        parsed = urlsplit(value)
+    except ValueError as error:
+        raise SourceScanError("The checked-out Git remote URL is malformed.") from error
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise SourceScanError("The checked-out Git remote must use HTTPS.")
+    # Trivy 0.74 removes URL userinfo before it records RepoURL and calculates
+    # the repository ArtifactID. Derive that value from Git, not from the report.
+    sanitized = urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc.rsplit("@", 1)[-1],
+            parsed.path,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+    return _validated_repository_url(sanitized)
+
+
+def _trusted_repository_identity_for_checkout(
+    repository_root: Path, source_revision: str
+) -> dict[str, Any] | None:
+    git_marker = repository_root / ".git"
+    try:
+        marker_metadata = git_marker.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise SourceScanError("Could not inspect the checkout Git marker.") from error
+    if git_marker.is_symlink():
+        raise SourceScanError("The checkout Git marker must not be a symbolic link.")
+    if stat.S_ISREG(marker_metadata.st_mode):
+        # go-git, used by pinned Trivy 0.74, does not resolve linked-worktree
+        # .git files during a filesystem scan and therefore emits filesystem form.
+        return None
+    if not stat.S_ISDIR(marker_metadata.st_mode):
+        raise SourceScanError("The checkout Git marker has an unsupported type.")
+
+    symbolic_status, symbolic_output = _git_output(
+        repository_root,
+        ["symbolic-ref", "-q", "HEAD"],
+        label="HEAD state",
+        allowed_returncodes=(0, 1),
+    )
+    if symbolic_status != 1 or symbolic_output:
+        raise SourceScanError("The source-scan checkout must have a detached HEAD.")
+
+    remote_url: str | None = None
+    for remote in ("upstream", "origin"):
+        status, output = _git_output(
+            repository_root,
+            ["config", "--local", "--no-includes", "--get-all", f"remote.{remote}.url"],
+            label="remote URL",
+            allowed_returncodes=(0, 1),
+        )
+        if status == 1:
+            continue
+        urls = output.splitlines()
+        if len(urls) != 1:
+            raise SourceScanError("The checked-out Git remote URL is ambiguous.")
+        remote_url = _sanitized_trivy_remote_url(urls[0])
+        break
+    if remote_url is None:
+        raise SourceScanError("The detached source-scan checkout has no trusted Git remote.")
+
+    _status, author_output = _git_output(
+        repository_root,
+        ["show", "-s", "--format=%an <%ae>", source_revision],
+        label="author identity",
+    )
+    _status, committer_output = _git_output(
+        repository_root,
+        ["show", "-s", "--format=%cn <%ce>", source_revision],
+        label="committer identity",
+    )
+    _status, message_output = _git_output(
+        repository_root,
+        ["show", "-s", "--format=%B", source_revision],
+        label="commit message",
+    )
+    metadata = {
+        "Author": _validated_signature(author_output.strip(), label="author"),
+        "Commit": source_revision,
+        "CommitMsg": _validated_commit_message(message_output.strip()),
+        "Committer": _validated_signature(committer_output.strip(), label="committer"),
+        "RepoURL": remote_url,
+    }
+    return {
+        "artifact_id": _repository_artifact_id(remote_url, source_revision),
+        "artifact_name": ".",
+        "artifact_type": "repository",
+        "metadata": metadata,
+    }
 
 
 def _write_private_json(path: Path, value: dict[str, Any]) -> None:

@@ -827,6 +827,12 @@ the rendered deployment tests and hash-verified actionlint 1.7.12 running over e
 workflow in the same required job. The source validator requires the exact Python and
 npm dependency-result identities plus all three Dockerfile results, so losing either
 dependency ecosystem or a clean Dockerfile result cannot pass on aggregate package counts.
+In a normal detached GitHub checkout, pinned Trivy classifies `filesystem .` as a
+repository. The validator therefore recomputes Trivy's repository artifact ID from the
+sanitized HTTPS Git remote and final commit, matches the bounded author, committer and
+message metadata to the checkout, and requires the vulnerability and secret reports to
+share that exact identity. Linked worktrees retain the separately validated filesystem
+form, while the generated private canary directory must always remain filesystem-only.
 Secret scanning is deliberately a separate all-severity pass: its generated immutable configuration disables every Trivy
 0.74 built-in path allow rule and default skip pattern, including tests, examples,
 vendor, Markdown and lockfiles. Five private canaries prove those normally skipped paths

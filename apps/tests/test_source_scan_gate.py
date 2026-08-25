@@ -2,7 +2,9 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -19,17 +21,60 @@ SPEC.loader.exec_module(source_scan)
 
 
 class SourceScanGateTests(TestCase):
+    def git(self, *arguments, environment=None):
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=self.root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+
     def setUp(self):
         super().setUp()
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
-        self.source_revision = "a" * 40
         self.target_bytes = {
             "Dockerfile": b"FROM example\nRUN apt-get update\n",
             "Dockerfile.egress": b"FROM example\nUSER 0:0\n",
         }
         for target, payload in self.target_bytes.items():
             (self.root / target).write_bytes(payload)
+
+        self.git("init", "--quiet")
+        self.git("config", "user.name", "BackupSheep CI")
+        self.git("config", "user.email", "security@example.invalid")
+        self.git(
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/backupsheep.git",
+        )
+        self.git("add", *sorted(self.target_bytes))
+        commit_environment = dict(os.environ)
+        commit_environment.update(
+            {
+                "GIT_AUTHOR_DATE": "2026-08-25T12:00:00+0000",
+                "GIT_COMMITTER_DATE": "2026-08-25T12:00:00+0000",
+            }
+        )
+        self.git(
+            "commit",
+            "--quiet",
+            "--message",
+            "Source scan fixture",
+            environment=commit_environment,
+        )
+        self.source_revision = self.git("rev-parse", "--verify", "HEAD^{commit}")
+        self.git("checkout", "--quiet", "--detach", self.source_revision)
+        self.repository_identity = source_scan._trusted_repository_identity_for_checkout(
+            self.root, self.source_revision
+        )
+        self.assertIsNotNone(self.repository_identity)
 
         self.findings = {
             "Dockerfile": {
@@ -71,7 +116,9 @@ class SourceScanGateTests(TestCase):
             "SchemaVersion": 2,
             "CreatedAt": "2026-08-25T12:34:56.123456Z",
             "ArtifactName": ".",
-            "ArtifactType": "filesystem",
+            "ArtifactType": "repository",
+            "ArtifactID": self.repository_identity["artifact_id"],
+            "Metadata": copy.deepcopy(self.repository_identity["metadata"]),
             "ReportID": "01234567-89ab-4def-8123-456789abcdef",
             "Trivy": {"Version": "0.74.0"},
             "Results": [
@@ -109,7 +156,9 @@ class SourceScanGateTests(TestCase):
             "SchemaVersion": 2,
             "CreatedAt": "2026-08-25T12:35:56.123456Z",
             "ArtifactName": ".",
-            "ArtifactType": "filesystem",
+            "ArtifactType": "repository",
+            "ArtifactID": self.repository_identity["artifact_id"],
+            "Metadata": copy.deepcopy(self.repository_identity["metadata"]),
             "ReportID": "11234567-89ab-4def-8123-456789abcdef",
             "Trivy": {"Version": "0.74.0"},
             "Results": [
@@ -184,6 +233,135 @@ class SourceScanGateTests(TestCase):
         self.assertEqual(summary["inventory"], {"packages": 2})
         self.assertEqual(summary["secret_canaries"]["total"], 5)
         self.assertNotIn("CauseMetadata", json.dumps(summary))
+
+    def test_normal_detached_checkout_and_canary_use_exact_opposite_header_forms(self):
+        self.assertTrue((self.root / ".git").is_dir())
+        self.assertEqual(self.git("branch", "--show-current"), "")
+        self.validate()
+
+        filesystem_main = copy.deepcopy(self.report)
+        filesystem_main["ArtifactType"] = "filesystem"
+        filesystem_main.pop("ArtifactID")
+        filesystem_main.pop("Metadata")
+        with self.assertRaises(source_scan.SourceScanError) as raised:
+            self.validate(report=filesystem_main)
+        self.assertIn("vulnerability/misconfiguration", str(raised.exception))
+        self.assertIn("missing_known=ArtifactID,Metadata", str(raised.exception))
+
+        repository_canary = copy.deepcopy(self.canary_report)
+        repository_canary["ArtifactType"] = "repository"
+        repository_canary["ArtifactID"] = self.repository_identity["artifact_id"]
+        repository_canary["Metadata"] = copy.deepcopy(
+            self.repository_identity["metadata"]
+        )
+        with self.assertRaises(source_scan.SourceScanError) as raised:
+            self.validate(canary_report=repository_canary)
+        self.assertIn("secret canary", str(raised.exception))
+        self.assertIn("unexpected_known=ArtifactID,Metadata", str(raised.exception))
+
+    def test_repository_reports_must_share_one_exact_artifact_identity(self):
+        changed_secret = copy.deepcopy(self.secret_report)
+        changed_url = "https://github.com/example/different.git"
+        changed_secret["Metadata"]["RepoURL"] = changed_url
+        changed_secret["ArtifactID"] = source_scan._repository_artifact_id(
+            changed_url, self.source_revision
+        )
+        with self.assertRaisesRegex(
+            source_scan.SourceScanError, "do not share one exact artifact identity"
+        ):
+            self.validate(secret_report=changed_secret)
+
+    def test_repository_identity_is_independently_bound_to_checkout_remote(self):
+        changed_url = "https://github.com/example/different.git"
+        changed_report = copy.deepcopy(self.report)
+        changed_secret = copy.deepcopy(self.secret_report)
+        for candidate in (changed_report, changed_secret):
+            candidate["Metadata"]["RepoURL"] = changed_url
+            candidate["ArtifactID"] = source_scan._repository_artifact_id(
+                changed_url, self.source_revision
+            )
+        with self.assertRaisesRegex(
+            source_scan.SourceScanError, "does not match the detached checkout"
+        ):
+            self.validate(report=changed_report, secret_report=changed_secret)
+
+        self.git(
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/example/reconfigured.git",
+        )
+        with self.assertRaisesRegex(
+            source_scan.SourceScanError, "does not match the detached checkout"
+        ):
+            self.validate()
+
+    def test_repository_metadata_and_artifact_id_fail_closed(self):
+        cases = []
+
+        changed_commit = copy.deepcopy(self.report)
+        changed_commit["Metadata"]["Commit"] = "b" * 40
+        changed_commit["ArtifactID"] = source_scan._repository_artifact_id(
+            changed_commit["Metadata"]["RepoURL"], "b" * 40
+        )
+        cases.append((changed_commit, "final source revision"))
+
+        invalid_author = copy.deepcopy(self.report)
+        invalid_author["Metadata"]["Author"] = "invalid\nauthor <invalid@example.invalid>"
+        cases.append((invalid_author, "author repository signature"))
+
+        invalid_committer = copy.deepcopy(self.report)
+        invalid_committer["Metadata"]["Committer"] = "invalid committer"
+        cases.append((invalid_committer, "committer repository signature"))
+
+        invalid_message = copy.deepcopy(self.report)
+        invalid_message["Metadata"]["CommitMsg"] = "invalid\x00message"
+        cases.append((invalid_message, "commit message metadata"))
+
+        invalid_url = copy.deepcopy(self.report)
+        invalid_url["Metadata"]["RepoURL"] = "http://github.com/example/backupsheep.git"
+        cases.append((invalid_url, "repository URL metadata"))
+
+        extra_metadata = copy.deepcopy(self.report)
+        extra_metadata["Metadata"]["Branch"] = "develop"
+        cases.append((extra_metadata, "metadata shape"))
+
+        missing_metadata = copy.deepcopy(self.report)
+        missing_metadata["Metadata"].pop("Committer")
+        cases.append((missing_metadata, "metadata shape"))
+
+        invalid_artifact = copy.deepcopy(self.report)
+        invalid_artifact["ArtifactID"] = "sha256:" + ("A" * 64)
+        cases.append((invalid_artifact, "artifact identity"))
+
+        for candidate, expected_error in cases:
+            with self.subTest(expected_error=expected_error), self.assertRaisesRegex(
+                source_scan.SourceScanError, expected_error
+            ):
+                self.validate(report=candidate)
+
+    def test_labeled_schema_diagnostic_never_echoes_unknown_field_names(self):
+        malformed = copy.deepcopy(self.report)
+        malformed.pop("Trivy")
+        private_unknown_key = "private-material-must-not-be-echoed"
+        malformed[private_unknown_key] = True
+        with self.assertRaises(source_scan.SourceScanError) as raised:
+            self.validate(report=malformed)
+        diagnostic = str(raised.exception)
+        self.assertIn("vulnerability/misconfiguration", diagnostic)
+        self.assertIn("missing_known=Trivy", diagnostic)
+        self.assertIn("unexpected_unknown_count=1", diagnostic)
+        self.assertNotIn(private_unknown_key, diagnostic)
+
+        malformed_secret = copy.deepcopy(self.secret_report)
+        malformed_secret.pop("ReportID")
+        malformed_secret[private_unknown_key] = True
+        with self.assertRaises(source_scan.SourceScanError) as raised:
+            self.validate(secret_report=malformed_secret)
+        diagnostic = str(raised.exception)
+        self.assertIn("all-severity secret", diagnostic)
+        self.assertIn("missing_known=ReportID", diagnostic)
+        self.assertNotIn(private_unknown_key, diagnostic)
 
     def test_any_vulnerability_or_secret_fails_without_echoing_secret_material(self):
         vulnerable = copy.deepcopy(self.report)
