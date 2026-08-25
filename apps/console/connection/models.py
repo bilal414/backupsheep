@@ -3623,15 +3623,20 @@ class CoreAuthWordPress(TimeStampedModel):
     def request(self, route, *, params=None, data=None, stream=False, timeout=None):
         """Call one exact WordPress origin without placing credentials in its URL."""
 
+        from apps.api.v1.utils.wordpress_transport import (
+            pinned_wordpress_get,
+            require_wordpress_protocol_v2,
+            resolve_wordpress_target,
+        )
+
+        # Refuse the legacy public plugin contract before resolving a target or
+        # decrypting any credential.  Re-enabling requires the reviewed v2 protocol;
+        # there is deliberately no query-string-key compatibility mode.
+        require_wordpress_protocol_v2()
         if route not in _WORDPRESS_ROUTES:
             raise ValueError("Unsupported WordPress API route")
         supplied = data or {}
         base_url = self._normalized_base_url(supplied.get("url", self.url))
-
-        from apps.api.v1.utils.wordpress_transport import (
-            pinned_wordpress_get,
-            resolve_wordpress_target,
-        )
 
         # Resolve and approve the target before decrypting any credential. The
         # transport later connects to this exact IP and never resolves again.

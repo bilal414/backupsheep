@@ -57,6 +57,22 @@ class WordPressTransportError(ValueError):
     """The WordPress target could not be reached without crossing a trust boundary."""
 
 
+def require_wordpress_protocol_v2():
+    """Fail closed until the authenticated v2 plugin contract is enabled.
+
+    The historical public plugin accepts a query-string bearer key and performs
+    state-changing GET requests.  The Python client must not silently fall back to
+    that contract merely to keep an old integration working.  Existing backup
+    artifacts remain accessible; only calls to the unsafe source protocol stop.
+    """
+
+    if not getattr(settings, "WORDPRESS_INTEGRATION_ENABLED", False):
+        raise WordPressTransportError(
+            "WordPress backups are disabled until the authenticated protocol v2 "
+            "plugin is installed and explicitly enabled"
+        )
+
+
 @dataclass(frozen=True)
 class PinnedWordPressTarget:
     hostname: str

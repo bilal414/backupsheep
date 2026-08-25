@@ -4,7 +4,7 @@ from unittest import mock
 
 from cryptography.fernet import Fernet
 from django.db import IntegrityError, transaction
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from apps.api.v1.connection.wordpress.serializers import (
     CoreAuthWordPressWriteSerializer,
@@ -18,6 +18,7 @@ from apps.tests import factories
 from apps.tests.base import BaseTestCase
 
 
+@override_settings(WORDPRESS_INTEGRATION_ENABLED=True)
 class WordPressCredentialModelTests(BaseTestCase):
     def setUp(self):
         super().setUp()
@@ -188,6 +189,39 @@ class WordPressCredentialModelTests(BaseTestCase):
         )
         self.assertFalse(serializer.is_valid())
         self.assertIn("key", serializer.errors)
+
+
+class WordPressProtocolKillSwitchTests(BaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.connection = factories.make_connection(
+            self.account, self.member, code="wordpress"
+        )
+        self.auth = CoreAuthWordPress.objects.create(
+            connection=self.connection,
+            url="https://wordpress.example.test",
+            key="wordpress-key-canary",
+        )
+
+    @override_settings(WORDPRESS_INTEGRATION_ENABLED=False)
+    @mock.patch(
+        "apps.api.v1.utils.wordpress_transport.pinned_wordpress_get"
+    )
+    @mock.patch(
+        "apps.api.v1.utils.wordpress_transport.resolve_wordpress_target"
+    )
+    def test_disabled_protocol_refuses_before_resolution_or_secret_decryption(
+        self, resolve_target, pinned_get
+    ):
+        with mock.patch.object(
+            self.auth, "_decrypt_secret", wraps=self.auth._decrypt_secret
+        ) as decrypt:
+            with self.assertRaisesRegex(ValueError, "protocol v2"):
+                self.auth.request("validate")
+
+        resolve_target.assert_not_called()
+        pinned_get.assert_not_called()
+        decrypt.assert_not_called()
 
 
 class WordPressCredentialMigrationTests(SimpleTestCase):
